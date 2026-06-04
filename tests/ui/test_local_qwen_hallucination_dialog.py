@@ -21,18 +21,16 @@ from puripuly_heart.ui.theme import (  # noqa: E402
 
 LOCAL_QWEN_GUIDANCE_KEYS = {
     "local_qwen_hallucination.body",
-    "local_qwen_hallucination.open_stt_settings",
+    "local_qwen_hallucination.open_guide",
     "local_qwen_hallucination.close",
     "debug_preview.local_qwen_hallucination_modal",
 }
 
 EXPECTED_EN_BODY = (
-    "Local speech recognition may be unstable right now.\n\n"
-    "PuriPuly detected repeated known-bad outputs from the local Qwen ASR model. "
-    "The audio input or desktop audio source may be unstable, or this local model "
-    "may not fit the current audio environment.\n\n"
-    "Try selecting the audio device again, or use Deepgram / Qwen Cloud ASR for more "
-    "stable recognition."
+    "The local speech recognition model isn't working right now.\n"
+    "Please switch to a cloud speech recognition service.\n\n"
+    "We recommend Deepgram. You can use it for free with welcome credits.\n"
+    "Open the GitHub guide and follow the setup instructions."
 )
 
 
@@ -95,7 +93,7 @@ def test_local_qwen_guidance_dialog_delegates_to_warm_document_family(
         requested_keys.append(key)
         return {
             "local_qwen_hallucination.body": "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.",
-            "local_qwen_hallucination.open_stt_settings": "Open STT settings",
+            "local_qwen_hallucination.open_guide": "Open guide",
             "local_qwen_hallucination.close": "Close",
         }[key]
 
@@ -114,7 +112,7 @@ def test_local_qwen_guidance_dialog_delegates_to_warm_document_family(
     page = FakePage()
     dialog = dialog_module.LocalQwenHallucinationDialog(
         page,
-        on_open_stt_settings=lambda: None,
+        on_open_guide=lambda: None,
         on_close=lambda: None,
     )
 
@@ -126,11 +124,11 @@ def test_local_qwen_guidance_dialog_delegates_to_warm_document_family(
         "Second paragraph.",
         "Third paragraph.",
     ]
-    assert captured["primary_label"] == "Open STT settings"
+    assert captured["primary_label"] == "Open guide"
     assert captured["secondary_label"] == "Close"
     assert getattr(captured["primary_action"], "__self__", None) is dialog
     assert getattr(captured["primary_action"], "__func__", None) is getattr(
-        dialog._on_open_stt_settings,
+        dialog._on_open_guide,
         "__func__",
         None,
     )
@@ -143,7 +141,7 @@ def test_local_qwen_guidance_dialog_delegates_to_warm_document_family(
     assert captured["glow_factory"] is dialog_module.create_glow_stack
     assert requested_keys == [
         "local_qwen_hallucination.body",
-        "local_qwen_hallucination.open_stt_settings",
+        "local_qwen_hallucination.open_guide",
         "local_qwen_hallucination.close",
     ]
     assert not any(key.endswith(".title") for key in requested_keys)
@@ -159,7 +157,7 @@ def test_local_qwen_guidance_dialog_renders_large_readable_two_action_modal(
         "t",
         lambda key: {
             "local_qwen_hallucination.body": EXPECTED_EN_BODY,
-            "local_qwen_hallucination.open_stt_settings": "Open STT settings",
+            "local_qwen_hallucination.open_guide": "Open guide",
             "local_qwen_hallucination.close": "Close",
         }[key],
     )
@@ -168,7 +166,7 @@ def test_local_qwen_guidance_dialog_renders_large_readable_two_action_modal(
 
     dialog = dialog_module.LocalQwenHallucinationDialog(
         page,
-        on_open_stt_settings=lambda: events.append("settings"),
+        on_open_guide=lambda: events.append("guide"),
         on_close=lambda: events.append("close"),
     )
 
@@ -197,7 +195,7 @@ def test_local_qwen_guidance_dialog_renders_large_readable_two_action_modal(
     ]
     assert [button.text for button in action_row.controls] == [
         "Close",
-        "Open STT settings",
+        "Open guide",
     ]
     assert [button.style.color[ft.ControlState.DEFAULT] for button in action_row.controls] == [
         COLOR_NEUTRAL_DARK,
@@ -211,7 +209,7 @@ def test_local_qwen_guidance_dialog_renders_large_readable_two_action_modal(
 
     action_row.controls[1].on_click(None)
 
-    assert events == ["settings"]
+    assert events == ["guide"]
     assert page.closed == [opened_dialog]
 
 
@@ -229,7 +227,7 @@ def test_local_qwen_guidance_i18n_keys_exist_in_all_locale_bundles() -> None:
 
     english = json.loads((i18n_dir / "en.json").read_text(encoding="utf-8"))
     assert english["local_qwen_hallucination.body"] == EXPECTED_EN_BODY
-    assert english["local_qwen_hallucination.open_stt_settings"] == "Open STT settings"
+    assert english["local_qwen_hallucination.open_guide"] == "Open guide"
     assert english["local_qwen_hallucination.close"] == "Close"
     assert english["debug_preview.local_qwen_hallucination_modal"] == "Local Qwen warning"
-    assert "audio input or desktop audio source" in english["local_qwen_hallucination.body"]
+    assert "welcome credits" in english["local_qwen_hallucination.body"]

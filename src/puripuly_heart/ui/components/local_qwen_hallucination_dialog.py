@@ -16,18 +16,18 @@ from puripuly_heart.ui.i18n import t
 class LocalQwenHallucinationDialog:
     action_labels = [
         "local_qwen_hallucination.close",
-        "local_qwen_hallucination.open_stt_settings",
+        "local_qwen_hallucination.open_guide",
     ]
 
     def __init__(
         self,
         page: ft.Page,
         *,
-        on_open_stt_settings: Callable[[], None],
+        on_open_guide: Callable[[], None],
         on_close: Callable[[], None] | None = None,
     ) -> None:
         self._page = page
-        self._on_open_stt_settings_callback = on_open_stt_settings
+        self._on_open_guide_callback = on_open_guide
         self._on_close_callback = on_close
         self._dialog: ft.AlertDialog | None = None
         self._dialog_result: WarmDocumentDialogResult | None = None
@@ -36,8 +36,8 @@ class LocalQwenHallucinationDialog:
         result = open_warm_document_dialog(
             self._page,
             body_paragraphs=split_body_paragraphs(t("local_qwen_hallucination.body")),
-            primary_label=t("local_qwen_hallucination.open_stt_settings"),
-            primary_action=self._on_open_stt_settings,
+            primary_label=t("local_qwen_hallucination.open_guide"),
+            primary_action=self._on_open_guide,
             secondary_label=t("local_qwen_hallucination.close"),
             secondary_action=self._on_close,
             glow_factory=create_glow_stack,
@@ -50,8 +50,8 @@ class LocalQwenHallucinationDialog:
             return
         self._page.close(self._dialog)
 
-    def _on_open_stt_settings(self) -> None:
-        self._on_open_stt_settings_callback()
+    def _on_open_guide(self) -> None:
+        self._on_open_guide_callback()
 
     def _on_close(self) -> None:
         if self._on_close_callback is not None:

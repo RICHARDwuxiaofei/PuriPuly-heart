@@ -500,9 +500,9 @@ def test_debug_preview_local_qwen_modal_opens_production_dialog_without_state_or
     captured: dict[str, object] = {}
 
     class FakeLocalQwenHallucinationDialog:
-        def __init__(self, page, *, on_open_stt_settings):
+        def __init__(self, page, *, on_open_guide):
             captured["page"] = page
-            captured["on_open_stt_settings"] = on_open_stt_settings
+            captured["on_open_guide"] = on_open_guide
 
         def open(self) -> None:
             captured["opened"] = True
@@ -527,10 +527,9 @@ def test_debug_preview_local_qwen_modal_opens_production_dialog_without_state_or
 
     assert captured["page"] is app.page
     assert captured["opened"] is True
-    assert getattr(captured["on_open_stt_settings"], "__self__", None) is app
+    assert getattr(captured["on_open_guide"], "__self__", None) is app
     assert (
-        getattr(captured["on_open_stt_settings"], "__func__", None)
-        is TranslatorApp._open_settings_tab
+        getattr(captured["on_open_guide"], "__func__", None) is TranslatorApp._open_local_qwen_guide
     )
     assert app._local_qwen_hallucination_dialog.__class__ is FakeLocalQwenHallucinationDialog
     assert app.controller._local_qwen_hallucination_detection_count == 1
@@ -600,7 +599,7 @@ def test_debug_audio_fault_actions_do_not_call_persistence_or_providers(monkeypa
     assert forbidden_calls == []
 
 
-def test_local_qwen_guidance_modal_open_stt_settings_routes_to_settings_safely(
+def test_local_qwen_guidance_modal_open_guide_opens_github_api_key_guide_safely(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_app_construction(monkeypatch)
@@ -617,6 +616,7 @@ def test_local_qwen_guidance_modal_open_stt_settings_routes_to_settings_safely(
 
     monkeypatch.setattr(app_module, "BottomNavBar", FakeBottomNavBar)
     forbidden_calls: list[str] = []
+    opened_urls: list[str] = []
     monkeypatch.setattr(
         app_module,
         "save_settings",
@@ -625,8 +625,9 @@ def test_local_qwen_guidance_modal_open_stt_settings_routes_to_settings_safely(
     monkeypatch.setattr(
         app_module.webbrowser,
         "open",
-        lambda *args, **kwargs: forbidden_calls.append("webbrowser.open"),
+        lambda url, *args, **kwargs: opened_urls.append(url),
     )
+    monkeypatch.setattr(app_module, "get_locale", lambda: "ko")
 
     page = DummyPage()
     app = TranslatorApp(page, config_path=Path("settings.json"))
@@ -646,10 +647,10 @@ def test_local_qwen_guidance_modal_open_stt_settings_routes_to_settings_safely(
     dialog._dialog_result.primary_button.on_click(None)
 
     assert page.closed == [opened_dialog]
-    assert app.content_area.content is app.view_settings
-    assert app.content_area.padding == 0
-    assert app.bottom_nav._selected == 1
-    assert app.bottom_nav.visual_updates == 1
+    assert opened_urls == [app_module.founder_readme_url_for_locale("ko")]
+    assert app.content_area.content is not app.view_settings
+    assert app.bottom_nav._selected == 0
+    assert app.bottom_nav.visual_updates == 0
     assert page.tasks == []
     assert forbidden_calls == []
 
