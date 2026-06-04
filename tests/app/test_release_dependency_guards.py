@@ -747,7 +747,7 @@ def test_push_ci_workflow_prepares_soxr_release_inputs_before_pyinstaller_packag
     assert job_block.index(SOXR_RELEASE_INPUTS_SCRIPT) < job_block.index("PyInstaller")
 
 
-def test_release_workflow_prepares_soxr_release_inputs_before_build_and_publishes_source_bundle() -> (
+def test_release_workflow_prepares_soxr_release_inputs_before_build_and_publishes_source_bundle_without_installer_sha256() -> (
     None
 ):
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
@@ -762,13 +762,14 @@ def test_release_workflow_prepares_soxr_release_inputs_before_build_and_publishe
         "PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe" in workflow
     )
     assert (
-        "release-artifacts/installer_output/"
-        "PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe.sha256" in workflow
-    )
-    assert (
         "release-artifacts/build/soxr-release-inputs/"
         "PuriPulyHeart-soxr-third-party-source-bundle.zip" in workflow
     )
+    assert (
+        "PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe.sha256" not in workflow
+    )
+    assert '"$installer.sha256"' not in workflow
+    assert "Get-FileHash -Path $installer -Algorithm SHA256" not in workflow
 
 
 def test_broker_direct_deploy_syncs_discord_oauth_secrets() -> None:
