@@ -5379,7 +5379,7 @@ def test_desktop_initial_controls_emit_launch_diagnostics_only_in_detailed_mode(
     ("overlay_target", "expected_refresh_burst"),
     [("desktop", "False"), ("steamvr", "True")],
 )
-async def test_overlay_start_logs_selected_target_for_experiment_boundaries(
+async def test_overlay_start_logs_selected_target_refresh_flags_for_experiment_boundaries(
     monkeypatch: pytest.MonkeyPatch,
     overlay_target: str,
     expected_refresh_burst: str,
@@ -5401,6 +5401,7 @@ async def test_overlay_start_logs_selected_target_for_experiment_boundaries(
         and "overlay_instance_id=overlay-" in message
         and "logging_mode=detailed" in message
         and f"peer_presentation_refresh_burst={expected_refresh_burst}" in message
+        and f"self_presentation_refresh_burst={expected_refresh_burst}" in message
         for message in messages
     )
 
@@ -5792,6 +5793,7 @@ async def test_overlay_start_enables_peer_presentation_refresh_for_new_presenter
 
     assert controller._overlay_presenter is not None
     assert controller._overlay_presenter.peer_presentation_refresh_burst is True
+    assert controller._overlay_presenter.self_presentation_refresh_burst is True
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
     await controller.set_overlay_enabled(False)
@@ -5814,6 +5816,7 @@ async def test_desktop_overlay_start_disables_peer_presentation_refresh_for_new_
 
     assert controller._overlay_presenter is not None
     assert controller._overlay_presenter.peer_presentation_refresh_burst is False
+    assert controller._overlay_presenter.self_presentation_refresh_burst is False
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
     await controller.set_overlay_enabled(False)
@@ -5837,12 +5840,14 @@ async def test_overlay_start_product_enables_existing_peer_presentation_refresh_
         calibration=controller.overlay_calibration.copy(),
         clock=controller.clock,
         peer_presentation_refresh_burst=False,
+        self_presentation_refresh_burst=False,
     )
 
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
 
     assert controller._overlay_presenter.peer_presentation_refresh_burst is True
+    assert controller._overlay_presenter.self_presentation_refresh_burst is True
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
     await controller.set_overlay_enabled(False)
@@ -5867,12 +5872,14 @@ async def test_desktop_overlay_start_disables_existing_peer_presentation_refresh
         calibration=controller.overlay_calibration.copy(),
         clock=controller.clock,
         peer_presentation_refresh_burst=True,
+        self_presentation_refresh_burst=True,
     )
 
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
 
     assert controller._overlay_presenter.peer_presentation_refresh_burst is False
+    assert controller._overlay_presenter.self_presentation_refresh_burst is False
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
     await controller.set_overlay_enabled(False)
@@ -5985,6 +5992,86 @@ async def test_overlay_start_syncs_bridge_after_preserved_presenter_cleans_refre
     assert bridge.snapshots[-1] == presenter.snapshot()
 
     await controller._teardown_overlay_runtime(preserve_presenter_state=False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_start_cleans_preserved_self_refresh_marker_before_initial_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    clock = FakeClock(_now=10.0)
+    sleep_events: list[asyncio.Event] = []
+
+    async def fake_sleep(delay: float) -> None:
+        release = asyncio.Event()
+        sleep_events.append(release)
+        await release.wait()
+        clock.advance(delay)
+        await asyncio.sleep(0)
+
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        clock=clock,
+        sleep=fake_sleep,
+        peer_presentation_refresh_burst=False,
+        self_presentation_refresh_burst=True,
+    )
+    adapter = OverlayEventAdapter(clock=clock)
+    self_turn_id = uuid4()
+
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=self_turn_id,
+                channel="self",
+                text="self source preserved across desktop restart",
+                is_final=True,
+                created_at=10.0,
+            ),
+            source_language="ko",
+            target_language="en",
+        )
+    )
+    await asyncio.sleep(0)
+    assert sleep_events
+    sleep_events[-1].set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    stale_snapshot = presenter.snapshot()
+    assert stale_snapshot.blocks[0].session_scope == "self_presentation_refresh=1"
+
+    class ImmediateConnectedOverlayProcessManager(FakeOverlayProcessManager):
+        instances: list["ImmediateConnectedOverlayProcessManager"] = []
+
+        async def start(self) -> None:
+            self.state = "connected"
+            self.failure_reason = None
+
+    monkeypatch.setattr(
+        controller_module,
+        "OverlayProcessManager",
+        ImmediateConnectedOverlayProcessManager,
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = OVERLAY_TARGET_DESKTOP
+    controller.hub = DummyHub()
+    controller._overlay_presenter = presenter
+
+    try:
+        await controller._run_overlay_start()
+
+        bridge = FakeOverlayBridge.instances[0]
+        assert presenter.self_presentation_refresh_burst is False
+        assert bridge.initial_snapshot.blocks[0].session_scope is None
+        assert presenter.snapshot().blocks[0].session_scope is None
+        assert bridge.current_snapshot == presenter.snapshot()
+    finally:
+        await controller._teardown_overlay_runtime(preserve_presenter_state=False)
 
 
 @pytest.mark.asyncio
