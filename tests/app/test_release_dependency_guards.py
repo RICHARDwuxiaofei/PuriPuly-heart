@@ -1143,6 +1143,34 @@ def test_installer_script_uses_inno_managed_local_stt_download() -> None:
     assert "SW_HIDE" not in script
 
 
+def test_installer_script_uses_concise_local_stt_user_copy_across_locales() -> None:
+    script = (ROOT / "installer.iss").read_text(encoding="utf-8")
+
+    expected_messages = {
+        "english.LocalSttPageDescription": "Download the built-in ASR model.",
+        "english.LocalSttReinstall": "Redownload ASR model",
+        "english.LocalSttDownloadDescription": "",
+        "korean.LocalSttPageDescription": "내장 ASR 모델을 다운로드 합니다.",
+        "korean.LocalSttReinstall": "ASR 모델 재다운로드",
+        "korean.LocalSttDownloadDescription": "",
+        "japanese.LocalSttPageDescription": "内蔵ASRモデルをダウンロードします。",
+        "japanese.LocalSttReinstall": "ASRモデルを再ダウンロード",
+        "japanese.LocalSttDownloadDescription": "",
+        "chinesesimplified.LocalSttPageDescription": "下载内置 ASR 模型。",
+        "chinesesimplified.LocalSttReinstall": "重新下载 ASR 模型",
+        "chinesesimplified.LocalSttDownloadDescription": "",
+        "chinesetraditional.LocalSttPageDescription": "下載內建 ASR 模型。",
+        "chinesetraditional.LocalSttReinstall": "重新下載 ASR 模型",
+        "chinesetraditional.LocalSttDownloadDescription": "",
+    }
+
+    for key, value in expected_messages.items():
+        assert f"{key}={value}\n" in script
+
+    assert "Hugging Face is tried first; ModelScope is used automatically if needed." not in script
+    assert "먼저 Hugging Face를 시도하고, 필요하면 ModelScope로 자동 전환합니다." not in script
+
+
 def test_installer_script_embeds_local_stt_manifest_assets_for_inno_download() -> None:
     script = (ROOT / "installer.iss").read_text(encoding="utf-8")
     manifest = json.loads(
