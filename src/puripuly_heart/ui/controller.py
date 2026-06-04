@@ -2689,12 +2689,14 @@ class GuiController:
             )
             self._active_overlay_target = overlay_target
             peer_presentation_refresh_burst = overlay_target != OVERLAY_TARGET_DESKTOP
+            self_presentation_refresh_burst = overlay_target != OVERLAY_TARGET_DESKTOP
             self.log_detailed(
                 "[Overlay][Start] "
                 f"target={overlay_target} "
                 f"overlay_instance_id={overlay_instance_id} "
                 f"logging_mode={self.runtime_logging_mode} "
-                f"peer_presentation_refresh_burst={peer_presentation_refresh_burst}"
+                f"peer_presentation_refresh_burst={peer_presentation_refresh_burst} "
+                f"self_presentation_refresh_burst={self_presentation_refresh_burst}"
             )
 
             if presenter is None:
@@ -2706,6 +2708,7 @@ class GuiController:
                     show_translation=self.settings.overlay.show_translation,
                     show_peer_original=self.settings.overlay.show_peer_original,
                     peer_presentation_refresh_burst=peer_presentation_refresh_burst,
+                    self_presentation_refresh_burst=self_presentation_refresh_burst,
                 )
                 self._overlay_presenter = presenter
             else:
@@ -2713,6 +2716,9 @@ class GuiController:
                 presenter.runtime_log_detailed = self.log_detailed
                 await presenter.update_peer_presentation_refresh_burst(
                     peer_presentation_refresh_burst
+                )
+                await presenter.update_self_presentation_refresh_burst(
+                    self_presentation_refresh_burst
                 )
             bridge = OverlayBridge(
                 session_token=secrets.token_urlsafe(16),
