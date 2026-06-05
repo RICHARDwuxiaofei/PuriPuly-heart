@@ -45,6 +45,47 @@ EXPECTED_OVERLAY_STEAMVR_NOT_RUNNING_COPY = {
     "zh-CN": "SteamVR 尚未运行。如果您想使用桌面叠加层，请在设置中更改。",
     "ja": "SteamVRがオフです。デスクトップオーバーレイを使いたい場合は、設定を変更してください。",
 }
+CUSTOM_VOCABULARY_TAG_EDITOR_I18N_KEYS = (
+    "settings.custom_vocabulary.description",
+    "settings.custom_vocabulary.add_placeholder",
+    "settings.custom_vocabulary.add_action",
+    "settings.custom_vocabulary.empty",
+    "settings.custom_vocabulary.remove_hint",
+)
+CUSTOM_VOCABULARY_EXISTING_I18N_KEYS = (
+    "settings.section.custom_vocabulary",
+    "snackbar.custom_vocabulary_limit",
+)
+EXPECTED_CUSTOM_VOCABULARY_TAG_EDITOR_COPY = {
+    "en": {
+        "settings.custom_vocabulary.description": "Applies to your own speech. Supported speech recognition providers use these hints to improve recognition.",
+        "settings.custom_vocabulary.add_placeholder": "Add hint",
+        "settings.custom_vocabulary.add_action": "Add",
+        "settings.custom_vocabulary.empty": "No hints yet.",
+        "settings.custom_vocabulary.remove_hint": "Remove {term}",
+    },
+    "ko": {
+        "settings.custom_vocabulary.description": "내 음성에만 적용돼요. 지원되는 음성 인식 제공자가 인식률을 높이는 데 사용해요.",
+        "settings.custom_vocabulary.add_placeholder": "힌트 추가",
+        "settings.custom_vocabulary.add_action": "추가",
+        "settings.custom_vocabulary.empty": "아직 추가된 힌트가 없어요.",
+        "settings.custom_vocabulary.remove_hint": "{term} 삭제",
+    },
+    "zh-CN": {
+        "settings.custom_vocabulary.description": "仅适用于你的语音。支持的语音识别提供商会使用这些提示来提高识别率。",
+        "settings.custom_vocabulary.add_placeholder": "添加提示",
+        "settings.custom_vocabulary.add_action": "添加",
+        "settings.custom_vocabulary.empty": "还没有添加提示。",
+        "settings.custom_vocabulary.remove_hint": "删除 {term}",
+    },
+    "ja": {
+        "settings.custom_vocabulary.description": "自分の音声にのみ適用されます。対応している音声認識プロバイダーが認識精度の向上に使用します。",
+        "settings.custom_vocabulary.add_placeholder": "ヒントを追加",
+        "settings.custom_vocabulary.add_action": "追加",
+        "settings.custom_vocabulary.empty": "追加されたヒントはまだありません。",
+        "settings.custom_vocabulary.remove_hint": "{term} を削除",
+    },
+}
 
 # Overlay target labels are selected with a runtime suffix; keep this exact so target typos fail.
 EXACT_DYNAMIC_I18N_KEYS = frozenset(
@@ -54,6 +95,9 @@ EXACT_DYNAMIC_I18N_KEYS = frozenset(
     }
 )
 
+# Desktop-overlay copy seeds product-standard keys before every key is referenced
+# in runtime code.
+# Keep this exact, temporary allowlist narrow so typo or stale seeded keys still fail.
 TEMPORARILY_ALLOWED_UNREFERENCED_I18N_KEYS = frozenset(
     SHIPPING_DESKTOP_OVERLAY_I18N_KEYS | DESKTOP_OVERLAY_RECOVERY_I18N_KEYS
 )
@@ -172,6 +216,27 @@ def test_overlay_steamvr_not_running_copy_points_to_desktop_overlay_setting() ->
 
     for locale, expected in EXPECTED_OVERLAY_STEAMVR_NOT_RUNNING_COPY.items():
         assert bundles[locale][OVERLAY_STEAMVR_NOT_RUNNING_KEY] == expected
+
+
+def test_custom_vocabulary_tag_editor_copy_is_localized_for_all_supported_locales() -> None:
+    bundles = _load_bundles()
+    supported_locales = set(available_locales())
+    required_keys = set(CUSTOM_VOCABULARY_TAG_EDITOR_I18N_KEYS) | set(
+        CUSTOM_VOCABULARY_EXISTING_I18N_KEYS
+    )
+
+    assert set(bundles) == supported_locales
+    for locale, expected_copy in EXPECTED_CUSTOM_VOCABULARY_TAG_EDITOR_COPY.items():
+        bundle = bundles[locale]
+        missing = sorted(required_keys - set(bundle))
+        assert missing == [], locale
+        assert {key: bundle[key] for key in CUSTOM_VOCABULARY_TAG_EDITOR_I18N_KEYS} == expected_copy
+        for key in CUSTOM_VOCABULARY_EXISTING_I18N_KEYS:
+            assert bundle[key].strip()
+            assert bundle[key] != key
+        assert "{term}" in bundle["settings.custom_vocabulary.remove_hint"]
+        for provider_name in ("Deepgram", "Soniox", "Qwen"):
+            assert provider_name not in bundle["settings.custom_vocabulary.description"]
 
 
 def test_local_llm_keys_are_localized() -> None:
@@ -358,7 +423,7 @@ def test_unused_key_guard_flags_desktop_overlay_typos() -> None:
     assert unused_keys == sorted(typo_like_keys)
 
 
-def test_desktop_overlay_seed_keys_are_exactly_allowlisted() -> None:
+def test_temporarily_allowed_seed_keys_are_exactly_allowlisted() -> None:
     unused_keys = _unused_i18n_keys(
         sorted(TEMPORARILY_ALLOWED_UNREFERENCED_I18N_KEYS),
         runtime_source="",
