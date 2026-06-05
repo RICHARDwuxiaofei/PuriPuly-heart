@@ -7,6 +7,7 @@ import copy
 import json
 import logging
 import math
+import re
 from pathlib import Path
 from typing import Callable
 
@@ -50,6 +51,7 @@ from puripuly_heart.ui.components.managed_trial_usage_bar import ManagedTrialUsa
 from puripuly_heart.ui.components.settings import (
     ApiKeyField,
     AudioSettings,
+    CustomVocabularyTagEditor,
     OptionItem,
     PromptEditor,
     SettingsModal,
@@ -96,6 +98,7 @@ _OVERLAY_TEXT_SCALE_PRESETS = (
     ("small", 0.8),
 )
 _DESKTOP_OVERLAY_REOPEN_FAILURE_REASONS = frozenset({"window_configuration_failed"})
+_CUSTOM_VOCAB_DELIMITER_RE = re.compile(r"[,\r\n]+")
 _TRANSLATION_MODEL_LABEL_KEYS = {
     TranslationModel.GEMMA4: "provider.gemma4_26b_a4b_it",
     TranslationModel.DEEPSEEK_V4_FLASH: "provider.deepseek_v4_flash",
@@ -245,7 +248,6 @@ class SettingsView(ft.Column):
         self._config_path: Path | None = None
         self.has_provider_changes: bool = False
         self.has_pending_prompt_changes: bool = False
-        self._custom_vocab_draft_terms: dict[str, str] = {}
         self._overlay_state: str = "off"
         self._overlay_failure_reason: str | None = None
         self._overlay_runtime_target: str = OVERLAY_TARGET_STEAMVR
@@ -1902,44 +1904,24 @@ class SettingsView(ft.Column):
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
         )
-        self._custom_vocab_info_icon = ft.Icon(
-            name=ft.Icons.INFO_OUTLINE,
-            color=COLOR_NEUTRAL,
-            size=24,
-            tooltip=t("settings.custom_vocabulary_tooltip"),
-        )
-        custom_vocab_header = ft.Row(
-            controls=[
-                self._custom_vocab_title,
-                ft.Container(expand=True),
-                self._custom_vocab_info_icon,
-            ],
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-        self._custom_vocab_helper_text = ft.Text(
-            self._custom_vocabulary_helper_copy(),
+        self._custom_vocab_description_text = ft.Text(
+            t("settings.custom_vocabulary.description"),
             size=16,
             color=COLOR_NEUTRAL,
         )
-        self._custom_vocab_terms = ft.TextField(
-            multiline=True,
-            min_lines=5,
-            helper_text="",
-            border_radius=12,
-            border_color=COLOR_DIVIDER,
-            focused_border_color=COLOR_PRIMARY,
-            text_size=16,
-            color=COLOR_ON_BACKGROUND,
-            on_change=self._on_custom_vocabulary_terms_change,
-            on_blur=self._on_custom_vocabulary_terms_blur,
+        self._custom_vocab_tag_editor = CustomVocabularyTagEditor(
+            on_add_terms=self._on_custom_vocabulary_add_terms,
+            on_remove_term=self._on_custom_vocabulary_remove_term,
         )
+        self._apply_custom_vocabulary_tag_editor_locale()
         row7 = SharedCardWrapper(
             ft.Column(
                 [
-                    custom_vocab_header,
-                    ft.Container(height=16),
-                    self._custom_vocab_terms,
+                    self._custom_vocab_title,
+                    ft.Container(height=6),
+                    self._custom_vocab_description_text,
+                    ft.Container(height=12),
+                    self._custom_vocab_tag_editor,
                 ],
                 spacing=0,
             ),
@@ -2148,53 +2130,48 @@ class SettingsView(ft.Column):
             provider=provider_label(self._active_prompt_key()),
         )
 
-    def _custom_vocabulary_helper_copy(self) -> str:
-        return t(
-            "settings.custom_vocabulary_helper",
-            language=language_name(self._current_source_language()),
+    def _custom_vocabulary_description_copy(self) -> str:
+        return t("settings.custom_vocabulary.description")
+
+    def _apply_custom_vocabulary_tag_editor_locale(self) -> None:
+        self._custom_vocab_tag_editor.set_placeholder(
+            t("settings.custom_vocabulary.add_placeholder")
+        )
+        self._custom_vocab_tag_editor.set_add_label(t("settings.custom_vocabulary.add_action"))
+        self._custom_vocab_tag_editor.set_empty_text(t("settings.custom_vocabulary.empty"))
+        self._custom_vocab_tag_editor.set_remove_label_template(
+            t("settings.custom_vocabulary.remove_hint")
         )
 
     def _sync_prompt_tab_copy(self) -> None:
         self._prompt_for_text.value = self._prompt_provider_copy()
-        self._custom_vocab_helper_text.value = self._custom_vocabulary_helper_copy()
+        self._custom_vocab_description_text.value = self._custom_vocabulary_description_copy()
+        self._apply_custom_vocabulary_tag_editor_locale()
         if self.page:
-            for control in (self._prompt_for_text, self._custom_vocab_helper_text):
+            for control in (self._prompt_for_text, self._custom_vocab_description_text):
                 with contextlib.suppress(Exception):
                     control.update()
 
-    def _set_custom_vocabulary_draft_from_settings(self, *, preserve_existing: bool) -> None:
+    def _sync_custom_vocabulary_editor_from_settings(self) -> None:
         if not self._settings:
-            self._custom_vocab_draft_terms = {}
-            self._custom_vocab_terms.value = ""
+            self._custom_vocab_tag_editor.set_terms([])
+            self._custom_vocab_tag_editor.clear_input()
             return
 
         source_language = self._current_source_language()
-        if not preserve_existing:
-            self._custom_vocab_draft_terms = {
-                language: "\n".join(terms)
-                for language, terms in self._settings.stt.custom_terms.items()
-            }
-        current_value = self._custom_vocab_draft_terms.get(
-            source_language,
-            "\n".join(self._settings.stt.custom_terms.get(source_language, [])),
+        self._custom_vocab_tag_editor.set_terms(
+            list(self._settings.stt.custom_terms.get(source_language, []))
         )
-        self._custom_vocab_draft_terms[source_language] = current_value
-        self._custom_vocab_terms.value = current_value
+        self._custom_vocab_tag_editor.clear_input()
 
-    def _parse_custom_vocabulary_terms(self) -> tuple[list[str], int]:
+    def _normalize_custom_vocabulary_submitted_terms(self, raw_terms: list[str]) -> list[str]:
         terms: list[str] = []
-        seen_terms: set[str] = set()
-        unique_count = 0
-        for line in (self._custom_vocab_terms.value or "").splitlines():
-            normalized = line.strip()
-            if not normalized or normalized in seen_terms:
-                continue
-            seen_terms.add(normalized)
-            unique_count += 1
-            if len(terms) >= MAX_CUSTOM_VOCAB_TERMS:
-                continue
-            terms.append(normalized)
-        return terms, unique_count
+        for raw_term in raw_terms:
+            for part in _CUSTOM_VOCAB_DELIMITER_RE.split(str(raw_term)):
+                normalized = part.strip()
+                if normalized:
+                    terms.append(normalized)
+        return terms
 
     @property
     def managed_trial_usage_state(self) -> dict[str, object]:
@@ -2748,11 +2725,9 @@ class SettingsView(ft.Column):
             self._prompt_editor.load_default_prompt(emit_change=False)
             settings.system_prompt = self._prompt_editor.value
 
-        self._set_custom_vocabulary_draft_from_settings(
-            preserve_existing=preserve_custom_vocab_draft
-        )
+        _ = preserve_custom_vocab_draft
+        self._sync_custom_vocabulary_editor_from_settings()
         self._sync_prompt_tab_copy()
-        self._custom_vocab_terms.helper_text = ""
         self._overlay_peer_contract = None
         self._sync_overlay_controls()
         self.set_overlay_calibration(
@@ -2800,6 +2775,7 @@ class SettingsView(ft.Column):
         else:
             self._prompt_editor.load_default_prompt(emit_change=False)
             settings.system_prompt = self._prompt_editor.value
+        self._sync_custom_vocabulary_editor_from_settings()
         self._sync_prompt_tab_copy()
 
         try:
@@ -4494,63 +4470,98 @@ class SettingsView(ft.Column):
         self._prompt_editor.load_default_prompt()
         self._on_prompt_commit(self._prompt_editor.value)
 
-    def _apply_custom_vocabulary(self) -> None:
+    def _show_custom_vocabulary_limit_snackbar(self) -> None:
+        if self.show_snackbar:
+            self.show_snackbar(
+                t(
+                    "snackbar.custom_vocabulary_limit",
+                    max_terms=MAX_CUSTOM_VOCAB_TERMS,
+                ),
+                ft.Colors.ORANGE_700,
+            )
+
+    def _set_custom_vocabulary_terms_for_current_language(self, next_terms: list[str]) -> None:
         if not self._settings:
             return
 
         source_language = self._current_source_language()
         updated_terms = dict(self._settings.stt.custom_terms)
         current_terms = list(updated_terms.get(source_language, []))
-        parsed_terms, unique_count = self._parse_custom_vocabulary_terms()
-        normalized_text = "\n".join(parsed_terms)
-        if self._custom_vocab_terms.value != normalized_text:
-            self._custom_vocab_terms.value = normalized_text
-            if self._custom_vocab_terms.page:
-                self._custom_vocab_terms.update()
-        updated_terms[source_language] = parsed_terms
+        applied_terms = list(next_terms)
+        updated_terms[source_language] = applied_terms
         next_enabled = any(bool(terms) for terms in updated_terms.values())
-        self._custom_vocab_draft_terms[source_language] = normalized_text
-
-        if unique_count > MAX_CUSTOM_VOCAB_TERMS:
-            self._emit_runtime_detailed(
-                "[Settings] Custom vocabulary capped: "
-                f"language={source_language}, requested={unique_count}, applied={MAX_CUSTOM_VOCAB_TERMS}"
-            )
-            if self.show_snackbar:
-                self.show_snackbar(
-                    t(
-                        "snackbar.custom_vocabulary_limit",
-                        max_terms=MAX_CUSTOM_VOCAB_TERMS,
-                    ),
-                    ft.Colors.ORANGE_700,
-                )
 
         if (
-            current_terms == parsed_terms
+            current_terms == applied_terms
             and self._settings.stt.custom_vocabulary_enabled == next_enabled
         ):
             return
 
         self._settings.stt.custom_terms = updated_terms
         self._settings.stt.custom_vocabulary_enabled = next_enabled
+        self._custom_vocab_tag_editor.set_terms(applied_terms)
         self._emit_runtime_detailed(
-            f"[Settings] Custom vocabulary applied: language={source_language}, terms={len(parsed_terms)}"
+            f"[Settings] Custom vocabulary applied: language={source_language}, terms={len(applied_terms)}"
         )
         self._emit_settings_changed()
 
-    def _on_apply_custom_vocabulary(self, e) -> None:
-        _ = e
-        self._apply_custom_vocabulary()
+    def _on_custom_vocabulary_add_terms(self, raw_terms: list[str]) -> None:
+        if not self._settings:
+            return
 
-    def _on_custom_vocabulary_terms_change(self, e) -> None:
-        _ = e
-        self._custom_vocab_draft_terms[self._current_source_language()] = (
-            self._custom_vocab_terms.value or ""
+        raw_values = [str(term) for term in raw_terms]
+        if any(value != "" for value in raw_values):
+            self._custom_vocab_tag_editor.clear_input()
+        submitted_terms = self._normalize_custom_vocabulary_submitted_terms(raw_values)
+        if not submitted_terms:
+            return
+
+        source_language = self._current_source_language()
+        current_terms = list(self._settings.stt.custom_terms.get(source_language, []))
+        next_terms = list(current_terms)
+        seen_terms = set(current_terms)
+        unique_requested_count = len(current_terms)
+        cap_exceeded = False
+
+        for term in submitted_terms:
+            if term in seen_terms:
+                continue
+            seen_terms.add(term)
+            unique_requested_count += 1
+            if len(next_terms) >= MAX_CUSTOM_VOCAB_TERMS:
+                cap_exceeded = True
+                continue
+            next_terms.append(term)
+
+        updated_terms = dict(self._settings.stt.custom_terms)
+        updated_terms[source_language] = list(next_terms)
+        next_enabled = any(bool(terms) for terms in updated_terms.values())
+        will_change = (
+            current_terms != next_terms
+            or self._settings.stt.custom_vocabulary_enabled != next_enabled
         )
+        if cap_exceeded:
+            if will_change:
+                self._emit_runtime_detailed(
+                    "[Settings] Custom vocabulary capped: "
+                    f"language={source_language}, requested={unique_requested_count}, "
+                    f"applied={MAX_CUSTOM_VOCAB_TERMS}"
+                )
+            self._show_custom_vocabulary_limit_snackbar()
 
-    def _on_custom_vocabulary_terms_blur(self, e) -> None:
-        _ = e
-        self._apply_custom_vocabulary()
+        self._set_custom_vocabulary_terms_for_current_language(next_terms)
+
+    def _on_custom_vocabulary_remove_term(self, term: str) -> None:
+        if not self._settings:
+            return
+
+        source_language = self._current_source_language()
+        current_terms = list(self._settings.stt.custom_terms.get(source_language, []))
+        try:
+            current_terms.remove(term)
+        except ValueError:
+            return
+        self._set_custom_vocabulary_terms_for_current_language(current_terms)
 
     async def _verify_key(self, provider: str, key: str) -> tuple[bool, str]:
         """Verify API key."""
@@ -4633,7 +4644,6 @@ class SettingsView(ft.Column):
                 self._local_llm_extra_body.error_text = message
         self._persona_title.value = t("settings.section.persona")
         self._custom_vocab_title.value = t("settings.section.custom_vocabulary")
-        self._custom_vocab_info_icon.tooltip = t("settings.custom_vocabulary_tooltip")
         self._vrc_mic_title.value = t("settings.vrc_mic_intercept")
         self._chatbox_source_title.value = t("settings.chatbox_include_source")
         self._clipboard_auto_translate_title.value = t("settings.clipboard_auto_translate")
@@ -4667,8 +4677,6 @@ class SettingsView(ft.Column):
         )
         _set_text_button_label(self._reset_prompt_btn, t("settings.reset_prompt"))
         self._sync_prompt_tab_copy()
-        self._custom_vocab_terms.label = None
-        self._custom_vocab_terms.helper_text = ""
 
         # Update dynamic buttons by replacing the entire style object
         ui_font = font_for_language(get_locale())
