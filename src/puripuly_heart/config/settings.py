@@ -33,6 +33,7 @@ from puripuly_heart.config.llm_profiles import (
     openrouter_alias_for_fields,
 )
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
+from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 
 SETTINGS_SCHEMA_VERSION = 24
 STT_INTERNAL_SAMPLE_RATE_HZ = 16000
@@ -3247,6 +3248,11 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
 
 def from_dict(data: dict[str, Any]) -> AppSettings:
+    from puripuly_heart.config.settings_vnext import migration as vnext_migration
+
+    if vnext_migration.is_vnext_settings_dict(data):
+        return from_dict(vnext_migration.to_legacy_dict(vnext_migration.from_dict(data)))
+
     audio_data = data.get("audio") or {}
     desktop_audio_data = data.get("desktop_audio") or {}
     overlay_data = data.get("overlay") if isinstance(data.get("overlay"), dict) else {}
@@ -3598,25 +3604,95 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     return settings
 
 
+@dataclass(frozen=True, slots=True)
+class FacadeSettingsLoadResult:
+    status: Any
+    settings: AppSettings | None = None
+    migrated: bool = False
+    backup_path: Path | None = None
+    error: Any | None = None
+
+    @property
+    def ok(self) -> bool:
+        status_value = getattr(self.status, "value", self.status)
+        return status_value == "success"
+
+
+_FacadeSettingsLoadResult = FacadeSettingsLoadResult
+
+
 def load_settings(path: Path) -> AppSettings:
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        raise ValueError("settings file must contain a JSON object")
-    migrated, changed = _migrate_settings_dict(raw)
-    settings = from_dict(migrated)
-    if changed:
-        save_settings(path, settings)
-    return settings
+    result = load_settings_with_result(path)
+    if result.settings is None:
+        raise RuntimeError(
+            result.error.message if result.error is not None else result.status.value
+        )
+    return result.settings
 
 
-def save_settings(path: Path, settings: AppSettings) -> None:
-    settings.validate()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(
-        path,
-        json.dumps(to_dict(settings), ensure_ascii=False, indent=2),
-        encoding="utf-8",
+def load_settings_with_result(path: Path):
+    from puripuly_heart.config.settings_vnext import compat as vnext_compat
+    from puripuly_heart.config.settings_vnext import migration as vnext_migration
+
+    result = vnext_compat.load_vnext_settings(path)
+    if result.settings is None:
+        return result
+    try:
+        legacy_settings = from_dict(vnext_migration.to_legacy_dict(result.settings))
+    except Exception as exc:
+        status = vnext_compat.SettingsPersistenceStatus.MIGRATION_FAILED
+        return _FacadeSettingsLoadResult(
+            status=status,
+            settings=None,
+            migrated=result.migrated,
+            backup_path=result.backup_path,
+            error=vnext_compat.SettingsPersistenceError(
+                status,
+                f"{type(exc).__name__}: {exc}",
+            ),
+        )
+    return _FacadeSettingsLoadResult(
+        status=result.status,
+        settings=legacy_settings,
+        migrated=result.migrated,
+        backup_path=result.backup_path,
+        error=result.error,
     )
+
+
+def save_settings(path: Path, settings: AppSettings | AppSettingsVNext) -> None:
+    result = save_settings_with_result(path, settings)
+    if not result.ok:
+        raise RuntimeError(
+            result.error.message if result.error is not None else result.status.value
+        )
+
+
+def save_settings_with_result(path: Path, settings: AppSettings | AppSettingsVNext):
+    from puripuly_heart.config.settings_vnext import compat as vnext_compat
+    from puripuly_heart.config.settings_vnext import migration as vnext_migration
+
+    if isinstance(settings, AppSettingsVNext):
+        vnext_settings = settings
+    else:
+        settings.validate()
+        vnext_settings = vnext_migration.from_legacy_app_settings(
+            settings,
+            preserve_provider_verification=True,
+        )
+    return vnext_compat.save_vnext_settings(path, vnext_settings)
+
+
+def load_vnext_settings(path: Path, **kwargs: Any):
+    from puripuly_heart.config.settings_vnext.compat import load_vnext_settings as _load
+
+    return _load(path, **kwargs)
+
+
+def save_vnext_settings(path: Path, settings: AppSettingsVNext):
+    from puripuly_heart.config.settings_vnext.compat import save_vnext_settings as _save
+
+    return _save(path, settings)
 
 
 def _atomic_write_text(path: Path, content: str, *, encoding: str) -> None:

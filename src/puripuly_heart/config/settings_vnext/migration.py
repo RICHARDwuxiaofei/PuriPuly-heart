@@ -1,0 +1,438 @@
+from __future__ import annotations
+
+import copy
+from collections.abc import Mapping
+from typing import Any
+
+from puripuly_heart.config.overlay_calibration import OverlayCalibration
+from puripuly_heart.config.settings_vnext import serialization
+from puripuly_heart.config.settings_vnext.schema import (
+    VNEXT_SETTINGS_SCHEMA_VERSION,
+    AppSettingsVNext,
+    AudioIntent,
+    ClipboardIntent,
+    DeepgramSTTIntent,
+    DesktopAudioIntent,
+    DesktopFletOverlayIntent,
+    DesktopFletOverlayPositionIntent,
+    DesktopFletOverlayVisualIntent,
+    GithubStarPromptState,
+    IntegratedContextIntent,
+    IntegratedContextState,
+    LanguageIntent,
+    LocalLLMIntent,
+    ManagedConnectionState,
+    OscIntent,
+    OverlayIntent,
+    PeerSTTIntent,
+    PeerTranslationState,
+    PersistedOperationalState,
+    PromptIntent,
+    ProviderVerificationEntry,
+    ProviderVerificationState,
+    QwenASRSTTIntent,
+    QwenTranslationIntent,
+    SecretsIntent,
+    SonioxSTTIntent,
+    STTIntent,
+    TranslationIntent,
+    UiIntent,
+    UserIntentSettings,
+)
+
+
+def is_vnext_settings_dict(data: Mapping[str, Any]) -> bool:
+    return (
+        isinstance(data, Mapping)
+        and _coerce_int(data.get("settings_version"), 0) >= VNEXT_SETTINGS_SCHEMA_VERSION
+    )
+
+
+_PROVIDER_VERIFICATION_FIELDS = (
+    "deepgram",
+    "soniox",
+    "google",
+    "openrouter",
+    "deepseek",
+    "alibaba_beijing",
+    "alibaba_singapore",
+)
+
+
+def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
+    """Read either canonical vNext settings or an accepted legacy settings dict."""
+
+    if not isinstance(data, Mapping):
+        raise ValueError("settings must be a JSON object")
+    if is_vnext_settings_dict(data):
+        _validate_vnext_top_level_shape(data)
+        return serialization.from_dict(data)
+
+    # Legacy compatibility belongs here: use the public legacy migration chain first, then
+    # project the normalized AppSettings values into canonical vNext intent/state values.
+    from puripuly_heart.config import settings as legacy_settings
+
+    migrated, _changed = legacy_settings._migrate_settings_dict(dict(copy.deepcopy(data)))
+    return from_legacy_app_settings(legacy_settings.from_dict(migrated))
+
+
+def from_legacy_app_settings(
+    settings: object,
+    *,
+    preserve_provider_verification: bool = False,
+) -> AppSettingsVNext:
+    from puripuly_heart.config import settings as legacy_settings
+
+    if not isinstance(settings, legacy_settings.AppSettings):
+        raise TypeError("legacy settings migration requires AppSettings")
+
+    data = legacy_settings.to_dict(settings)
+    return AppSettingsVNext(
+        settings_version=VNEXT_SETTINGS_SCHEMA_VERSION,
+        intent=UserIntentSettings(
+            translation=TranslationIntent(
+                model=data["translation"]["model"],
+                connection=data["translation"]["connection"],
+                connection_history=dict(data["translation"]["connection_history"]),
+                concurrency_limit=int(data["llm"]["concurrency_limit"]),
+                openrouter_fallback_selection_alias=data["openrouter"]["fallback_selection_alias"],
+                openrouter_broker_base_url=data["openrouter"]["broker_base_url"],
+                openrouter_routing_mode=data["openrouter"]["routing_mode"],
+                qwen=QwenTranslationIntent(
+                    region=data["qwen"]["region"],
+                    llm_model=data["qwen"]["llm_model"],
+                ),
+            ),
+            local_llm=LocalLLMIntent(
+                backend=data["local_llm"]["backend"],
+                base_url=data["local_llm"]["base_url"],
+                model=data["local_llm"]["model"],
+                extra_body=dict(data["local_llm"]["extra_body"]),
+            ),
+            stt=STTIntent(
+                provider=data["provider"]["stt"],
+                drain_timeout_s=float(data["stt"]["drain_timeout_s"]),
+                vad_speech_threshold=float(data["stt"]["vad_speech_threshold"]),
+                low_latency_mode=bool(data["stt"]["low_latency_mode"]),
+                low_latency_vad_hangover_ms=int(data["stt"]["low_latency_vad_hangover_ms"]),
+                low_latency_merge_gap_ms=int(data["stt"]["low_latency_merge_gap_ms"]),
+                low_latency_spec_retry_max=int(data["stt"]["low_latency_spec_retry_max"]),
+                custom_vocabulary_enabled=bool(data["stt"]["custom_vocabulary_enabled"]),
+                custom_terms=copy.deepcopy(data["stt"]["custom_terms"]),
+                deepgram=DeepgramSTTIntent(model=data["deepgram_stt"]["model"]),
+                qwen_asr=QwenASRSTTIntent(model=data["qwen_asr_stt"]["model"]),
+                soniox=SonioxSTTIntent(
+                    model=data["soniox_stt"]["model"],
+                    endpoint=data["soniox_stt"]["endpoint"],
+                    keepalive_interval_s=float(data["soniox_stt"]["keepalive_interval_s"]),
+                    trailing_silence_ms=int(data["soniox_stt"]["trailing_silence_ms"]),
+                ),
+            ),
+            peer_stt=PeerSTTIntent(provider=data["provider"]["peer_stt"]),
+            languages=LanguageIntent(
+                source_language=data["languages"]["source_language"],
+                target_language=data["languages"]["target_language"],
+                peer_source_language=data["languages"]["peer_source_language"],
+                peer_target_language=data["languages"]["peer_target_language"],
+                recent_source_languages=list(data["languages"]["recent_source_languages"]),
+                recent_target_languages=list(data["languages"]["recent_target_languages"]),
+            ),
+            audio=AudioIntent(
+                ring_buffer_ms=int(data["audio"]["ring_buffer_ms"]),
+                input_host_api=data["audio"]["input_host_api"],
+                input_device=data["audio"]["input_device"],
+            ),
+            desktop_audio=DesktopAudioIntent(
+                output_device=data["desktop_audio"]["output_device"],
+                vad_speech_threshold=float(data["desktop_audio"]["vad_speech_threshold"]),
+                vad_hangover_ms=int(data["desktop_audio"]["vad_hangover_ms"]),
+                vad_pre_roll_ms=int(data["desktop_audio"]["vad_pre_roll_ms"]),
+            ),
+            overlay=OverlayIntent(
+                target=data["overlay"]["target"],
+                show_translation=bool(data["overlay"]["show_translation"]),
+                show_peer_original=bool(data["overlay"]["show_peer_original"]),
+                calibration=OverlayCalibration(**data["overlay"]["calibration"]),
+                desktop_flet=DesktopFletOverlayIntent(
+                    size_preset=data["overlay"]["desktop_flet"]["size_preset"],
+                    position=DesktopFletOverlayPositionIntent(
+                        x=data["overlay"]["desktop_flet"]["position"]["x"],
+                        y=data["overlay"]["desktop_flet"]["position"]["y"],
+                    ),
+                    visual=DesktopFletOverlayVisualIntent(
+                        background_alpha=float(
+                            data["overlay"]["desktop_flet"]["visual"]["background_alpha"]
+                        ),
+                    ),
+                ),
+            ),
+            osc=OscIntent(
+                host=data["osc"]["host"],
+                port=int(data["osc"]["port"]),
+                chatbox_address=data["osc"]["chatbox_address"],
+                chatbox_send=bool(data["osc"]["chatbox_send"]),
+                chatbox_clear=bool(data["osc"]["chatbox_clear"]),
+                chatbox_max_chars=int(data["osc"]["chatbox_max_chars"]),
+                vrc_mic_intercept=bool(data["osc"]["vrc_mic_intercept"]),
+                chatbox_include_source=bool(data["osc"]["chatbox_include_source"]),
+            ),
+            secrets=SecretsIntent(
+                backend=data["secrets"]["backend"],
+                encrypted_file_path=data["secrets"]["encrypted_file_path"],
+            ),
+            ui=UiIntent(locale=data["ui"]["locale"]),
+            clipboard=ClipboardIntent(
+                auto_translate_enabled=bool(data["ui"]["clipboard_auto_translate_enabled"]),
+            ),
+            integrated_context=IntegratedContextIntent(
+                enabled=bool(data["ui"]["integrated_context_enabled"]),
+            ),
+            prompts=PromptIntent(system_prompt=data["system_prompt"]),
+        ),
+        state=PersistedOperationalState(
+            provider_verification=_provider_verification_state(
+                data["api_key_verified"],
+                preserve_provider_verification=preserve_provider_verification,
+            ),
+            managed_connection=ManagedConnectionState(
+                installation_id=data["managed_identity"]["installation_id"],
+                release_token=data["managed_identity"]["release_token"],
+                release_token_expires_at=data["managed_identity"]["release_token_expires_at"],
+                verified_hardware_hash=data["managed_identity"]["verified_hardware_hash"],
+                verified_hardware_hash_salt_version=data["managed_identity"][
+                    "verified_hardware_hash_salt_version"
+                ],
+                active_managed_credential_ref=data["managed_identity"][
+                    "active_managed_credential_ref"
+                ],
+                active_managed_expires_at=data["managed_identity"]["active_managed_expires_at"],
+                founder_letter_seen_credential_ref=data["managed_identity"][
+                    "founder_letter_seen_credential_ref"
+                ],
+                referral_id=data["managed_identity"]["referral_id"],
+            ),
+            github_star_prompt=GithubStarPromptState(
+                clicked=bool(data["ui"]["github_star_prompt_clicked"]),
+                last_shown_at=data["ui"]["github_star_prompt_last_shown_at"],
+                show_count=int(data["ui"]["github_star_prompt_show_count"]),
+                translation_success_observed=bool(
+                    data["ui"]["github_star_prompt_translation_success_observed"]
+                ),
+                eligible_launch_count=int(data["ui"]["github_star_prompt_eligible_launch_count"]),
+            ),
+            peer_translation=PeerTranslationState(
+                eula_accepted=bool(data["ui"]["peer_translation_eula_accepted"]),
+            ),
+            integrated_context=IntegratedContextState(
+                bootstrapped=bool(data["ui"]["integrated_context_bootstrapped"]),
+            ),
+        ),
+    )
+
+
+def _validate_vnext_top_level_shape(data: Mapping[str, Any]) -> None:
+    for section in ("intent", "state"):
+        if section not in data:
+            raise ValueError(f"vNext settings missing required top-level {section!r} object")
+        if not isinstance(data[section], Mapping):
+            raise ValueError(f"vNext settings top-level {section!r} must be a JSON object")
+
+
+def _provider_verification_state(
+    raw_verification: Mapping[str, Any],
+    *,
+    preserve_provider_verification: bool,
+) -> ProviderVerificationState:
+    entries: dict[str, ProviderVerificationEntry] = {}
+    for provider in _PROVIDER_VERIFICATION_FIELDS:
+        verified = preserve_provider_verification and bool(raw_verification.get(provider, False))
+        entries[provider] = ProviderVerificationEntry(
+            status="verified" if verified else "unknown",
+        )
+    return ProviderVerificationState(**entries)
+
+
+def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
+    """Project canonical vNext values back to the temporary legacy facade shape.
+
+    Runtime callers still consume AppSettings during this gate. This adapter keeps that public
+    facade available while persistence writes the vNext intent/state schema.
+    """
+
+    from puripuly_heart.config import settings as legacy_settings
+
+    intent = settings.intent
+    state = settings.state
+    data = legacy_settings.to_dict(legacy_settings.AppSettings())
+    data["settings_version"] = legacy_settings.SETTINGS_SCHEMA_VERSION
+    data["provider"]["llm"] = _legacy_provider_llm_for_translation(
+        intent.translation.model,
+        intent.translation.connection,
+    )
+    data["provider"]["stt"] = intent.stt.provider
+    data["provider"]["peer_stt"] = intent.peer_stt.provider
+    data["translation"] = {
+        "model": intent.translation.model,
+        "connection": intent.translation.connection,
+        "connection_history": dict(intent.translation.connection_history),
+    }
+    data["languages"] = {
+        "source_language": intent.languages.source_language,
+        "target_language": intent.languages.target_language,
+        "peer_source_language": intent.languages.peer_source_language,
+        "peer_target_language": intent.languages.peer_target_language,
+        "recent_source_languages": list(intent.languages.recent_source_languages),
+        "recent_target_languages": list(intent.languages.recent_target_languages),
+    }
+    data["audio"].update(
+        {
+            "ring_buffer_ms": intent.audio.ring_buffer_ms,
+            "input_host_api": intent.audio.input_host_api,
+            "input_device": intent.audio.input_device,
+        }
+    )
+    data["desktop_audio"] = {
+        "output_device": intent.desktop_audio.output_device,
+        "vad_speech_threshold": intent.desktop_audio.vad_speech_threshold,
+        "vad_hangover_ms": intent.desktop_audio.vad_hangover_ms,
+        "vad_pre_roll_ms": intent.desktop_audio.vad_pre_roll_ms,
+    }
+    data["overlay"] = {
+        "target": intent.overlay.target,
+        "show_translation": intent.overlay.show_translation,
+        "show_peer_original": intent.overlay.show_peer_original,
+        "calibration": intent.overlay.calibration.to_dict(),
+        "desktop_flet": {
+            "size_preset": intent.overlay.desktop_flet.size_preset,
+            "position": {
+                "x": intent.overlay.desktop_flet.position.x,
+                "y": intent.overlay.desktop_flet.position.y,
+            },
+            "visual": {
+                "background_alpha": intent.overlay.desktop_flet.visual.background_alpha,
+            },
+        },
+    }
+    data["stt"] = {
+        "drain_timeout_s": intent.stt.drain_timeout_s,
+        "vad_speech_threshold": intent.stt.vad_speech_threshold,
+        "low_latency_mode": intent.stt.low_latency_mode,
+        "low_latency_vad_hangover_ms": intent.stt.low_latency_vad_hangover_ms,
+        "low_latency_merge_gap_ms": intent.stt.low_latency_merge_gap_ms,
+        "low_latency_spec_retry_max": intent.stt.low_latency_spec_retry_max,
+        "custom_vocabulary_enabled": intent.stt.custom_vocabulary_enabled,
+        "custom_terms": copy.deepcopy(intent.stt.custom_terms),
+    }
+    data["deepgram_stt"] = {"model": intent.stt.deepgram.model}
+    data["qwen_asr_stt"]["model"] = intent.stt.qwen_asr.model
+    data["soniox_stt"] = {
+        "model": intent.stt.soniox.model,
+        "endpoint": intent.stt.soniox.endpoint,
+        "keepalive_interval_s": intent.stt.soniox.keepalive_interval_s,
+        "trailing_silence_ms": intent.stt.soniox.trailing_silence_ms,
+    }
+    data["openrouter"].update(
+        {
+            "routing_mode": intent.translation.openrouter_routing_mode,
+            "selected_source": legacy_settings.OpenRouterCredentialSource.NONE.value,
+            "selection_alias": None,
+            "fallback_selection_alias": intent.translation.openrouter_fallback_selection_alias,
+            "broker_base_url": intent.translation.openrouter_broker_base_url,
+        }
+    )
+    data["qwen"] = {
+        "region": intent.translation.qwen.region,
+        "llm_model": intent.translation.qwen.llm_model,
+    }
+    data["local_llm"] = {
+        "backend": intent.local_llm.backend,
+        "base_url": intent.local_llm.base_url,
+        "model": intent.local_llm.model,
+        "extra_body": copy.deepcopy(intent.local_llm.extra_body),
+    }
+    data["llm"] = {"concurrency_limit": intent.translation.concurrency_limit}
+    data["osc"] = {
+        "host": intent.osc.host,
+        "port": intent.osc.port,
+        "chatbox_address": intent.osc.chatbox_address,
+        "chatbox_send": intent.osc.chatbox_send,
+        "chatbox_clear": intent.osc.chatbox_clear,
+        "chatbox_max_chars": intent.osc.chatbox_max_chars,
+        "vrc_mic_intercept": intent.osc.vrc_mic_intercept,
+        "chatbox_include_source": intent.osc.chatbox_include_source,
+    }
+    data["secrets"] = {
+        "backend": intent.secrets.backend,
+        "encrypted_file_path": intent.secrets.encrypted_file_path,
+    }
+    data["ui"] = {
+        "locale": intent.ui.locale,
+        "peer_translation_eula_accepted": state.peer_translation.eula_accepted,
+        "integrated_context_enabled": intent.integrated_context.enabled,
+        "integrated_context_bootstrapped": state.integrated_context.bootstrapped,
+        "clipboard_auto_translate_enabled": intent.clipboard.auto_translate_enabled,
+        "github_star_prompt_clicked": state.github_star_prompt.clicked,
+        "github_star_prompt_last_shown_at": state.github_star_prompt.last_shown_at,
+        "github_star_prompt_show_count": state.github_star_prompt.show_count,
+        "github_star_prompt_translation_success_observed": (
+            state.github_star_prompt.translation_success_observed
+        ),
+        "github_star_prompt_eligible_launch_count": (
+            state.github_star_prompt.eligible_launch_count
+        ),
+    }
+    data["api_key_verified"] = {
+        "deepgram": state.provider_verification.deepgram.status == "verified",
+        "soniox": state.provider_verification.soniox.status == "verified",
+        "google": state.provider_verification.google.status == "verified",
+        "openrouter": state.provider_verification.openrouter.status == "verified",
+        "deepseek": state.provider_verification.deepseek.status == "verified",
+        "alibaba_beijing": state.provider_verification.alibaba_beijing.status == "verified",
+        "alibaba_singapore": state.provider_verification.alibaba_singapore.status == "verified",
+    }
+    data["managed_identity"] = {
+        "installation_id": state.managed_connection.installation_id,
+        "release_token": state.managed_connection.release_token,
+        "release_token_expires_at": state.managed_connection.release_token_expires_at,
+        "verified_hardware_hash": state.managed_connection.verified_hardware_hash,
+        "verified_hardware_hash_salt_version": (
+            state.managed_connection.verified_hardware_hash_salt_version
+        ),
+        "active_managed_credential_ref": state.managed_connection.active_managed_credential_ref,
+        "active_managed_expires_at": state.managed_connection.active_managed_expires_at,
+        "founder_letter_seen_credential_ref": (
+            state.managed_connection.founder_letter_seen_credential_ref
+        ),
+        "referral_id": state.managed_connection.referral_id,
+    }
+    data["system_prompt"] = intent.prompts.system_prompt
+    return data
+
+
+def _coerce_int(value: object, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _legacy_provider_llm_for_translation(model: str, connection: str) -> str:
+    if model == "local_llm":
+        return "local_llm"
+    if model in {"gemini3_flash", "gemini31_flash_lite"}:
+        return "gemini"
+    if model in {"deepseek_v4_flash", "deepseek_v4_pro"} and connection == "official_byok":
+        return "deepseek"
+    if model == "qwen35_plus":
+        return "qwen"
+    return "openrouter"
+
+
+__all__ = [
+    "from_dict",
+    "from_legacy_app_settings",
+    "is_vnext_settings_dict",
+    "to_legacy_dict",
+]

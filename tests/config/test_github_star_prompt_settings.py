@@ -11,6 +11,7 @@ from puripuly_heart.config.settings import (
     load_settings,
     to_dict,
 )
+from tests.config.settings_vnext_test_helpers import legacy_projected_settings_file
 
 PROMPT_UI_DEFAULTS = {
     "github_star_prompt_clicked": False,
@@ -127,7 +128,7 @@ def test_github_star_prompt_show_count_load_normalizes_non_integer_values_on_dis
     path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.ui.github_star_prompt_show_count == 0
     assert persisted["ui"]["github_star_prompt_show_count"] == 0

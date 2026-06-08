@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from puripuly_heart.config import settings as settings_module
@@ -18,6 +16,7 @@ from puripuly_heart.config.settings import (
 )
 from puripuly_heart.main import _load_settings_or_default
 from puripuly_heart.ui.controller import GuiController
+from tests.config.settings_vnext_test_helpers import legacy_projected_settings_file
 
 
 def _resolve_first_run_locale(system_locale: str | None) -> str:
@@ -106,7 +105,7 @@ def test_load_settings_preserves_existing_saved_locale(
     loaded = load_settings(path)
 
     assert loaded.ui.locale == "ja"
-    assert json.loads(path.read_text(encoding="utf-8"))["ui"]["locale"] == "ja"
+    assert legacy_projected_settings_file(path)["ui"]["locale"] == "ja"
 
 
 def test_first_run_settings_preserve_prompt_defaults() -> None:
@@ -159,7 +158,7 @@ def test_controller_first_run_uses_detected_system_locale(
     loaded = controller._load_or_init_settings(path)
 
     assert loaded.ui.locale == "ko"
-    assert json.loads(path.read_text(encoding="utf-8"))["ui"]["locale"] == "ko"
+    assert legacy_projected_settings_file(path)["ui"]["locale"] == "ko"
 
 
 def test_main_first_run_uses_detected_system_locale(

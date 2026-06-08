@@ -14,6 +14,7 @@ from puripuly_heart.config.settings import (
     load_settings,
     to_dict,
 )
+from tests.config.settings_vnext_test_helpers import legacy_projected_settings_file
 
 PRE_MANAGED_HANDOFF_SETTINGS_SCHEMA_VERSION = 15
 
@@ -116,7 +117,7 @@ def test_load_settings_migrates_v22_referral_id_values(tmp_path, persisted_value
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert SETTINGS_SCHEMA_VERSION == 24
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
@@ -151,7 +152,7 @@ def test_load_settings_backfills_managed_identity_defaults(tmp_path) -> None:
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.managed_identity.installation_id == ""
     assert loaded.managed_identity.release_token is None
@@ -181,7 +182,7 @@ def test_load_settings_backfills_openrouter_defaults(tmp_path) -> None:
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert loaded.openrouter.broker_base_url == DEFAULT_OPENROUTER_BROKER_BASE_URL
@@ -199,7 +200,7 @@ def test_load_settings_backfills_managed_handoff_defaults(tmp_path) -> None:
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.managed_identity.active_managed_credential_ref is None
     assert loaded.managed_identity.active_managed_expires_at is None
@@ -227,7 +228,7 @@ def test_load_settings_normalizes_invalid_managed_handoff_values_to_none(tmp_pat
     path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.managed_identity.active_managed_credential_ref is None
     assert loaded.managed_identity.active_managed_expires_at is None

@@ -61,6 +61,10 @@ from puripuly_heart.core.storage.secrets import (
     KeyringSecretStore,
     mask_secret,
 )
+from tests.config.settings_vnext_test_helpers import (
+    legacy_projected_settings_file,
+    load_raw_json_file,
+)
 
 
 def test_settings_roundtrip(tmp_path):
@@ -103,7 +107,7 @@ def test_schema21_migration_forces_existing_peer_vad_hangover_to_500_ms(
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.desktop_audio.vad_hangover_ms == 500
@@ -205,7 +209,7 @@ def test_save_settings_preserves_existing_file_when_replace_fails(
     with pytest.raises(RuntimeError, match="replace failed"):
         save_settings(path, AppSettings())
 
-    assert json.loads(path.read_text(encoding="utf-8")) == original_payload
+    assert load_raw_json_file(path) == original_payload
     assert not path.with_suffix(path.suffix + ".tmp").exists()
 
 
@@ -338,7 +342,7 @@ def test_load_settings_persists_v17_directsound_preservation(tmp_path) -> None:
     path.write_text(json.dumps(raw), encoding="utf-8")
 
     loaded = load_settings(path)
-    stored = json.loads(path.read_text(encoding="utf-8"))
+    stored = legacy_projected_settings_file(path)
 
     assert loaded.audio.input_host_api == WINDOWS_DIRECTSOUND_HOST_API
     assert loaded.audio.input_device == "Manual DirectSound Mic"
@@ -365,7 +369,7 @@ def test_load_settings_persists_v18_osc_rate_limit_key_removal(tmp_path) -> None
     path.write_text(json.dumps(raw), encoding="utf-8")
 
     loaded = load_settings(path)
-    stored = json.loads(path.read_text(encoding="utf-8"))
+    stored = legacy_projected_settings_file(path)
 
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.osc.host == "192.0.2.20"
@@ -685,7 +689,7 @@ def test_schema21_migration_adds_local_llm_defaults(tmp_path: Path) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.local_llm.extra_body == {"reasoning_effort": "none"}
@@ -707,7 +711,7 @@ def test_schema22_repair_persists_malformed_local_llm(tmp_path: Path) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.local_llm.base_url == "http://127.0.0.1:11434/v1"
     assert loaded.local_llm.model == "llama3.1:8b"
@@ -732,7 +736,7 @@ def test_schema22_repair_persists_default_for_local_llm_non_standard_json_consta
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.local_llm.extra_body == {"reasoning_effort": "none"}
     assert persisted["local_llm"]["extra_body"] == {"reasoning_effort": "none"}
@@ -746,7 +750,7 @@ def test_schema22_repair_persists_missing_local_llm(tmp_path: Path) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.local_llm.backend == LocalLLMBackend.OLLAMA
     assert loaded.local_llm.base_url == "http://127.0.0.1:11434/v1"
@@ -914,7 +918,7 @@ def test_to_dict_roundtrips_deepseek_managed_china_provider_routing(tmp_path) ->
 
     save_settings(path, settings)
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.translation.model == TranslationModel.DEEPSEEK_V4_FLASH
     assert loaded.translation.connection == TranslationConnection.MANAGED_CHINA
@@ -1053,7 +1057,7 @@ def test_load_settings_infers_missing_qwen_region_from_legacy_asr_endpoint(tmp_p
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.qwen.region == QwenRegion.SINGAPORE
     assert loaded.qwen_asr_stt.endpoint == loaded.qwen.get_asr_endpoint()
@@ -1170,7 +1174,7 @@ def test_load_settings_backfills_peer_provider_defaults_without_copying_self_val
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.provider.peer_stt == STTProviderName.DEEPGRAM
     assert loaded.deepgram_stt.model == "nova-3-medical"
@@ -1185,7 +1189,7 @@ def test_load_settings_preserves_peer_local_qwen(tmp_path) -> None:
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.provider.peer_stt == STTProviderName.LOCAL_QWEN
     assert persisted["provider"]["peer_stt"] == STTProviderName.LOCAL_QWEN.value
@@ -1311,7 +1315,7 @@ def test_load_settings_backfills_v4_peer_blocks_from_schema3_fixture(tmp_path) -
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.provider.peer_stt == STTProviderName.DEEPGRAM
@@ -1367,7 +1371,7 @@ def test_load_settings_persists_invalid_stt_provider_as_deepgram(tmp_path) -> No
     loaded = load_settings(path)
 
     assert loaded.provider.stt == STTProviderName.DEEPGRAM
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["provider"]["stt"] == STTProviderName.DEEPGRAM.value
 
 
@@ -1381,7 +1385,7 @@ def test_load_settings_persists_non_dict_provider_payload_as_deepgram(tmp_path) 
     loaded = load_settings(path)
 
     assert loaded.provider.stt == STTProviderName.DEEPGRAM
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["provider"]["stt"] == STTProviderName.DEEPGRAM.value
     assert persisted["provider"]["llm"] == LLMProviderName.GEMINI.value
 
@@ -1397,7 +1401,7 @@ def test_load_settings_migrates_legacy_concurrency_limit_and_persists(tmp_path):
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.llm.concurrency_limit == 5
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["llm"]["concurrency_limit"] == 5
 
@@ -1413,7 +1417,7 @@ def test_load_settings_migrates_previous_default_concurrency_limit_and_persists(
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.llm.concurrency_limit == 5
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["llm"]["concurrency_limit"] == 5
 
@@ -1458,7 +1462,7 @@ def test_load_settings_rewrites_migrated_8khz_audio_via_normal_save_path(
     assert loaded.audio.internal_sample_rate_hz == 16000
     assert replace_calls == [("settings.json.tmp", "settings.json")]
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["audio"]["internal_sample_rate_hz"] == 16000
 
@@ -1474,7 +1478,7 @@ def test_load_settings_migration_preserves_custom_concurrency_limit(tmp_path):
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.llm.concurrency_limit == 3
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["llm"]["concurrency_limit"] == 3
 
@@ -1488,7 +1492,7 @@ def test_qwen_llm_model_roundtrip(tmp_path):
     loaded = load_settings(path)
     assert loaded.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["qwen"]["llm_model"] == "qwen3.5-plus"
 
 
@@ -1501,7 +1505,7 @@ def test_gemini_llm_model_roundtrip(tmp_path):
     loaded = load_settings(path)
     assert loaded.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite"
 
 
@@ -1514,7 +1518,7 @@ def test_load_settings_migrates_legacy_qwen_mt_flash_model(tmp_path):
     loaded = load_settings(path)
     assert loaded.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["qwen"]["llm_model"] == "qwen3.5-plus"
 
 
@@ -1527,7 +1531,7 @@ def test_load_settings_migrates_legacy_invalid_gemini_model(tmp_path):
     loaded = load_settings(path)
     assert loaded.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite"
 
 
@@ -1540,7 +1544,7 @@ def test_load_settings_migrates_preview_gemini_flash_lite_to_ga(tmp_path):
     loaded = load_settings(path)
     assert loaded.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite"
 
 
@@ -1579,7 +1583,7 @@ def test_overlay_display_preferences_roundtrip(tmp_path):
     assert loaded.overlay.show_translation is False
     assert loaded.overlay.show_peer_original is False
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["overlay"]["show_translation"] is False
     assert persisted["overlay"]["show_peer_original"] is False
     assert "show_overlay_translation" not in persisted["ui"]
@@ -1613,7 +1617,7 @@ def test_load_settings_backfills_missing_overlay_display_preferences(tmp_path):
     assert loaded.overlay.show_translation is True
     assert loaded.overlay.show_peer_original is True
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["overlay"]["show_translation"] is True
     assert persisted["overlay"]["show_peer_original"] is True
 
@@ -1632,7 +1636,7 @@ def test_load_settings_backfills_overlay_display_preferences_when_overlay_sectio
     assert loaded.overlay.show_translation is True
     assert loaded.overlay.show_peer_original is True
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["overlay"]["show_translation"] is True
     assert persisted["overlay"]["show_peer_original"] is True
     assert "overlay_enabled" not in persisted["ui"]
@@ -1657,7 +1661,7 @@ def test_stt_custom_vocabulary_roundtrip(tmp_path):
         "en": ["OSC", "Soniox"],
     }
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["stt"]["custom_vocabulary_enabled"] is True
     assert persisted["stt"]["custom_terms"] == {
         "ko": ["Puripuly", "VRChat"],
@@ -1698,7 +1702,7 @@ def test_load_settings_backfills_seeded_custom_vocabulary_defaults(tmp_path):
         "ja": ["airi", "shinano"],
     }
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["stt"]["custom_vocabulary_enabled"] is True
     assert persisted["stt"]["custom_terms"] == {
         "ko": ["아이리", "시나노"],
@@ -1783,7 +1787,7 @@ def test_system_prompts_are_not_persisted(tmp_path):
     settings.system_prompt = "qwen prompt"
     save_settings(path, settings)
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     loaded = load_settings(path)
 
     assert "system_prompts" not in persisted
@@ -1835,7 +1839,7 @@ def test_translation_settings_roundtrip_materializes_deepseek_openrouter_byok(tm
 
     save_settings(path, settings)
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert persisted["translation"] == {
         "model": "deepseek_v4_flash",
@@ -1921,7 +1925,7 @@ def test_load_settings_translation_block_wins_over_stale_openrouter_deepseek_fie
     path.write_text(json.dumps(data), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.translation.model == TranslationModel.GEMMA4
     assert loaded.translation.connection == TranslationConnection.OPENROUTER
@@ -1954,7 +1958,7 @@ def test_load_settings_translation_block_wins_for_gemini_over_stale_openrouter_f
     path.write_text(json.dumps(data), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.translation.model == TranslationModel.GEMINI_31_FLASH_LITE
     assert loaded.translation.connection == TranslationConnection.OFFICIAL_BYOK
@@ -2234,7 +2238,7 @@ def test_load_settings_persists_translation_section_for_legacy_file(tmp_path) ->
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.translation.model == TranslationModel.GEMMA4
@@ -2257,7 +2261,7 @@ def test_load_settings_persists_default_translation_for_malformed_non_dict_secti
     path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.translation.model == TranslationModel.GEMMA4
     assert loaded.translation.connection == TranslationConnection.MANAGED
@@ -2320,7 +2324,7 @@ def test_load_settings_persists_normalized_translation_section(tmp_path) -> None
     path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.translation.model == TranslationModel.GEMINI_31_FLASH_LITE
     assert loaded.translation.connection == TranslationConnection.OFFICIAL_BYOK
@@ -2357,7 +2361,7 @@ def test_load_settings_persists_materialized_runtime_fields_for_current_translat
     path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.translation.model == TranslationModel.DEEPSEEK_V4_FLASH
     assert loaded.translation.connection == TranslationConnection.OFFICIAL_BYOK
@@ -2424,7 +2428,7 @@ def test_openrouter_explicit_inactive_state_keeps_selection_alias_none(tmp_path)
     serialized = to_dict(settings)
     save_settings(path, settings)
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     assert settings.openrouter.selected_source == OpenRouterCredentialSource.NONE
@@ -2550,7 +2554,7 @@ def test_openrouter_settings_roundtrip_persists_deepseek_china_fallback(
     save_settings(path, settings)
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.openrouter.fallback_selection_alias == deepseek_china_fallback
     assert persisted["openrouter"]["fallback_selection_alias"] == deepseek_china_fallback.value
@@ -2596,7 +2600,7 @@ def test_openrouter_settings_roundtrip_persists_deepseek_selection_and_fallback(
     save_settings(path, settings)
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.openrouter.selection_alias == deepseek_managed
     assert loaded.openrouter.llm_model == deepseek_model
@@ -2640,7 +2644,7 @@ def test_openrouter_qwen_flash_main_roundtrip_migrates_to_deepseek_and_preserves
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert isinstance(loaded.openrouter.selection_alias, OpenRouterSelectionAlias)
     assert isinstance(loaded.openrouter.fallback_selection_alias, OpenRouterFallbackSelectionAlias)
@@ -2676,7 +2680,7 @@ def test_load_settings_backfills_openrouter_blocks_and_persists(tmp_path):
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
@@ -2705,7 +2709,7 @@ def test_load_settings_backfills_openrouter_aliases_from_legacy_fields(tmp_path)
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
@@ -2739,7 +2743,7 @@ def test_load_settings_backfills_openrouter_selected_source_to_byok_for_legacy_o
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.openrouter.selected_source == OpenRouterCredentialSource.BYOK
     assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
@@ -2761,7 +2765,7 @@ def test_load_settings_normalizes_legacy_active_openrouter_none_selected_source_
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.openrouter.selected_source == OpenRouterCredentialSource.BYOK
     assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
@@ -2838,7 +2842,7 @@ def test_load_settings_schema_migration_resets_all_prompt_values(tmp_path) -> No
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     shared_prompt = load_prompt_for_provider("gemini")
 
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
@@ -2878,7 +2882,7 @@ def test_prompt_customized_after_migration_survives_save_load(tmp_path) -> None:
     save_settings(path, settings)
 
     loaded = load_settings(path)
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
 
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
@@ -2899,7 +2903,7 @@ def test_load_settings_migrates_legacy_soniox_model_and_persists(tmp_path):
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.soniox_stt.model == "stt-rt-v4"
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["soniox_stt"]["model"] == "stt-rt-v4"
 
@@ -2915,7 +2919,7 @@ def test_load_settings_migration_preserves_custom_soniox_model(tmp_path):
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.soniox_stt.model == "stt-rt-experimental"
 
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = legacy_projected_settings_file(path)
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["soniox_stt"]["model"] == "stt-rt-experimental"
 

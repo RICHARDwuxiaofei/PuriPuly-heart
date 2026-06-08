@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from puripuly_heart.config.settings import from_dict, to_dict
+from tests.config.settings_vnext_test_helpers import legacy_projected_settings_file
 
 
 def test_peer_translation_eula_acceptance_defaults_false() -> None:
@@ -206,7 +207,7 @@ def test_load_settings_migrates_legacy_overlay_display_and_calibration_shape(
     )
 
     settings = load_settings(path)
-    reloaded = json.loads(path.read_text(encoding="utf-8"))
+    reloaded = legacy_projected_settings_file(path)
 
     assert settings.ui.overlay_enabled is False
     assert settings.overlay.show_translation is False
@@ -242,7 +243,7 @@ def test_load_settings_forces_desktop_vad_threshold_to_v3_default(tmp_path) -> N
     )
 
     settings = load_settings(path)
-    reloaded = json.loads(path.read_text(encoding="utf-8"))
+    reloaded = legacy_projected_settings_file(path)
 
     assert settings.settings_version == SETTINGS_SCHEMA_VERSION
     assert settings.desktop_audio.vad_speech_threshold == 0.6
@@ -267,7 +268,7 @@ def test_load_settings_migrates_legacy_desktop_vad_hangover_to_new_default(tmp_p
     )
 
     settings = load_settings(path)
-    reloaded = json.loads(path.read_text(encoding="utf-8"))
+    reloaded = legacy_projected_settings_file(path)
 
     assert settings.settings_version == SETTINGS_SCHEMA_VERSION
     assert settings.desktop_audio.vad_hangover_ms == 500
@@ -292,7 +293,7 @@ def test_load_settings_migrates_desktop_vad_hangover_700_to_500(tmp_path) -> Non
     )
 
     settings = load_settings(path)
-    reloaded = json.loads(path.read_text(encoding="utf-8"))
+    reloaded = legacy_projected_settings_file(path)
 
     assert settings.settings_version == SETTINGS_SCHEMA_VERSION
     assert settings.desktop_audio.vad_hangover_ms == 500
