@@ -2927,7 +2927,9 @@ class SettingsView(ft.Column):
             qwen_regions.add(settings.qwen.region)
 
         self._qwen_region_btn.visible = (
-            stt == STTProviderName.QWEN_ASR or llm == LLMProviderName.QWEN
+            stt == STTProviderName.QWEN_ASR
+            or llm == LLMProviderName.QWEN
+            or peer_stt == STTProviderName.QWEN_ASR
         )
         self._alibaba_key_beijing.visible = QwenRegion.BEIJING in qwen_regions
         self._alibaba_key_singapore.visible = QwenRegion.SINGAPORE in qwen_regions
@@ -3041,6 +3043,7 @@ class SettingsView(ft.Column):
         self._update_api_visibility()
         if self.page:
             self._peer_stt_text.update()
+            self._qwen_region_btn.update()
             self._api_keys_column.update()
         self.has_provider_changes = True
 

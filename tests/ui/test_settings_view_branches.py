@@ -3815,6 +3815,26 @@ def test_update_api_visibility_uses_shared_qwen_region_for_peer_and_self(
     assert view._alibaba_key_singapore.visible is False
 
 
+def test_update_api_visibility_shows_shared_qwen_region_for_peer_qwen_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.SONIOX
+    settings.provider.peer_stt = STTProviderName.QWEN_ASR
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.ui.peer_translation_enabled = True
+    settings.qwen.region = QwenRegion.BEIJING
+
+    view, _ = _make_settings_view(monkeypatch)
+    view._settings = settings
+    view._update_api_visibility()
+
+    assert view._soniox_key.visible is True
+    assert view._qwen_region_btn.visible is True
+    assert view._alibaba_key_beijing.visible is True
+    assert view._alibaba_key_singapore.visible is False
+
+
 def test_on_peer_stt_selected_refreshes_api_visibility_and_redraws_immediately(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3838,6 +3858,11 @@ def test_on_peer_stt_selected_refreshes_api_visibility_and_redraws_immediately(
         "update",
         lambda self: api_key_updates.append("api_keys_column"),
     )
+    monkeypatch.setattr(
+        view._qwen_region_btn,
+        "update",
+        lambda: api_key_updates.append("qwen_region_btn"),
+    )
 
     view._on_peer_stt_selected(STTProviderName.SONIOX.value)
 
@@ -3847,7 +3872,7 @@ def test_on_peer_stt_selected_refreshes_api_visibility_and_redraws_immediately(
     assert pending is not None
     assert pending.provider.peer_stt == STTProviderName.SONIOX
     assert view._peer_stt_text.content.value == t("provider.soniox")
-    assert api_key_updates == ["peer_stt_text", "api_keys_column"]
+    assert api_key_updates == ["peer_stt_text", "qwen_region_btn", "api_keys_column"]
 
 
 def test_peer_provider_labels_are_backed_by_i18n(monkeypatch: pytest.MonkeyPatch) -> None:
