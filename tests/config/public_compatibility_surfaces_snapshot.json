@@ -1,0 +1,294 @@
+{
+  "secret_store": {
+    "keyring_service_name": "puripuly-heart",
+    "registry_keys": [
+      "google_api_key",
+      "openrouter_api_key",
+      "openrouter_managed_api_key",
+      "openrouter_managed_user_id",
+      "openrouter_managed_user_installation_id",
+      "deepseek_api_key",
+      "deepgram_api_key",
+      "soniox_api_key",
+      "alibaba_api_key_beijing",
+      "alibaba_api_key_singapore",
+      "alibaba_api_key",
+      "local_llm_api_key",
+      "managed_device_private_key",
+      "managed_device_public_key",
+      "managed_identity_binding"
+    ],
+    "env_lookup_paths": [
+      {
+        "owner": "gemini_llm",
+        "lookup": "require_secret",
+        "key": "google_api_key",
+        "env_vars": [
+          "GOOGLE_API_KEY"
+        ],
+        "legacy_keys": []
+      },
+      {
+        "owner": "openrouter_byok_llm",
+        "lookup": "openrouter_byok",
+        "key": "openrouter_api_key",
+        "env_vars": [
+          "OPENROUTER_API_KEY"
+        ],
+        "legacy_keys": []
+      },
+      {
+        "owner": "deepseek_llm",
+        "lookup": "require_secret",
+        "key": "deepseek_api_key",
+        "env_vars": [
+          "DEEPSEEK_API_KEY"
+        ],
+        "legacy_keys": []
+      },
+      {
+        "owner": "qwen_beijing_llm_stt_peer_stt",
+        "lookup": "require_secret_any",
+        "key": "alibaba_api_key_beijing",
+        "env_vars": [
+          "ALIBABA_API_KEY_BEIJING",
+          "ALIBABA_API_KEY",
+          "DASHSCOPE_API_KEY"
+        ],
+        "legacy_keys": [
+          "alibaba_api_key"
+        ]
+      },
+      {
+        "owner": "qwen_singapore_llm_stt_peer_stt",
+        "lookup": "require_secret_any",
+        "key": "alibaba_api_key_singapore",
+        "env_vars": [
+          "ALIBABA_API_KEY_SINGAPORE",
+          "ALIBABA_API_KEY",
+          "DASHSCOPE_API_KEY"
+        ],
+        "legacy_keys": [
+          "alibaba_api_key"
+        ]
+      },
+      {
+        "owner": "deepgram_stt_peer_stt",
+        "lookup": "require_secret",
+        "key": "deepgram_api_key",
+        "env_vars": [
+          "DEEPGRAM_API_KEY"
+        ],
+        "legacy_keys": []
+      },
+      {
+        "owner": "soniox_stt_peer_stt",
+        "lookup": "require_secret",
+        "key": "soniox_api_key",
+        "env_vars": [
+          "SONIOX_API_KEY"
+        ],
+        "legacy_keys": []
+      },
+      {
+        "owner": "local_llm_optional",
+        "lookup": "optional_secret_store_only",
+        "key": "local_llm_api_key",
+        "env_vars": [],
+        "legacy_keys": [],
+        "ignored_env_vars": [
+          "LOCAL_LLM_API_KEY"
+        ]
+      }
+    ]
+  },
+  "broker_v1": {
+    "paths": [
+      "/v1/auth/discord/start",
+      "/v1/providers/openrouter/discord/issue",
+      "/v1/providers/openrouter/issue",
+      "/v1/trial/challenge",
+      "/v1/trial/challenge/verify",
+      "/v1/trial/status"
+    ],
+    "public_error_codes": [
+      "challenge_expired",
+      "challenge_invalid",
+      "internal_error",
+      "invalid_request",
+      "issuance_suspended",
+      "rate_limited",
+      "trial_not_eligible",
+      "trial_unavailable"
+    ],
+    "public_error_classes": [
+      "retryable",
+      "security_fail",
+      "terminal"
+    ]
+  },
+  "overlay": {
+    "contract_version": 6,
+    "manifest_fields": [
+      "app_version",
+      "bridge_url",
+      "contract_version",
+      "diagnostics_enabled",
+      "locale",
+      "log_dir",
+      "log_level",
+      "logging_mode",
+      "overlay_instance_id",
+      "parent_pid",
+      "session_token",
+      "startup_deadline_ms"
+    ],
+    "calibration_fields": [
+      "anchor",
+      "offset_x",
+      "offset_y",
+      "distance",
+      "text_scale",
+      "background_alpha"
+    ],
+    "presentation_block_fields": [
+      "id",
+      "occupant_key",
+      "appearance_seq",
+      "channel",
+      "block_variant",
+      "primary_text",
+      "secondary_text",
+      "secondary_enabled",
+      "update_id",
+      "primary_language",
+      "secondary_language",
+      "origin_wall_clock_ms",
+      "session_scope",
+      "source_text_hash",
+      "source_text_len",
+      "logical_turn_key"
+    ],
+    "channels": [
+      "self",
+      "peer"
+    ],
+    "block_variants": [
+      "active_self",
+      "active_peer",
+      "finalized"
+    ]
+  },
+  "prompts": {
+    "translation_prompt_name": "translation_prompt",
+    "load_prompt_fallback_order": [
+      "{name}.md",
+      "{name}.txt",
+      "default.md",
+      "default.txt"
+    ],
+    "llm_provider_prompt_keys": [
+      "deepseek",
+      "gemini",
+      "local_llm",
+      "openrouter",
+      "qwen"
+    ]
+  },
+  "provider_aliases": {
+    "openrouter_main_selection_aliases": [
+      "gemma4_managed",
+      "qwen35_flash_managed",
+      "deepseek_v4_flash_managed",
+      "gemma4_byok",
+      "qwen35_flash_byok",
+      "deepseek_v4_flash_byok"
+    ],
+    "openrouter_fallback_selection_aliases": [
+      "none",
+      "qwen35_flash",
+      "deepseek_v4_flash",
+      "deepseek_v4_flash_china"
+    ],
+    "legacy_selection_aliases": [
+      "openrouter:byok:google/gemma-4-26b-a4b-it",
+      "openrouter:byok:qwen/qwen3.5-flash-02-23",
+      "openrouter:managed:google/gemma-4-26b-a4b-it",
+      "openrouter:none:google/gemma-4-26b-a4b-it",
+      "openrouter:none:qwen/qwen3.5-flash-02-23"
+    ],
+    "legacy_fallback_aliases": {
+      "gemini25_flash_lite": "deepseek_v4_flash",
+      "gemini31_flash_lite": "deepseek_v4_flash",
+      "gemma4": "deepseek_v4_flash",
+      "gemma4_managed": "deepseek_v4_flash",
+      "gemma4_byok": "deepseek_v4_flash",
+      "qwen35_flash_managed": "qwen35_flash",
+      "qwen35_flash_byok": "qwen35_flash",
+      "deepseek_v4_flash_managed": "deepseek_v4_flash",
+      "deepseek_v4_flash_byok": "deepseek_v4_flash"
+    }
+  },
+  "guard_coverage": {
+    "secret_store": [
+      "tests/config/test_public_compatibility_surfaces.py::test_secret_store_key_registry_snapshot_matches_current_public_keys",
+      "tests/config/test_public_compatibility_surfaces.py::test_secret_store_env_lookup_snapshot_matches_current_fallback_behavior",
+      "tests/config/test_public_compatibility_surfaces.py::test_secret_store_accepts_legacy_alibaba_key_and_backfills_current_key",
+      "tests/config/test_public_compatibility_surfaces.py::test_settings_serialization_excludes_secret_store_registry_keys",
+      "tests/app/test_wiring_secrets.py::test_create_secret_store_encrypted_file_resolves_relative_path",
+      "tests/app/test_wiring_secrets.py::test_create_secret_store_encrypted_file_requires_passphrase",
+      "tests/app/test_wiring_providers.py::test_create_llm_provider_openrouter_uses_env_fallback",
+      "tests/app/test_wiring_providers.py::test_create_llm_provider_local_llm_ignores_optional_env_key",
+      "tests/app/test_wiring_providers.py::test_create_llm_provider_local_llm_uses_secret_store_key_even_when_env_is_set",
+      "tests/config/test_config_and_secrets.py::test_encrypted_file_secret_store_roundtrip",
+      "tests/config/test_config_and_secrets.py::test_encrypted_file_secret_store_does_not_store_plaintext",
+      "tests/config/test_config_and_secrets.py::test_encrypted_file_secret_store_rejects_wrong_passphrase",
+      "tests/core/test_openrouter_credentials.py::test_resolve_openrouter_credentials_uses_selected_byok_key_without_managed_fallback"
+    ],
+    "broker_v1": [
+      "tests/config/test_public_compatibility_surfaces.py::test_broker_v1_snapshot_matches_client_paths_and_public_error_vocabulary",
+      "tests/core/test_managed_openrouter_broker_client.py::test_challenge_parses_fingerprint_salt",
+      "tests/core/test_managed_openrouter_broker_client.py::test_start_discord_oauth_posts_redirect_and_parses_success_payload",
+      "tests/core/test_managed_openrouter_broker_client.py::test_issue_discord_managed_key_posts_signed_payload_and_parses_success",
+      "tests/core/test_managed_openrouter_broker_client.py::test_get_trial_status_tolerates_optional_referral_id_compatibility_fields",
+      "tests/core/test_managed_openrouter_broker_client.py::test_nested_broker_error_envelope_becomes_release_error"
+    ],
+    "overlay": [
+      "tests/config/test_public_compatibility_surfaces.py::test_overlay_contract_snapshot_matches_manifest_and_protocol_wire_shape",
+      "tests/core/test_overlay_manifest.py::test_overlay_manifest_uses_structured_block_contract_version",
+      "tests/core/test_overlay_manifest.py::test_overlay_manifest_round_trips_contract_fields",
+      "tests/core/test_overlay_manifest.py::test_overlay_manifest_accepts_legacy_diagnostics_enabled_field",
+      "tests/core/test_overlay_protocol.py::test_overlay_presentation_snapshot_round_trips_blocks_and_calibration",
+      "tests/core/test_overlay_bridge.py::test_overlay_bridge_sends_authenticated_initial_snapshot",
+      "tests/app/test_overlay_process_manager.py::test_overlay_process_manager_waits_for_overlay_ready_before_connected",
+      "tests/app/test_desktop_overlay_runner.py::test_overlay_manifest_serialization_omits_target_and_desktop_runtime_fields",
+      "tests/ui/test_desktop_overlay_renderer.py::test_desktop_overlay_snapshot_mapping_table_documents_current_block_contract"
+    ],
+    "prompt_loader": [
+      "tests/config/test_public_compatibility_surfaces.py::test_prompt_loader_snapshot_freezes_fallback_order_and_translation_prompt_requirement",
+      "tests/config/test_prompt_loader.py::test_load_prompt_for_llm_providers_uses_shared_translation_prompt",
+      "tests/config/test_prompt_loader.py::test_load_prompt_falls_back_to_default",
+      "tests/config/test_prompt_loader.py::test_load_prompt_for_provider_requires_translation_prompt_for_llm_provider",
+      "tests/config/test_prompt_loader.py::test_get_default_prompt_reads_translation_prompt"
+    ],
+    "provider_aliases": [
+      "tests/config/test_public_compatibility_surfaces.py::test_provider_alias_snapshot_matches_current_aliases_and_legacy_acceptance",
+      "tests/config/test_config_and_secrets.py::test_openrouter_fallback_aliases_include_curated_openrouter_models",
+      "tests/config/test_config_and_secrets.py::test_from_dict_migrates_legacy_openrouter_fallbacks_to_deepseek_v4_flash",
+      "tests/config/test_config_and_secrets.py::test_openrouter_legacy_gemini25_flash_lite_fallback_normalizes_to_deepseek",
+      "tests/config/test_config_and_secrets.py::test_openrouter_deepseek_v4_flash_aliases_use_stable_slug"
+    ],
+    "i18n_parity": [
+      "tests/ui/test_i18n_key_usage.py::test_i18n_bundles_share_the_same_keys",
+      "tests/ui/test_i18n_key_usage.py::test_available_locales_use_product_display_order",
+      "tests/ui/test_i18n_key_usage.py::test_i18n_bundles_do_not_keep_unused_runtime_keys"
+    ],
+    "packaging": [
+      "tests/app/test_release_dependency_guards.py::test_shared_windows_build_script_uses_alternate_app_id_and_isolated_installer_smoke_dir",
+      "tests/app/test_release_dependency_guards.py::test_shared_windows_build_script_uses_separate_smoke_installer_build_with_alternate_app_id",
+      "tests/app/test_release_dependency_guards.py::test_shared_windows_build_script_overrides_local_stt_appdata_for_smoke_and_checks_log",
+      "tests/app/test_release_dependency_guards.py::test_shared_windows_build_script_parses_in_powershell"
+    ]
+  },
+  "blockers": []
+}
