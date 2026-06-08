@@ -686,6 +686,7 @@ describe('broker migration behavior', () => {
         discordOpenrouterIssueIp: _discordOpenrouterIssueIp,
         discordOpenrouterIssueInstallation: _discordOpenrouterIssueInstallation,
         pendingDiscordOAuthSessions: _pendingDiscordOAuthSessions,
+        qqAuthAssertIp: _qqAuthAssertIp,
         referralAttempts: _referralAttempts,
         retention: defaultRetention,
         ...defaultsThrough0003
