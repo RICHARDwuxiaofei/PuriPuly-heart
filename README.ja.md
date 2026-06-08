@@ -33,6 +33,7 @@
 デモ動画のYouTubeリンク:
 - [デモ 1](https://www.youtube.com/watch?v=3p0CamYui0o)
 - [デモ 2](https://youtu.be/DoX36Y7J_lc?si=YjbeVTS8v3jGQB1w)
+- [デモ 3](https://www.youtube.com/watch?v=D0npvp68xNY)
 
 ---
 
