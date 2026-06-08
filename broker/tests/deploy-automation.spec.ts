@@ -183,14 +183,64 @@ describe('broker direct deploy automation', () => {
     const smokeSpec = readFileSync(deploySmokeSpec, 'utf8');
     const readme = readFileSync(brokerReadme, 'utf8');
     const checklist = readFileSync(rolloutChecklist, 'utf8');
+    const deployJobEnvBlock = extractBetween(
+      workflow,
+      '    env:\n',
+      '    steps:\n',
+    );
+    const productionSecretNames = [
+      'CLOUDFLARE_API_TOKEN',
+      'CLOUDFLARE_ACCOUNT_ID',
+      'BROKER_D1_DATABASE_ID_PRODUCTION',
+      'OPENROUTER_MANAGED_API_KEY_PRODUCTION',
+      'OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION',
+      'OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION',
+      'OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION',
+      'QQ_AUTH_HMAC_PSK_PRODUCTION',
+      'DISCORD_CLIENT_ID_PRODUCTION',
+      'DISCORD_CLIENT_SECRET_PRODUCTION',
+      'DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION',
+      'DISCORD_USER_REF_SECRET_PRODUCTION',
+      'DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION',
+    ];
+    const liveInputValidationIndex = smokeSpec.indexOf(
+      'const liveInputs = readLiveDeploySmokeInputs',
+    );
+    const healthzProbeIndex = smokeSpec.indexOf(
+      "url: new URL('/healthz'",
+    );
     const managedUserHmacBlankCheckIndex = workflow.indexOf(
       'OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION is required and must not be blank.',
+    );
+    const cloudflareApiTokenBlankCheckIndex = workflow.indexOf(
+      'CLOUDFLARE_API_TOKEN is required and must not be blank.',
+    );
+    const cloudflareAccountIdBlankCheckIndex = workflow.indexOf(
+      'CLOUDFLARE_ACCOUNT_ID is required and must not be blank.',
+    );
+    const brokerD1DatabaseIdBlankCheckIndex = workflow.indexOf(
+      'BROKER_D1_DATABASE_ID_PRODUCTION is required and must not be blank.',
+    );
+    const managedApiKeyBlankCheckIndex = workflow.indexOf(
+      'OPENROUTER_MANAGED_API_KEY_PRODUCTION is required and must not be blank.',
+    );
+    const managementApiKeyBlankCheckIndex = workflow.indexOf(
+      'OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION is required and must not be blank.',
+    );
+    const managedGuardrailIdBlankCheckIndex = workflow.indexOf(
+      'OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION is required and must not be blank.',
     );
     const discordWebhookBlankCheckIndex = workflow.indexOf(
       'DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION is required and must not be blank.',
     );
     const remoteD1MigrationIndex = workflow.indexOf(
       'wrangler d1 migrations apply',
+    );
+    const openRouterGuardrailPatchIndex = workflow.indexOf(
+      'PATCH "$guardrail_url"',
+    );
+    const firstSecretSyncIndex = workflow.indexOf(
+      'wrangler secret put OPENROUTER_MANAGED_API_KEY',
     );
     const managedUserHmacSyncIndex = workflow.indexOf(
       'wrangler secret put OPENROUTER_MANAGED_USER_HMAC_SECRET',
@@ -201,16 +251,39 @@ describe('broker direct deploy automation', () => {
     const discordDailyWebhookSyncIndex = workflow.indexOf(
       'wrangler secret put DISCORD_DAILY_REPORT_WEBHOOK_URL',
     );
+    const qqAuthHmacPskBlankCheckIndex = workflow.indexOf(
+      'QQ_AUTH_HMAC_PSK_PRODUCTION is required and must not be blank.',
+    );
+    const qqAuthHmacPskSyncIndex = workflow.indexOf(
+      'wrangler secret put QQ_AUTH_HMAC_PSK',
+    );
 
     expect(workflow).toContain('workflow_dispatch:');
     expect(workflow).not.toContain('\npush:');
     expect(workflow).toContain('confirm_production_deploy');
     expect(workflow).toContain('environment: production');
+    expect(deployJobEnvBlock).toContain("NODE_VERSION: '22'");
+    expect(deployJobEnvBlock).toContain('BROKER_CANONICAL_WORKER_NAME: puripuly-heart-broker');
+    expect(deployJobEnvBlock).toContain(
+      'BROKER_CANONICAL_WORKERS_DEV_URL: ${{ vars.BROKER_CANONICAL_WORKERS_DEV_URL }}',
+    );
+    expect(deployJobEnvBlock).toContain(
+      'BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION: ${{ vars.BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION }}',
+    );
+    expect(deployJobEnvBlock).not.toContain('secrets.');
+    for (const productionSecretName of productionSecretNames) {
+      expect(deployJobEnvBlock).not.toContain(`${productionSecretName}:`);
+      expect(workflow).toContain(
+        `${productionSecretName}: \${{ secrets.${productionSecretName} }}`,
+      );
+    }
     expect(workflow).toContain('BROKER_D1_DATABASE_ID_PRODUCTION');
     expect(workflow).toContain('OPENROUTER_MANAGED_API_KEY_PRODUCTION');
     expect(workflow).toContain('OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION');
     expect(workflow).toContain('OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION');
     expect(workflow).toContain('OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION');
+    expect(workflow).toContain('QQ_AUTH_HMAC_PSK_PRODUCTION');
+    expect(workflow).toContain('QQ_AUTH_HMAC_PSK');
     expect(workflow).toContain('DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION');
     expect(workflow).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION');
     expect(workflow).toContain('BROKER_CANONICAL_WORKERS_DEV_URL');
@@ -257,18 +330,36 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toMatch(
       /wrangler secret put OPENROUTER_MANAGED_USER_HMAC_SECRET --config/u,
     );
+    expect(workflow).toMatch(/wrangler secret put QQ_AUTH_HMAC_PSK --config/u);
     expect(workflow).toMatch(
       /wrangler secret put DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL --config/u,
     );
     expect(workflow).toMatch(
       /wrangler secret put DISCORD_DAILY_REPORT_WEBHOOK_URL --config/u,
     );
+    for (const requiredDeployBlankCheckIndex of [
+      cloudflareApiTokenBlankCheckIndex,
+      cloudflareAccountIdBlankCheckIndex,
+      brokerD1DatabaseIdBlankCheckIndex,
+      managedApiKeyBlankCheckIndex,
+      managementApiKeyBlankCheckIndex,
+      managedGuardrailIdBlankCheckIndex,
+    ]) {
+      expect(requiredDeployBlankCheckIndex).toBeGreaterThanOrEqual(0);
+      expect(requiredDeployBlankCheckIndex).toBeLessThan(remoteD1MigrationIndex);
+      expect(requiredDeployBlankCheckIndex).toBeLessThan(openRouterGuardrailPatchIndex);
+      expect(requiredDeployBlankCheckIndex).toBeLessThan(firstSecretSyncIndex);
+    }
     expect(managedUserHmacBlankCheckIndex).toBeGreaterThanOrEqual(0);
     expect(discordWebhookBlankCheckIndex).toBeGreaterThanOrEqual(0);
     expect(remoteD1MigrationIndex).toBeGreaterThanOrEqual(0);
     expect(managedUserHmacBlankCheckIndex).toBeLessThan(remoteD1MigrationIndex);
     expect(managedUserHmacSyncIndex).toBeGreaterThanOrEqual(0);
     expect(managedUserHmacBlankCheckIndex).toBeLessThan(managedUserHmacSyncIndex);
+    expect(qqAuthHmacPskBlankCheckIndex).toBeGreaterThanOrEqual(0);
+    expect(qqAuthHmacPskBlankCheckIndex).toBeLessThan(remoteD1MigrationIndex);
+    expect(qqAuthHmacPskSyncIndex).toBeGreaterThanOrEqual(0);
+    expect(qqAuthHmacPskBlankCheckIndex).toBeLessThan(qqAuthHmacPskSyncIndex);
     expect(discordImmediateWebhookSyncIndex).toBeGreaterThanOrEqual(0);
     expect(discordDailyWebhookSyncIndex).toBeGreaterThanOrEqual(0);
     expect(discordWebhookBlankCheckIndex).toBeLessThan(discordImmediateWebhookSyncIndex);
@@ -280,21 +371,42 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL');
     expect(workflow).toContain('curl --fail');
     expect(workflow).toContain('timeout-minutes: 10');
+    expect(workflow).toContain('BROKER_DEPLOY_SMOKE_QQ_AUTH_HMAC_PSK');
+    expect(workflow).toContain("BROKER_DEPLOY_SMOKE_RUN: 'true'");
+    expect(workflow).toContain(
+      'BROKER_DEPLOY_SMOKE_QQ_AUTH_HMAC_PSK: ${{ secrets.QQ_AUTH_HMAC_PSK_PRODUCTION }}',
+    );
     expect(workflow).toContain('app / public traffic');
     expect(workflow).toContain('transitional runtime compatibility');
     expect(workflow).toContain('managed child-key creation and cleanup');
     expect(workflow).toContain('assign the canonical production guardrail');
     expect(workflow).toContain('positive Qwen/DeepSeek/Gemini routing');
-    expect(smokeSpec).toContain("process.env.CI === 'true'");
+    expect(smokeSpec).not.toContain("process.env.CI === 'true'");
+    expect(smokeSpec).not.toContain('smokeBaseUrl ||');
+    expect(smokeSpec).toContain('BROKER_DEPLOY_SMOKE_RUN');
+    expect(smokeSpec).toContain(
+      "process.env.BROKER_DEPLOY_SMOKE_RUN === 'true'",
+    );
+    expect(liveInputValidationIndex).toBeGreaterThanOrEqual(0);
+    expect(healthzProbeIndex).toBeGreaterThanOrEqual(0);
+    expect(liveInputValidationIndex).toBeLessThan(healthzProbeIndex);
     expect(smokeSpec).toContain('/api/v1/key');
     expect(smokeSpec).toContain('/api/v1/chat/completions');
     expect(smokeSpec).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL');
+    expect(smokeSpec).toContain('BROKER_DEPLOY_SMOKE_QQ_AUTH_HMAC_PSK');
+    expect(smokeSpec).toContain('/v1/auth/qq/assert');
+    expect(smokeSpec).toContain('deploy-smoke-qq-');
+    expect(smokeSpec).toContain('ph-qq-subject-v1_');
     expect(smokeSpec).toContain('reads issued child-key metadata');
     expect(smokeSpec).toContain('recognizes model-routing failures as guardrail enforcement');
     expect(smokeSpec).toContain('assertSuccessfulChatCompletionResponse');
     expect(smokeSpec).toContain('assertManagedOpenRouterUserId');
     expect(smokeSpec).toContain('issue.body.openrouter_user_id');
     expect(smokeSpec).toContain('MANAGED_OPENROUTER_USER_ID_PATTERN');
+    expect(smokeSpec).toContain('MANAGED_OPENROUTER_USER_ID_PATTERN.test(value)');
+    expect(smokeSpec).not.toContain(
+      'expect(value).toMatch(MANAGED_OPENROUTER_USER_ID_PATTERN)',
+    );
     expect(smokeSpec).toContain('ph-or-user-v');
     expect(smokeSpec).toContain('MANAGED_TRIAL_ALLOWED_MODELS');
     expect(smokeSpec).toContain('qwen/qwen3.5-flash-02-23');
@@ -309,6 +421,20 @@ describe('broker direct deploy automation', () => {
     expect(readme).toContain('reconciles the production OpenRouter guardrail');
     expect(readme).toContain('OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION');
     expect(readme).toContain('OPENROUTER_MANAGED_USER_HMAC_SECRET');
+    expect(readme).toContain('QQ_AUTH_HMAC_PSK_PRODUCTION');
+    expect(readme).toContain('QQ_AUTH_HMAC_PSK');
+    expect(readme).toContain('POST /v1/auth/qq/assert');
+    expect(readme).toContain('0008_add_qq_auth_assertions.sql');
+    expect(readme).toContain('qq_auth_assertions');
+    expect(readme).toContain('qqAuthAssertIp');
+    expect(readme).toContain('DISCORD_CLIENT_ID_PRODUCTION');
+    expect(readme).toContain('DISCORD_CLIENT_SECRET_PRODUCTION');
+    expect(readme).toContain('DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION');
+    expect(readme).toContain('DISCORD_USER_REF_SECRET_PRODUCTION');
+    expect(readme).toContain('DISCORD_CLIENT_ID');
+    expect(readme).toContain('DISCORD_CLIENT_SECRET');
+    expect(readme).toContain('DISCORD_REDIRECT_URI_ALLOWLIST');
+    expect(readme).toContain('DISCORD_USER_REF_SECRET');
     expect(readme).toContain('DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION');
     expect(readme).toContain('DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL');
     expect(readme).toContain('DISCORD_DAILY_REPORT_WEBHOOK_URL');
@@ -322,12 +448,27 @@ describe('broker direct deploy automation', () => {
     expect(checklist).toContain('OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION');
     expect(checklist).toContain('OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION');
     expect(checklist).toContain('OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION');
+    expect(checklist).toContain('QQ_AUTH_HMAC_PSK_PRODUCTION');
+    expect(checklist).toContain('QQ_AUTH_HMAC_PSK');
+    expect(checklist).toContain('POST /v1/auth/qq/assert');
+    expect(checklist).toContain('DISCORD_CLIENT_ID_PRODUCTION');
+    expect(checklist).toContain('DISCORD_CLIENT_SECRET_PRODUCTION');
+    expect(checklist).toContain('DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION');
+    expect(checklist).toContain('DISCORD_USER_REF_SECRET_PRODUCTION');
+    expect(checklist).toContain('DISCORD_CLIENT_ID');
+    expect(checklist).toContain('DISCORD_CLIENT_SECRET');
+    expect(checklist).toContain('DISCORD_REDIRECT_URI_ALLOWLIST');
+    expect(checklist).toContain('DISCORD_USER_REF_SECRET');
     expect(checklist).toContain('DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION');
     expect(checklist).toContain('daily Discord heartbeat');
     expect(checklist).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION');
     expect(checklist).toContain('transitional compatibility only');
     expect(checklist).toContain('guardrail reconcile');
-    expect(checklist).toContain('positive routing for');
+    expect(checklist).toContain('budget_usd = 0.07');
+    expect(checklist).not.toContain('budget_usd = 0.08');
+    expect(checklist).toContain(
+      'positive routing for `qwen/qwen3.5-flash-02-23`, `deepseek/deepseek-v4-flash`, and `google/gemini-2.5-flash-lite`',
+    );
   });
 
   it('ships a manual production workflow that updates only the broker daily auth cap runtime config', () => {
@@ -366,4 +507,15 @@ function runNodeScript(scriptUrl: URL, args: string[]): string {
   return execFileSync(process.execPath, [fileURLToPath(scriptUrl), ...args], {
     encoding: 'utf8',
   });
+}
+
+function extractBetween(source: string, startMarker: string, endMarker: string): string {
+  const startIndex = source.indexOf(startMarker);
+  expect(startIndex).toBeGreaterThanOrEqual(0);
+
+  const contentStartIndex = startIndex + startMarker.length;
+  const endIndex = source.indexOf(endMarker, contentStartIndex);
+  expect(endIndex).toBeGreaterThanOrEqual(0);
+
+  return source.slice(contentStartIndex, endIndex);
 }

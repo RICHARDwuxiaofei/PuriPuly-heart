@@ -127,6 +127,7 @@ export interface TestBrokerEnv extends Record<string, unknown> {
   DISCORD_USER_REF_SECRET: string;
   DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL: string;
   DISCORD_DAILY_REPORT_WEBHOOK_URL: string;
+  QQ_AUTH_HMAC_PSK: string;
   __db: DatabaseSync;
 }
 
@@ -158,6 +159,7 @@ export function createTestBrokerEnv(options: SqliteD1Hooks = {}): TestBrokerEnv 
     DISCORD_USER_REF_SECRET: 'test-discord-user-ref-secret',
     DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL: 'https://discord.test/immediate-alert',
     DISCORD_DAILY_REPORT_WEBHOOK_URL: 'https://discord.test/daily-report',
+    QQ_AUTH_HMAC_PSK: 'test-qq-auth-hmac-psk',
     __db: db,
   };
 }

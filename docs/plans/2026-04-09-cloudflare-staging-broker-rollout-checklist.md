@@ -39,7 +39,7 @@ What it does **not** mean:
   - it also hardcodes `name: "puripuly-heart-broker"`, so direct deploy work targets the canonical worker name unless a deploy-time config overrides it
 - The broker requires these runtime bindings:
   - D1 binding: `BROKER_DB`
-  - Worker secrets: `OPENROUTER_MANAGED_API_KEY` (transitional compatibility only), `OPENROUTER_MANAGEMENT_API_KEY`, `OPENROUTER_MANAGED_GUARDRAIL_ID`, `OPENROUTER_MANAGED_USER_HMAC_SECRET`, `DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL`, `DISCORD_DAILY_REPORT_WEBHOOK_URL`
+  - Worker secrets: `OPENROUTER_MANAGED_API_KEY` (transitional compatibility only), `OPENROUTER_MANAGEMENT_API_KEY`, `OPENROUTER_MANAGED_GUARDRAIL_ID`, `OPENROUTER_MANAGED_USER_HMAC_SECRET`, `QQ_AUTH_HMAC_PSK`, `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, `DISCORD_REDIRECT_URI_ALLOWLIST`, `DISCORD_USER_REF_SECRET`, `DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL`, `DISCORD_DAILY_REPORT_WEBHOOK_URL`
 - Current broker deploy command:
   - `pnpm --filter @puripuly-heart/broker run deploy`
 - Broker `pnpm` / `vitest` / `wrangler` verification should run from a Linux-native workspace.
@@ -83,6 +83,11 @@ What it does **not** mean:
 - [ ] production OpenRouter management key prepared (`OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION`)
 - [ ] production OpenRouter managed guardrail id prepared (`OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION`)
 - [ ] production OpenRouter managed user-id HMAC secret prepared (`OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION`)
+- [ ] production QQ assertion HMAC PSK prepared (`QQ_AUTH_HMAC_PSK_PRODUCTION`, copied to Worker secret `QQ_AUTH_HMAC_PSK`; never store the value in the repo)
+- [ ] production Discord OAuth client id prepared (`DISCORD_CLIENT_ID_PRODUCTION`, copied to Worker secret `DISCORD_CLIENT_ID`)
+- [ ] production Discord OAuth client secret prepared (`DISCORD_CLIENT_SECRET_PRODUCTION`, copied to Worker secret `DISCORD_CLIENT_SECRET`; never store the value in the repo)
+- [ ] production Discord redirect allowlist prepared (`DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION`, copied to Worker secret `DISCORD_REDIRECT_URI_ALLOWLIST`)
+- [ ] production Discord user-ref HMAC secret prepared (`DISCORD_USER_REF_SECRET_PRODUCTION`, copied to Worker secret `DISCORD_USER_REF_SECRET`; never store the value in the repo)
 - [ ] production Discord operations webhook prepared (`DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION`)
 - [ ] GitHub Environment `production` created if CI automation is used
 - [ ] GitHub secret `CLOUDFLARE_API_TOKEN` registered
@@ -92,6 +97,11 @@ What it does **not** mean:
 - [ ] GitHub secret `OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION` registered
 - [ ] GitHub secret `OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION` registered
 - [ ] GitHub secret `OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION` registered
+- [ ] GitHub secret `QQ_AUTH_HMAC_PSK_PRODUCTION` registered
+- [ ] GitHub secret `DISCORD_CLIENT_ID_PRODUCTION` registered
+- [ ] GitHub secret `DISCORD_CLIENT_SECRET_PRODUCTION` registered
+- [ ] GitHub secret `DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION` registered
+- [ ] GitHub secret `DISCORD_USER_REF_SECRET_PRODUCTION` registered
 - [ ] GitHub secret `DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION` registered
 - [ ] GitHub Environment variable `BROKER_CANONICAL_WORKERS_DEV_URL` registered
 - [ ] GitHub Environment variable `BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION` registered
@@ -135,6 +145,7 @@ Minimum automated smoke coverage should include the broker’s real HTTP contrac
 - [x] `POST /v1/trial/challenge/verify`
 - [x] `GET /v1/trial/status`
 - [x] `POST /v1/providers/openrouter/issue`
+- [x] `POST /v1/auth/qq/assert` with a synthetic non-PII `deploy-smoke-qq-<uuid>` identity and a credential computed from `BROKER_DEPLOY_SMOKE_QQ_AUTH_HMAC_PSK`
 
 Implementation notes for the minimum smoke path:
 
@@ -142,10 +153,11 @@ Implementation notes for the minimum smoke path:
 - [x] use canonical signing for `verify`, `status`, and `issue`
 - [x] use a managed issue payload drawn from the curated allowlist:
   - `reason = llm_start`
-  - `budget_usd = 0.08`
+  - `budget_usd = 0.07`
   - `model = google/gemma-4-26b-a4b-it`
 - [x] after issue, probe positive routing for:
   - `qwen/qwen3.5-flash-02-23`
+  - `deepseek/deepseek-v4-flash`
   - `google/gemini-2.5-flash-lite`
 - [x] prefer existing broker test helpers where possible:
   - `broker/tests/test-support/ed25519.ts`
@@ -162,8 +174,9 @@ Recommended failure-path smoke coverage:
 Canonical production smoke now also verifies:
 
 - [x] issued child-key metadata reflects the managed limit / expiry contract
+- [x] the test-only QQ assertion endpoint verifies a synthetic HMAC assertion without logging the PSK, raw identity, raw credential, or derived subject material
 - [x] the deploy path performs guardrail reconcile before deploy / smoke
-- [x] positive routing for `qwen/qwen3.5-flash-02-23` and `google/gemini-2.5-flash-lite`
+- [x] positive routing for `qwen/qwen3.5-flash-02-23`, `deepseek/deepseek-v4-flash`, and `google/gemini-2.5-flash-lite`
 - [x] a known disallowed model is rejected after guardrail assignment
 
 Recommended later expansion:
@@ -191,6 +204,8 @@ The remaining rollout work is operational, not repo-side automation:
     - `OPENROUTER_MANAGED_API_KEY_PRODUCTION` remains transitional compatibility only
     - `OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION` and `OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION` are required for child-key issuance
     - `OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION` must be registered so deploy sync can populate runtime `OPENROUTER_MANAGED_USER_HMAC_SECRET` for deterministic managed OpenRouter user ids
+    - `QQ_AUTH_HMAC_PSK_PRODUCTION` must be registered so deploy sync can populate runtime `QQ_AUTH_HMAC_PSK` and the smoke test can exercise `POST /v1/auth/qq/assert`
+    - `DISCORD_CLIENT_ID_PRODUCTION`, `DISCORD_CLIENT_SECRET_PRODUCTION`, `DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION`, and `DISCORD_USER_REF_SECRET_PRODUCTION` must be registered so deploy sync can populate runtime `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, `DISCORD_REDIRECT_URI_ALLOWLIST`, and `DISCORD_USER_REF_SECRET` for Discord OAuth onboarding
     - `BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION` must be set to a model blocked by the configured guardrail
 2. create or confirm the production D1 database and capture its `database_id`
 3. review the manual workflow inputs / guards

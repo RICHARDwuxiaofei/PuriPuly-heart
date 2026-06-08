@@ -18,12 +18,27 @@ describe('Discord OAuth managed OpenRouter schema contract', () => {
     );
   });
 
+  it('requires the QQ auth assertion HMAC worker secret at the broker boundary', () => {
+    expect(REQUIRED_BINDINGS.secrets).toEqual(
+      expect.arrayContaining(['QQ_AUTH_HMAC_PSK']),
+    );
+  });
+
   it('caps new Discord-gated OpenRouter entitlements to 500 per UTC day by default', () => {
     expect(DEFAULT_BROKER_ABUSE_CONTROLS.newActiveEntitlementsPerDay).toEqual({
       endpoint: 'POST /v1/providers/openrouter/discord/issue',
       scope: 'global',
       maxCount: 500,
       windowDays: 1,
+    });
+  });
+
+  it('rate limits QQ auth assertion attempts by IP by default', () => {
+    expect(DEFAULT_BROKER_ABUSE_CONTROLS.qqAuthAssertIp).toEqual({
+      endpoint: 'POST /v1/auth/qq/assert',
+      scope: 'ip',
+      maxRequests: 20,
+      windowMinutes: 15,
     });
   });
 
@@ -48,5 +63,27 @@ describe('Discord OAuth managed OpenRouter schema contract', () => {
         'discord_issue_delivered_at',
       ]),
     );
+  });
+
+  it('migrates the QQ auth assertion table contract', () => {
+    const env = createTestBrokerEnv();
+
+    const tables = env.__db
+      .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    expect(tables.map((table) => table.name)).toEqual(
+      expect.arrayContaining(['qq_auth_assertions']),
+    );
+
+    const columns = env.__db
+      .prepare("SELECT name FROM pragma_table_info('qq_auth_assertions') ORDER BY cid")
+      .all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toEqual([
+      'qq_subject_ref',
+      'credential_hash',
+      'asserted_at',
+      'received_at',
+      'status',
+    ]);
   });
 });

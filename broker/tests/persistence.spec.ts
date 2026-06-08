@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 
 import { describe, expect, it } from 'vitest';
 
@@ -11,8 +12,10 @@ import {
   BROKER_MIGRATION_FILENAMES,
   FIRST_BROKER_MIGRATION,
   LATEST_BROKER_MIGRATION,
+  applyBrokerMigrations,
   readBrokerMigrationSql,
 } from './test-support/migrations';
+import { createTestBrokerEnv } from './test-support/sqlite-d1';
 
 describe('broker persistent state model', () => {
   it('defines the D1 table contract, runtime config keys, and minimal release-session state', async () => {
@@ -326,6 +329,22 @@ describe('broker persistent state model', () => {
           storedStatuses: ['issuing', 'active', 'failed', 'cleanup_required'],
           foreignKeys: ['entitlement_installation_id -> installations.installation_id'],
         },
+        qqAuthAssertions: {
+          name: 'qq_auth_assertions',
+          purpose:
+            'durable anonymized QQ Bot HMAC assertion evidence for the test endpoint',
+          primaryKey: 'qq_subject_ref',
+          columns: [
+            'qq_subject_ref',
+            'credential_hash',
+            'asserted_at',
+            'received_at',
+            'status',
+          ],
+          storedStatuses: ['verified'],
+          rawIdentityStorage: false,
+          duplicateHandling: 'preserve original row; duplicate assertions are idempotent',
+        },
         brokerRequestEvents: {
           name: 'broker_request_events',
           purpose: ['per-endpoint rate limits', 'cross-endpoint velocity hooks'],
@@ -429,6 +448,28 @@ describe('broker persistent state model', () => {
     expect(payload).not.toHaveProperty('runtimeConfig');
   });
 
+  it('migrates the QQ auth assertion table contract', () => {
+    const env = createTestBrokerEnv();
+
+    const tables = env.__db
+      .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    expect(tables.map((table) => table.name)).toEqual(
+      expect.arrayContaining(['qq_auth_assertions']),
+    );
+
+    const columns = env.__db
+      .prepare("SELECT name FROM pragma_table_info('qq_auth_assertions') ORDER BY cid")
+      .all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toEqual([
+      'qq_subject_ref',
+      'credential_hash',
+      'asserted_at',
+      'received_at',
+      'status',
+    ]);
+  });
+
   it('ships a first D1 migration that creates the documented tables and indexes', () => {
     expect(BROKER_MIGRATION_FILENAMES).toEqual([
       '0000_define_broker_persistent_state.sql',
@@ -440,6 +481,7 @@ describe('broker persistent state model', () => {
       '0005_add_referral_persistence_foundation.sql',
       '0006_harden_referral_reward_operations.sql',
       '0007_simplify_referral_id_checks.sql',
+      '0008_add_qq_auth_assertions.sql',
     ]);
     expect(existsSync(FIRST_BROKER_MIGRATION)).toBe(true);
     expect(existsSync(LATEST_BROKER_MIGRATION)).toBe(true);
@@ -471,6 +513,9 @@ describe('broker persistent state model', () => {
     );
     const referralCheckRepairMigration = readBrokerMigrationSql(
       '0007_simplify_referral_id_checks.sql',
+    );
+    const qqAuthAssertionsMigration = readBrokerMigrationSql(
+      '0008_add_qq_auth_assertions.sql',
     );
 
     expect(migration).toContain('CREATE TABLE broker_config');
@@ -589,5 +634,62 @@ describe('broker persistent state model', () => {
     expect(referralCheckRepairMigration).toContain('PRAGMA foreign_key_check');
     expect(referralCheckRepairMigration).not.toContain('PRAGMA foreign_keys = OFF');
     expect(referralCheckRepairMigration).not.toContain('PRAGMA foreign_keys = ON');
+    expect(qqAuthAssertionsMigration).toContain('CREATE TABLE qq_auth_assertions');
+    expect(qqAuthAssertionsMigration).toContain('qq_subject_ref TEXT PRIMARY KEY');
+    expect(qqAuthAssertionsMigration).toContain('credential_hash TEXT NOT NULL');
+    expect(qqAuthAssertionsMigration).toContain('asserted_at TEXT NOT NULL');
+    expect(qqAuthAssertionsMigration).toContain(
+      'received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP',
+    );
+    expect(qqAuthAssertionsMigration).toContain(
+      "status TEXT NOT NULL CHECK(status IN ('verified'))",
+    );
+    expect(qqAuthAssertionsMigration).toContain('json_insert');
+    expect(qqAuthAssertionsMigration).toContain('$.qqAuthAssertIp');
+    expect(qqAuthAssertionsMigration).toContain('POST /v1/auth/qq/assert');
+    expect(qqAuthAssertionsMigration).not.toContain('json_set');
+  });
+
+  it('inserts the QQ auth assertion abuse-control default without replacing tuned JSON', () => {
+    const db = new DatabaseSync(':memory:');
+    try {
+      applyBrokerMigrations(db, { through: '0007_simplify_referral_id_checks.sql' });
+
+      const beforeRow = db
+        .prepare('SELECT value FROM broker_config WHERE key = ?')
+        .get('abuse_controls') as { value: string };
+      const before = JSON.parse(beforeRow.value) as {
+        trialChallenge: { maxRequests: number };
+        discordAuthStartIp: { maxRequests: number };
+      } & Record<string, unknown>;
+      before.trialChallenge.maxRequests = 7;
+      before.discordAuthStartIp.maxRequests = 17;
+      db.prepare('UPDATE broker_config SET value = ? WHERE key = ?').run(
+        JSON.stringify(before),
+        'abuse_controls',
+      );
+
+      applyBrokerMigrations(db, { after: '0007_simplify_referral_id_checks.sql' });
+
+      const afterRow = db
+        .prepare('SELECT value FROM broker_config WHERE key = ?')
+        .get('abuse_controls') as { value: string };
+      const after = JSON.parse(afterRow.value) as {
+        trialChallenge: { maxRequests: number };
+        discordAuthStartIp: { maxRequests: number };
+        qqAuthAssertIp?: unknown;
+      };
+
+      expect(after.trialChallenge.maxRequests).toBe(7);
+      expect(after.discordAuthStartIp.maxRequests).toBe(17);
+      expect(after.qqAuthAssertIp).toEqual({
+        endpoint: 'POST /v1/auth/qq/assert',
+        scope: 'ip',
+        maxRequests: 20,
+        windowMinutes: 15,
+      });
+    } finally {
+      db.close();
+    }
   });
 });
