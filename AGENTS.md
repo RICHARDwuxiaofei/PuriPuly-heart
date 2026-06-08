@@ -2,6 +2,7 @@
 
 - If implementation facts and docs disagree, treat code as the source of truth and then align docs or escalate.
 - Keep this file concise and operational. Record only rules an agent must remember before touching the codebase.
+- If a compacted or resumed context references an active `/implement-work` run, reload the `implement-work` skill, read its ledger and selected source input, validate source identity/hash, and continue only from the recorded next action. Do not continue from compressed chat memory alone; stop for context or decision if the ledger or source is ambiguous.
 
 ## Architecture Work Model
 
