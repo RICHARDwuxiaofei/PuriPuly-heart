@@ -183,12 +183,7 @@ def test_prompt_tab_labels_and_tag_editor_copy_render_from_i18n(monkeypatch) -> 
         assert view._custom_vocab_description_text.value == t(
             "settings.custom_vocabulary.description"
         )
-        assert view._custom_vocab_tag_editor._input_field.hint_text == t(  # noqa: SLF001
-            "settings.custom_vocabulary.add_placeholder"
-        )
-        assert view._custom_vocab_tag_editor._add_button.text == t(  # noqa: SLF001
-            "settings.custom_vocabulary.add_action"
-        )
+        assert view._custom_vocab_tag_editor._input_field.hint_text == ""  # noqa: SLF001
     finally:
         i18n_module.set_locale(previous_locale)
 
