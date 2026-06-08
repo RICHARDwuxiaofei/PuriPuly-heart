@@ -39,6 +39,7 @@ describe('broker foundation', () => {
           'DISCORD_USER_REF_SECRET',
           'DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL',
           'DISCORD_DAILY_REPORT_WEBHOOK_URL',
+          'QQ_AUTH_HMAC_PSK',
         ],
       },
       hosting: {

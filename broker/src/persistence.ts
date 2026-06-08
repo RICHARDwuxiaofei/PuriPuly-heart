@@ -92,6 +92,7 @@ export interface BrokerAbuseControlsConfigValue {
   discordAuthStartInstallation: BrokerEndpointRateLimitConfig;
   discordOpenrouterIssueIp: BrokerEndpointRateLimitConfig;
   discordOpenrouterIssueInstallation: BrokerEndpointRateLimitConfig;
+  qqAuthAssertIp: BrokerEndpointRateLimitConfig;
   pendingDiscordOAuthSessions: BrokerPendingDiscordOAuthSessionsConfig;
   newActiveEntitlementsPerDay: BrokerDailyIssuanceCapConfig;
   immediateAlerts: BrokerImmediateAlertsConfig;
@@ -149,6 +150,12 @@ export const DEFAULT_BROKER_ABUSE_CONTROLS: BrokerAbuseControlsConfigValue = {
     endpoint: 'POST /v1/providers/openrouter/discord/issue',
     scope: 'installation_id',
     maxRequests: 3,
+    windowMinutes: 15,
+  },
+  qqAuthAssertIp: {
+    endpoint: 'POST /v1/auth/qq/assert',
+    scope: 'ip',
+    maxRequests: 20,
     windowMinutes: 15,
   },
   pendingDiscordOAuthSessions: {
@@ -450,6 +457,14 @@ export interface BrokerRequestEventRecord {
   observed_at: string;
 }
 
+export interface QqAuthAssertionRecord {
+  qq_subject_ref: string;
+  credential_hash: string;
+  asserted_at: string;
+  received_at: string;
+  status: 'verified';
+}
+
 export interface BrokerIssueSuccessEventRecord {
   id: number;
   installation_id: string;
@@ -745,6 +760,22 @@ export const BROKER_PERSISTENCE_MODEL = {
       ],
       storedStatuses: ['issuing', 'active', 'failed', 'cleanup_required'],
       foreignKeys: ['entitlement_installation_id -> installations.installation_id'],
+    },
+    qqAuthAssertions: {
+      name: 'qq_auth_assertions',
+      purpose:
+        'durable anonymized QQ Bot HMAC assertion evidence for the test endpoint',
+      primaryKey: 'qq_subject_ref',
+      columns: [
+        'qq_subject_ref',
+        'credential_hash',
+        'asserted_at',
+        'received_at',
+        'status',
+      ],
+      storedStatuses: ['verified'],
+      rawIdentityStorage: false,
+      duplicateHandling: 'preserve original row; duplicate assertions are idempotent',
     },
     brokerRequestEvents: {
       name: 'broker_request_events',

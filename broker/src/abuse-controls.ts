@@ -597,6 +597,8 @@ function getEndpointRateLimitConfigs(
         controls.discordOpenrouterIssueIp,
         controls.discordOpenrouterIssueInstallation,
       ];
+    case 'POST /v1/auth/qq/assert':
+      return [controls.qqAuthAssertIp];
     default:
       return [];
   }
@@ -825,6 +827,11 @@ function validateBrokerAbuseControlsConfig(
     'POST /v1/providers/openrouter/discord/issue',
     'installation_id',
   );
+  const qqAuthAssertIp = validateEndpointRateLimitConfig(
+    value.qqAuthAssertIp,
+    'POST /v1/auth/qq/assert',
+    'ip',
+  );
   const pendingDiscordOAuthSessions = validatePendingDiscordOAuthSessionsConfig(
     value.pendingDiscordOAuthSessions,
   );
@@ -847,6 +854,7 @@ function validateBrokerAbuseControlsConfig(
     !discordAuthStartInstallation ||
     !discordOpenrouterIssueIp ||
     !discordOpenrouterIssueInstallation ||
+    !qqAuthAssertIp ||
     !pendingDiscordOAuthSessions ||
     !newActiveEntitlementsPerDay ||
     !immediateAlerts ||
@@ -868,6 +876,7 @@ function validateBrokerAbuseControlsConfig(
     discordAuthStartInstallation,
     discordOpenrouterIssueIp,
     discordOpenrouterIssueInstallation,
+    qqAuthAssertIp,
     pendingDiscordOAuthSessions,
     newActiveEntitlementsPerDay,
     immediateAlerts,

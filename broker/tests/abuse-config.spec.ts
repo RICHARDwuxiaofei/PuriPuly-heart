@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import app from '../src/index';
-import { getBrokerAbuseControlsConfig } from '../src/abuse-controls';
+import {
+  checkEndpointRateLimit,
+  getBrokerAbuseControlsConfig,
+} from '../src/abuse-controls';
 import {
   TEST_DEFAULT_ABUSE_CONTROLS,
   TEST_DEFAULT_ABUSE_RUNTIME_STATE,
@@ -200,6 +203,66 @@ describe('broker abuse-controls runtime config validation', () => {
       windowMinutes: 15,
     });
     expect(controls.newActiveEntitlementsPerDay.maxCount).toBe(500);
+  });
+
+  it('persists the QQ auth assertion IP endpoint default in abuse controls', () => {
+    const env = createTestBrokerEnv();
+    const row = env.__db
+      .prepare('SELECT value FROM broker_config WHERE key = ?')
+      .get('abuse_controls') as { value: string };
+    const controls = JSON.parse(row.value) as Record<string, unknown>;
+
+    expect(controls.qqAuthAssertIp).toEqual({
+      endpoint: 'POST /v1/auth/qq/assert',
+      scope: 'ip',
+      maxRequests: 20,
+      windowMinutes: 15,
+    });
+  });
+
+  it('validates QQ auth assertion overrides and dispatches its IP endpoint rate limit', async () => {
+    const env = createTestBrokerEnv();
+    updateAbuseControls(env, (controls) => {
+      controls.qqAuthAssertIp.maxRequests = 1;
+    });
+
+    const controls = await getBrokerAbuseControlsConfig(env.BROKER_DB);
+    expect(controls.qqAuthAssertIp).toEqual({
+      endpoint: 'POST /v1/auth/qq/assert',
+      scope: 'ip',
+      maxRequests: 1,
+      windowMinutes: 15,
+    });
+
+    env.__db
+      .prepare(
+        `INSERT INTO broker_request_events (endpoint, ip, installation_id, observed_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run('POST /v1/auth/qq/assert', '203.0.113.98', null, '2026-06-08T06:00:00.000Z');
+    env.__db
+      .prepare(
+        `INSERT INTO broker_request_events (endpoint, ip, installation_id, observed_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run('POST /v1/auth/qq/assert', '203.0.113.98', null, '2026-06-08T06:00:01.000Z');
+
+    await expect(
+      checkEndpointRateLimit(env.BROKER_DB, {
+        endpoint: 'POST /v1/auth/qq/assert',
+        now: new Date('2026-06-08T06:00:02.000Z'),
+        ip: '203.0.113.98',
+        installationId: null,
+        hardwareHash: null,
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        status: 429,
+        code: 'rate_limited',
+        class: 'retryable',
+        subcode: 'ip_rate_limited',
+      }),
+    );
   });
 
   it('seeds referral attempt, velocity, and retention defaults', async () => {

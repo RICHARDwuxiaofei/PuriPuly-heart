@@ -23,13 +23,13 @@ const POSITIVE_ROUTING_PROBE_MODELS = MANAGED_ALLOWLIST_MODELS.filter(
 );
 const BOOTSTRAP_PLACEHOLDER = '__BOOTSTRAP_REQUIRED__';
 const OPENROUTER_API_BASE_URL = new URL('https://openrouter.ai');
+const smokeRunEnabled = process.env.BROKER_DEPLOY_SMOKE_RUN === 'true';
 const smokeBaseUrl = process.env.BROKER_DEPLOY_SMOKE_BASE_URL?.trim();
-const smokeDisallowedModel = normalizeDisallowedModel(
-  process.env.BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL,
-  MANAGED_ALLOWLIST_MODELS,
-  process.env.CI === 'true',
-);
+const smokeQqAuthHmacPsk = process.env.BROKER_DEPLOY_SMOKE_QQ_AUTH_HMAC_PSK;
+const smokeDisallowedModel = process.env.BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL;
 const MANAGED_OPENROUTER_USER_ID_PATTERN = /^ph-or-user-v\d+_[A-Za-z0-9_-]+$/u;
+const QQ_SUBJECT_REF_PATTERN = /^ph-qq-subject-v1_[A-Za-z0-9_-]+$/u;
+const textEncoder = new TextEncoder();
 type JsonRequestOptions = {
   method: string;
   url: URL;
@@ -37,8 +37,7 @@ type JsonRequestOptions = {
   headers?: HeadersInit;
 };
 
-const describeDeploySmoke =
-  smokeBaseUrl || process.env.CI === 'true' ? describe : describe.skip;
+const describeDeploySmoke = smokeRunEnabled ? describe : describe.skip;
 
 describe('broker deploy smoke helpers', () => {
   it('reads issued child-key metadata from the OpenRouter current-key payload', () => {
@@ -96,7 +95,7 @@ describe('broker deploy smoke helpers', () => {
     ).not.toThrow();
   });
 
-  it('requires a distinct disallowed model probe when smoke runs in CI', () => {
+  it('requires a distinct disallowed model probe when live smoke is enabled', () => {
     expect(normalizeDisallowedModel(undefined, MANAGED_ALLOWLIST_MODELS, false)).toBeUndefined();
     expect(
       normalizeDisallowedModel('openai/gpt-4o-mini', MANAGED_ALLOWLIST_MODELS, true),
@@ -135,12 +134,83 @@ describe('broker deploy smoke helpers', () => {
     ]);
     expect(MANAGED_ALLOWLIST_MODELS).toEqual(MANAGED_TRIAL_ALLOWED_MODELS);
   });
+
+  it('computes QQ assertion credentials as lowercase HMAC-SHA256 hex', async () => {
+    await expect(
+      computeHmacSha256Hex('key', 'The quick brown fox jumps over the lazy dog'),
+    ).resolves.toBe('f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8');
+  });
+
+  it('does not activate live deploy smoke unless explicitly opted in', () => {
+    expect(shouldRunDeploySmoke(undefined)).toBe(false);
+    expect(shouldRunDeploySmoke('')).toBe(false);
+    expect(shouldRunDeploySmoke('false')).toBe(false);
+    expect(shouldRunDeploySmoke('TRUE')).toBe(false);
+    expect(shouldRunDeploySmoke('true')).toBe(true);
+  });
+
+  it('validates complete live smoke inputs before the live flow can start', () => {
+    const validInputs = readLiveDeploySmokeInputs({
+      baseUrl: 'https://puripuly-heart-broker.example.workers.dev',
+      canonicalWorkerName: CANONICAL_WORKER_NAME,
+      disallowedModel: 'openai/gpt-4o-mini',
+      managedAllowlistedModels: MANAGED_ALLOWLIST_MODELS,
+      qqAuthHmacPsk: 'deploy-smoke-psk',
+    });
+
+    expect(validInputs.baseUrl.toString()).toBe(
+      'https://puripuly-heart-broker.example.workers.dev/',
+    );
+    expect(validInputs.disallowedModel).toBe('openai/gpt-4o-mini');
+    expect(validInputs.qqAuthHmacPsk).toBe('deploy-smoke-psk');
+
+    expect(() =>
+      readLiveDeploySmokeInputs({
+        baseUrl: 'https://puripuly-heart-broker.example.workers.dev',
+        canonicalWorkerName: CANONICAL_WORKER_NAME,
+        disallowedModel: undefined,
+        managedAllowlistedModels: MANAGED_ALLOWLIST_MODELS,
+        qqAuthHmacPsk: undefined,
+      }),
+    ).toThrow(
+      /BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL.*BROKER_DEPLOY_SMOKE_QQ_AUTH_HMAC_PSK/is,
+    );
+    expect(() =>
+      readLiveDeploySmokeInputs({
+        baseUrl: undefined,
+        canonicalWorkerName: CANONICAL_WORKER_NAME,
+        disallowedModel: 'openai/gpt-4o-mini',
+        managedAllowlistedModels: MANAGED_ALLOWLIST_MODELS,
+        qqAuthHmacPsk: 'deploy-smoke-psk',
+      }),
+    ).toThrow(/BROKER_DEPLOY_SMOKE_BASE_URL/i);
+  });
+
+  it('rejects malformed managed OpenRouter user ids without echoing the value', () => {
+    const malformedDerivedUserId = 'ph-or-user-v1_invalid value';
+
+    expect(() => assertManagedOpenRouterUserId(malformedDerivedUserId)).toThrow(
+      'issue success payload must include a valid openrouter_user_id',
+    );
+
+    try {
+      assertManagedOpenRouterUserId(malformedDerivedUserId);
+    } catch (error) {
+      expect((error as Error).message).not.toContain(malformedDerivedUserId);
+    }
+  });
 });
 
 describeDeploySmoke('broker direct deploy smoke', () => {
   it('passes the canonical workers.dev trial flow', async () => {
-    const baseUrl = normalizeSmokeBaseUrl(smokeBaseUrl);
-    validateCanonicalWorkersDevTarget(baseUrl, CANONICAL_WORKER_NAME);
+    const liveInputs = readLiveDeploySmokeInputs({
+      baseUrl: smokeBaseUrl,
+      canonicalWorkerName: CANONICAL_WORKER_NAME,
+      disallowedModel: smokeDisallowedModel,
+      managedAllowlistedModels: MANAGED_ALLOWLIST_MODELS,
+      qqAuthHmacPsk: smokeQqAuthHmacPsk,
+    });
+    const { baseUrl, disallowedModel, qqAuthHmacPsk } = liveInputs;
 
     const keyPair = await createDeviceKeyPair();
     const installationId = `deploy-smoke-${crypto.randomUUID().replace(/-/gu, '')}`.slice(
@@ -170,6 +240,25 @@ describeDeploySmoke('broker direct deploy smoke', () => {
     expect(foundation.body.trialProviderPolicy?.managedFreeTrial?.models).toEqual(
       expect.arrayContaining([...MANAGED_ALLOWLIST_MODELS]),
     );
+
+    const qqIdentity = `deploy-smoke-qq-${crypto.randomUUID()}`;
+    const qqCredential = await computeHmacSha256Hex(
+      qqAuthHmacPsk,
+      qqIdentity,
+    );
+    const qqAssertion = await requestJson({
+      method: 'POST',
+      url: new URL('/v1/auth/qq/assert', baseUrl),
+      body: {
+        qq_identity: qqIdentity,
+        credential: qqCredential,
+        asserted_at: new Date().toISOString(),
+      },
+    });
+    expect(qqAssertion.status).toBe(200);
+    expect(qqAssertion.body.ok).toBe(true);
+    expect(qqAssertion.body.status).toBe('verified');
+    assertQqSubjectRef(qqAssertion.body);
 
     const challenge = await requestJson({
       method: 'POST',
@@ -282,7 +371,7 @@ describeDeploySmoke('broker direct deploy smoke', () => {
 
     const guardrailProbe = await requestOpenRouterChatCompletion(
       issue.body.openrouter_api_key,
-      requireDisallowedModel(smokeDisallowedModel),
+      disallowedModel,
       'Reply with the single word blocked.',
     );
     expect(guardrailProbe.status).toBeGreaterThanOrEqual(400);
@@ -292,28 +381,114 @@ describeDeploySmoke('broker direct deploy smoke', () => {
   }, 180_000);
 });
 
-function assertManagedOpenRouterUserId(value: unknown): asserts value is string {
-  expect(typeof value).toBe('string');
+type LiveDeploySmokeInputOptions = {
+  baseUrl: string | undefined;
+  canonicalWorkerName: string;
+  disallowedModel: string | undefined;
+  managedAllowlistedModels: readonly string[];
+  qqAuthHmacPsk: string | undefined;
+};
 
-  if (typeof value !== 'string') {
-    throw new Error('issue success payload must include openrouter_user_id');
+type LiveDeploySmokeInputs = {
+  baseUrl: URL;
+  disallowedModel: string;
+  qqAuthHmacPsk: string;
+};
+
+function shouldRunDeploySmoke(rawValue: string | undefined): boolean {
+  return rawValue === 'true';
+}
+
+function readLiveDeploySmokeInputs({
+  baseUrl: rawBaseUrl,
+  canonicalWorkerName,
+  disallowedModel: rawDisallowedModel,
+  managedAllowlistedModels,
+  qqAuthHmacPsk: rawQqAuthHmacPsk,
+}: LiveDeploySmokeInputOptions): LiveDeploySmokeInputs {
+  const validationErrors: string[] = [];
+  let baseUrl: URL | undefined;
+  let disallowedModel: string | undefined;
+  let qqAuthHmacPsk: string | undefined;
+
+  try {
+    baseUrl = normalizeSmokeBaseUrl(rawBaseUrl);
+    validateCanonicalWorkersDevTarget(baseUrl, canonicalWorkerName);
+  } catch (error) {
+    validationErrors.push(readErrorMessage(error));
   }
 
-  expect(value.trim().length).toBeGreaterThan(0);
-  expect(value).toMatch(MANAGED_OPENROUTER_USER_ID_PATTERN);
+  try {
+    disallowedModel = normalizeDisallowedModel(
+      rawDisallowedModel,
+      managedAllowlistedModels,
+      true,
+    );
+  } catch (error) {
+    validationErrors.push(readErrorMessage(error));
+  }
+
+  try {
+    qqAuthHmacPsk = requireQqAuthHmacPsk(rawQqAuthHmacPsk);
+  } catch (error) {
+    validationErrors.push(readErrorMessage(error));
+  }
+
+  if (validationErrors.length > 0) {
+    throw new Error(
+      `Deploy smoke live inputs are incomplete: ${validationErrors.join('; ')}`,
+    );
+  }
+
+  return {
+    baseUrl: baseUrl as URL,
+    disallowedModel: disallowedModel as string,
+    qqAuthHmacPsk: qqAuthHmacPsk as string,
+  };
+}
+
+function readErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function assertManagedOpenRouterUserId(value: unknown): asserts value is string {
+  if (
+    typeof value !== 'string' ||
+    value.trim().length === 0 ||
+    !MANAGED_OPENROUTER_USER_ID_PATTERN.test(value)
+  ) {
+    throw new Error('issue success payload must include a valid openrouter_user_id');
+  }
+}
+
+function assertQqSubjectRef(payload: unknown): void {
+  const body = readRecord(payload, 'QQ assertion response');
+  const subjectRef = body.qq_subject_ref;
+
+  if (typeof subjectRef !== 'string' || !QQ_SUBJECT_REF_PATTERN.test(subjectRef)) {
+    throw new Error('QQ assertion response must include a valid qq_subject_ref');
+  }
+}
+
+function requireQqAuthHmacPsk(value: string | undefined): string {
+  if (value === undefined || value.trim().length === 0) {
+    throw new Error('BROKER_DEPLOY_SMOKE_QQ_AUTH_HMAC_PSK is required for deploy smoke');
+  }
+
+  return value;
 }
 
 function normalizeDisallowedModel(
   rawValue: string | undefined,
   managedAllowlistedModels: readonly string[],
-  isCi: boolean,
+  isRequired: boolean,
 ): string | undefined {
   const normalized = rawValue?.trim();
 
   if (!normalized) {
-    if (isCi) {
+    if (isRequired) {
       throw new Error(
-        'BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL is required for CI smoke runs',
+        'BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL is required for deploy smoke',
       );
     }
 
@@ -373,6 +548,21 @@ function timestampFromHeaders(headers: Headers): string {
   }
 
   return new Date().toISOString();
+}
+
+async function computeHmacSha256Hex(secret: string, value: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    textEncoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, textEncoder.encode(value));
+
+  return Array.from(new Uint8Array(signature), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
 }
 
 function readOpenRouterCurrentKeyMetadata(payload: unknown): {
@@ -605,8 +795,15 @@ async function requestOpenRouterChatCompletion(
 }
 
 function redactIssueBody(rawText: string): string {
-  return rawText.replace(
-    /"openrouter_api_key"\s*:\s*"[^"]+"/gu,
-    '"openrouter_api_key":"[REDACTED]"',
-  );
+  return rawText
+    .replace(
+      /"openrouter_api_key"\s*:\s*"[^"]+"/gu,
+      '"openrouter_api_key":"[REDACTED]"',
+    )
+    .replace(/"qq_identity"\s*:\s*"[^"]+"/gu, '"qq_identity":"[REDACTED]"')
+    .replace(/"credential"\s*:\s*"[^"]+"/gu, '"credential":"[REDACTED]"')
+    .replace(
+      /"qq_subject_ref"\s*:\s*"[^"]+"/gu,
+      '"qq_subject_ref":"[REDACTED]"',
+    );
 }
