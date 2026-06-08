@@ -238,6 +238,7 @@ LAYER_RULES = (
     LayerRule(
         layer=OUTPUT_MESSAGE_OBSERVABILITY_PORTS,
         prefixes=(
+            "puripuly_heart.core.diagnostic_validation",
             "puripuly_heart.core.messages",
             "puripuly_heart.core.observability",
             "puripuly_heart.core.output",
