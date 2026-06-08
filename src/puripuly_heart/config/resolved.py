@@ -149,6 +149,7 @@ class ResolvedLLMConfig:
     fallback_provider: str | None = None
     fallback_model: str | None = None
     fallback_credential: ResolvedCredentialRequirement = field(default_factory=_no_credential)
+    fallback_provider_routing: str | None = None
     base_url: str | None = None
     service_endpoint: str | None = None
     region: str | None = None

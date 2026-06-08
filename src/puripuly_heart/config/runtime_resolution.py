@@ -1,0 +1,903 @@
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Final, Literal, TypeAlias, cast
+
+from puripuly_heart.config.llm_profiles import (
+    FALLBACK_PROFILE_BY_ALIAS,
+    OPENROUTER_CREDENTIAL_SOURCE_BYOK,
+    OPENROUTER_CREDENTIAL_SOURCE_MANAGED,
+    OPENROUTER_CREDENTIAL_SOURCE_NONE,
+    OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH,
+    OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_CHINA,
+    OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE,
+    OPENROUTER_MODEL_DEEPSEEK_V4_FLASH,
+    OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT,
+    OPENROUTER_MODEL_QWEN_35_FLASH_02_23,
+    get_openrouter_llm_profile,
+    normalize_openrouter_fallback_selection_alias,
+    openrouter_alias_for_fields,
+)
+from puripuly_heart.config.resolved import (
+    CREDENTIAL_SOURCE_MANAGED,
+    CREDENTIAL_SOURCE_NONE,
+    CREDENTIAL_SOURCE_SECRET_STORE,
+    ResolvedCredentialRequirement,
+    ResolvedLLMConfig,
+    ResolvedOptionValue,
+)
+
+TRANSLATION_MODEL_GEMMA4: Final = "gemma4"
+TRANSLATION_MODEL_DEEPSEEK_V4_FLASH: Final = "deepseek_v4_flash"
+TRANSLATION_MODEL_DEEPSEEK_V4_PRO: Final = "deepseek_v4_pro"
+TRANSLATION_MODEL_GEMINI_3_FLASH: Final = "gemini3_flash"
+TRANSLATION_MODEL_GEMINI_31_FLASH_LITE: Final = "gemini31_flash_lite"
+TRANSLATION_MODEL_QWEN_35_PLUS: Final = "qwen35_plus"
+TRANSLATION_MODEL_LOCAL_LLM: Final = "local_llm"
+
+TranslationModelName: TypeAlias = Literal[
+    "gemma4",
+    "deepseek_v4_flash",
+    "deepseek_v4_pro",
+    "gemini3_flash",
+    "gemini31_flash_lite",
+    "qwen35_plus",
+    "local_llm",
+]
+TRANSLATION_MODELS: Final[tuple[TranslationModelName, ...]] = (
+    TRANSLATION_MODEL_GEMMA4,
+    TRANSLATION_MODEL_DEEPSEEK_V4_FLASH,
+    TRANSLATION_MODEL_DEEPSEEK_V4_PRO,
+    TRANSLATION_MODEL_GEMINI_3_FLASH,
+    TRANSLATION_MODEL_GEMINI_31_FLASH_LITE,
+    TRANSLATION_MODEL_QWEN_35_PLUS,
+    TRANSLATION_MODEL_LOCAL_LLM,
+)
+
+TRANSLATION_CONNECTION_MANAGED: Final = "managed"
+TRANSLATION_CONNECTION_MANAGED_CHINA: Final = "managed_china"
+TRANSLATION_CONNECTION_OPENROUTER: Final = "openrouter"
+TRANSLATION_CONNECTION_OFFICIAL_BYOK: Final = "official_byok"
+TRANSLATION_CONNECTION_OLLAMA: Final = "ollama"
+
+TranslationConnectionName: TypeAlias = Literal[
+    "managed",
+    "managed_china",
+    "openrouter",
+    "official_byok",
+    "ollama",
+]
+TRANSLATION_CONNECTIONS: Final[tuple[TranslationConnectionName, ...]] = (
+    TRANSLATION_CONNECTION_MANAGED,
+    TRANSLATION_CONNECTION_MANAGED_CHINA,
+    TRANSLATION_CONNECTION_OPENROUTER,
+    TRANSLATION_CONNECTION_OFFICIAL_BYOK,
+    TRANSLATION_CONNECTION_OLLAMA,
+)
+TRANSLATION_CONNECTIONS_BY_MODEL: Final[
+    Mapping[TranslationModelName, tuple[TranslationConnectionName, ...]]
+] = MappingProxyType(
+    {
+        TRANSLATION_MODEL_GEMMA4: (
+            TRANSLATION_CONNECTION_MANAGED,
+            TRANSLATION_CONNECTION_OPENROUTER,
+        ),
+        TRANSLATION_MODEL_DEEPSEEK_V4_FLASH: (
+            TRANSLATION_CONNECTION_MANAGED,
+            TRANSLATION_CONNECTION_MANAGED_CHINA,
+            TRANSLATION_CONNECTION_OPENROUTER,
+            TRANSLATION_CONNECTION_OFFICIAL_BYOK,
+        ),
+        TRANSLATION_MODEL_DEEPSEEK_V4_PRO: (TRANSLATION_CONNECTION_OFFICIAL_BYOK,),
+        TRANSLATION_MODEL_GEMINI_3_FLASH: (TRANSLATION_CONNECTION_OFFICIAL_BYOK,),
+        TRANSLATION_MODEL_GEMINI_31_FLASH_LITE: (TRANSLATION_CONNECTION_OFFICIAL_BYOK,),
+        TRANSLATION_MODEL_QWEN_35_PLUS: (TRANSLATION_CONNECTION_OFFICIAL_BYOK,),
+        TRANSLATION_MODEL_LOCAL_LLM: (TRANSLATION_CONNECTION_OLLAMA,),
+    }
+)
+TRANSLATION_CONNECTION_PRIORITY: Final[tuple[TranslationConnectionName, ...]] = (
+    TRANSLATION_CONNECTION_MANAGED,
+    TRANSLATION_CONNECTION_OPENROUTER,
+    TRANSLATION_CONNECTION_OFFICIAL_BYOK,
+)
+
+OPENROUTER_SOURCE_NONE: Final = OPENROUTER_CREDENTIAL_SOURCE_NONE
+OPENROUTER_SOURCE_MANAGED: Final = OPENROUTER_CREDENTIAL_SOURCE_MANAGED
+OPENROUTER_SOURCE_BYOK: Final = OPENROUTER_CREDENTIAL_SOURCE_BYOK
+OpenRouterSource: TypeAlias = Literal["none", "managed", "byok"]
+OPENROUTER_SOURCES: Final[tuple[OpenRouterSource, ...]] = (
+    OPENROUTER_SOURCE_NONE,
+    OPENROUTER_SOURCE_MANAGED,
+    OPENROUTER_SOURCE_BYOK,
+)
+
+OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE_VALUE: Final = OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE
+OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_VALUE: Final = (
+    OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH
+)
+
+PROVIDER_OPENROUTER: Final = "openrouter"
+PROVIDER_DEEPSEEK: Final = "deepseek"
+PROVIDER_GEMINI: Final = "gemini"
+PROVIDER_QWEN: Final = "qwen"
+PROVIDER_LOCAL_LLM: Final = "local_llm"
+LLM_PROVIDERS: Final[tuple[str, ...]] = (
+    PROVIDER_GEMINI,
+    PROVIDER_OPENROUTER,
+    PROVIDER_QWEN,
+    PROVIDER_DEEPSEEK,
+    PROVIDER_LOCAL_LLM,
+)
+
+GEMINI_MODEL_3_FLASH: Final = "gemini-3-flash-preview"
+GEMINI_MODEL_31_FLASH_LITE: Final = "gemini-3.1-flash-lite"
+DEEPSEEK_MODEL_V4_FLASH: Final = "deepseek-v4-flash"
+DEEPSEEK_MODEL_V4_PRO: Final = "deepseek-v4-pro"
+QWEN_MODEL_35_FLASH: Final = "qwen3.5-flash"
+QWEN_MODEL_35_PLUS: Final = "qwen3.5-plus"
+LOCAL_LLM_BACKEND_OLLAMA: Final = "ollama"
+LOCAL_LLM_DEFAULT_BASE_URL: Final = "http://127.0.0.1:11434/v1"
+LOCAL_LLM_DEFAULT_MODEL: Final = "llama3.1:8b"
+QWEN_REGION_BEIJING: Final = "beijing"
+QWEN_REGION_SINGAPORE: Final = "singapore"
+
+CREDENTIAL_REF_OPENROUTER_BYOK: Final = "openrouter:byok"
+CREDENTIAL_REF_OPENROUTER_MANAGED: Final = "openrouter:managed"
+CREDENTIAL_REF_GEMINI_BYOK: Final = "gemini:byok"
+CREDENTIAL_REF_DEEPSEEK_BYOK: Final = "deepseek:byok"
+CREDENTIAL_REF_QWEN_BEIJING: Final = "qwen:beijing"
+CREDENTIAL_REF_QWEN_SINGAPORE: Final = "qwen:singapore"
+
+_OPENROUTER_MODELS: Final[tuple[str, ...]] = (
+    OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT,
+    OPENROUTER_MODEL_QWEN_35_FLASH_02_23,
+    OPENROUTER_MODEL_DEEPSEEK_V4_FLASH,
+)
+_OPENROUTER_ROUTING_MODES: Final[tuple[str, ...]] = (
+    "latency",
+    "parasail_first",
+    "novita_first",
+)
+_OPENROUTER_PROVIDER_ROUTINGS: Final[tuple[str, ...]] = (
+    "default",
+    "deepseek_only",
+)
+
+
+def _empty_options() -> Mapping[str, ResolvedOptionValue]:
+    return MappingProxyType({})
+
+
+def _freeze_option_mapping(values: Mapping[str, object]) -> Mapping[str, ResolvedOptionValue]:
+    frozen: dict[str, ResolvedOptionValue] = {}
+    for key, value in values.items():
+        if not isinstance(key, str):
+            raise ValueError("runtime intent option keys must be strings")
+        frozen[key] = _freeze_option_value(value)
+    return MappingProxyType(frozen)
+
+
+def _freeze_option_value(value: object) -> ResolvedOptionValue:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Mapping):
+        return _freeze_option_mapping(cast(Mapping[str, object], value))
+    if isinstance(value, tuple | list):
+        return tuple(_freeze_option_value(item) for item in value)
+    raise TypeError("runtime intent option values must be scalars, mappings, lists, or tuples")
+
+
+def _normalize_string(value: object, *, default: str) -> str:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized:
+            return normalized
+    return default
+
+
+def _normalize_allowed(value: object, *, allowed: tuple[str, ...], default: str) -> str:
+    normalized = _normalize_string(value, default=default)
+    if normalized in allowed:
+        return normalized
+    return default
+
+
+def _require_allowed(value: str, allowed: tuple[str, ...], *, field_name: str) -> None:
+    if value not in allowed:
+        raise ValueError(f"{field_name} must be one of {', '.join(allowed)}")
+
+
+def _default_translation_connection(model: TranslationModelName) -> TranslationConnectionName:
+    supported = TRANSLATION_CONNECTIONS_BY_MODEL[model]
+    for connection in TRANSLATION_CONNECTION_PRIORITY:
+        if connection in supported:
+            return connection
+    return supported[0]
+
+
+def _normalize_translation_model(value: object) -> TranslationModelName:
+    return cast(
+        TranslationModelName,
+        _normalize_allowed(
+            value,
+            allowed=TRANSLATION_MODELS,
+            default=TRANSLATION_MODEL_GEMMA4,
+        ),
+    )
+
+
+def _normalize_translation_connection(
+    value: object,
+    *,
+    model: TranslationModelName,
+) -> TranslationConnectionName:
+    connection = cast(
+        TranslationConnectionName,
+        _normalize_allowed(
+            value,
+            allowed=TRANSLATION_CONNECTIONS,
+            default=_default_translation_connection(model),
+        ),
+    )
+    if connection in TRANSLATION_CONNECTIONS_BY_MODEL[model]:
+        return connection
+    return _default_translation_connection(model)
+
+
+def _normalize_positive_int(value: object, *, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int) and value > 0:
+        return value
+    return default
+
+
+def _normalize_openrouter_source(value: object, *, default: OpenRouterSource) -> OpenRouterSource:
+    return cast(
+        OpenRouterSource,
+        _normalize_allowed(
+            value,
+            allowed=OPENROUTER_SOURCES,
+            default=default,
+        ),
+    )
+
+
+def _default_openrouter_source_for_provider(provider_llm: object) -> OpenRouterSource:
+    if provider_llm == PROVIDER_OPENROUTER:
+        return OPENROUTER_SOURCE_BYOK
+    if isinstance(provider_llm, str) and provider_llm.strip() == PROVIDER_OPENROUTER:
+        return OPENROUTER_SOURCE_BYOK
+    if isinstance(provider_llm, str) and provider_llm.strip() in LLM_PROVIDERS:
+        return OPENROUTER_SOURCE_NONE
+    return OPENROUTER_SOURCE_MANAGED
+
+
+def _explicit_openrouter_source(value: object) -> OpenRouterSource | None:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized in OPENROUTER_SOURCES:
+            return cast(OpenRouterSource, normalized)
+    return None
+
+
+def _normalize_openrouter_model(value: object) -> str:
+    return _normalize_allowed(
+        value,
+        allowed=_OPENROUTER_MODELS,
+        default=OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT,
+    )
+
+
+def _canonical_openrouter_alias(model: str, source: OpenRouterSource) -> str | None:
+    if source == OPENROUTER_SOURCE_NONE:
+        return None
+    return openrouter_alias_for_fields(model=model, source=source)
+
+
+def _normalize_openrouter_fallback_alias(value: object) -> str:
+    if isinstance(value, str):
+        normalized = normalize_openrouter_fallback_selection_alias(value)
+        if normalized is not None and normalized in FALLBACK_PROFILE_BY_ALIAS:
+            return normalized
+    return OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH
+
+
+def _normalize_openrouter_broker_base_url(value: object) -> str | None:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized:
+            return normalized
+    return None
+
+
+def _no_credential() -> ResolvedCredentialRequirement:
+    return ResolvedCredentialRequirement(
+        source=CREDENTIAL_SOURCE_NONE,
+        required=False,
+        reference=None,
+    )
+
+
+def _required_credential(source: str, reference: str) -> ResolvedCredentialRequirement:
+    return ResolvedCredentialRequirement(source=source, required=True, reference=reference)
+
+
+def _openrouter_credential(source: OpenRouterSource) -> ResolvedCredentialRequirement:
+    if source == OPENROUTER_SOURCE_MANAGED:
+        return _required_credential(CREDENTIAL_SOURCE_MANAGED, CREDENTIAL_REF_OPENROUTER_MANAGED)
+    if source == OPENROUTER_SOURCE_BYOK:
+        return _required_credential(
+            CREDENTIAL_SOURCE_SECRET_STORE,
+            CREDENTIAL_REF_OPENROUTER_BYOK,
+        )
+    return _no_credential()
+
+
+def _qwen_credential_reference(region: str) -> str:
+    if region == QWEN_REGION_SINGAPORE:
+        return CREDENTIAL_REF_QWEN_SINGAPORE
+    return CREDENTIAL_REF_QWEN_BEIJING
+
+
+def _qwen_service_endpoint(region: str) -> str:
+    if region == QWEN_REGION_SINGAPORE:
+        return "https://dashscope-intl.aliyuncs.com/api/v1"
+    return "https://dashscope.aliyuncs.com/api/v1"
+
+
+def _translation_connection_from_openrouter_source(
+    selected_source: OpenRouterSource,
+    *,
+    model: TranslationModelName,
+    provider_routing: str,
+) -> TranslationConnectionName:
+    if selected_source == OPENROUTER_SOURCE_MANAGED:
+        if model == TRANSLATION_MODEL_DEEPSEEK_V4_FLASH and provider_routing == "deepseek_only":
+            return TRANSLATION_CONNECTION_MANAGED_CHINA
+        return TRANSLATION_CONNECTION_MANAGED
+    if selected_source == OPENROUTER_SOURCE_BYOK:
+        return TRANSLATION_CONNECTION_OPENROUTER
+    return _default_translation_connection(model)
+
+
+@dataclass(frozen=True, slots=True)
+class TranslationRuntimeIntent:
+    model: TranslationModelName = TRANSLATION_MODEL_GEMMA4
+    connection: TranslationConnectionName = TRANSLATION_CONNECTION_MANAGED
+    concurrency_limit: int = 5
+
+    def __post_init__(self) -> None:
+        model = _normalize_translation_model(self.model)
+        connection = _normalize_translation_connection(self.connection, model=model)
+        concurrency_limit = _normalize_positive_int(self.concurrency_limit, default=5)
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "connection", connection)
+        object.__setattr__(self, "concurrency_limit", concurrency_limit)
+        _require_allowed(model, TRANSLATION_MODELS, field_name="model")
+        if connection not in TRANSLATION_CONNECTIONS_BY_MODEL[model]:
+            raise ValueError("translation connection is not supported for model")
+
+
+@dataclass(frozen=True, slots=True)
+class OpenRouterRuntimeIntent:
+    model: str = OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT
+    selected_source: OpenRouterSource = OPENROUTER_SOURCE_MANAGED
+    selection_alias: str | None = None
+    fallback_selection_alias: str = OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH
+    routing_mode: str = "latency"
+    provider_routing: str = "default"
+    broker_base_url: str | None = None
+
+    def __post_init__(self) -> None:
+        model = _normalize_openrouter_model(self.model)
+        source = _normalize_openrouter_source(
+            self.selected_source,
+            default=OPENROUTER_SOURCE_MANAGED,
+        )
+        selection_alias = _canonical_openrouter_alias(model, source)
+        fallback_selection_alias = _normalize_openrouter_fallback_alias(
+            self.fallback_selection_alias
+        )
+        routing_mode = _normalize_allowed(
+            self.routing_mode,
+            allowed=_OPENROUTER_ROUTING_MODES,
+            default="latency",
+        )
+        provider_routing = _normalize_allowed(
+            self.provider_routing,
+            allowed=_OPENROUTER_PROVIDER_ROUTINGS,
+            default="default",
+        )
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "selected_source", source)
+        object.__setattr__(self, "selection_alias", selection_alias)
+        object.__setattr__(self, "fallback_selection_alias", fallback_selection_alias)
+        object.__setattr__(self, "routing_mode", routing_mode)
+        object.__setattr__(self, "provider_routing", provider_routing)
+        object.__setattr__(
+            self,
+            "broker_base_url",
+            _normalize_openrouter_broker_base_url(self.broker_base_url),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DirectProviderRuntimeIntent:
+    gemini_3_flash_model: str = GEMINI_MODEL_3_FLASH
+    gemini_31_flash_lite_model: str = GEMINI_MODEL_31_FLASH_LITE
+    deepseek_v4_flash_model: str = DEEPSEEK_MODEL_V4_FLASH
+    deepseek_v4_pro_model: str = DEEPSEEK_MODEL_V4_PRO
+    qwen_35_plus_model: str = QWEN_MODEL_35_PLUS
+    qwen_region: str = QWEN_REGION_BEIJING
+    local_llm_backend: str = LOCAL_LLM_BACKEND_OLLAMA
+    local_llm_base_url: str = LOCAL_LLM_DEFAULT_BASE_URL
+    local_llm_model: str = LOCAL_LLM_DEFAULT_MODEL
+    local_llm_extra_body: Mapping[str, ResolvedOptionValue] = field(default_factory=_empty_options)
+
+    def __post_init__(self) -> None:
+        qwen_region = _normalize_allowed(
+            self.qwen_region,
+            allowed=(QWEN_REGION_BEIJING, QWEN_REGION_SINGAPORE),
+            default=QWEN_REGION_BEIJING,
+        )
+        object.__setattr__(self, "qwen_region", qwen_region)
+        object.__setattr__(
+            self,
+            "local_llm_extra_body",
+            _freeze_option_mapping(cast(Mapping[str, object], self.local_llm_extra_body)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeResolutionInput:
+    translation: TranslationRuntimeIntent = field(default_factory=TranslationRuntimeIntent)
+    openrouter: OpenRouterRuntimeIntent = field(default_factory=OpenRouterRuntimeIntent)
+    direct: DirectProviderRuntimeIntent = field(default_factory=DirectProviderRuntimeIntent)
+
+
+def normalize_translation_runtime_intent(
+    *,
+    model: object,
+    connection: object,
+    concurrency_limit: object = None,
+) -> TranslationRuntimeIntent:
+    normalized_model = _normalize_translation_model(model)
+    return TranslationRuntimeIntent(
+        model=normalized_model,
+        connection=_normalize_translation_connection(connection, model=normalized_model),
+        concurrency_limit=_normalize_positive_int(concurrency_limit, default=5),
+    )
+
+
+def normalize_openrouter_runtime_intent(
+    *,
+    provider_llm: object = None,
+    model: object = None,
+    selected_source: object = None,
+    selection_alias: object = None,
+    fallback_selection_alias: object = None,
+    routing_mode: object = None,
+    provider_routing: object = None,
+    broker_base_url: object = None,
+) -> OpenRouterRuntimeIntent:
+    selection_profile = None
+    if isinstance(selection_alias, str):
+        normalized_alias = selection_alias.strip()
+        if normalized_alias:
+            selection_profile = get_openrouter_llm_profile(normalized_alias)
+
+    explicit_source = _explicit_openrouter_source(selected_source)
+    source = explicit_source or _default_openrouter_source_for_provider(provider_llm)
+    if selection_profile is not None and selection_profile.openrouter_model is not None:
+        resolved_model = _normalize_openrouter_model(selection_profile.openrouter_model)
+        resolved_source = _normalize_openrouter_source(
+            selection_profile.openrouter_source,
+            default=source,
+        )
+        if (
+            resolved_source == OPENROUTER_SOURCE_NONE
+            and explicit_source is not None
+            and explicit_source != OPENROUTER_SOURCE_NONE
+        ):
+            resolved_source = explicit_source
+    else:
+        resolved_model = _normalize_openrouter_model(model)
+        resolved_source = source
+
+    return OpenRouterRuntimeIntent(
+        model=resolved_model,
+        selected_source=resolved_source,
+        selection_alias=_canonical_openrouter_alias(resolved_model, resolved_source),
+        fallback_selection_alias=_normalize_openrouter_fallback_alias(fallback_selection_alias),
+        routing_mode=_normalize_allowed(
+            routing_mode,
+            allowed=_OPENROUTER_ROUTING_MODES,
+            default="latency",
+        ),
+        provider_routing=_normalize_allowed(
+            provider_routing,
+            allowed=_OPENROUTER_PROVIDER_ROUTINGS,
+            default="default",
+        ),
+        broker_base_url=_normalize_openrouter_broker_base_url(broker_base_url),
+    )
+
+
+def derive_translation_runtime_intent_from_compatibility(
+    *,
+    provider_llm: object,
+    openrouter_model: object = None,
+    openrouter_selected_source: object = None,
+    openrouter_provider_routing: object = None,
+    gemini_model: object = None,
+    qwen_model: object = None,
+    deepseek_model: object = None,
+    concurrency_limit: object = None,
+) -> TranslationRuntimeIntent:
+    provider = _normalize_allowed(
+        provider_llm,
+        allowed=LLM_PROVIDERS,
+        default=PROVIDER_GEMINI,
+    )
+    openrouter_model_value = _normalize_openrouter_model(openrouter_model)
+    openrouter_source = _normalize_openrouter_source(
+        openrouter_selected_source,
+        default=_default_openrouter_source_for_provider(provider),
+    )
+    provider_routing = _normalize_allowed(
+        openrouter_provider_routing,
+        allowed=_OPENROUTER_PROVIDER_ROUTINGS,
+        default="default",
+    )
+    concurrency = _normalize_positive_int(concurrency_limit, default=5)
+
+    if provider == PROVIDER_OPENROUTER:
+        if openrouter_model_value == OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT:
+            return TranslationRuntimeIntent(
+                model=TRANSLATION_MODEL_GEMMA4,
+                connection=_translation_connection_from_openrouter_source(
+                    openrouter_source,
+                    model=TRANSLATION_MODEL_GEMMA4,
+                    provider_routing=provider_routing,
+                ),
+                concurrency_limit=concurrency,
+            )
+        if openrouter_model_value == OPENROUTER_MODEL_DEEPSEEK_V4_FLASH:
+            return TranslationRuntimeIntent(
+                model=TRANSLATION_MODEL_DEEPSEEK_V4_FLASH,
+                connection=_translation_connection_from_openrouter_source(
+                    openrouter_source,
+                    model=TRANSLATION_MODEL_DEEPSEEK_V4_FLASH,
+                    provider_routing=provider_routing,
+                ),
+                concurrency_limit=concurrency,
+            )
+        return TranslationRuntimeIntent(
+            model=TRANSLATION_MODEL_DEEPSEEK_V4_FLASH,
+            connection=_default_translation_connection(TRANSLATION_MODEL_DEEPSEEK_V4_FLASH),
+            concurrency_limit=concurrency,
+        )
+
+    if provider == PROVIDER_LOCAL_LLM:
+        return TranslationRuntimeIntent(
+            model=TRANSLATION_MODEL_LOCAL_LLM,
+            connection=TRANSLATION_CONNECTION_OLLAMA,
+            concurrency_limit=concurrency,
+        )
+
+    if provider == PROVIDER_DEEPSEEK:
+        if (
+            _normalize_allowed(
+                deepseek_model,
+                allowed=(DEEPSEEK_MODEL_V4_FLASH, DEEPSEEK_MODEL_V4_PRO),
+                default=DEEPSEEK_MODEL_V4_FLASH,
+            )
+            == DEEPSEEK_MODEL_V4_PRO
+        ):
+            return TranslationRuntimeIntent(
+                model=TRANSLATION_MODEL_DEEPSEEK_V4_PRO,
+                connection=TRANSLATION_CONNECTION_OFFICIAL_BYOK,
+                concurrency_limit=concurrency,
+            )
+        return TranslationRuntimeIntent(
+            model=TRANSLATION_MODEL_DEEPSEEK_V4_FLASH,
+            connection=TRANSLATION_CONNECTION_OFFICIAL_BYOK,
+            concurrency_limit=concurrency,
+        )
+
+    if provider == PROVIDER_QWEN:
+        if (
+            _normalize_allowed(
+                qwen_model,
+                allowed=(QWEN_MODEL_35_FLASH, QWEN_MODEL_35_PLUS),
+                default=QWEN_MODEL_35_PLUS,
+            )
+            == QWEN_MODEL_35_FLASH
+        ):
+            return TranslationRuntimeIntent(
+                model=TRANSLATION_MODEL_DEEPSEEK_V4_FLASH,
+                connection=_default_translation_connection(TRANSLATION_MODEL_DEEPSEEK_V4_FLASH),
+                concurrency_limit=concurrency,
+            )
+        return TranslationRuntimeIntent(
+            model=TRANSLATION_MODEL_QWEN_35_PLUS,
+            connection=TRANSLATION_CONNECTION_OFFICIAL_BYOK,
+            concurrency_limit=concurrency,
+        )
+
+    if (
+        _normalize_allowed(
+            gemini_model,
+            allowed=(GEMINI_MODEL_3_FLASH, GEMINI_MODEL_31_FLASH_LITE),
+            default=GEMINI_MODEL_31_FLASH_LITE,
+        )
+        == GEMINI_MODEL_3_FLASH
+    ):
+        return TranslationRuntimeIntent(
+            model=TRANSLATION_MODEL_GEMINI_3_FLASH,
+            connection=TRANSLATION_CONNECTION_OFFICIAL_BYOK,
+            concurrency_limit=concurrency,
+        )
+    return TranslationRuntimeIntent(
+        model=TRANSLATION_MODEL_GEMINI_31_FLASH_LITE,
+        connection=TRANSLATION_CONNECTION_OFFICIAL_BYOK,
+        concurrency_limit=concurrency,
+    )
+
+
+def _openrouter_source_for_translation(
+    connection: TranslationConnectionName,
+    openrouter: OpenRouterRuntimeIntent,
+) -> OpenRouterSource:
+    if connection in (TRANSLATION_CONNECTION_MANAGED, TRANSLATION_CONNECTION_MANAGED_CHINA):
+        return OPENROUTER_SOURCE_MANAGED
+    if openrouter.selected_source == OPENROUTER_SOURCE_NONE:
+        return OPENROUTER_SOURCE_NONE
+    return OPENROUTER_SOURCE_BYOK
+
+
+def _openrouter_fallback_fields(
+    openrouter: OpenRouterRuntimeIntent,
+    source: OpenRouterSource,
+    *,
+    provider_routing: str,
+) -> tuple[str | None, str | None, ResolvedCredentialRequirement, str | None]:
+    if (
+        openrouter.fallback_selection_alias == OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE
+        or provider_routing == "deepseek_only"
+    ):
+        return None, None, _no_credential(), None
+    fallback_profile = FALLBACK_PROFILE_BY_ALIAS[openrouter.fallback_selection_alias]
+    if fallback_profile.openrouter_model is None:
+        return None, None, _no_credential(), None
+    fallback_provider_routing = (
+        "deepseek_only"
+        if openrouter.fallback_selection_alias
+        == OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_CHINA
+        else "default"
+    )
+    return (
+        PROVIDER_OPENROUTER,
+        fallback_profile.openrouter_model,
+        _openrouter_credential(source),
+        fallback_provider_routing,
+    )
+
+
+def _resolved_openrouter_config(
+    *,
+    model: str,
+    source: OpenRouterSource,
+    openrouter: OpenRouterRuntimeIntent,
+    provider_routing: str,
+    concurrency_limit: int,
+) -> ResolvedLLMConfig:
+    (
+        fallback_provider,
+        fallback_model,
+        fallback_credential,
+        fallback_provider_routing,
+    ) = _openrouter_fallback_fields(
+        openrouter,
+        source,
+        provider_routing=provider_routing,
+    )
+    return ResolvedLLMConfig(
+        provider=PROVIDER_OPENROUTER,
+        model=model,
+        credential=_openrouter_credential(source),
+        fallback_provider=fallback_provider,
+        fallback_model=fallback_model,
+        fallback_credential=fallback_credential,
+        fallback_provider_routing=fallback_provider_routing,
+        service_endpoint=openrouter.broker_base_url,
+        routing_mode=openrouter.routing_mode,
+        provider_routing=provider_routing,
+        concurrency_limit=concurrency_limit,
+    )
+
+
+def _resolved_direct_provider_config(
+    *,
+    provider: str,
+    model: str,
+    credential: ResolvedCredentialRequirement,
+    concurrency_limit: int,
+    base_url: str | None = None,
+    service_endpoint: str | None = None,
+    region: str | None = None,
+    provider_options: Mapping[str, object] | None = None,
+) -> ResolvedLLMConfig:
+    return ResolvedLLMConfig(
+        provider=provider,
+        model=model,
+        credential=credential,
+        base_url=base_url,
+        service_endpoint=service_endpoint,
+        region=region,
+        concurrency_limit=concurrency_limit,
+        provider_options={} if provider_options is None else provider_options,
+    )
+
+
+def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConfig:
+    translation = runtime_input.translation
+    openrouter = runtime_input.openrouter
+    direct = runtime_input.direct
+    concurrency_limit = translation.concurrency_limit
+
+    if translation.model == TRANSLATION_MODEL_GEMMA4:
+        return _resolved_openrouter_config(
+            model=OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT,
+            source=_openrouter_source_for_translation(translation.connection, openrouter),
+            openrouter=openrouter,
+            provider_routing="default",
+            concurrency_limit=concurrency_limit,
+        )
+
+    if translation.model == TRANSLATION_MODEL_DEEPSEEK_V4_FLASH:
+        if translation.connection == TRANSLATION_CONNECTION_OFFICIAL_BYOK:
+            return _resolved_direct_provider_config(
+                provider=PROVIDER_DEEPSEEK,
+                model=direct.deepseek_v4_flash_model,
+                credential=_required_credential(
+                    CREDENTIAL_SOURCE_SECRET_STORE,
+                    CREDENTIAL_REF_DEEPSEEK_BYOK,
+                ),
+                concurrency_limit=concurrency_limit,
+            )
+        provider_routing = (
+            "deepseek_only"
+            if translation.connection == TRANSLATION_CONNECTION_MANAGED_CHINA
+            else "default"
+        )
+        return _resolved_openrouter_config(
+            model=OPENROUTER_MODEL_DEEPSEEK_V4_FLASH,
+            source=_openrouter_source_for_translation(translation.connection, openrouter),
+            openrouter=openrouter,
+            provider_routing=provider_routing,
+            concurrency_limit=concurrency_limit,
+        )
+
+    if translation.model == TRANSLATION_MODEL_DEEPSEEK_V4_PRO:
+        return _resolved_direct_provider_config(
+            provider=PROVIDER_DEEPSEEK,
+            model=direct.deepseek_v4_pro_model,
+            credential=_required_credential(
+                CREDENTIAL_SOURCE_SECRET_STORE,
+                CREDENTIAL_REF_DEEPSEEK_BYOK,
+            ),
+            concurrency_limit=concurrency_limit,
+        )
+
+    if translation.model == TRANSLATION_MODEL_GEMINI_3_FLASH:
+        return _resolved_direct_provider_config(
+            provider=PROVIDER_GEMINI,
+            model=direct.gemini_3_flash_model,
+            credential=_required_credential(
+                CREDENTIAL_SOURCE_SECRET_STORE,
+                CREDENTIAL_REF_GEMINI_BYOK,
+            ),
+            concurrency_limit=concurrency_limit,
+        )
+
+    if translation.model == TRANSLATION_MODEL_GEMINI_31_FLASH_LITE:
+        return _resolved_direct_provider_config(
+            provider=PROVIDER_GEMINI,
+            model=direct.gemini_31_flash_lite_model,
+            credential=_required_credential(
+                CREDENTIAL_SOURCE_SECRET_STORE,
+                CREDENTIAL_REF_GEMINI_BYOK,
+            ),
+            concurrency_limit=concurrency_limit,
+        )
+
+    if translation.model == TRANSLATION_MODEL_QWEN_35_PLUS:
+        return _resolved_direct_provider_config(
+            provider=PROVIDER_QWEN,
+            model=direct.qwen_35_plus_model,
+            credential=_required_credential(
+                CREDENTIAL_SOURCE_SECRET_STORE,
+                _qwen_credential_reference(direct.qwen_region),
+            ),
+            service_endpoint=_qwen_service_endpoint(direct.qwen_region),
+            region=direct.qwen_region,
+            concurrency_limit=concurrency_limit,
+        )
+
+    return _resolved_direct_provider_config(
+        provider=PROVIDER_LOCAL_LLM,
+        model=direct.local_llm_model,
+        credential=_no_credential(),
+        base_url=direct.local_llm_base_url,
+        concurrency_limit=concurrency_limit,
+        provider_options={
+            "backend": direct.local_llm_backend,
+            "extra_body": direct.local_llm_extra_body,
+        },
+    )
+
+
+__all__ = [
+    "CREDENTIAL_REF_DEEPSEEK_BYOK",
+    "CREDENTIAL_REF_GEMINI_BYOK",
+    "CREDENTIAL_REF_OPENROUTER_BYOK",
+    "CREDENTIAL_REF_OPENROUTER_MANAGED",
+    "CREDENTIAL_REF_QWEN_BEIJING",
+    "CREDENTIAL_REF_QWEN_SINGAPORE",
+    "DEEPSEEK_MODEL_V4_FLASH",
+    "DEEPSEEK_MODEL_V4_PRO",
+    "DirectProviderRuntimeIntent",
+    "GEMINI_MODEL_3_FLASH",
+    "GEMINI_MODEL_31_FLASH_LITE",
+    "LOCAL_LLM_BACKEND_OLLAMA",
+    "LOCAL_LLM_DEFAULT_BASE_URL",
+    "LOCAL_LLM_DEFAULT_MODEL",
+    "LLM_PROVIDERS",
+    "OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH",
+    "OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_CHINA",
+    "OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_VALUE",
+    "OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE",
+    "OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE_VALUE",
+    "OPENROUTER_SOURCE_BYOK",
+    "OPENROUTER_SOURCE_MANAGED",
+    "OPENROUTER_SOURCE_NONE",
+    "OPENROUTER_SOURCES",
+    "OpenRouterRuntimeIntent",
+    "OpenRouterSource",
+    "PROVIDER_DEEPSEEK",
+    "PROVIDER_GEMINI",
+    "PROVIDER_LOCAL_LLM",
+    "PROVIDER_OPENROUTER",
+    "PROVIDER_QWEN",
+    "QWEN_MODEL_35_PLUS",
+    "QWEN_MODEL_35_FLASH",
+    "QWEN_REGION_BEIJING",
+    "QWEN_REGION_SINGAPORE",
+    "RuntimeResolutionInput",
+    "TRANSLATION_CONNECTION_MANAGED",
+    "TRANSLATION_CONNECTION_MANAGED_CHINA",
+    "TRANSLATION_CONNECTION_OFFICIAL_BYOK",
+    "TRANSLATION_CONNECTION_OLLAMA",
+    "TRANSLATION_CONNECTION_OPENROUTER",
+    "TRANSLATION_CONNECTIONS",
+    "TRANSLATION_CONNECTIONS_BY_MODEL",
+    "TRANSLATION_MODEL_DEEPSEEK_V4_FLASH",
+    "TRANSLATION_MODEL_DEEPSEEK_V4_PRO",
+    "TRANSLATION_MODEL_GEMINI_3_FLASH",
+    "TRANSLATION_MODEL_GEMINI_31_FLASH_LITE",
+    "TRANSLATION_MODEL_GEMMA4",
+    "TRANSLATION_MODEL_LOCAL_LLM",
+    "TRANSLATION_MODEL_QWEN_35_PLUS",
+    "TRANSLATION_MODELS",
+    "TranslationConnectionName",
+    "TranslationModelName",
+    "TranslationRuntimeIntent",
+    "derive_translation_runtime_intent_from_compatibility",
+    "normalize_openrouter_runtime_intent",
+    "normalize_translation_runtime_intent",
+    "resolve_llm_config",
+]

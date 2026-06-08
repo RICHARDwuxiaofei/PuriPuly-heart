@@ -189,6 +189,30 @@ def test_resolved_contracts_expose_dtos_and_literal_constants() -> None:
     assert resolved.OVERLAY_TARGETS == ("steamvr", "desktop")
 
 
+def test_resolved_llm_config_carries_explicit_fallback_provider_routing() -> None:
+    resolved = _resolved_module()
+
+    llm_config = resolved.ResolvedLLMConfig(
+        provider="openrouter",
+        model="google/gemma-4-26b-a4b-it",
+        credential=_credential(resolved),
+        fallback_provider="openrouter",
+        fallback_model="deepseek/deepseek-v4-flash",
+        fallback_credential=_credential(resolved),
+        fallback_provider_routing="deepseek_only",
+        routing_mode="latency",
+        provider_routing="default",
+    )
+    no_fallback = resolved.ResolvedLLMConfig(
+        provider="openrouter",
+        model="google/gemma-4-26b-a4b-it",
+        credential=_credential(resolved),
+    )
+
+    assert llm_config.fallback_provider_routing == "deepseek_only"
+    assert no_fallback.fallback_provider_routing is None
+
+
 def test_resolved_dtos_are_frozen_and_slotted() -> None:
     resolved = _resolved_module()
     dto_classes = (
