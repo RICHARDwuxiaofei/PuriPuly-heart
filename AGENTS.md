@@ -1,9 +1,6 @@
 ## Purpose & Authority
 
-- This file is the authority for **agent operating policy** in this repository.
-- Discoverable implementation facts (exact defaults, command options, file formats) must be read from code and README files first.
 - If implementation facts and docs disagree, treat code as the source of truth and then align docs.
-- Keep this file focused on rules and routing, not long feature or setup explanations.
 
 ## Agent-Only Invariants
 
