@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from importlib import import_module
+from types import SimpleNamespace
 
 import pytest
 
@@ -47,32 +48,36 @@ def _iter_controls(control: ft.Control):
         yield from _iter_controls(child)
 
 
-def test_set_terms_renders_compact_chips_inside_wrapping_token_field() -> None:
+def test_set_terms_renders_compact_chips_above_native_input() -> None:
     editor = _make_editor()
 
     editor.set_terms(["Puripuly", "VRChat"])
 
     chips = _chip_controls(editor)
-    token_controls = list(editor._token_wrap.controls)
     assert editor._chips_wrap.wrap is True
-    assert editor._token_wrap.wrap is True
     assert editor._empty_text.visible is False
     assert len(chips) == 2
     assert [_chip_term_text(chip).value for chip in chips] == ["Puripuly", "VRChat"]
     assert [chip.data for chip in chips] == ["Puripuly", "VRChat"]
-    assert token_controls[:-1] == chips
-    assert token_controls[-1] is editor._input_field
+    assert editor._chips_wrap.visible is True
+    assert list(editor.controls) == [editor._chips_wrap, editor._input_field]
+    assert editor._input_field not in editor._chips_wrap.controls
+    assert not hasattr(editor, "_token_wrap")
+    assert not hasattr(editor, "_token_field")
     assert _chip_term_text(chips[0]).width is None
-    assert _chip_term_text(chips[0]).size == 16
-    assert chips[0].padding.left == 16
-    assert chips[0].padding.right == 16
-    assert chips[0].padding.top == 8
-    assert chips[0].padding.bottom == 8
+    assert _chip_term_text(chips[0]).size == 22
+    assert chips[0].padding.left == 20
+    assert chips[0].padding.right == 20
+    assert chips[0].padding.top == 14
+    assert chips[0].padding.bottom == 14
     assert callable(chips[0].on_click)
+    assert callable(chips[0].on_hover)
+    assert chips[0].tooltip is None
+    assert _chip_term_text(chips[0]).tooltip is None
     assert not any(isinstance(node, ft.IconButton) for node in _iter_controls(editor))
 
 
-def test_empty_terms_keep_single_token_field_without_placeholder_help() -> None:
+def test_empty_terms_show_only_native_input_without_placeholder_help() -> None:
     editor = _make_editor()
     editor.set_empty_text("No hints yet.")
     editor.set_placeholder("Type hint, then Space")
@@ -82,41 +87,28 @@ def test_empty_terms_keep_single_token_field_without_placeholder_help() -> None:
     assert _chip_controls(editor) == []
     assert editor._empty_text.value == "No hints yet."
     assert editor._empty_text.visible is False
-    assert list(editor._token_wrap.controls) == [editor._input_field]
+    assert editor._chips_wrap.visible is False
+    assert list(editor.controls) == [editor._input_field]
     assert editor._input_field.hint_text == ""
 
 
-def test_token_field_click_focuses_inner_input() -> None:
-    editor = _make_editor()
-    focused: list[bool] = []
-    editor._input_field.focus = lambda: focused.append(True)  # noqa: SLF001
-
-    editor._token_field.on_click(None)  # noqa: SLF001
-
-    assert focused == [True]
-
-
-def test_inner_input_focus_drives_outer_token_field_focus_ring() -> None:
-    module = _editor_module()
+def test_input_uses_native_focus_styling_without_outer_token_field() -> None:
     editor = _make_editor()
 
-    assert editor._input_field.focus_color == ft.Colors.TRANSPARENT  # noqa: SLF001
-    assert editor._input_field.focused_bgcolor == ft.Colors.TRANSPARENT  # noqa: SLF001
-    assert editor._input_field.focused_color == module.COLOR_NEUTRAL_DARK  # noqa: SLF001
-    assert editor._token_field.border.top.color == module.COLOR_DIVIDER  # noqa: SLF001
-    assert editor._token_field.border.top.width == 1  # noqa: SLF001
+    assert not hasattr(editor, "_token_field")
+    assert editor._input_field.border != ft.InputBorder.NONE  # noqa: SLF001
+    assert editor._input_field.focus_color != ft.Colors.TRANSPARENT  # noqa: SLF001
+    assert editor._input_field.focused_bgcolor != ft.Colors.TRANSPARENT  # noqa: SLF001
+    assert editor._input_field.focused_border_color != ft.Colors.TRANSPARENT  # noqa: SLF001
 
-    editor._input_field.on_focus(None)  # noqa: SLF001
 
-    assert editor._token_field.border.top.color == module.COLOR_PRIMARY  # noqa: SLF001
-    assert editor._token_field.border.top.width == 1.5  # noqa: SLF001
-    assert editor._token_field.shadow is not None  # noqa: SLF001
+def test_input_size_matches_api_key_fields() -> None:
+    editor = _make_editor()
 
-    editor._input_field.on_blur(None)  # noqa: SLF001
-
-    assert editor._token_field.border.top.color == module.COLOR_DIVIDER  # noqa: SLF001
-    assert editor._token_field.border.top.width == 1  # noqa: SLF001
-    assert not editor._token_field.shadow  # noqa: SLF001
+    assert editor._input_field.text_size == 28  # noqa: SLF001
+    assert editor._input_field.border_radius == 12  # noqa: SLF001
+    assert editor._input_field.dense is not True  # noqa: SLF001
+    assert editor._input_field.content_padding is None  # noqa: SLF001
 
 
 def test_space_delimited_input_change_commits_tokens_and_clears_input() -> None:
@@ -198,8 +190,28 @@ def test_clicking_chip_calls_remove_callback_with_visible_term() -> None:
     chip.on_click(None)
 
     assert removed == ["Puripuly"]
-    assert chip.tooltip == "Remove Puripuly"
+    assert chip.tooltip is None
     assert not any(isinstance(node, ft.IconButton) for node in _iter_controls(chip))
+
+
+def test_chip_hover_matches_dashboard_active_button_colors() -> None:
+    module = _editor_module()
+    editor = _make_editor()
+    editor.set_terms(["Puripuly"])
+    chip = _chip_controls(editor)[0]
+    term_text = _chip_term_text(chip)
+
+    chip.on_hover(SimpleNamespace(data="true", control=chip))
+
+    assert chip.bgcolor == module.COLOR_PRIMARY
+    assert chip.border.top.color == module.COLOR_PRIMARY
+    assert term_text.color == ft.Colors.WHITE
+
+    chip.on_hover(SimpleNamespace(data="false", control=chip))
+
+    assert chip.bgcolor == module.COLOR_PRIMARY_CONTAINER
+    assert chip.border.top.color == module.COLOR_DIVIDER
+    assert term_text.color == module.COLOR_ON_PRIMARY_CONTAINER
 
 
 def test_locale_setters_update_placeholder_empty_add_and_existing_remove_labels() -> None:
@@ -213,7 +225,7 @@ def test_locale_setters_update_placeholder_empty_add_and_existing_remove_labels(
 
     assert editor._input_field.hint_text == ""
     assert editor._empty_text.value == "아직 추가된 힌트가 없어요."
-    assert _chip_controls(editor)[0].tooltip == "Puripuly 삭제"
+    assert _chip_controls(editor)[0].tooltip is None
 
 
 def test_clear_input_clears_unsubmitted_add_text() -> None:
@@ -225,7 +237,7 @@ def test_clear_input_clears_unsubmitted_add_text() -> None:
     assert editor._input_field.value == ""
 
 
-def test_long_hint_text_is_constrained_and_available_as_tooltip() -> None:
+def test_long_hint_text_is_constrained_without_hover_tooltips() -> None:
     editor = _make_editor()
     long_term = "A very long Speech Recognition Hint " * 8
 
@@ -235,8 +247,10 @@ def test_long_hint_text_is_constrained_and_available_as_tooltip() -> None:
     term_text = _chip_term_text(chip)
 
     assert chip.clip_behavior == ft.ClipBehavior.HARD_EDGE
+    assert chip.tooltip is None
     assert term_text.value == long_term
-    assert term_text.tooltip == long_term
+    assert term_text.tooltip is None
+    assert term_text.semantics_label == long_term
     assert term_text.width is not None
     assert term_text.width <= 240
     assert term_text.max_lines == 1
