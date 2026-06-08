@@ -6476,18 +6476,13 @@ def test_custom_vocabulary_loads_current_source_language_bucket_as_tags(
     assert _tree_contains_control(custom_vocab_card, view._custom_vocab_tag_editor)
     assert not hasattr(view, "_custom_vocab_terms")
     assert _custom_vocab_chip_terms(view) == ["Puripuly", "VRChat"]
-    assert view._custom_vocab_tag_editor._input_field.hint_text == t(  # noqa: SLF001
-        "settings.custom_vocabulary.add_placeholder"
-    )
-    assert view._custom_vocab_tag_editor._add_button.text == t(  # noqa: SLF001
-        "settings.custom_vocabulary.add_action"
-    )
+    assert view._custom_vocab_tag_editor._input_field.hint_text == ""  # noqa: SLF001
     text_fields = [
         node for node in _iter_control_tree(custom_vocab_card) if isinstance(node, ft.TextField)
     ]
     assert text_fields == [view._custom_vocab_tag_editor._input_field]  # noqa: SLF001
-    assert view._custom_vocab_tag_editor._input_field.min_lines == 1  # noqa: SLF001
-    assert view._custom_vocab_tag_editor._input_field.max_lines == 2  # noqa: SLF001
+    assert view._custom_vocab_tag_editor._input_field.multiline is False  # noqa: SLF001
+    assert view._custom_vocab_tag_editor._input_field.max_lines == 1  # noqa: SLF001
 
 
 @pytest.mark.parametrize(
@@ -6511,9 +6506,7 @@ def test_custom_vocabulary_loads_seeded_settings_defaults_as_tags(
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
     assert _custom_vocab_chip_terms(view) == expected_terms
-    assert view._custom_vocab_tag_editor._empty_text.value == t(  # noqa: SLF001
-        "settings.custom_vocabulary.empty"
-    )
+    assert view._custom_vocab_tag_editor._empty_text.visible is False  # noqa: SLF001
 
 
 def test_custom_vocabulary_card_shows_inline_helper_without_info_icon(
@@ -6579,13 +6572,13 @@ def test_prompt_tab_hides_prompt_provider_copy_and_old_language_helper_text(
     [
         (
             "ko",
-            "내 음성에만 적용돼요. 지원되는 음성 인식 제공자가 인식률을 높이는 데 사용해요.",
+            "자기 자신이 한 말에만 적용되어요. Soniox와 Deepgram에서만 적용되어요.",
         ),
         (
             "en",
-            "Applies to your own speech. Supported speech recognition providers use these hints to improve recognition.",
+            "Applies only to what you say. Only Soniox and Deepgram use these hints.",
         ),
-        ("zh-CN", "仅适用于你的语音。支持的语音识别提供商会使用这些提示来提高识别率。"),
+        ("zh-CN", "仅适用于你自己说的话。只有 Soniox 和 Deepgram 会使用这些提示。"),
     ],
 )
 def test_custom_vocabulary_inline_helper_copy_matches_provider_scope(
@@ -6856,7 +6849,7 @@ def test_custom_vocabulary_default_load_refreshes_from_settings(
     assert view._custom_vocab_tag_editor._input_field.value == ""  # noqa: SLF001
 
 
-def test_custom_vocabulary_add_control_persists_unique_terms_and_emits_once(
+def test_custom_vocabulary_token_input_persists_unique_space_terms_and_emits_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -6872,9 +6865,9 @@ def test_custom_vocabulary_add_control_persists_unique_terms_and_emits_once(
     view.runtime_log_detailed = lambda message, *, level=logging.INFO: detailed_messages.append(
         message
     )
-    view._custom_vocab_tag_editor._input_field.value = " VRChat, Soniox\nPuripuly "  # noqa: SLF001
+    view._custom_vocab_tag_editor._input_field.value = " VRChat Soniox\nPuripuly "  # noqa: SLF001
 
-    view._custom_vocab_tag_editor._add_button.on_click(None)  # noqa: SLF001
+    view._custom_vocab_tag_editor._input_field.on_change(None)  # noqa: SLF001
 
     assert view._custom_vocab_tag_editor.on_add_terms is not None
     assert view._custom_vocab_tag_editor._input_field.value == ""  # noqa: SLF001
@@ -6903,7 +6896,7 @@ def test_custom_vocabulary_add_normalizes_direct_raw_terms_exact_case_sensitive(
     view.on_settings_changed = changed.append
     view._custom_vocab_tag_editor._input_field.value = "draft"  # noqa: SLF001
 
-    view._on_custom_vocabulary_add_terms([" puripuly, Puripuly\nPURIPULY ", " "])
+    view._on_custom_vocabulary_add_terms([" puripuly Puripuly\nPURIPULY ", " "])
 
     assert view._custom_vocab_tag_editor._input_field.value == ""  # noqa: SLF001
     assert settings.stt.custom_terms == {
@@ -6930,9 +6923,9 @@ def test_custom_vocabulary_empty_and_duplicate_adds_clear_input_without_emit(
     view.runtime_log_detailed = lambda message, *, level=logging.INFO: detailed_messages.append(
         message
     )
-    view._custom_vocab_tag_editor._input_field.value = " , Puripuly,  Puripuly  \n "  # noqa: SLF001
+    view._custom_vocab_tag_editor._input_field.value = " Puripuly  Puripuly  \n "  # noqa: SLF001
 
-    view._custom_vocab_tag_editor._add_button.on_click(None)  # noqa: SLF001
+    view._custom_vocab_tag_editor._input_field.on_change(None)  # noqa: SLF001
 
     assert view._custom_vocab_tag_editor._input_field.value == ""  # noqa: SLF001
     assert settings.stt.custom_terms == {"ko": ["Puripuly"], "en": ["Avatar"]}
@@ -6977,10 +6970,8 @@ def test_custom_vocabulary_remove_control_persists_current_bucket_and_emits_once
         message
     )
 
-    remove_button = view._custom_vocab_tag_editor._chip_remove_button(  # noqa: SLF001
-        view._custom_vocab_tag_editor._chips_wrap.controls[0]  # noqa: SLF001
-    )
-    remove_button.on_click(None)
+    chip = view._custom_vocab_tag_editor._chips_wrap.controls[0]  # noqa: SLF001
+    chip.on_click(None)
 
     assert settings.stt.custom_vocabulary_enabled is True
     assert settings.stt.custom_terms == {"ko": ["VRChat"], "en": ["Avatar"]}
@@ -7032,7 +7023,7 @@ def test_custom_vocabulary_add_caps_partial_terms_and_shows_snackbar(
         message
     )
 
-    view._on_custom_vocabulary_add_terms(["fits,overflow"])
+    view._on_custom_vocabulary_add_terms(["fits overflow"])
 
     assert settings.stt.custom_terms == {
         "ko": [*existing_terms, "fits"],
@@ -7120,19 +7111,10 @@ def test_apply_locale_refreshes_custom_vocabulary_text(
 
     assert view._custom_vocab_title.value == t("settings.section.custom_vocabulary")
     assert view._custom_vocab_description_text.value == t("settings.custom_vocabulary.description")
-    assert view._custom_vocab_tag_editor._input_field.hint_text == t(  # noqa: SLF001
-        "settings.custom_vocabulary.add_placeholder"
-    )
-    assert view._custom_vocab_tag_editor._add_button.text == t(  # noqa: SLF001
-        "settings.custom_vocabulary.add_action"
-    )
-    assert view._custom_vocab_tag_editor._empty_text.value == t(  # noqa: SLF001
-        "settings.custom_vocabulary.empty"
-    )
-    remove_button = view._custom_vocab_tag_editor._chip_remove_button(  # noqa: SLF001
-        view._custom_vocab_tag_editor._chips_wrap.controls[0]  # noqa: SLF001
-    )
-    assert remove_button.tooltip == t("settings.custom_vocabulary.remove_hint", term="Puripuly")
+    assert view._custom_vocab_tag_editor._input_field.hint_text == ""  # noqa: SLF001
+    assert view._custom_vocab_tag_editor._empty_text.visible is False  # noqa: SLF001
+    chip = view._custom_vocab_tag_editor._chips_wrap.controls[0]  # noqa: SLF001
+    assert chip.tooltip == t("settings.custom_vocabulary.remove_hint", term="Puripuly")
 
 
 def test_settings_view_uses_generic_subtab_shell(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 
 import flet as ft
 
@@ -9,7 +9,6 @@ from puripuly_heart.ui.theme import (
     COLOR_DIVIDER,
     COLOR_NEUTRAL,
     COLOR_NEUTRAL_DARK,
-    COLOR_ON_BACKGROUND,
     COLOR_ON_PRIMARY_CONTAINER,
     COLOR_PRIMARY,
     COLOR_PRIMARY_CONTAINER,
@@ -17,10 +16,15 @@ from puripuly_heart.ui.theme import (
 )
 
 _CHIP_TERM_WIDTH = 220
+_CHIP_COMPACT_CHAR_LIMIT = 24
 _CHIP_RADIUS = 999
-_CHIP_HORIZONTAL_PADDING = 12
-_ADD_CONTROL_HEIGHT = 40
-_ADD_SPLIT_RE = re.compile(r"[,\r\n]+")
+_CHIP_HORIZONTAL_PADDING = 16
+_CHIP_VERTICAL_PADDING = 8
+_TOKEN_INPUT_WIDTH = 180
+_TOKEN_FIELD_RADIUS = 14
+_TOKEN_FIELD_BORDER_WIDTH = 1
+_TOKEN_FIELD_FOCUSED_BORDER_WIDTH = 1.5
+_TOKEN_SPLIT_RE = re.compile(r"\s+")
 
 
 def _update_control_if_mounted(control: ft.Control) -> None:
@@ -34,7 +38,7 @@ def _update_control_if_mounted(control: ft.Control) -> None:
 
 
 class CustomVocabularyTagEditor(ft.Column):
-    """Presentation component for editing Speech Recognition Hint chips."""
+    """Presentation component for editing Speech Recognition Hint token chips."""
 
     def __init__(
         self,
@@ -46,6 +50,7 @@ class CustomVocabularyTagEditor(ft.Column):
         self.on_remove_term = on_remove_term
         self._terms: list[str] = []
         self._remove_label_template = ""
+        self._add_label = ""
 
         self._empty_text = ft.Text(
             "",
@@ -53,58 +58,60 @@ class CustomVocabularyTagEditor(ft.Column):
             color=COLOR_NEUTRAL,
             max_lines=2,
             overflow=ft.TextOverflow.ELLIPSIS,
+            visible=False,
         )
         self._chips_wrap = ft.Row(
             controls=[],
-            spacing=8,
+            spacing=6,
             run_spacing=8,
             wrap=True,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        self._tag_area = ft.Column(
-            controls=[self._chips_wrap, self._empty_text],
-            spacing=6,
-            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-        )
 
         self._input_field = ft.TextField(
             hint_text="",
-            multiline=True,
-            min_lines=1,
-            max_lines=2,
+            multiline=False,
+            max_lines=1,
             dense=True,
-            height=_ADD_CONTROL_HEIGHT,
-            expand=True,
-            border_radius=12,
-            border_color=COLOR_DIVIDER,
-            focused_border_color=COLOR_PRIMARY,
+            height=32,
+            width=_TOKEN_INPUT_WIDTH,
+            border=ft.InputBorder.NONE,
+            border_width=0,
+            focused_border_width=0,
+            border_color=ft.Colors.TRANSPARENT,
+            focused_border_color=ft.Colors.TRANSPARENT,
+            bgcolor=ft.Colors.TRANSPARENT,
+            focused_bgcolor=ft.Colors.TRANSPARENT,
+            focused_color=COLOR_NEUTRAL_DARK,
+            focus_color=ft.Colors.TRANSPARENT,
             text_size=14,
             color=COLOR_NEUTRAL_DARK,
-            content_padding=ft.padding.symmetric(horizontal=12, vertical=8),
+            content_padding=ft.padding.symmetric(horizontal=2, vertical=6),
+            on_change=self._handle_input_change,
+            on_submit=self._handle_input_submit,
+            on_focus=self._handle_input_focus,
+            on_blur=self._handle_input_blur,
         )
-        self._add_button = ft.TextButton(
-            text="",
-            icon=ft.Icons.ADD_ROUNDED,
-            height=_ADD_CONTROL_HEIGHT,
-            on_click=self._handle_add_click,
-            style=ft.ButtonStyle(
-                color=COLOR_ON_PRIMARY_CONTAINER,
-                bgcolor=COLOR_PRIMARY_CONTAINER,
-                side=ft.BorderSide(1, COLOR_DIVIDER),
-                shape=ft.RoundedRectangleBorder(radius=12),
-                padding=ft.padding.symmetric(horizontal=14, vertical=8),
-                icon_size=18,
-            ),
-        )
-        self._add_row = ft.Row(
-            controls=[self._input_field, self._add_button],
-            spacing=8,
+        self._token_wrap = ft.Row(
+            controls=[self._input_field],
+            spacing=6,
+            run_spacing=8,
+            wrap=True,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        self._token_field = ft.Container(
+            content=self._token_wrap,
+            width=float("inf"),
+            bgcolor=COLOR_SURFACE_TONAL,
+            border=self._token_field_border(focused=False),
+            border_radius=_TOKEN_FIELD_RADIUS,
+            padding=ft.padding.symmetric(horizontal=10, vertical=7),
+            on_click=self._handle_token_field_click,
         )
 
         super().__init__(
-            controls=[self._tag_area, self._add_row],
-            spacing=10,
+            controls=[self._token_field],
+            spacing=0,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
 
@@ -113,15 +120,19 @@ class CustomVocabularyTagEditor(ft.Column):
     def set_terms(self, terms: list[str]) -> None:
         """Re-render hint chips and empty state from the provided terms."""
         self._terms = list(terms)
-        self._chips_wrap.controls = [self._build_chip(term) for term in self._terms]
-        self._empty_text.visible = not self._terms
-        self._chips_wrap.visible = bool(self._terms)
+        chip_controls = [self._build_chip(term) for term in self._terms]
+        self._chips_wrap.controls = chip_controls
+        self._token_wrap.controls = [*chip_controls, self._input_field]
+        self._empty_text.visible = False
+        self._chips_wrap.visible = True
         _update_control_if_mounted(self._chips_wrap)
+        _update_control_if_mounted(self._token_wrap)
         _update_control_if_mounted(self._empty_text)
 
     def set_placeholder(self, text: str) -> None:
-        """Update add-input placeholder copy."""
-        self._input_field.hint_text = text
+        """Accept legacy placeholder copy; token input intentionally stays quiet."""
+        _ = text
+        self._input_field.hint_text = ""
         _update_control_if_mounted(self._input_field)
 
     def set_empty_text(self, text: str) -> None:
@@ -133,62 +144,50 @@ class CustomVocabularyTagEditor(ft.Column):
         """Update remove tooltip/semantic copy for existing and future chips."""
         self._remove_label_template = template
         for chip in self._chips_wrap.controls:
-            remove_button = self._chip_remove_button(chip)
-            remove_button.tooltip = self._format_remove_label(str(chip.data))
-            _update_control_if_mounted(remove_button)
+            chip.tooltip = self._format_remove_label(str(chip.data))
+            _update_control_if_mounted(chip)
 
     def set_add_label(self, text: str) -> None:
-        """Update visible add control label."""
-        self._add_button.text = text
-        _update_control_if_mounted(self._add_button)
+        """Accept legacy add-button copy; token input no longer renders a button."""
+        self._add_label = text
 
     def clear_input(self) -> None:
         """Clear unsubmitted add-input text."""
         self._input_field.value = ""
         _update_control_if_mounted(self._input_field)
 
+    def _term_text_width(self, term: str) -> int | None:
+        if len(term) <= _CHIP_COMPACT_CHAR_LIMIT:
+            return None
+        return _CHIP_TERM_WIDTH
+
     def _build_chip(self, term: str) -> ft.Container:
         term_text = ft.Text(
             term,
-            size=14,
-            color=COLOR_ON_BACKGROUND,
+            size=16,
+            color=COLOR_ON_PRIMARY_CONTAINER,
             max_lines=1,
             overflow=ft.TextOverflow.ELLIPSIS,
             no_wrap=True,
-            width=_CHIP_TERM_WIDTH,
+            width=self._term_text_width(term),
             tooltip=term,
             semantics_label=term,
         )
-        remove_button = ft.IconButton(
-            icon=ft.Icons.CLOSE_ROUNDED,
-            icon_color=COLOR_NEUTRAL_DARK,
-            icon_size=15,
-            width=28,
-            height=28,
-            padding=0,
-            visual_density=ft.VisualDensity.COMPACT,
-            tooltip=self._format_remove_label(term),
-            data=term,
-            on_click=lambda _event, visible_term=term: self._handle_remove(visible_term),
-        )
         return ft.Container(
             data=term,
-            bgcolor=COLOR_SURFACE_TONAL,
+            tooltip=self._format_remove_label(term),
+            bgcolor=COLOR_PRIMARY_CONTAINER,
             border=ft.border.all(1, COLOR_DIVIDER),
             border_radius=_CHIP_RADIUS,
             padding=ft.padding.only(
                 left=_CHIP_HORIZONTAL_PADDING,
-                right=4,
-                top=4,
-                bottom=4,
+                right=_CHIP_HORIZONTAL_PADDING,
+                top=_CHIP_VERTICAL_PADDING,
+                bottom=_CHIP_VERTICAL_PADDING,
             ),
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            content=ft.Row(
-                controls=[term_text, remove_button],
-                spacing=4,
-                tight=True,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
+            content=term_text,
+            on_click=lambda _event, visible_term=term: self._handle_remove(visible_term),
         )
 
     def _format_remove_label(self, term: str) -> str | None:
@@ -196,19 +195,53 @@ class CustomVocabularyTagEditor(ft.Column):
             return None
         return self._remove_label_template.format(term=term)
 
-    def _chip_remove_button(self, chip: ft.Control) -> ft.IconButton:
-        row = getattr(chip, "content", None)
-        controls: Sequence[ft.Control] = getattr(row, "controls", ()) or ()
-        return controls[1]  # type: ignore[return-value]
+    def _token_field_border(self, *, focused: bool) -> ft.Border:
+        return ft.border.all(
+            _TOKEN_FIELD_FOCUSED_BORDER_WIDTH if focused else _TOKEN_FIELD_BORDER_WIDTH,
+            COLOR_PRIMARY if focused else COLOR_DIVIDER,
+        )
+
+    def _token_field_focus_shadow(self) -> ft.BoxShadow:
+        return ft.BoxShadow(
+            blur_radius=8,
+            color=ft.Colors.with_opacity(0.12, COLOR_PRIMARY),
+            offset=ft.Offset(0, 0),
+            spread_radius=0,
+        )
+
+    def _set_token_field_focused(self, focused: bool) -> None:
+        self._token_field.border = self._token_field_border(focused=focused)
+        self._token_field.shadow = self._token_field_focus_shadow() if focused else None
+        _update_control_if_mounted(self._token_field)
+
+    def _handle_token_field_click(self, _event) -> None:
+        self._input_field.focus()
 
     def _handle_add_click(self, _event) -> None:
+        self._commit_input_value()
+
+    def _handle_input_change(self, _event) -> None:
         raw_value = self._input_field.value or ""
-        if raw_value == "":
+        if not raw_value or not _TOKEN_SPLIT_RE.search(raw_value):
             return
-        if self.on_add_terms is None:
+        self._commit_input_value()
+
+    def _handle_input_submit(self, _event) -> None:
+        self._commit_input_value()
+
+    def _handle_input_focus(self, _event) -> None:
+        self._set_token_field_focused(True)
+
+    def _handle_input_blur(self, _event) -> None:
+        self._set_token_field_focused(False)
+        self._commit_input_value()
+
+    def _commit_input_value(self) -> None:
+        raw_value = self._input_field.value or ""
+        if raw_value == "" or self.on_add_terms is None:
             return
 
-        raw_terms = [part for part in _ADD_SPLIT_RE.split(raw_value) if part != ""]
+        raw_terms = [part for part in _TOKEN_SPLIT_RE.split(raw_value.strip()) if part]
         self.clear_input()
         if raw_terms:
             self.on_add_terms(raw_terms)

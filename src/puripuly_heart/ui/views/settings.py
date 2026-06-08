@@ -98,7 +98,7 @@ _OVERLAY_TEXT_SCALE_PRESETS = (
     ("small", 0.8),
 )
 _DESKTOP_OVERLAY_REOPEN_FAILURE_REASONS = frozenset({"window_configuration_failed"})
-_CUSTOM_VOCAB_DELIMITER_RE = re.compile(r"[,\r\n]+")
+_CUSTOM_VOCAB_DELIMITER_RE = re.compile(r"\s+")
 _TRANSLATION_MODEL_LABEL_KEYS = {
     TranslationModel.GEMMA4: "provider.gemma4_26b_a4b_it",
     TranslationModel.DEEPSEEK_V4_FLASH: "provider.deepseek_v4_flash",
