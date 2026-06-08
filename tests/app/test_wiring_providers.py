@@ -7,9 +7,16 @@ from puripuly_heart.app.wiring import (
     _LazyFactoryLLMProvider,
     build_peer_stt_provider_signature,
     create_llm_provider,
+    create_llm_provider_from_resolved_config,
     create_peer_stt_backend,
     create_stt_backend,
     resolve_peer_stt_config,
+)
+from puripuly_heart.config.resolved import (
+    CREDENTIAL_SOURCE_NONE,
+    CREDENTIAL_SOURCE_SECRET_STORE,
+    ResolvedCredentialRequirement,
+    ResolvedLLMConfig,
 )
 from puripuly_heart.config.settings import (
     AppSettings,
@@ -313,6 +320,97 @@ def test_create_llm_provider_local_llm_uses_secret_store_key_even_when_env_is_se
     assert provider.inner.api_key == "store-secret"
 
 
+def test_create_llm_provider_from_resolved_local_llm_uses_dto_values_and_optional_secret() -> None:
+    legacy_settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    legacy_settings.local_llm.base_url = "http://legacy.local/v1"
+    legacy_settings.local_llm.model = "legacy-model"
+    legacy_settings.local_llm.extra_body = {"legacy": True}
+    legacy_settings.llm.concurrency_limit = 1
+    resolved = ResolvedLLMConfig(
+        provider="local_llm",
+        model="dto-model",
+        credential=ResolvedCredentialRequirement(
+            source=CREDENTIAL_SOURCE_NONE,
+            required=False,
+            reference=None,
+        ),
+        base_url="http://dto.local/v1",
+        concurrency_limit=7,
+        provider_options={"extra_body": {"think": False}},
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("local_llm_api_key", "dto-local-secret")
+
+    provider = create_llm_provider_from_resolved_config(
+        resolved,
+        secrets=secrets,
+        compatibility_settings=legacy_settings,
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, LocalOpenAICompatibleLLMProvider)
+    assert provider.inner.base_url == "http://dto.local/v1"
+    assert provider.inner.model == "dto-model"
+    assert provider.inner.api_key == "dto-local-secret"
+    assert provider.inner.extra_body == {"think": False}
+    assert provider.semaphore._value == 7  # type: ignore[attr-defined]
+
+
+def test_create_llm_provider_legacy_facade_uses_runtime_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.GEMINI),
+        gemini=GeminiSettings(llm_model=GeminiLLMModel.GEMINI_3_FLASH),
+        llm=LLMSettings(concurrency_limit=2),
+    )
+    settings.local_llm.base_url = "http://legacy.local/v1"
+    settings.local_llm.model = "legacy-local-model"
+    settings.local_llm.extra_body = {"legacy": True}
+    resolved = ResolvedLLMConfig(
+        provider="local_llm",
+        model="resolved-local-model",
+        credential=ResolvedCredentialRequirement(
+            source=CREDENTIAL_SOURCE_NONE,
+            required=False,
+            reference=None,
+        ),
+        base_url="http://resolved.local/v1",
+        concurrency_limit=9,
+        provider_options={"extra_body": {"resolved": True}},
+    )
+    captured_inputs: list[object] = []
+
+    def fake_resolve_llm_config(runtime_input: object) -> ResolvedLLMConfig:
+        captured_inputs.append(runtime_input)
+        return resolved
+
+    monkeypatch.setattr(
+        wiring_module,
+        "resolve_llm_config",
+        fake_resolve_llm_config,
+        raising=False,
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("google_api_key", "raw-gemini-key")
+    secrets.set("local_llm_api_key", "resolved-local-key")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert captured_inputs, "legacy facade must call runtime resolution"
+    runtime_input = captured_inputs[0]
+    assert runtime_input.direct.local_llm_base_url == "http://legacy.local/v1"  # type: ignore[attr-defined]
+    assert runtime_input.direct.local_llm_model == "legacy-local-model"  # type: ignore[attr-defined]
+    assert runtime_input.translation.concurrency_limit == 2  # type: ignore[attr-defined]
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, LocalOpenAICompatibleLLMProvider)
+    assert provider.inner.base_url == "http://resolved.local/v1"
+    assert provider.inner.model == "resolved-local-model"
+    assert provider.inner.api_key == "resolved-local-key"
+    assert provider.inner.extra_body == {"resolved": True}
+    assert provider.semaphore._value == 9  # type: ignore[attr-defined]
+
+
 def test_create_llm_provider_openrouter_uses_secret_and_model() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
@@ -358,6 +456,51 @@ def test_create_llm_provider_openrouter_byok_still_uses_user_owned_secret_after_
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, OpenRouterLLMProvider)
     assert provider.inner.api_key == "pkce-user-key"
+
+
+def test_create_llm_provider_openrouter_qwen_byok_alias_uses_resolved_qwen_model() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.BYOK,
+            selection_alias=OpenRouterSelectionAlias.QWEN35_FLASH_BYOK,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+            routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "qwen-byok-key")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, OpenRouterLLMProvider)
+    assert provider.inner.api_key == "qwen-byok-key"
+    assert provider.inner.model == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
+    assert provider.inner.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+    assert provider.inner.provider_routing == OpenRouterProviderRouting.DEFAULT
+
+
+def test_create_llm_provider_openrouter_qwen_byok_deepseek_only_skips_fallback_racing() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.BYOK,
+            selection_alias=OpenRouterSelectionAlias.QWEN35_FLASH_BYOK,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH,
+            provider_routing=OpenRouterProviderRouting.DEEPSEEK_ONLY,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "qwen-byok-key")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, OpenRouterLLMProvider)
+    assert not isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert provider.inner.model == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
+    assert provider.inner.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
 
 
 def test_create_llm_provider_openrouter_passes_runtime_logging() -> None:
@@ -447,6 +590,30 @@ def test_create_llm_provider_openrouter_deepseek_only_skips_openrouter_fallback_
     assert provider.inner.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
 
 
+def test_create_llm_provider_openrouter_deepseek_byok_deepseek_only_skips_fallback_racing() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.DEEPSEEK_V4_FLASH,
+            selected_source=OpenRouterCredentialSource.BYOK,
+            selection_alias=OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_BYOK,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.QWEN35_FLASH,
+            provider_routing=OpenRouterProviderRouting.DEEPSEEK_ONLY,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "byok-key")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, OpenRouterLLMProvider)
+    assert not isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert provider.inner.api_key == "byok-key"
+    assert provider.inner.model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
+    assert provider.inner.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
+
+
 def test_create_llm_provider_openrouter_deepseek_china_fallback_uses_deepseek_only_routing() -> (
     None
 ):
@@ -481,6 +648,49 @@ def test_create_llm_provider_openrouter_deepseek_china_fallback_uses_deepseek_on
     assert isinstance(fallback_provider, OpenRouterLLMProvider)
     assert fallback_provider.model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
     assert fallback_provider.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
+
+
+def test_create_llm_provider_from_resolved_openrouter_fallback_uses_resolved_routing() -> None:
+    resolved = ResolvedLLMConfig(
+        provider="openrouter",
+        model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
+        credential=ResolvedCredentialRequirement(
+            source=CREDENTIAL_SOURCE_SECRET_STORE,
+            required=True,
+            reference="openrouter:byok",
+        ),
+        fallback_provider="openrouter",
+        fallback_model=OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value,
+        fallback_credential=ResolvedCredentialRequirement(
+            source=CREDENTIAL_SOURCE_SECRET_STORE,
+            required=True,
+            reference="openrouter:byok",
+        ),
+        fallback_provider_routing="deepseek_only",
+        routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST.value,
+        provider_routing=OpenRouterProviderRouting.DEFAULT.value,
+        concurrency_limit=3,
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "or-key")
+
+    provider = create_llm_provider_from_resolved_config(resolved, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.primary, OpenRouterLLMProvider)
+    assert provider.inner.primary.model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value
+    assert provider.inner.primary.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+    assert provider.inner.primary.provider_routing == OpenRouterProviderRouting.DEFAULT
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+
+    fallback_provider = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_provider, OpenRouterLLMProvider)
+    assert fallback_provider.model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
+    assert fallback_provider.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+    assert fallback_provider.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
+    assert provider.semaphore._value == 3  # type: ignore[attr-defined]
 
 
 def test_create_llm_provider_openrouter_direct_managed_reuse_forwards_cached_user_identifier(

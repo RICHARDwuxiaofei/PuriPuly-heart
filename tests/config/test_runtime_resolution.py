@@ -521,6 +521,55 @@ def test_openrouter_deepseek_only_primary_suppresses_fallback_fields() -> None:
     assert config.fallback_provider_routing is None
 
 
+def test_openrouter_deepseek_byok_deepseek_only_preserves_routing_and_suppresses_fallback() -> None:
+    runtime_resolution = _runtime_resolution_module()
+    resolved = _resolved_module()
+    openrouter_intent = runtime_resolution.normalize_openrouter_runtime_intent(
+        provider_llm="openrouter",
+        model="deepseek/deepseek-v4-flash",
+        selected_source="byok",
+        fallback_selection_alias="qwen35_flash",
+        routing_mode="parasail_first",
+        provider_routing="deepseek_only",
+        broker_base_url="https://broker.fixture.test/v1",
+    )
+    translation_intent = runtime_resolution.derive_translation_runtime_intent_from_compatibility(
+        provider_llm="openrouter",
+        openrouter_model=openrouter_intent.model,
+        openrouter_selected_source=openrouter_intent.selected_source,
+        openrouter_provider_routing=openrouter_intent.provider_routing,
+        concurrency_limit=8,
+    )
+
+    config = runtime_resolution.resolve_llm_config(
+        runtime_resolution.RuntimeResolutionInput(
+            translation=translation_intent,
+            openrouter=openrouter_intent,
+        )
+    )
+
+    assert translation_intent.model == runtime_resolution.TRANSLATION_MODEL_DEEPSEEK_V4_FLASH
+    assert translation_intent.connection == runtime_resolution.TRANSLATION_CONNECTION_OPENROUTER
+    assert config.provider == "openrouter"
+    assert config.model == "deepseek/deepseek-v4-flash"
+    assert config.credential == resolved.ResolvedCredentialRequirement(
+        source=resolved.CREDENTIAL_SOURCE_SECRET_STORE,
+        required=True,
+        reference="openrouter:byok",
+    )
+    assert config.routing_mode == "parasail_first"
+    assert config.provider_routing == "deepseek_only"
+    assert config.service_endpoint == "https://broker.fixture.test/v1"
+    assert config.fallback_provider is None
+    assert config.fallback_model is None
+    assert config.fallback_credential == resolved.ResolvedCredentialRequirement(
+        source=resolved.CREDENTIAL_SOURCE_NONE,
+        required=False,
+        reference=None,
+    )
+    assert config.fallback_provider_routing is None
+
+
 def test_legacy_current_openrouter_aliases_normalize_to_canonical_intent_and_resolve() -> None:
     runtime_resolution = _runtime_resolution_module()
     profiles = _profiles_module()
@@ -698,6 +747,101 @@ def test_missing_translation_openrouter_compatibility_values_derive_exact_runtim
     )
     assert config.fallback_provider_routing == "default"
     assert config.concurrency_limit == 4
+
+
+@pytest.mark.parametrize(
+    ("selected_source", "expected_credential_source", "expected_credential_reference"),
+    [
+        ("byok", "secret_store", "openrouter:byok"),
+        ("managed", "managed", "openrouter:managed"),
+    ],
+)
+def test_openrouter_qwen_primary_compatibility_preserves_model_and_source(
+    selected_source: str,
+    expected_credential_source: str,
+    expected_credential_reference: str,
+) -> None:
+    runtime_resolution = _runtime_resolution_module()
+    resolved = _resolved_module()
+    openrouter_intent = runtime_resolution.normalize_openrouter_runtime_intent(
+        provider_llm="openrouter",
+        model="qwen/qwen3.5-flash-02-23",
+        selected_source=selected_source,
+        fallback_selection_alias="none",
+        routing_mode="parasail_first",
+        provider_routing="default",
+        broker_base_url="https://broker.fixture.test/v1",
+    )
+    translation_intent = runtime_resolution.derive_translation_runtime_intent_from_compatibility(
+        provider_llm="openrouter",
+        openrouter_model=openrouter_intent.model,
+        openrouter_selected_source=openrouter_intent.selected_source,
+        openrouter_provider_routing=openrouter_intent.provider_routing,
+        concurrency_limit=8,
+    )
+
+    config = runtime_resolution.resolve_llm_config(
+        runtime_resolution.RuntimeResolutionInput(
+            translation=translation_intent,
+            openrouter=openrouter_intent,
+        )
+    )
+
+    assert config.provider == "openrouter"
+    assert config.model == "qwen/qwen3.5-flash-02-23"
+    assert config.credential == resolved.ResolvedCredentialRequirement(
+        source=expected_credential_source,
+        required=True,
+        reference=expected_credential_reference,
+    )
+    assert config.routing_mode == "parasail_first"
+    assert config.provider_routing == "default"
+    assert config.service_endpoint == "https://broker.fixture.test/v1"
+    assert config.fallback_provider is None
+    assert config.fallback_model is None
+    assert config.concurrency_limit == 8
+
+
+def test_openrouter_qwen_primary_deepseek_only_preserves_routing_and_suppresses_fallback() -> None:
+    runtime_resolution = _runtime_resolution_module()
+    resolved = _resolved_module()
+    openrouter_intent = runtime_resolution.normalize_openrouter_runtime_intent(
+        provider_llm="openrouter",
+        model="qwen/qwen3.5-flash-02-23",
+        selected_source="byok",
+        fallback_selection_alias="deepseek_v4_flash",
+        routing_mode="parasail_first",
+        provider_routing="deepseek_only",
+        broker_base_url="https://broker.fixture.test/v1",
+    )
+    translation_intent = runtime_resolution.derive_translation_runtime_intent_from_compatibility(
+        provider_llm="openrouter",
+        openrouter_model=openrouter_intent.model,
+        openrouter_selected_source=openrouter_intent.selected_source,
+        openrouter_provider_routing=openrouter_intent.provider_routing,
+        concurrency_limit=8,
+    )
+
+    config = runtime_resolution.resolve_llm_config(
+        runtime_resolution.RuntimeResolutionInput(
+            translation=translation_intent,
+            openrouter=openrouter_intent,
+        )
+    )
+
+    assert translation_intent.model == runtime_resolution.TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH
+    assert config.provider == "openrouter"
+    assert config.model == "qwen/qwen3.5-flash-02-23"
+    assert config.provider_routing == "deepseek_only"
+    assert config.routing_mode == "parasail_first"
+    assert config.fallback_provider is None
+    assert config.fallback_model is None
+    assert config.fallback_credential == resolved.ResolvedCredentialRequirement(
+        source=resolved.CREDENTIAL_SOURCE_NONE,
+        required=False,
+        reference=None,
+    )
+    assert config.fallback_provider_routing is None
 
 
 def test_missing_openrouter_source_defaults_to_byok_for_openrouter_provider() -> None:

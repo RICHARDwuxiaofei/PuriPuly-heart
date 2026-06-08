@@ -3,25 +3,47 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
-from puripuly_heart.config.llm_profiles import (
-    LLM_PROVIDER_GEMINI,
-    LLM_PROVIDER_OPENROUTER,
-    openrouter_alias_for_fields,
-    profile_for_alias,
-    resolve_openrouter_fallback_model,
+from puripuly_heart.config.llm_profiles import openrouter_alias_for_fields
+from puripuly_heart.config.resolved import (
+    CREDENTIAL_SOURCE_MANAGED,
+    CREDENTIAL_SOURCE_NONE,
+    CREDENTIAL_SOURCE_SECRET_STORE,
+    ResolvedCredentialRequirement,
+    ResolvedLLMConfig,
+)
+from puripuly_heart.config.runtime_resolution import (
+    CREDENTIAL_REF_OPENROUTER_BYOK,
+    CREDENTIAL_REF_OPENROUTER_MANAGED,
+    CREDENTIAL_REF_QWEN_BEIJING,
+    CREDENTIAL_REF_QWEN_SINGAPORE,
+    PROVIDER_DEEPSEEK,
+    PROVIDER_GEMINI,
+    PROVIDER_LOCAL_LLM,
+    PROVIDER_OPENROUTER,
+    PROVIDER_QWEN,
+    TRANSLATION_CONNECTION_OFFICIAL_BYOK,
+    TRANSLATION_CONNECTION_OPENROUTER,
+    TRANSLATION_MODEL_QWEN_35_PLUS,
+    DirectProviderRuntimeIntent,
+    RuntimeResolutionInput,
+    derive_translation_runtime_intent_from_compatibility,
+    normalize_openrouter_runtime_intent,
+    normalize_translation_runtime_intent,
+    resolve_llm_config,
 )
 from puripuly_heart.config.settings import (
     STT_INTERNAL_SAMPLE_RATE_HZ,
     AppSettings,
     LLMProviderName,
     OpenRouterCredentialSource,
-    OpenRouterFallbackSelectionAlias,
     OpenRouterLLMModel,
     OpenRouterProviderRouting,
+    OpenRouterRoutingMode,
     OpenRouterSelectionAlias,
     QwenRegion,
     SecretsBackend,
@@ -31,9 +53,10 @@ from puripuly_heart.config.settings import (
 from puripuly_heart.core.llm import FallbackRacingLLMProvider
 from puripuly_heart.core.llm.provider import LLMProvider, SemaphoreLLMProvider
 from puripuly_heart.core.openrouter_credentials import (
+    OPENROUTER_BYOK_API_KEY_ENV,
+    OPENROUTER_BYOK_API_KEY_SECRET,
+    OPENROUTER_MANAGED_API_KEY_SECRET,
     load_managed_openrouter_user_identifier,
-    require_openrouter_execution_api_key,
-    resolve_openrouter_credentials,
 )
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.core.storage.secrets import (
@@ -98,130 +121,6 @@ class _LazyFactoryLLMProvider(LLMProvider):
             await self._delegate.close()
 
 
-def _resolve_primary_openrouter_alias(settings: AppSettings) -> str:
-    if settings.openrouter.selection_alias is not None:
-        return settings.openrouter.selection_alias.value
-    if settings.openrouter.selected_source == OpenRouterCredentialSource.NONE:
-        raise ValueError("OpenRouter selected source must not be `none` for execution")
-    return openrouter_alias_for_fields(
-        model=settings.openrouter.llm_model.value,
-        source=settings.openrouter.selected_source.value,
-    )
-
-
-def _settings_for_openrouter_alias(settings: AppSettings, *, alias: str) -> AppSettings:
-    profile = profile_for_alias(alias)
-    if profile.openrouter_model is None:
-        raise ValueError(f"LLM selection alias `{alias}` is not an OpenRouter profile")
-    canonical_alias = OpenRouterSelectionAlias(
-        openrouter_alias_for_fields(
-            model=profile.openrouter_model,
-            source=profile.openrouter_source,
-        )
-    )
-    return replace(
-        settings,
-        openrouter=replace(
-            settings.openrouter,
-            llm_model=OpenRouterLLMModel(profile.openrouter_model),
-            selected_source=OpenRouterCredentialSource(profile.openrouter_source),
-            selection_alias=canonical_alias,
-        ),
-    )
-
-
-def _settings_for_openrouter_fallback_model(
-    settings: AppSettings,
-    *,
-    fallback_model: str,
-    provider_routing: OpenRouterProviderRouting | None = None,
-) -> AppSettings:
-    resolved_settings = replace(settings)
-    resolved_settings.openrouter = replace(settings.openrouter)
-    resolved_settings.openrouter.llm_model = OpenRouterLLMModel(fallback_model)
-    resolved_settings.openrouter.selection_alias = None
-    if provider_routing is not None:
-        resolved_settings.openrouter.provider_routing = provider_routing
-    return resolved_settings
-
-
-def _provider_routing_for_openrouter_fallback(
-    fallback_selection_alias: OpenRouterFallbackSelectionAlias,
-) -> OpenRouterProviderRouting:
-    if fallback_selection_alias == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH_CHINA:
-        return OpenRouterProviderRouting.DEEPSEEK_ONLY
-    return OpenRouterProviderRouting.DEFAULT
-
-
-def _create_llm_provider_from_alias_profile(
-    settings: AppSettings,
-    *,
-    alias: str,
-    secrets: SecretStore,
-    managed_release_service: object | None,
-    managed_delegate_ready: Callable[[], object] | None,
-    runtime_logging: SessionRuntimeLoggingService | None,
-) -> LLMProvider:
-    profile = profile_for_alias(alias)
-    if profile.provider == LLM_PROVIDER_GEMINI:
-        api_key = require_secret(secrets, key="google_api_key", env_var="GOOGLE_API_KEY")
-        return GeminiLLMProvider(
-            api_key=api_key,
-            model=profile.gemini_model or settings.gemini.llm_model.value,
-            runtime_logging=runtime_logging,
-        )
-    if profile.provider != LLM_PROVIDER_OPENROUTER:
-        raise ValueError(f"Unsupported LLM selection alias: {alias}")
-
-    alias_settings = _settings_for_openrouter_alias(settings, alias=alias)
-    alias_managed_release_service = _managed_release_service_for_alias(
-        managed_release_service,
-        alias_settings=alias_settings,
-    )
-    if (
-        alias_settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
-        and alias_managed_release_service is None
-    ):
-        raise ValueError(MANAGED_OPENROUTER_RELEASE_SERVICE_REQUIRED_ERROR)
-
-    resolution = resolve_openrouter_credentials(alias_settings, secrets=secrets)
-    if (
-        alias_settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
-        and resolution.api_key is None
-        and alias_managed_release_service is not None
-    ):
-        from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterLLMProvider
-
-        return ManagedOpenRouterLLMProvider(
-            release_service=alias_managed_release_service,
-            delegate_factory=lambda api_key: OpenRouterLLMProvider(
-                api_key=api_key,
-                user_identifier=load_managed_openrouter_user_identifier(
-                    alias_settings,
-                    secrets=secrets,
-                ),
-                model=alias_settings.openrouter.llm_model.value,
-                routing_mode=settings.openrouter.routing_mode,
-                provider_routing=alias_settings.openrouter.provider_routing,
-                runtime_logging=runtime_logging,
-            ),
-            on_delegate_ready=managed_delegate_ready,
-        )
-
-    api_key = require_openrouter_execution_api_key(alias_settings, secrets=secrets)
-    user_identifier = None
-    if alias_settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:
-        user_identifier = load_managed_openrouter_user_identifier(alias_settings, secrets=secrets)
-    return OpenRouterLLMProvider(
-        api_key=api_key,
-        user_identifier=user_identifier,
-        model=alias_settings.openrouter.llm_model.value,
-        routing_mode=settings.openrouter.routing_mode,
-        provider_routing=alias_settings.openrouter.provider_routing,
-        runtime_logging=runtime_logging,
-    )
-
-
 def _managed_release_service_for_alias(
     managed_release_service: object | None,
     *,
@@ -256,65 +155,6 @@ def _managed_release_service_for_alias(
     )
 
 
-def _create_openrouter_fallback_provider(
-    *,
-    settings: AppSettings,
-    secrets: SecretStore,
-    managed_release_service: object | None,
-    managed_delegate_ready: Callable[[], object] | None,
-    runtime_logging: SessionRuntimeLoggingService | None,
-) -> LLMProvider:
-    fallback_model = resolve_openrouter_fallback_model(
-        settings.openrouter.fallback_selection_alias.value
-    )
-    if fallback_model is None:
-        raise ValueError("OpenRouter fallback selection must resolve to a model")
-
-    resolved_settings = _settings_for_openrouter_fallback_model(
-        settings,
-        fallback_model=fallback_model,
-        provider_routing=_provider_routing_for_openrouter_fallback(
-            settings.openrouter.fallback_selection_alias
-        ),
-    )
-
-    if settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:
-        if managed_release_service is None:
-            raise ValueError(MANAGED_OPENROUTER_RELEASE_SERVICE_REQUIRED_ERROR)
-
-        from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterLLMProvider
-
-        fallback_managed_release_service = _managed_release_service_for_alias(
-            managed_release_service,
-            alias_settings=resolved_settings,
-        )
-
-        return ManagedOpenRouterLLMProvider(
-            release_service=fallback_managed_release_service,
-            delegate_factory=lambda api_key: OpenRouterLLMProvider(
-                api_key=api_key,
-                user_identifier=load_managed_openrouter_user_identifier(
-                    resolved_settings,
-                    secrets=secrets,
-                ),
-                model=resolved_settings.openrouter.llm_model.value,
-                routing_mode=resolved_settings.openrouter.routing_mode,
-                provider_routing=resolved_settings.openrouter.provider_routing,
-                runtime_logging=runtime_logging,
-            ),
-            on_delegate_ready=managed_delegate_ready,
-        )
-
-    api_key = require_openrouter_execution_api_key(resolved_settings, secrets=secrets)
-    return OpenRouterLLMProvider(
-        api_key=api_key,
-        model=resolved_settings.openrouter.llm_model.value,
-        routing_mode=resolved_settings.openrouter.routing_mode,
-        provider_routing=resolved_settings.openrouter.provider_routing,
-        runtime_logging=runtime_logging,
-    )
-
-
 def _shared_managed_release_service_for_fallback(
     primary: LLMProvider,
     managed_release_service: object | None,
@@ -324,6 +164,434 @@ def _shared_managed_release_service_for_fallback(
     if isinstance(primary, ManagedOpenRouterLLMProvider):
         return primary.release_service
     return managed_release_service
+
+
+def _runtime_resolution_input_from_compatibility_settings(
+    settings: AppSettings,
+) -> RuntimeResolutionInput:
+    openrouter_intent = normalize_openrouter_runtime_intent(
+        provider_llm=settings.provider.llm,
+        model=settings.openrouter.llm_model,
+        selected_source=settings.openrouter.selected_source,
+        selection_alias=settings.openrouter.selection_alias,
+        fallback_selection_alias=settings.openrouter.fallback_selection_alias,
+        routing_mode=settings.openrouter.routing_mode,
+        provider_routing=settings.openrouter.provider_routing,
+        broker_base_url=settings.openrouter.broker_base_url,
+    )
+    translation_intent = derive_translation_runtime_intent_from_compatibility(
+        provider_llm=settings.provider.llm,
+        openrouter_model=openrouter_intent.model,
+        openrouter_selected_source=openrouter_intent.selected_source,
+        openrouter_provider_routing=openrouter_intent.provider_routing,
+        gemini_model=settings.gemini.llm_model,
+        qwen_model=settings.qwen.llm_model,
+        deepseek_model=settings.deepseek.llm_model,
+        concurrency_limit=settings.llm.concurrency_limit,
+    )
+    if settings.provider.llm == LLMProviderName.QWEN:
+        translation_intent = normalize_translation_runtime_intent(
+            model=TRANSLATION_MODEL_QWEN_35_PLUS,
+            connection=TRANSLATION_CONNECTION_OFFICIAL_BYOK,
+            concurrency_limit=settings.llm.concurrency_limit,
+        )
+    elif (
+        settings.provider.llm == LLMProviderName.OPENROUTER
+        and openrouter_intent.selected_source == OpenRouterCredentialSource.NONE.value
+    ):
+        translation_intent = normalize_translation_runtime_intent(
+            model=translation_intent.model,
+            connection=TRANSLATION_CONNECTION_OPENROUTER,
+            concurrency_limit=settings.llm.concurrency_limit,
+        )
+    direct_intent = DirectProviderRuntimeIntent(
+        gemini_3_flash_model=settings.gemini.llm_model.value,
+        gemini_31_flash_lite_model=settings.gemini.llm_model.value,
+        deepseek_v4_flash_model=settings.deepseek.llm_model.value,
+        deepseek_v4_pro_model=settings.deepseek.llm_model.value,
+        qwen_35_plus_model=settings.qwen.llm_model.value,
+        qwen_region=settings.qwen.region.value,
+        local_llm_backend=settings.local_llm.backend.value,
+        local_llm_base_url=settings.local_llm.base_url,
+        local_llm_model=settings.local_llm.model,
+        local_llm_extra_body=settings.local_llm.extra_body,
+    )
+    return RuntimeResolutionInput(
+        translation=translation_intent,
+        openrouter=openrouter_intent,
+        direct=direct_intent,
+    )
+
+
+def _plain_resolved_option_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _plain_resolved_option_value(child) for key, child in value.items()}
+    if isinstance(value, tuple):
+        return [_plain_resolved_option_value(child) for child in value]
+    return value
+
+
+def _resolved_option_mapping(
+    values: Mapping[str, object],
+    key: str,
+) -> dict[str, object]:
+    value = values.get(key)
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(option_key): _plain_resolved_option_value(option_value)
+        for option_key, option_value in value.items()
+    }
+
+
+def _normalize_secret_value(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _require_openrouter_byok_api_key(secrets: SecretStore) -> str:
+    value = _normalize_secret_value(secrets.get(OPENROUTER_BYOK_API_KEY_SECRET))
+    if value is not None:
+        return value
+    value = _normalize_secret_value(os.getenv(OPENROUTER_BYOK_API_KEY_ENV))
+    if value is not None:
+        return value
+    raise ValueError(
+        f"Missing secret `{OPENROUTER_BYOK_API_KEY_SECRET}` "
+        f"(or env var {OPENROUTER_BYOK_API_KEY_ENV})"
+    )
+
+
+def _openrouter_managed_api_key(secrets: SecretStore) -> str | None:
+    return _normalize_secret_value(secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET))
+
+
+def _openrouter_source_for_resolved_credential(
+    credential: ResolvedCredentialRequirement,
+) -> OpenRouterCredentialSource:
+    if (
+        credential.source == CREDENTIAL_SOURCE_MANAGED
+        or credential.reference == CREDENTIAL_REF_OPENROUTER_MANAGED
+    ):
+        return OpenRouterCredentialSource.MANAGED
+    if (
+        credential.source == CREDENTIAL_SOURCE_SECRET_STORE
+        and credential.reference == CREDENTIAL_REF_OPENROUTER_BYOK
+    ):
+        return OpenRouterCredentialSource.BYOK
+    if credential.source == CREDENTIAL_SOURCE_NONE:
+        return OpenRouterCredentialSource.NONE
+    raise ValueError("Unsupported OpenRouter resolved credential reference")
+
+
+def _settings_for_resolved_openrouter_fields(
+    settings: AppSettings | None,
+    *,
+    model: str,
+    service_endpoint: str | None,
+    selected_source: OpenRouterCredentialSource,
+    provider_routing: OpenRouterProviderRouting,
+    routing_mode: OpenRouterRoutingMode,
+    include_selection_alias: bool,
+) -> AppSettings:
+    resolved_settings = replace(settings) if settings is not None else AppSettings()
+    resolved_settings.openrouter = replace(resolved_settings.openrouter)
+    resolved_settings.openrouter.llm_model = OpenRouterLLMModel(model)
+    resolved_settings.openrouter.selected_source = selected_source
+    resolved_settings.openrouter.routing_mode = routing_mode
+    resolved_settings.openrouter.provider_routing = provider_routing
+    resolved_settings.openrouter.broker_base_url = service_endpoint or ""
+    selection_alias = None
+    if include_selection_alias:
+        alias_value = openrouter_alias_for_fields(
+            model=model,
+            source=selected_source.value,
+        )
+        if alias_value is not None:
+            selection_alias = OpenRouterSelectionAlias(alias_value)
+    resolved_settings.openrouter.selection_alias = selection_alias
+    return resolved_settings
+
+
+def _openrouter_routing_mode(value: str | None) -> OpenRouterRoutingMode:
+    if value is None:
+        return OpenRouterRoutingMode.LATENCY
+    return OpenRouterRoutingMode(value)
+
+
+def _openrouter_provider_routing(value: str | None) -> OpenRouterProviderRouting:
+    if value is None:
+        return OpenRouterProviderRouting.DEFAULT
+    return OpenRouterProviderRouting(value)
+
+
+def _qwen_api_key_for_resolved_credential(
+    credential: ResolvedCredentialRequirement,
+    *,
+    secrets: SecretStore,
+) -> str:
+    if credential.reference == CREDENTIAL_REF_QWEN_SINGAPORE:
+        return require_secret_any(
+            secrets,
+            key="alibaba_api_key_singapore",
+            env_vars=("ALIBABA_API_KEY_SINGAPORE", "ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
+            legacy_keys=("alibaba_api_key",),
+        )
+    if credential.reference in (CREDENTIAL_REF_QWEN_BEIJING, None):
+        return require_secret_any(
+            secrets,
+            key="alibaba_api_key_beijing",
+            env_vars=("ALIBABA_API_KEY_BEIJING", "ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
+            legacy_keys=("alibaba_api_key",),
+        )
+    raise ValueError("Unsupported Qwen resolved credential reference")
+
+
+def _qwen_sync_base_url(config: ResolvedLLMConfig) -> str:
+    if config.service_endpoint:
+        return config.service_endpoint
+    if config.region == QwenRegion.SINGAPORE.value:
+        return "https://dashscope-intl.aliyuncs.com/api/v1"
+    return "https://dashscope.aliyuncs.com/api/v1"
+
+
+def _qwen_async_base_url(config: ResolvedLLMConfig) -> str:
+    sync_base_url = _qwen_sync_base_url(config).rstrip("/")
+    if sync_base_url.endswith("/compatible-mode/v1"):
+        return sync_base_url
+    if sync_base_url.endswith("/api/v1"):
+        return sync_base_url[: -len("/api/v1")] + "/compatible-mode/v1"
+    return sync_base_url + "/compatible-mode/v1"
+
+
+def _openrouter_provider_from_resolved_config(
+    config: ResolvedLLMConfig,
+    *,
+    secrets: SecretStore,
+    managed_release_service: object | None,
+    managed_delegate_ready: Callable[[], object] | None,
+    runtime_logging: SessionRuntimeLoggingService | None,
+    compatibility_settings: AppSettings | None,
+    force_managed_wrapper: bool = False,
+    include_selection_alias: bool = True,
+) -> LLMProvider:
+    return _openrouter_provider_from_resolved_fields(
+        model=config.model,
+        credential=config.credential,
+        service_endpoint=config.service_endpoint,
+        routing_mode_value=config.routing_mode,
+        provider_routing_value=config.provider_routing,
+        secrets=secrets,
+        managed_release_service=managed_release_service,
+        managed_delegate_ready=managed_delegate_ready,
+        runtime_logging=runtime_logging,
+        compatibility_settings=compatibility_settings,
+        force_managed_wrapper=force_managed_wrapper,
+        include_selection_alias=include_selection_alias,
+    )
+
+
+def _openrouter_provider_from_resolved_fields(
+    *,
+    model: str,
+    credential: ResolvedCredentialRequirement,
+    service_endpoint: str | None,
+    routing_mode_value: str | None,
+    provider_routing_value: str | None,
+    secrets: SecretStore,
+    managed_release_service: object | None,
+    managed_delegate_ready: Callable[[], object] | None,
+    runtime_logging: SessionRuntimeLoggingService | None,
+    compatibility_settings: AppSettings | None,
+    force_managed_wrapper: bool = False,
+    include_selection_alias: bool = True,
+) -> LLMProvider:
+    selected_source = _openrouter_source_for_resolved_credential(credential)
+    if selected_source == OpenRouterCredentialSource.NONE:
+        raise ValueError("OpenRouter selected source must not be `none` for execution")
+
+    routing_mode = _openrouter_routing_mode(routing_mode_value)
+    provider_routing = _openrouter_provider_routing(provider_routing_value)
+    openrouter_settings = _settings_for_resolved_openrouter_fields(
+        compatibility_settings,
+        model=model,
+        service_endpoint=service_endpoint,
+        selected_source=selected_source,
+        provider_routing=provider_routing,
+        routing_mode=routing_mode,
+        include_selection_alias=include_selection_alias,
+    )
+
+    if selected_source == OpenRouterCredentialSource.MANAGED:
+        if managed_release_service is None:
+            raise ValueError(MANAGED_OPENROUTER_RELEASE_SERVICE_REQUIRED_ERROR)
+        alias_managed_release_service = _managed_release_service_for_alias(
+            managed_release_service,
+            alias_settings=openrouter_settings,
+        )
+        managed_api_key = _openrouter_managed_api_key(secrets)
+        if force_managed_wrapper or managed_api_key is None:
+            from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterLLMProvider
+
+            return ManagedOpenRouterLLMProvider(
+                release_service=alias_managed_release_service,
+                delegate_factory=lambda api_key: OpenRouterLLMProvider(
+                    api_key=api_key,
+                    user_identifier=load_managed_openrouter_user_identifier(
+                        openrouter_settings,
+                        secrets=secrets,
+                    ),
+                    model=model,
+                    routing_mode=routing_mode,
+                    provider_routing=provider_routing,
+                    runtime_logging=runtime_logging,
+                ),
+                on_delegate_ready=managed_delegate_ready,
+            )
+        return OpenRouterLLMProvider(
+            api_key=managed_api_key,
+            user_identifier=load_managed_openrouter_user_identifier(
+                openrouter_settings,
+                secrets=secrets,
+            ),
+            model=model,
+            routing_mode=routing_mode,
+            provider_routing=provider_routing,
+            runtime_logging=runtime_logging,
+        )
+
+    api_key = _require_openrouter_byok_api_key(secrets)
+    return OpenRouterLLMProvider(
+        api_key=api_key,
+        model=model,
+        routing_mode=routing_mode,
+        provider_routing=provider_routing,
+        runtime_logging=runtime_logging,
+    )
+
+
+def _base_llm_provider_from_resolved_config(
+    config: ResolvedLLMConfig,
+    *,
+    secrets: SecretStore,
+    managed_release_service: object | None,
+    managed_delegate_ready: Callable[[], object] | None,
+    runtime_logging: SessionRuntimeLoggingService | None,
+    compatibility_settings: AppSettings | None,
+    qwen_low_latency_mode: bool,
+) -> LLMProvider:
+    if config.provider == PROVIDER_GEMINI:
+        api_key = require_secret(secrets, key="google_api_key", env_var="GOOGLE_API_KEY")
+        return GeminiLLMProvider(
+            api_key=api_key,
+            model=config.model,
+            runtime_logging=runtime_logging,
+        )
+
+    if config.provider == PROVIDER_OPENROUTER:
+        base = _openrouter_provider_from_resolved_config(
+            config,
+            secrets=secrets,
+            managed_release_service=managed_release_service,
+            managed_delegate_ready=managed_delegate_ready,
+            runtime_logging=runtime_logging,
+            compatibility_settings=compatibility_settings,
+        )
+        if config.fallback_provider is not None:
+            if config.fallback_provider != PROVIDER_OPENROUTER or config.fallback_model is None:
+                raise ValueError("Resolved OpenRouter fallback must provide an OpenRouter model")
+            fallback_managed_release_service = _shared_managed_release_service_for_fallback(
+                base,
+                managed_release_service,
+            )
+            base = FallbackRacingLLMProvider(
+                primary=base,
+                fallback=_LazyFactoryLLMProvider(
+                    factory=lambda: _openrouter_provider_from_resolved_fields(
+                        model=config.fallback_model,
+                        credential=config.fallback_credential,
+                        service_endpoint=config.service_endpoint,
+                        routing_mode_value=config.routing_mode,
+                        provider_routing_value=config.fallback_provider_routing,
+                        secrets=secrets,
+                        managed_release_service=fallback_managed_release_service,
+                        managed_delegate_ready=managed_delegate_ready,
+                        runtime_logging=runtime_logging,
+                        compatibility_settings=compatibility_settings,
+                        force_managed_wrapper=True,
+                        include_selection_alias=False,
+                    )
+                ),
+                runtime_logging=runtime_logging,
+            )
+        return base
+
+    if config.provider == PROVIDER_QWEN:
+        api_key = _qwen_api_key_for_resolved_credential(config.credential, secrets=secrets)
+        if qwen_low_latency_mode:
+            return AsyncQwenLLMProvider(
+                api_key=api_key,
+                base_url=_qwen_async_base_url(config),
+                model=config.model,
+                runtime_logging=runtime_logging,
+            )
+        return QwenLLMProvider(
+            api_key=api_key,
+            base_url=_qwen_sync_base_url(config),
+            model=config.model,
+            runtime_logging=runtime_logging,
+        )
+
+    if config.provider == PROVIDER_DEEPSEEK:
+        api_key = require_secret(
+            secrets,
+            key="deepseek_api_key",
+            env_var="DEEPSEEK_API_KEY",
+        )
+        return DeepSeekLLMProvider(
+            api_key=api_key,
+            model=config.model,
+            runtime_logging=runtime_logging,
+        )
+
+    if config.provider == PROVIDER_LOCAL_LLM:
+        api_key = (secrets.get("local_llm_api_key") or "").strip()
+        return LocalOpenAICompatibleLLMProvider(
+            base_url=config.base_url or "http://127.0.0.1:11434/v1",
+            model=config.model,
+            extra_body=_resolved_option_mapping(config.provider_options, "extra_body"),
+            api_key=api_key,
+            runtime_logging=runtime_logging,
+        )
+
+    raise ValueError(f"Unsupported LLM provider: {config.provider}")
+
+
+def create_llm_provider_from_resolved_config(
+    config: ResolvedLLMConfig,
+    *,
+    secrets: SecretStore,
+    managed_release_service: object | None = None,
+    managed_delegate_ready: Callable[[], object] | None = None,
+    runtime_logging: SessionRuntimeLoggingService | None = None,
+    compatibility_settings: AppSettings | None = None,
+    qwen_low_latency_mode: bool = True,
+) -> LLMProvider:
+    base = _base_llm_provider_from_resolved_config(
+        config,
+        secrets=secrets,
+        managed_release_service=managed_release_service,
+        managed_delegate_ready=managed_delegate_ready,
+        runtime_logging=runtime_logging,
+        compatibility_settings=compatibility_settings,
+        qwen_low_latency_mode=qwen_low_latency_mode,
+    )
+    return SemaphoreLLMProvider(
+        inner=base,
+        semaphore=asyncio.Semaphore(config.concurrency_limit),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -439,106 +707,16 @@ def create_llm_provider(
     managed_delegate_ready: Callable[[], object] | None = None,
     runtime_logging: SessionRuntimeLoggingService | None = None,
 ) -> LLMProvider:
-    if settings.provider.llm == LLMProviderName.GEMINI:
-        api_key = require_secret(secrets, key="google_api_key", env_var="GOOGLE_API_KEY")
-        base: LLMProvider = GeminiLLMProvider(
-            api_key=api_key,
-            model=settings.gemini.llm_model.value,
-            runtime_logging=runtime_logging,
-        )
-    elif settings.provider.llm == LLMProviderName.OPENROUTER:
-        primary_alias = _resolve_primary_openrouter_alias(settings)
-        base = _create_llm_provider_from_alias_profile(
-            settings,
-            alias=primary_alias,
-            secrets=secrets,
-            managed_release_service=managed_release_service,
-            managed_delegate_ready=managed_delegate_ready,
-            runtime_logging=runtime_logging,
-        )
-        if (
-            settings.openrouter.fallback_selection_alias != OpenRouterFallbackSelectionAlias.NONE
-            and settings.openrouter.provider_routing != OpenRouterProviderRouting.DEEPSEEK_ONLY
-        ):
-            fallback_managed_release_service = _shared_managed_release_service_for_fallback(
-                base,
-                managed_release_service,
-            )
-            base = FallbackRacingLLMProvider(
-                primary=base,
-                fallback=_LazyFactoryLLMProvider(
-                    factory=lambda: _create_openrouter_fallback_provider(
-                        settings=settings,
-                        secrets=secrets,
-                        managed_release_service=fallback_managed_release_service,
-                        managed_delegate_ready=managed_delegate_ready,
-                        runtime_logging=runtime_logging,
-                    )
-                ),
-                runtime_logging=runtime_logging,
-            )
-    elif settings.provider.llm == LLMProviderName.QWEN:
-        from puripuly_heart.config.settings import QwenRegion
-
-        if settings.qwen.region == QwenRegion.BEIJING:
-            api_key = require_secret_any(
-                secrets,
-                key="alibaba_api_key_beijing",
-                env_vars=("ALIBABA_API_KEY_BEIJING", "ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
-                legacy_keys=("alibaba_api_key",),
-            )
-        else:
-            api_key = require_secret_any(
-                secrets,
-                key="alibaba_api_key_singapore",
-                env_vars=("ALIBABA_API_KEY_SINGAPORE", "ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
-                legacy_keys=("alibaba_api_key",),
-            )
-        if settings.stt.low_latency_mode:
-            # Low-latency mode: use httpx async client for immediate cancellation
-            base_url = settings.qwen.get_llm_base_url()
-            # Convert SDK URL to OpenAI-compatible URL
-            async_base_url = base_url.replace("/api/v1", "/compatible-mode/v1")
-            base = AsyncQwenLLMProvider(
-                api_key=api_key,
-                base_url=async_base_url,
-                model=settings.qwen.llm_model.value,
-                runtime_logging=runtime_logging,
-            )
-        else:
-            # Standard mode: use DashScope SDK
-            base = QwenLLMProvider(
-                api_key=api_key,
-                base_url=settings.qwen.get_llm_base_url(),
-                model=settings.qwen.llm_model.value,
-                runtime_logging=runtime_logging,
-            )
-    elif settings.provider.llm == LLMProviderName.DEEPSEEK:
-        api_key = require_secret(
-            secrets,
-            key="deepseek_api_key",
-            env_var="DEEPSEEK_API_KEY",
-        )
-        base = DeepSeekLLMProvider(
-            api_key=api_key,
-            model=settings.deepseek.llm_model.value,
-            runtime_logging=runtime_logging,
-        )
-    elif settings.provider.llm == LLMProviderName.LOCAL_LLM:
-        api_key = (secrets.get("local_llm_api_key") or "").strip()
-        base = LocalOpenAICompatibleLLMProvider(
-            base_url=settings.local_llm.base_url,
-            model=settings.local_llm.model,
-            extra_body=settings.local_llm.extra_body,
-            api_key=api_key,
-            runtime_logging=runtime_logging,
-        )
-    else:
-        raise ValueError(f"Unsupported LLM provider: {settings.provider.llm}")
-
-    return SemaphoreLLMProvider(
-        inner=base,
-        semaphore=asyncio.Semaphore(settings.llm.concurrency_limit),
+    runtime_input = _runtime_resolution_input_from_compatibility_settings(settings)
+    resolved = resolve_llm_config(runtime_input)
+    return create_llm_provider_from_resolved_config(
+        resolved,
+        secrets=secrets,
+        managed_release_service=managed_release_service,
+        managed_delegate_ready=managed_delegate_ready,
+        runtime_logging=runtime_logging,
+        compatibility_settings=settings,
+        qwen_low_latency_mode=settings.stt.low_latency_mode,
     )
 
 

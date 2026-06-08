@@ -35,6 +35,7 @@ TRANSLATION_MODEL_DEEPSEEK_V4_PRO: Final = "deepseek_v4_pro"
 TRANSLATION_MODEL_GEMINI_3_FLASH: Final = "gemini3_flash"
 TRANSLATION_MODEL_GEMINI_31_FLASH_LITE: Final = "gemini31_flash_lite"
 TRANSLATION_MODEL_QWEN_35_PLUS: Final = "qwen35_plus"
+TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH: Final = "openrouter_qwen35_flash"
 TRANSLATION_MODEL_LOCAL_LLM: Final = "local_llm"
 
 TranslationModelName: TypeAlias = Literal[
@@ -44,6 +45,7 @@ TranslationModelName: TypeAlias = Literal[
     "gemini3_flash",
     "gemini31_flash_lite",
     "qwen35_plus",
+    "openrouter_qwen35_flash",
     "local_llm",
 ]
 TRANSLATION_MODELS: Final[tuple[TranslationModelName, ...]] = (
@@ -53,6 +55,7 @@ TRANSLATION_MODELS: Final[tuple[TranslationModelName, ...]] = (
     TRANSLATION_MODEL_GEMINI_3_FLASH,
     TRANSLATION_MODEL_GEMINI_31_FLASH_LITE,
     TRANSLATION_MODEL_QWEN_35_PLUS,
+    TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH,
     TRANSLATION_MODEL_LOCAL_LLM,
 )
 
@@ -94,6 +97,10 @@ TRANSLATION_CONNECTIONS_BY_MODEL: Final[
         TRANSLATION_MODEL_GEMINI_3_FLASH: (TRANSLATION_CONNECTION_OFFICIAL_BYOK,),
         TRANSLATION_MODEL_GEMINI_31_FLASH_LITE: (TRANSLATION_CONNECTION_OFFICIAL_BYOK,),
         TRANSLATION_MODEL_QWEN_35_PLUS: (TRANSLATION_CONNECTION_OFFICIAL_BYOK,),
+        TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH: (
+            TRANSLATION_CONNECTION_MANAGED,
+            TRANSLATION_CONNECTION_OPENROUTER,
+        ),
         TRANSLATION_MODEL_LOCAL_LLM: (TRANSLATION_CONNECTION_OLLAMA,),
     }
 )
@@ -575,6 +582,16 @@ def derive_translation_runtime_intent_from_compatibility(
                 ),
                 concurrency_limit=concurrency,
             )
+        if openrouter_model_value == OPENROUTER_MODEL_QWEN_35_FLASH_02_23:
+            return TranslationRuntimeIntent(
+                model=TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH,
+                connection=_translation_connection_from_openrouter_source(
+                    openrouter_source,
+                    model=TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH,
+                    provider_routing=provider_routing,
+                ),
+                concurrency_limit=concurrency,
+            )
         return TranslationRuntimeIntent(
             model=TRANSLATION_MODEL_DEEPSEEK_V4_FLASH,
             connection=_default_translation_connection(TRANSLATION_MODEL_DEEPSEEK_V4_FLASH),
@@ -772,7 +789,11 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
         provider_routing = (
             "deepseek_only"
             if translation.connection == TRANSLATION_CONNECTION_MANAGED_CHINA
-            else "default"
+            else (
+                openrouter.provider_routing
+                if translation.connection == TRANSLATION_CONNECTION_OPENROUTER
+                else "default"
+            )
         )
         return _resolved_openrouter_config(
             model=OPENROUTER_MODEL_DEEPSEEK_V4_FLASH,
@@ -825,6 +846,15 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
             ),
             service_endpoint=_qwen_service_endpoint(direct.qwen_region),
             region=direct.qwen_region,
+            concurrency_limit=concurrency_limit,
+        )
+
+    if translation.model == TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH:
+        return _resolved_openrouter_config(
+            model=OPENROUTER_MODEL_QWEN_35_FLASH_02_23,
+            source=_openrouter_source_for_translation(translation.connection, openrouter),
+            openrouter=openrouter,
+            provider_routing=openrouter.provider_routing,
             concurrency_limit=concurrency_limit,
         )
 
@@ -891,6 +921,7 @@ __all__ = [
     "TRANSLATION_MODEL_GEMINI_31_FLASH_LITE",
     "TRANSLATION_MODEL_GEMMA4",
     "TRANSLATION_MODEL_LOCAL_LLM",
+    "TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH",
     "TRANSLATION_MODEL_QWEN_35_PLUS",
     "TRANSLATION_MODELS",
     "TranslationConnectionName",
