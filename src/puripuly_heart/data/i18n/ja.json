@@ -164,6 +164,7 @@
   "settings.overlay.failure.runtime_control_invalid": "デスクトップ字幕の変更を適用できませんでした",
   "settings.overlay.failure.runtime_crashed": "オーバーレイランタイムが終了しました",
   "settings.overlay.failure.unknown": "不明なオーバーレイエラー",
+  "settings.mutation.runtime_apply_failed": "設定は保存されましたが、ランタイムへの適用に失敗しました。",
   "settings.overlay.calibration": "キャリブレーション",
   "settings.overlay.calibration.anchor": "基準点",
   "settings.overlay.calibration.anchor.head_locked": "ヘッド固定",

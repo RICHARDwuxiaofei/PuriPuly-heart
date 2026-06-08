@@ -164,6 +164,7 @@
   "settings.overlay.failure.runtime_control_invalid": "Desktop captions could not apply the requested change",
   "settings.overlay.failure.runtime_crashed": "Overlay runtime crashed",
   "settings.overlay.failure.unknown": "Unknown overlay failure",
+  "settings.mutation.runtime_apply_failed": "Settings were saved, but runtime apply failed.",
   "settings.overlay.calibration": "Calibration",
   "settings.overlay.calibration.anchor": "Anchor",
   "settings.overlay.calibration.anchor.head_locked": "Head-Locked",

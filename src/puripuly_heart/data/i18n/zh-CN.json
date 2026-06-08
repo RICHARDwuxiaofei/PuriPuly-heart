@@ -164,6 +164,7 @@
     "settings.overlay.failure.runtime_control_invalid": "无法应用桌面字幕更改",
     "settings.overlay.failure.runtime_crashed": "叠加层运行时已崩溃",
     "settings.overlay.failure.unknown": "未知叠加层错误",
+    "settings.mutation.runtime_apply_failed": "设置已保存，但运行时应用失败。",
     "settings.overlay.calibration": "校准",
     "settings.overlay.calibration.anchor": "锚点",
     "settings.overlay.calibration.anchor.head_locked": "头部锁定",

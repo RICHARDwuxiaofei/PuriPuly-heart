@@ -34,6 +34,7 @@ GITHUB_STAR_SNACKBAR_KEYS = (
     "github_star.snackbar.action",
 )
 OVERLAY_STEAMVR_NOT_RUNNING_KEY = "settings.overlay.failure.steamvr_not_running"
+SETTINGS_MUTATION_MESSAGE_KEYS = ("settings.mutation.runtime_apply_failed",)
 
 EXPECTED_GITHUB_STAR_SNACKBAR_KO_COPY = {
     "github_star.snackbar.message": "PuriPuly가 도움이 됐다면 GitHub에서 Star를 눌러주세요! 큰 힘이 되어요!",
@@ -234,6 +235,19 @@ def test_overlay_steamvr_not_running_copy_points_to_desktop_overlay_setting() ->
 
     for locale, expected in EXPECTED_OVERLAY_STEAMVR_NOT_RUNNING_COPY.items():
         assert bundles[locale][OVERLAY_STEAMVR_NOT_RUNNING_KEY] == expected
+
+
+def test_settings_mutation_message_keys_are_localized_for_all_supported_locales() -> None:
+    bundles = _load_bundles()
+    supported_locales = set(available_locales())
+
+    assert set(bundles) == supported_locales
+    for locale, bundle in bundles.items():
+        missing = sorted(set(SETTINGS_MUTATION_MESSAGE_KEYS) - set(bundle))
+        assert missing == [], locale
+        for key in SETTINGS_MUTATION_MESSAGE_KEYS:
+            assert bundle[key].strip()
+            assert bundle[key] != key
 
 
 def test_custom_vocabulary_tag_editor_copy_is_localized_for_all_supported_locales() -> None:
