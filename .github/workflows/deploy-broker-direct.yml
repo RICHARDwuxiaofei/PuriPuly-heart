@@ -22,18 +22,6 @@ jobs:
     environment: production
     env:
       NODE_VERSION: '22'
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      BROKER_D1_DATABASE_ID_PRODUCTION: ${{ secrets.BROKER_D1_DATABASE_ID_PRODUCTION }}
-      OPENROUTER_MANAGED_API_KEY_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_API_KEY_PRODUCTION }}
-      OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION: ${{ secrets.OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION }}
-      OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION }}
-      OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION }}
-      DISCORD_CLIENT_ID_PRODUCTION: ${{ secrets.DISCORD_CLIENT_ID_PRODUCTION }}
-      DISCORD_CLIENT_SECRET_PRODUCTION: ${{ secrets.DISCORD_CLIENT_SECRET_PRODUCTION }}
-      DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION: ${{ secrets.DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION }}
-      DISCORD_USER_REF_SECRET_PRODUCTION: ${{ secrets.DISCORD_USER_REF_SECRET_PRODUCTION }}
-      DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION: ${{ secrets.DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION }}
       BROKER_CANONICAL_WORKERS_DEV_URL: ${{ vars.BROKER_CANONICAL_WORKERS_DEV_URL }}
       BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION: ${{ vars.BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION }}
       BROKER_CANONICAL_WORKER_NAME: puripuly-heart-broker
@@ -42,6 +30,21 @@ jobs:
         shell: bash
         env:
           CONFIRM_PRODUCTION_DEPLOY: ${{ github.event.inputs.confirm_production_deploy }}
+          BROKER_CANONICAL_WORKERS_DEV_URL: ${{ vars.BROKER_CANONICAL_WORKERS_DEV_URL }}
+          BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION: ${{ vars.BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BROKER_D1_DATABASE_ID_PRODUCTION: ${{ secrets.BROKER_D1_DATABASE_ID_PRODUCTION }}
+          OPENROUTER_MANAGED_API_KEY_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_API_KEY_PRODUCTION }}
+          OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION: ${{ secrets.OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION }}
+          OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION }}
+          OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION }}
+          QQ_AUTH_HMAC_PSK_PRODUCTION: ${{ secrets.QQ_AUTH_HMAC_PSK_PRODUCTION }}
+          DISCORD_CLIENT_ID_PRODUCTION: ${{ secrets.DISCORD_CLIENT_ID_PRODUCTION }}
+          DISCORD_CLIENT_SECRET_PRODUCTION: ${{ secrets.DISCORD_CLIENT_SECRET_PRODUCTION }}
+          DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION: ${{ secrets.DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION }}
+          DISCORD_USER_REF_SECRET_PRODUCTION: ${{ secrets.DISCORD_USER_REF_SECRET_PRODUCTION }}
+          DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION: ${{ secrets.DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION }}
         run: |
           if [[ "$GITHUB_REF" != 'refs/heads/dev' ]]; then
             echo 'Direct production broker deploys must be launched from refs/heads/dev.' >&2
@@ -63,8 +66,43 @@ jobs:
             exit 1
           fi
 
+          if [[ -z "${CLOUDFLARE_API_TOKEN//[[:space:]]/}" ]]; then
+            echo 'CLOUDFLARE_API_TOKEN is required and must not be blank.' >&2
+            exit 1
+          fi
+
+          if [[ -z "${CLOUDFLARE_ACCOUNT_ID//[[:space:]]/}" ]]; then
+            echo 'CLOUDFLARE_ACCOUNT_ID is required and must not be blank.' >&2
+            exit 1
+          fi
+
+          if [[ -z "${BROKER_D1_DATABASE_ID_PRODUCTION//[[:space:]]/}" ]]; then
+            echo 'BROKER_D1_DATABASE_ID_PRODUCTION is required and must not be blank.' >&2
+            exit 1
+          fi
+
+          if [[ -z "${OPENROUTER_MANAGED_API_KEY_PRODUCTION//[[:space:]]/}" ]]; then
+            echo 'OPENROUTER_MANAGED_API_KEY_PRODUCTION is required and must not be blank.' >&2
+            exit 1
+          fi
+
+          if [[ -z "${OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION//[[:space:]]/}" ]]; then
+            echo 'OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION is required and must not be blank.' >&2
+            exit 1
+          fi
+
+          if [[ -z "${OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION//[[:space:]]/}" ]]; then
+            echo 'OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION is required and must not be blank.' >&2
+            exit 1
+          fi
+
           if [[ -z "${OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION//[[:space:]]/}" ]]; then
             echo 'OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION is required and must not be blank.' >&2
+            exit 1
+          fi
+
+          if [[ -z "${QQ_AUTH_HMAC_PSK_PRODUCTION//[[:space:]]/}" ]]; then
+            echo 'QQ_AUTH_HMAC_PSK_PRODUCTION is required and must not be blank.' >&2
             exit 1
           fi
 
@@ -178,6 +216,8 @@ jobs:
         id: render
         shell: bash
         working-directory: broker
+        env:
+          BROKER_D1_DATABASE_ID_PRODUCTION: ${{ secrets.BROKER_D1_DATABASE_ID_PRODUCTION }}
         run: |
           deploy_dir='.deploy-direct'
           config_path='wrangler.production.jsonc'
@@ -211,6 +251,9 @@ jobs:
 
       - name: Apply remote D1 migrations
         working-directory: broker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: >-
           pnpm exec wrangler d1 migrations apply
           puripuly-heart-broker --remote --config
@@ -218,6 +261,9 @@ jobs:
 
       - name: Bootstrap fingerprint salt while the migration placeholder is still present
         working-directory: broker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: >-
           pnpm exec wrangler d1 execute
           puripuly-heart-broker --remote --config
@@ -227,6 +273,9 @@ jobs:
       - name: Verify fingerprint salt bootstrap completed
         shell: bash
         working-directory: broker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           bootstrap_state_json="$(pnpm exec wrangler d1 execute \
             puripuly-heart-broker --remote --config "${{ steps.render.outputs.config_path }}" \
@@ -251,6 +300,9 @@ jobs:
 
       - name: Reconcile production OpenRouter guardrail
         shell: bash
+        env:
+          OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION: ${{ secrets.OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION }}
+          OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION }}
         run: |
           guardrail_url="https://openrouter.ai/api/v1/guardrails/$OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION"
           expected_models_json="$(python3 - <<'PY'
@@ -380,9 +432,22 @@ jobs:
                   raise SystemExit(f'{label} enforce_zdr must be false')
           PY
 
-      - name: Sync worker secrets for managed issuance and Discord OAuth operations
+      - name: Sync worker secrets for managed issuance, QQ assertions, and Discord OAuth operations
         shell: bash
         working-directory: broker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          OPENROUTER_MANAGED_API_KEY_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_API_KEY_PRODUCTION }}
+          OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION: ${{ secrets.OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION }}
+          OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION }}
+          OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION }}
+          QQ_AUTH_HMAC_PSK_PRODUCTION: ${{ secrets.QQ_AUTH_HMAC_PSK_PRODUCTION }}
+          DISCORD_CLIENT_ID_PRODUCTION: ${{ secrets.DISCORD_CLIENT_ID_PRODUCTION }}
+          DISCORD_CLIENT_SECRET_PRODUCTION: ${{ secrets.DISCORD_CLIENT_SECRET_PRODUCTION }}
+          DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION: ${{ secrets.DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION }}
+          DISCORD_USER_REF_SECRET_PRODUCTION: ${{ secrets.DISCORD_USER_REF_SECRET_PRODUCTION }}
+          DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION: ${{ secrets.DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION }}
         run: |
           # OPENROUTER_MANAGED_API_KEY_PRODUCTION remains for transitional runtime compatibility
           # until the legacy binding is removed from the worker contract.
@@ -398,6 +463,9 @@ jobs:
           # for each installation at runtime via OPENROUTER_MANAGED_USER_HMAC_SECRET.
           printf '%s' "$OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION" \
             | pnpm exec wrangler secret put OPENROUTER_MANAGED_USER_HMAC_SECRET --config "${{ steps.render.outputs.config_path }}"
+          # QQ_AUTH_HMAC_PSK_PRODUCTION verifies the test-only QQ Bot assertion route at runtime.
+          printf '%s' "$QQ_AUTH_HMAC_PSK_PRODUCTION" \
+            | pnpm exec wrangler secret put QQ_AUTH_HMAC_PSK --config "${{ steps.render.outputs.config_path }}"
           # Discord OAuth runtime secrets are required for the GUI-managed onboarding flow.
           printf '%s' "$DISCORD_CLIENT_ID_PRODUCTION" \
             | pnpm exec wrangler secret put DISCORD_CLIENT_ID --config "${{ steps.render.outputs.config_path }}"
@@ -416,6 +484,9 @@ jobs:
 
       - name: Deploy canonical broker worker
         working-directory: broker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: >-
           pnpm exec wrangler deploy --config
           "${{ steps.render.outputs.config_path }}"
@@ -440,9 +511,11 @@ jobs:
       - name: Run deployed broker smoke test
         timeout-minutes: 10
         env:
+          BROKER_DEPLOY_SMOKE_RUN: 'true'
           BROKER_DEPLOY_SMOKE_BASE_URL: ${{ env.BROKER_CANONICAL_WORKERS_DEV_URL }}
           BROKER_DEPLOY_CANONICAL_WORKER_NAME: ${{ env.BROKER_CANONICAL_WORKER_NAME }}
           BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL: ${{ env.BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION }}
+          BROKER_DEPLOY_SMOKE_QQ_AUTH_HMAC_PSK: ${{ secrets.QQ_AUTH_HMAC_PSK_PRODUCTION }}
         run: >-
           pnpm exec vitest run broker/tests/deploy-smoke/canonical-production.spec.ts
           --reporter=verbose

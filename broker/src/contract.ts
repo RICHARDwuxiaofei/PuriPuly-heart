@@ -45,6 +45,7 @@ export type {
   BrokerDailyIssuanceCapEndpoint,
   BrokerEndpointRateLimitConfig,
   BrokerPendingDiscordOAuthSessionsConfig,
+  QqAuthAssertionRecord,
   BrokerReferralAttemptControlsConfig,
   BrokerAbuseControlsConfigValue,
   BrokerAbuseSubjectHookRecord,
@@ -104,6 +105,7 @@ export const REQUIRED_BINDINGS = {
     'DISCORD_USER_REF_SECRET',
     'DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL',
     'DISCORD_DAILY_REPORT_WEBHOOK_URL',
+    'QQ_AUTH_HMAC_PSK',
   ],
 } as const;
 
@@ -119,6 +121,7 @@ export interface BrokerBindings {
   DISCORD_USER_REF_SECRET: string;
   DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL: string;
   DISCORD_DAILY_REPORT_WEBHOOK_URL: string;
+  QQ_AUTH_HMAC_PSK: string;
 }
 
 export type BrokerEnv = {

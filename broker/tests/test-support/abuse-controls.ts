@@ -49,6 +49,12 @@ export interface StoredAbuseControls {
     maxRequests: number;
     windowMinutes: number;
   };
+  qqAuthAssertIp: {
+    endpoint: string;
+    scope: 'ip';
+    maxRequests: number;
+    windowMinutes: number;
+  };
   pendingDiscordOAuthSessions: {
     maxPerInstallation: number;
     maxPerIp: number;
@@ -177,6 +183,12 @@ export const TEST_DEFAULT_ABUSE_CONTROLS: StoredAbuseControls = {
     endpoint: 'POST /v1/providers/openrouter/discord/issue',
     scope: 'installation_id',
     maxRequests: 3,
+    windowMinutes: 15,
+  },
+  qqAuthAssertIp: {
+    endpoint: 'POST /v1/auth/qq/assert',
+    scope: 'ip',
+    maxRequests: 20,
     windowMinutes: 15,
   },
   pendingDiscordOAuthSessions: {
@@ -414,6 +426,7 @@ function normalizeAbuseControls(value: unknown): StoredAbuseControls {
     normalized.discordOpenrouterIssueInstallation,
     value.discordOpenrouterIssueInstallation,
   );
+  assignRecord(normalized.qqAuthAssertIp, value.qqAuthAssertIp);
   assignRecord(normalized.pendingDiscordOAuthSessions, value.pendingDiscordOAuthSessions);
   assignRecord(normalized.newActiveEntitlementsPerDay, value.newActiveEntitlementsPerDay);
   assignRecord(normalized.immediateAlerts, value.immediateAlerts);
