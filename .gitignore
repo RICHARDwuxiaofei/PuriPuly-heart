@@ -223,6 +223,7 @@ __marimo__/
 .test_audio/
 Installer_output/
 .references/
+refactoring/
 /scripts/*
 !/scripts/bench_*.py
 !/scripts/ci/
