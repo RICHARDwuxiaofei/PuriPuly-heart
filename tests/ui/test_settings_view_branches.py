@@ -6572,13 +6572,13 @@ def test_prompt_tab_hides_prompt_provider_copy_and_old_language_helper_text(
     [
         (
             "ko",
-            "자기 자신이 한 말에만 적용되어요. Soniox와 Deepgram에서만 적용되어요.",
+            "자신이 말한 단어의 인식률을 높일 수 있어요. 현재는 Soniox와 Deepgram만 지원해요.",
         ),
         (
             "en",
-            "Applies only to what you say. Only Soniox and Deepgram use these hints.",
+            "You can improve recognition of words you say. Currently, only Soniox and Deepgram support this.",
         ),
-        ("zh-CN", "仅适用于你自己说的话。只有 Soniox 和 Deepgram 会使用这些提示。"),
+        ("zh-CN", "可以提高你自己说出的单词的识别率。目前仅支持 Soniox 和 Deepgram。"),
     ],
 )
 def test_custom_vocabulary_inline_helper_copy_matches_provider_scope(

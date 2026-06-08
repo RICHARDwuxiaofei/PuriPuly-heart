@@ -58,32 +58,50 @@ CUSTOM_VOCABULARY_EXISTING_I18N_KEYS = (
 )
 EXPECTED_CUSTOM_VOCABULARY_TAG_EDITOR_COPY = {
     "en": {
-        "settings.custom_vocabulary.description": "Applies only to what you say. Only Soniox and Deepgram use these hints.",
+        "settings.custom_vocabulary.description": "You can improve recognition of words you say. Currently, only Soniox and Deepgram support this.",
         "settings.custom_vocabulary.add_placeholder": "",
         "settings.custom_vocabulary.add_action": "Add",
         "settings.custom_vocabulary.empty": "No hints yet.",
         "settings.custom_vocabulary.remove_hint": "Remove {term}",
     },
     "ko": {
-        "settings.custom_vocabulary.description": "자기 자신이 한 말에만 적용되어요. Soniox와 Deepgram에서만 적용되어요.",
+        "settings.custom_vocabulary.description": "자신이 말한 단어의 인식률을 높일 수 있어요. 현재는 Soniox와 Deepgram만 지원해요.",
         "settings.custom_vocabulary.add_placeholder": "",
         "settings.custom_vocabulary.add_action": "추가",
         "settings.custom_vocabulary.empty": "아직 추가된 힌트가 없어요.",
         "settings.custom_vocabulary.remove_hint": "{term} 삭제",
     },
     "zh-CN": {
-        "settings.custom_vocabulary.description": "仅适用于你自己说的话。只有 Soniox 和 Deepgram 会使用这些提示。",
+        "settings.custom_vocabulary.description": "可以提高你自己说出的单词的识别率。目前仅支持 Soniox 和 Deepgram。",
         "settings.custom_vocabulary.add_placeholder": "",
         "settings.custom_vocabulary.add_action": "添加",
         "settings.custom_vocabulary.empty": "还没有添加提示。",
         "settings.custom_vocabulary.remove_hint": "删除 {term}",
     },
     "ja": {
-        "settings.custom_vocabulary.description": "自分が話した内容にのみ適用されます。Soniox と Deepgram でのみ使用されます。",
+        "settings.custom_vocabulary.description": "自分が話す単語の認識率を高められます。現在は Soniox と Deepgram のみ対応しています。",
         "settings.custom_vocabulary.add_placeholder": "",
         "settings.custom_vocabulary.add_action": "追加",
         "settings.custom_vocabulary.empty": "追加されたヒントはまだありません。",
         "settings.custom_vocabulary.remove_hint": "{term} を削除",
+    },
+}
+EXPECTED_VAD_THRESHOLD_SECTION_COPY = {
+    "en": {
+        "settings.section.self_vad_sensitivity": "Your VAD Threshold",
+        "settings.section.peer_vad_sensitivity": "Peer VAD Threshold",
+    },
+    "ko": {
+        "settings.section.self_vad_sensitivity": "내 음성 감지 임계값",
+        "settings.section.peer_vad_sensitivity": "상대방 음성 감지 임계값",
+    },
+    "ja": {
+        "settings.section.self_vad_sensitivity": "自分の音声検出しきい値",
+        "settings.section.peer_vad_sensitivity": "相手の音声検出しきい値",
+    },
+    "zh-CN": {
+        "settings.section.self_vad_sensitivity": "自己的语音检测阈值",
+        "settings.section.peer_vad_sensitivity": "对方语音检测阈值",
     },
 }
 
@@ -238,6 +256,19 @@ def test_custom_vocabulary_tag_editor_copy_is_localized_for_all_supported_locale
         assert "Soniox" in bundle["settings.custom_vocabulary.description"]
         assert "Deepgram" in bundle["settings.custom_vocabulary.description"]
         assert "Qwen" not in bundle["settings.custom_vocabulary.description"]
+
+
+def test_vad_section_copy_uses_threshold_not_sensitivity() -> None:
+    bundles = _load_bundles()
+
+    for locale, expected_copy in EXPECTED_VAD_THRESHOLD_SECTION_COPY.items():
+        assert {
+            key: bundles[locale][key]
+            for key in (
+                "settings.section.self_vad_sensitivity",
+                "settings.section.peer_vad_sensitivity",
+            )
+        } == expected_copy
 
 
 def test_local_llm_keys_are_localized() -> None:
