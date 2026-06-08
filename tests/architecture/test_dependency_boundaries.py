@@ -65,6 +65,7 @@ LAYER_RULES = (
     LayerRule(
         layer=SCHEMA_VALUES,
         prefixes=(
+            "puripuly_heart.config.overlay_calibration",
             "puripuly_heart.config.settings_vnext.schema",
             "puripuly_heart.config.audio_host_api",
             "puripuly_heart.config.llm_profiles",
@@ -306,14 +307,6 @@ KNOWN_ALLOWED_VIOLATIONS: frozenset[ImportViolation] = frozenset(
             reason="adapters may wrap concrete resources but must not depend on settings migration internals or UI controls unless explicitly UI-owned",
         ),
         ImportViolation(
-            rule_id="migration-serialization-stays-compatible-and-pure",
-            importer="src/puripuly_heart/config/settings.py",
-            imported="puripuly_heart.ui.overlay_calibration",
-            importer_layer="migration/serialization",
-            imported_layer="UI adapters/renderers",
-            reason="settings migration and serialization must not import UI, app services, provider construction, SecretStore/Broker adapters, provider internals, or runtime state owners",
-        ),
-        ImportViolation(
             rule_id="orchestrator-avoids-product-adapters",
             importer="src/puripuly_heart/core/orchestrator/hub.py",
             imported="puripuly_heart.core.runtime_logging",
@@ -328,14 +321,6 @@ KNOWN_ALLOWED_VIOLATIONS: frozenset[ImportViolation] = frozenset(
             importer_layer="orchestrator",
             imported_layer="adapters",
             reason="orchestrator modules must avoid Flet UI, concrete provider construction, settings migration internals, services, and product-output adapters",
-        ),
-        ImportViolation(
-            rule_id="overlay-core-avoids-ui-renderers",
-            importer="src/puripuly_heart/core/overlay/presenter.py",
-            imported="puripuly_heart.ui.overlay_calibration",
-            importer_layer="overlay core",
-            imported_layer="UI adapters/renderers",
-            reason="overlay core may use overlay protocol/value objects and observability ports, but not Flet controls, views, or desktop renderer defaults except through adapters",
         ),
         ImportViolation(
             rule_id="providers-avoid-ui-settings-and-runtime-log-concretes",
@@ -733,6 +718,21 @@ def test_concrete_osc_modules_classify_as_adapters() -> None:
     assert _layer_for_module("puripuly_heart.core.osc.chatbox_paginator") == ADAPTERS
     assert _layer_for_module("puripuly_heart.core.osc.receiver") == ADAPTERS
     assert _layer_for_module("puripuly_heart.core.osc.udp_sender") == ADAPTERS
+
+
+def test_overlay_calibration_value_object_has_config_schema_ownership() -> None:
+    assert _layer_for_module("puripuly_heart.config.overlay_calibration") == SCHEMA_VALUES
+    assert _layer_for_module("puripuly_heart.ui.overlay_calibration") == UI_ADAPTERS_RENDERERS
+
+    forbidden_imports = {
+        ("src/puripuly_heart/config/settings.py", "puripuly_heart.ui.overlay_calibration"),
+        ("src/puripuly_heart/core/overlay/presenter.py", "puripuly_heart.ui.overlay_calibration"),
+    }
+    actual_imports = {
+        (violation.importer, violation.imported) for violation in _dependency_violations()
+    }
+
+    assert not (forbidden_imports & actual_imports)
 
 
 def test_current_concrete_osc_imports_are_adapter_boundary_violations() -> None:

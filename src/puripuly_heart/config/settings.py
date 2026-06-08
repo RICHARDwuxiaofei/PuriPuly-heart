@@ -32,7 +32,7 @@ from puripuly_heart.config.llm_profiles import (
     normalize_openrouter_fallback_selection_alias,
     openrouter_alias_for_fields,
 )
-from puripuly_heart.ui.overlay_calibration import OverlayCalibration
+from puripuly_heart.config.overlay_calibration import OverlayCalibration
 
 SETTINGS_SCHEMA_VERSION = 24
 STT_INTERNAL_SAMPLE_RATE_HZ = 16000

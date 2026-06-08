@@ -9,8 +9,8 @@ from dataclasses import dataclass, field
 from typing import Protocol
 from uuid import UUID
 
+from puripuly_heart.config.overlay_calibration import OverlayCalibration
 from puripuly_heart.core.clock import Clock, SystemClock
-from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
 from .diagnostics import OverlayDiagnosticsRecorder
 from .protocol import (
