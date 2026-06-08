@@ -5374,6 +5374,50 @@ def test_desktop_initial_controls_emit_launch_diagnostics_only_in_detailed_mode(
     assert basic_controller._runtime_logging.detailed_messages == []
 
 
+def test_desktop_initial_controls_can_be_built_from_resolved_overlay_config() -> None:
+    from puripuly_heart.config.resolved import ResolvedOverlayConfig  # noqa: PLC0415
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
+    resolved = ResolvedOverlayConfig(
+        enabled=True,
+        target="desktop",
+        show_translation=False,
+        show_peer_original=True,
+        calibration={"distance": 2.0},
+        desktop_overlay_options={
+            "size_preset": "medium",
+            "position": {"x": 597, "y": 1017},
+            "locked": True,
+            "visual": {
+                "text_scale": 1.0,
+                "background_alpha": 0.5,
+                "outline_width": None,
+            },
+        },
+    )
+
+    controls = controller._build_initial_desktop_runtime_controls_from_resolved_config(resolved)
+
+    assert controls == [
+        {
+            "command": "apply_window_bounds",
+            "x": 597,
+            "y": 1017,
+            "width": 1344,
+            "height": 336,
+        },
+        {
+            "command": "apply_visual_config",
+            "text_scale": 1.0,
+            "background_alpha": 0.5,
+            "outline_width": None,
+        },
+        {"command": "set_interaction_mode", "mode": "edit"},
+    ]
+    assert "desktop_flet" not in resolved.desktop_overlay_options
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("overlay_target", "expected_refresh_burst"),

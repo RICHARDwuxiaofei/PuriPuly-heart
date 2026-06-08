@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from puripuly_heart.app.wiring import ResolvedPeerSTTConfig
+from puripuly_heart.config.resolved import (
+    CREDENTIAL_SOURCE_SECRET_STORE,
+    ResolvedCredentialRequirement,
+    ResolvedSTTConfig,
+)
 from puripuly_heart.config.settings import STTProviderName
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.runtime.peer_channel import (
@@ -107,18 +111,40 @@ async def fake_run_audio_loop(**_kwargs) -> None:
 
 
 def make_peer_runtime_config(output_device: str = "Headphones (Loopback)") -> PeerRuntimeConfig:
-    backend = ResolvedPeerSTTConfig(
+    backend = ResolvedSTTConfig(
+        channel="peer",
         provider=STTProviderName.DEEPGRAM,
         source_language="ko",
+        model="nova-3",
+        endpoint=None,
+        region=None,
+        credential=ResolvedCredentialRequirement(
+            source=CREDENTIAL_SOURCE_SECRET_STORE,
+            required=True,
+            reference="deepgram:stt",
+        ),
+        input_host_api=None,
+        input_device=None,
+        output_device=output_device,
         sample_rate_hz=16000,
-        keyterms=("아이리", "시나노"),
-        deepgram_model="nova-3",
+        channels=1,
+        ring_buffer_ms=500,
+        drain_timeout_s=2.0,
+        vad_speech_threshold=0.6,
+        vad_hangover_ms=900,
+        vad_pre_roll_ms=500,
+        low_latency_enabled=True,
+        low_latency_merge_gap_ms=600,
+        low_latency_spec_retry_max=10,
+        custom_vocabulary_enabled=True,
+        custom_terms={"ko": ("아이리", "시나노")},
+        provider_options={},
     )
     provider_signature = (
         backend.provider,
         backend.source_language,
-        backend.deepgram_model,
-        backend.keyterms,
+        backend.model,
+        backend.custom_terms,
     )
     return PeerRuntimeConfig(
         backend=backend,

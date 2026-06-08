@@ -7,7 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
-from puripuly_heart.app.wiring import ResolvedPeerSTTConfig
+from puripuly_heart.config.resolved import ResolvedSTTConfig
 from puripuly_heart.core.clock import Clock
 from puripuly_heart.core.orchestrator.hub import ClientHub
 
@@ -22,7 +22,7 @@ class PeerChannelRuntimeState(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class PeerRuntimeConfig:
-    backend: ResolvedPeerSTTConfig
+    backend: ResolvedSTTConfig
     output_device: str
     vad_threshold: float
     vad_hangover_ms: int

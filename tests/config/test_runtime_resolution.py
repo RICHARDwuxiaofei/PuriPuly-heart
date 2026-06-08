@@ -138,8 +138,10 @@ def test_canonical_runtime_intent_contracts_are_frozen_and_slotted() -> None:
 
     for class_name in (
         "DirectProviderRuntimeIntent",
+        "OverlayRuntimeIntent",
         "OpenRouterRuntimeIntent",
         "RuntimeResolutionInput",
+        "STTRuntimeIntent",
         "TranslationRuntimeIntent",
     ):
         dto_class = getattr(runtime_resolution, class_name)
@@ -154,6 +156,130 @@ def test_canonical_runtime_intent_contracts_are_frozen_and_slotted() -> None:
     )
     with pytest.raises(FrozenInstanceError):
         intent.model = runtime_resolution.TRANSLATION_MODEL_LOCAL_LLM
+
+
+def test_stt_runtime_resolution_produces_channel_specific_resolved_dto() -> None:
+    runtime_resolution = _runtime_resolution_module()
+    resolved = _resolved_module()
+
+    config = runtime_resolution.resolve_stt_config(
+        runtime_resolution.STTRuntimeIntent(
+            channel=resolved.RUNTIME_CHANNEL_PEER,
+            provider=runtime_resolution.STT_PROVIDER_SONIOX,
+            source_language="zh-CN",
+            output_device="Steam Streaming Speakers",
+            sample_rate_hz=16000,
+            vad_speech_threshold=0.62,
+            vad_hangover_ms=450,
+            vad_pre_roll_ms=275,
+            soniox_model="stt-rt-v4-peer",
+            soniox_endpoint="wss://peer-soniox.example/realtime",
+            soniox_keepalive_interval_s=12.5,
+            soniox_trailing_silence_ms=700,
+        )
+    )
+
+    assert isinstance(config, resolved.ResolvedSTTConfig)
+    assert config.channel == resolved.RUNTIME_CHANNEL_PEER
+    assert config.source_language == "zh-CN"
+    assert config.provider == runtime_resolution.STT_PROVIDER_SONIOX
+    assert config.model == "stt-rt-v4-peer"
+    assert config.endpoint == "wss://peer-soniox.example/realtime"
+    assert config.output_device == "Steam Streaming Speakers"
+    assert config.sample_rate_hz == 16000
+    assert config.vad_speech_threshold == 0.62
+    assert config.vad_hangover_ms == 450
+    assert config.vad_pre_roll_ms == 275
+    assert config.credential == resolved.ResolvedCredentialRequirement(
+        source=resolved.CREDENTIAL_SOURCE_SECRET_STORE,
+        required=True,
+        reference="soniox:stt",
+    )
+    assert config.provider_options == {
+        "keepalive_interval_s": 12.5,
+        "trailing_silence_ms": 700,
+    }
+
+
+def test_stt_runtime_resolution_resolves_qwen_region_endpoint_and_custom_terms() -> None:
+    runtime_resolution = _runtime_resolution_module()
+    resolved = _resolved_module()
+
+    config = runtime_resolution.resolve_stt_config(
+        runtime_resolution.STTRuntimeIntent(
+            channel=resolved.RUNTIME_CHANNEL_SELF,
+            provider=runtime_resolution.STT_PROVIDER_QWEN_ASR,
+            source_language="ko-KR",
+            input_host_api="Windows WASAPI",
+            input_device="Microphone Array",
+            qwen_region=runtime_resolution.QWEN_REGION_SINGAPORE,
+            qwen_asr_model="qwen3-asr-custom",
+            custom_vocabulary_enabled=True,
+            custom_terms={"ko-KR": ("Puripuly", "VRChat")},
+        )
+    )
+
+    assert config.channel == resolved.RUNTIME_CHANNEL_SELF
+    assert config.source_language == "ko-KR"
+    assert config.provider == runtime_resolution.STT_PROVIDER_QWEN_ASR
+    assert config.model == "qwen3-asr-custom"
+    assert config.region == runtime_resolution.QWEN_REGION_SINGAPORE
+    assert config.endpoint == "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+    assert config.input_host_api == "Windows WASAPI"
+    assert config.input_device == "Microphone Array"
+    assert config.credential == resolved.ResolvedCredentialRequirement(
+        source=resolved.CREDENTIAL_SOURCE_SECRET_STORE,
+        required=True,
+        reference="qwen:singapore",
+    )
+    assert config.custom_vocabulary_enabled is True
+    assert config.custom_terms == {"ko-KR": ("Puripuly", "VRChat")}
+
+
+def test_default_peer_stt_runtime_intent_uses_desktop_peer_vad_defaults() -> None:
+    runtime_resolution = _runtime_resolution_module()
+    resolved = _resolved_module()
+
+    config = runtime_resolution.resolve_stt_config(
+        runtime_resolution.RuntimeResolutionInput().peer_stt
+    )
+
+    assert config.channel == resolved.RUNTIME_CHANNEL_PEER
+    assert config.vad_speech_threshold == 0.6
+    assert config.vad_hangover_ms == 500
+    assert config.vad_pre_roll_ms == 500
+
+
+def test_overlay_runtime_resolution_maps_desktop_options_without_legacy_name() -> None:
+    runtime_resolution = _runtime_resolution_module()
+    resolved = _resolved_module()
+
+    config = runtime_resolution.resolve_overlay_config(
+        runtime_resolution.OverlayRuntimeIntent(
+            enabled=True,
+            target=resolved.OVERLAY_TARGET_DESKTOP,
+            show_translation=False,
+            show_peer_original=True,
+            calibration={"distance": 3.0, "offset_x": 1.25},
+            desktop_overlay_options={
+                "size_preset": "large",
+                "position": {"x": 123, "y": 456},
+                "locked": True,
+                "visual": {"background_alpha": 0.42},
+            },
+        )
+    )
+
+    assert isinstance(config, resolved.ResolvedOverlayConfig)
+    assert config.enabled is True
+    assert config.target == resolved.OVERLAY_TARGET_DESKTOP
+    assert config.show_translation is False
+    assert config.show_peer_original is True
+    assert config.calibration["distance"] == 3.0
+    assert config.desktop_overlay_options["size_preset"] == "large"
+    assert config.desktop_overlay_options["position"] == {"x": 123, "y": 456}
+    assert config.desktop_overlay_options["locked"] is True
+    assert "desktop_flet" not in config.desktop_overlay_options
 
 
 @pytest.mark.parametrize(

@@ -12,7 +12,7 @@ import secrets
 import sys
 import threading
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,13 +25,18 @@ from puripuly_heart.app.wiring import (
     build_peer_stt_provider_signature,
     create_llm_provider,
     create_peer_stt_backend,
+    create_peer_stt_backend_from_resolved_config,
     create_secret_store,
     create_stt_backend,
-    resolve_peer_stt_config,
+    resolve_overlay_config,
+    resolve_peer_stt_runtime_config,
 )
 from puripuly_heart.config.audio_host_api import normalize_input_host_api
 from puripuly_heart.config.llm_profiles import profile_for_alias
+from puripuly_heart.config.resolved import ResolvedOverlayConfig
 from puripuly_heart.config.settings import (
+    DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA,
+    DESKTOP_FLET_DEFAULT_TEXT_SCALE,
     DESKTOP_FLET_MIN_HEIGHT,
     DESKTOP_FLET_MIN_WIDTH,
     DESKTOP_FLET_SIZE_PRESETS,
@@ -1934,6 +1939,61 @@ class GuiController:
             {"command": "set_interaction_mode", "mode": interaction_mode},
         ]
 
+    def _build_initial_desktop_runtime_controls_from_resolved_config(
+        self,
+        config: ResolvedOverlayConfig,
+    ) -> list[dict[str, object]]:
+        desktop_options = config.desktop_overlay_options
+        position = desktop_options.get("position")
+        if not isinstance(position, Mapping):
+            position = {}
+        visual_options = desktop_options.get("visual")
+        if not isinstance(visual_options, Mapping):
+            visual_options = {}
+
+        width, height = self._desktop_dimensions_for_size_preset(desktop_options.get("size_preset"))
+        x = position.get("x")
+        y = position.get("y")
+        if self._is_finite_non_bool_number(x) and self._is_finite_non_bool_number(y):
+            bounds = {"x": x, "y": y, "width": width, "height": height}
+        else:
+            bounds = self._desktop_centered_bounds_for_dimensions(width=width, height=height)
+
+        text_scale = visual_options.get("text_scale", DESKTOP_FLET_DEFAULT_TEXT_SCALE)
+        background_alpha = visual_options.get(
+            "background_alpha",
+            DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA,
+        )
+        outline_width = visual_options.get("outline_width")
+        interaction_mode = DESKTOP_INTERACTION_MODE_EDIT
+        self.log_detailed(
+            "[DesktopOverlay][Launch] "
+            f"target=desktop locked={bool(desktop_options.get('locked', False))} "
+            f"interaction_mode={interaction_mode} "
+            f"size_preset={desktop_options.get('size_preset')} "
+            f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+            f"height={bounds['height']} "
+            f"text_scale={text_scale} "
+            f"background_alpha={background_alpha} "
+            f"outline_width={outline_width}"
+        )
+        return [
+            {
+                "command": "apply_window_bounds",
+                "x": bounds["x"],
+                "y": bounds["y"],
+                "width": bounds["width"],
+                "height": bounds["height"],
+            },
+            {
+                "command": "apply_visual_config",
+                "text_scale": text_scale,
+                "background_alpha": background_alpha,
+                "outline_width": outline_width,
+            },
+            {"command": "set_interaction_mode", "mode": interaction_mode},
+        ]
+
     @staticmethod
     def _desktop_dimensions_for_size_preset(size_preset: object) -> tuple[int, int]:
         if isinstance(size_preset, str) and size_preset in DESKTOP_FLET_SIZE_PRESETS:
@@ -2516,7 +2576,7 @@ class GuiController:
             await self._broadcast_desktop_runtime_control(payload)
 
     def _build_peer_runtime_config(self, settings: AppSettings) -> PeerRuntimeConfig:
-        backend = resolve_peer_stt_config(settings)
+        backend = resolve_peer_stt_runtime_config(settings)
         provider_signature = build_peer_stt_provider_signature(settings)
         return PeerRuntimeConfig(
             backend=backend,
@@ -2690,8 +2750,9 @@ class GuiController:
             presenter = self._overlay_presenter
             overlay_instance_id = f"overlay-{secrets.token_hex(8)}"
             diagnostics = OverlayDiagnosticsRecorder(overlay_instance_id=overlay_instance_id)
-            overlay_target = self._active_overlay_target or self._overlay_target_for_settings(
-                self.settings
+            resolved_overlay_config = resolve_overlay_config(self.settings)
+            overlay_target = self._active_overlay_target or self._normalized_overlay_target(
+                resolved_overlay_config.target
             )
             self._active_overlay_target = overlay_target
             peer_presentation_refresh_burst = overlay_target != OVERLAY_TARGET_DESKTOP
@@ -2711,8 +2772,8 @@ class GuiController:
                     clock=self.clock,
                     diagnostics=diagnostics,
                     runtime_log_detailed=self.log_detailed,
-                    show_translation=self.settings.overlay.show_translation,
-                    show_peer_original=self.settings.overlay.show_peer_original,
+                    show_translation=resolved_overlay_config.show_translation,
+                    show_peer_original=resolved_overlay_config.show_peer_original,
                     peer_presentation_refresh_burst=peer_presentation_refresh_burst,
                     self_presentation_refresh_burst=self_presentation_refresh_burst,
                 )
@@ -2735,8 +2796,10 @@ class GuiController:
                 desktop_runtime_controls_enabled=overlay_target == OVERLAY_TARGET_DESKTOP,
             )
             if overlay_target == OVERLAY_TARGET_DESKTOP:
-                initial_desktop_controls = self._build_initial_desktop_runtime_controls(
-                    self.settings
+                initial_desktop_controls = (
+                    self._build_initial_desktop_runtime_controls_from_resolved_config(
+                        resolved_overlay_config
+                    )
                 )
                 initial_interaction_control = initial_desktop_controls[-1]
                 self._set_desktop_overlay_interaction_mode(initial_interaction_control.get("mode"))
@@ -4163,8 +4226,8 @@ class GuiController:
     ) -> ManagedSTTProvider:
         assert self.settings is not None
         secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-        peer_backend = create_peer_stt_backend(
-            self.settings,
+        peer_backend = create_peer_stt_backend_from_resolved_config(
+            config.backend,
             secrets=secrets,
             diagnostics_enabled=self._detailed_audio_diag_enabled,
         )

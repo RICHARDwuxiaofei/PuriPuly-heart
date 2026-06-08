@@ -125,12 +125,14 @@ def _stt_config(
     resolved: ModuleType,
     *,
     channel: str,
+    source_language: str = "ko-KR",
     input_device: str | None,
     output_device: str | None,
     provider_options: dict[str, object] | None = None,
 ) -> Any:
     return resolved.ResolvedSTTConfig(
         channel=channel,
+        source_language=source_language,
         provider="local_qwen" if channel == resolved.RUNTIME_CHANNEL_SELF else "soniox",
         model="qwen3-asr-flash-realtime",
         endpoint="wss://example.invalid/stt",
@@ -282,6 +284,7 @@ def test_self_and_peer_stt_share_one_resolved_shape_with_channel_values() -> Non
     peer_stt = _stt_config(
         resolved,
         channel=resolved.RUNTIME_CHANNEL_PEER,
+        source_language="zh-CN",
         input_device=None,
         output_device="Steam Streaming Speakers",
         provider_options={"capture": {"source": "desktop"}},
@@ -292,9 +295,11 @@ def test_self_and_peer_stt_share_one_resolved_shape_with_channel_values() -> Non
         field.name for field in fields(peer_stt)
     )
     assert self_stt.channel == "self"
+    assert self_stt.source_language == "ko-KR"
     assert self_stt.input_device == "Microphone Array"
     assert self_stt.output_device is None
     assert peer_stt.channel == "peer"
+    assert peer_stt.source_language == "zh-CN"
     assert peer_stt.input_device is None
     assert peer_stt.output_device == "Steam Streaming Speakers"
 

@@ -167,6 +167,7 @@ class ResolvedLLMConfig:
 @dataclass(frozen=True, slots=True)
 class ResolvedSTTConfig:
     channel: RuntimeChannel
+    source_language: str
     provider: str
     model: str | None
     endpoint: str | None
@@ -191,6 +192,8 @@ class ResolvedSTTConfig:
 
     def __post_init__(self) -> None:
         _ensure_known_value(self.channel, RUNTIME_CHANNELS, field_name="channel")
+        if not isinstance(self.source_language, str) or not self.source_language.strip():
+            raise ValueError("source_language must be non-empty")
         if self.sample_rate_hz <= 0:
             raise ValueError("sample_rate_hz must be > 0")
         if self.channels <= 0:

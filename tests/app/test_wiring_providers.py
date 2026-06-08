@@ -4,6 +4,7 @@ import pytest
 
 from puripuly_heart.app import wiring as wiring_module
 from puripuly_heart.app.wiring import (
+    ResolvedPeerSTTConfig,
     _LazyFactoryLLMProvider,
     build_peer_stt_provider_signature,
     create_llm_provider,
@@ -17,6 +18,7 @@ from puripuly_heart.config.resolved import (
     CREDENTIAL_SOURCE_SECRET_STORE,
     ResolvedCredentialRequirement,
     ResolvedLLMConfig,
+    ResolvedSTTConfig,
 )
 from puripuly_heart.config.settings import (
     AppSettings,
@@ -66,6 +68,91 @@ from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
 from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaSTTBackend
 from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
 from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
+
+
+def _resolved_stt_config(
+    *,
+    channel: str = "self",
+    provider: str = "deepgram",
+    source_language: str = "ko-KR",
+    model: str | None = "nova-3",
+    endpoint: str | None = None,
+    region: str | None = None,
+    credential_reference: str | None = "deepgram:stt",
+    input_host_api: str | None = "Windows WASAPI",
+    input_device: str | None = "Microphone Array",
+    output_device: str | None = None,
+    sample_rate_hz: int = 16000,
+    custom_vocabulary_enabled: bool = False,
+    custom_terms: dict[str, tuple[str, ...]] | None = None,
+    provider_options: dict[str, object] | None = None,
+) -> ResolvedSTTConfig:
+    credential = (
+        ResolvedCredentialRequirement(
+            source=CREDENTIAL_SOURCE_SECRET_STORE,
+            required=True,
+            reference=credential_reference,
+        )
+        if credential_reference is not None
+        else ResolvedCredentialRequirement(
+            source=CREDENTIAL_SOURCE_NONE,
+            required=False,
+            reference=None,
+        )
+    )
+    return ResolvedSTTConfig(
+        channel=channel,
+        source_language=source_language,
+        provider=provider,
+        model=model,
+        endpoint=endpoint,
+        region=region,
+        credential=credential,
+        input_host_api=input_host_api,
+        input_device=input_device,
+        output_device=output_device,
+        sample_rate_hz=sample_rate_hz,
+        channels=1,
+        ring_buffer_ms=500,
+        drain_timeout_s=2.0,
+        vad_speech_threshold=0.5,
+        vad_hangover_ms=600,
+        vad_pre_roll_ms=500,
+        low_latency_enabled=True,
+        low_latency_merge_gap_ms=600,
+        low_latency_spec_retry_max=10,
+        custom_vocabulary_enabled=custom_vocabulary_enabled,
+        custom_terms={} if custom_terms is None else custom_terms,
+        provider_options={} if provider_options is None else provider_options,
+    )
+
+
+def test_legacy_resolved_peer_stt_config_constructor_exposes_old_fields() -> None:
+    resolved = ResolvedPeerSTTConfig(
+        provider=STTProviderName.SONIOX,
+        source_language="zh-CN",
+        sample_rate_hz=16000,
+        keyterms=("Airi", "Shinano"),
+        deepgram_model="nova-peer",
+        qwen_model="qwen-peer",
+        qwen_region=QwenRegion.SINGAPORE,
+        soniox_model="stt-rt-v4-peer",
+        soniox_endpoint="wss://peer-soniox.example/realtime",
+        soniox_keepalive_interval_s=12.5,
+        soniox_trailing_silence_ms=700,
+    )
+
+    assert resolved.provider is STTProviderName.SONIOX
+    assert resolved.source_language == "zh-CN"
+    assert resolved.sample_rate_hz == 16000
+    assert resolved.keyterms == ("Airi", "Shinano")
+    assert resolved.deepgram_model == "nova-peer"
+    assert resolved.qwen_model == "qwen-peer"
+    assert resolved.qwen_region is QwenRegion.SINGAPORE
+    assert resolved.soniox_model == "stt-rt-v4-peer"
+    assert resolved.soniox_endpoint == "wss://peer-soniox.example/realtime"
+    assert resolved.soniox_keepalive_interval_s == 12.5
+    assert resolved.soniox_trailing_silence_ms == 700
 
 
 def test_create_llm_provider_gemini_uses_secret_and_concurrency_limit() -> None:
@@ -1179,6 +1266,169 @@ def test_create_llm_provider_requires_secret(monkeypatch: pytest.MonkeyPatch) ->
         create_llm_provider(settings, secrets=secrets)
 
 
+def test_create_stt_backend_from_resolved_deepgram_uses_dto_values_and_secret() -> None:
+    resolved = _resolved_stt_config(
+        provider="deepgram",
+        source_language="ko-KR",
+        model="nova-3-general",
+        custom_vocabulary_enabled=True,
+        custom_terms={"ko-KR": ("Puripuly", "VRChat")},
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("deepgram_api_key", "dto-deepgram-key")
+
+    backend = wiring_module.create_stt_backend_from_resolved_config(resolved, secrets=secrets)
+
+    assert isinstance(backend, DeepgramRealtimeSTTBackend)
+    assert backend.api_key == "dto-deepgram-key"
+    assert backend.model == "nova-3-general"
+    assert backend.language == get_deepgram_language("ko-KR")
+    assert backend.sample_rate_hz == 16000
+    assert list(backend.keyterms) == ["Puripuly", "VRChat"]
+    assert backend.stream_label == "self"
+
+
+def test_create_stt_backend_from_resolved_qwen_uses_endpoint_region_and_secret_ref() -> None:
+    resolved = _resolved_stt_config(
+        provider="qwen_asr",
+        source_language="ja",
+        model="qwen3-asr-dto",
+        endpoint="wss://dto-qwen.example/realtime",
+        region="singapore",
+        credential_reference="qwen:singapore",
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("alibaba_api_key_singapore", "dto-qwen-key")
+
+    backend = wiring_module.create_stt_backend_from_resolved_config(resolved, secrets=secrets)
+
+    assert isinstance(backend, QwenASRRealtimeSTTBackend)
+    assert backend.api_key == "dto-qwen-key"
+    assert backend.model == "qwen3-asr-dto"
+    assert backend.endpoint == "wss://dto-qwen.example/realtime"
+    assert backend.language == get_qwen_asr_language("ja")
+
+
+def test_create_stt_backend_from_resolved_qwen_uses_region_when_endpoint_missing() -> None:
+    resolved = _resolved_stt_config(
+        provider="qwen_asr",
+        source_language="ja",
+        model="qwen3-asr-dto",
+        endpoint=None,
+        region="singapore",
+        credential_reference="qwen:singapore",
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("alibaba_api_key_singapore", "dto-qwen-key")
+
+    backend = wiring_module.create_stt_backend_from_resolved_config(resolved, secrets=secrets)
+
+    assert isinstance(backend, QwenASRRealtimeSTTBackend)
+    assert backend.endpoint == "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+
+
+def test_create_stt_backend_from_resolved_soniox_uses_options_and_custom_terms() -> None:
+    resolved = _resolved_stt_config(
+        provider="soniox",
+        source_language="zh-CN",
+        model="stt-rt-v4-dto",
+        endpoint="wss://dto-soniox.example/realtime",
+        credential_reference="soniox:stt",
+        custom_vocabulary_enabled=True,
+        custom_terms={"zh-CN": ("Airi", "Shinano")},
+        provider_options={"keepalive_interval_s": 12.5, "trailing_silence_ms": 450},
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("soniox_api_key", "dto-soniox-key")
+
+    backend = wiring_module.create_stt_backend_from_resolved_config(resolved, secrets=secrets)
+
+    assert isinstance(backend, SonioxRealtimeSTTBackend)
+    assert backend.api_key == "dto-soniox-key"
+    assert backend.model == "stt-rt-v4-dto"
+    assert backend.endpoint == "wss://dto-soniox.example/realtime"
+    assert backend.sample_rate_hz == 16000
+    assert backend.keepalive_interval_s == 12.5
+    assert backend.trailing_silence_ms == 450
+    assert list(backend.context_terms) == ["Airi", "Shinano"]
+
+
+def test_create_stt_backend_from_resolved_local_qwen_uses_channel_language_and_no_secret() -> None:
+    resolved = _resolved_stt_config(
+        provider="local_qwen",
+        source_language="zh-CN",
+        model=None,
+        credential_reference=None,
+    )
+    secrets = InMemorySecretStore()
+
+    backend = wiring_module.create_stt_backend_from_resolved_config(resolved, secrets=secrets)
+
+    assert isinstance(backend, LocalQwenSherpaSTTBackend)
+    assert backend.model_dir == default_local_stt_model_dir()
+    assert backend.sample_rate_hz == 16000
+    assert backend.stream_label == "self"
+    assert backend.language_hint == "Chinese"
+
+
+def test_create_peer_stt_backend_from_resolved_uses_peer_dto_without_raw_self_settings() -> None:
+    resolved = _resolved_stt_config(
+        channel="peer",
+        provider="deepgram",
+        source_language="zh-CN",
+        model="dto-peer-model",
+        input_host_api=None,
+        input_device=None,
+        output_device="Steam Streaming Speakers",
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("deepgram_api_key", "peer-key")
+
+    backend = wiring_module.create_peer_stt_backend_from_resolved_config(
+        resolved,
+        secrets=secrets,
+    )
+
+    assert isinstance(backend, DeepgramRealtimeSTTBackend)
+    assert backend.api_key == "peer-key"
+    assert backend.model == "dto-peer-model"
+    assert backend.language == get_deepgram_language("zh-CN")
+    assert backend.stream_label == "peer"
+
+
+def test_resolve_overlay_config_maps_desktop_flet_to_resolved_desktop_options() -> None:
+    settings = AppSettings()
+    settings.ui.overlay_enabled = True
+    settings.overlay.target = "desktop"
+    settings.overlay.show_translation = False
+    settings.overlay.show_peer_original = True
+    settings.overlay.calibration.distance = 2.5
+    settings.overlay.desktop_flet.size_preset = "large"
+    settings.overlay.desktop_flet.position.x = 111
+    settings.overlay.desktop_flet.position.y = 222
+    settings.overlay.desktop_flet.locked = True
+    settings.overlay.desktop_flet.visual.background_alpha = 0.44
+
+    resolved = wiring_module.resolve_overlay_config(settings)
+
+    assert resolved.enabled is True
+    assert resolved.target == "desktop"
+    assert resolved.show_translation is False
+    assert resolved.show_peer_original is True
+    assert resolved.calibration["distance"] == 2.5
+    assert resolved.desktop_overlay_options == {
+        "size_preset": "large",
+        "position": {"x": 111, "y": 222},
+        "locked": True,
+        "visual": {
+            "text_scale": 1.0,
+            "background_alpha": 0.44,
+            "outline_width": None,
+        },
+    }
+    assert "desktop_flet" not in resolved.desktop_overlay_options
+
+
 def test_create_stt_backend_deepgram_uses_settings_and_secret() -> None:
     settings = AppSettings(
         provider=ProviderSettings(stt=STTProviderName.DEEPGRAM),
@@ -1263,6 +1513,14 @@ def test_create_stt_backend_local_qwen_passes_language_hint_without_hotwords() -
     assert getattr(backend, "hotwords", ()) == ()
 
 
+def test_create_stt_backend_rejects_invalid_compatibility_provider() -> None:
+    settings = AppSettings()
+    settings.provider.stt = "corrupt-self-stt-provider"  # type: ignore[assignment]
+
+    with pytest.raises(ValueError, match="Unsupported STT provider"):
+        create_stt_backend(settings, secrets=InMemorySecretStore())
+
+
 def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration_without_hint_terms() -> None:
     settings = AppSettings(
         provider=ProviderSettings(
@@ -1338,7 +1596,48 @@ def test_resolve_peer_stt_config_always_uses_self_deepgram_model() -> None:
     resolved = resolve_peer_stt_config(settings)
 
     assert resolved.provider == STTProviderName.DEEPGRAM
-    assert resolved.deepgram_model == "nova-3-general"
+    assert resolved.model == "nova-3-general"
+
+
+def test_resolve_peer_stt_config_exposes_legacy_provider_specific_fields() -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    settings.languages.peer_source_language = "zh-CN"
+    settings.soniox_stt.model = "stt-rt-v4-peer"
+    settings.soniox_stt.endpoint = "wss://peer-soniox.example/realtime"
+    settings.soniox_stt.keepalive_interval_s = 12.5
+    settings.soniox_stt.trailing_silence_ms = 700
+
+    resolved = resolve_peer_stt_config(settings)
+
+    assert isinstance(resolved, ResolvedPeerSTTConfig)
+    assert resolved.provider is STTProviderName.SONIOX
+    assert resolved.source_language == "zh-CN"
+    assert resolved.sample_rate_hz == 16000
+    assert resolved.keyterms == ()
+    assert resolved.deepgram_model is None
+    assert resolved.qwen_model is None
+    assert resolved.qwen_region is None
+    assert resolved.soniox_model == "stt-rt-v4-peer"
+    assert resolved.soniox_endpoint == "wss://peer-soniox.example/realtime"
+    assert resolved.soniox_keepalive_interval_s == 12.5
+    assert resolved.soniox_trailing_silence_ms == 700
+
+
+def test_resolve_peer_stt_config_rejects_invalid_compatibility_provider() -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = "corrupt-peer-stt-provider"  # type: ignore[assignment]
+
+    with pytest.raises(ValueError, match="Unsupported peer STT provider"):
+        resolve_peer_stt_config(settings)
+
+
+def test_create_peer_stt_backend_rejects_invalid_compatibility_provider() -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = "corrupt-peer-stt-provider"  # type: ignore[assignment]
+
+    with pytest.raises(ValueError, match="Unsupported peer STT provider"):
+        create_peer_stt_backend(settings, secrets=InMemorySecretStore())
 
 
 def test_create_peer_stt_backend_uses_peer_selected_soniox_provider() -> None:
@@ -1402,7 +1701,7 @@ def test_resolve_peer_stt_config_uses_shared_qwen_model_only() -> None:
 
     resolved = resolve_peer_stt_config(settings)
 
-    assert resolved.qwen_model == "self-qwen-asr"
+    assert resolved.model == "self-qwen-asr"
 
 
 def test_create_peer_stt_backend_uses_peer_local_qwen_provider_and_fixed_sample_rate() -> None:
@@ -1480,10 +1779,10 @@ def test_resolve_peer_stt_config_uses_shared_soniox_endpoint_keepalive_and_trail
 
     resolved = resolve_peer_stt_config(settings)
 
-    assert resolved.soniox_model == "self-soniox"
-    assert resolved.soniox_endpoint == "wss://self-soniox.example/realtime"
-    assert resolved.soniox_keepalive_interval_s == 12.5
-    assert resolved.soniox_trailing_silence_ms == 900
+    assert resolved.model == "self-soniox"
+    assert resolved.endpoint == "wss://self-soniox.example/realtime"
+    assert resolved.provider_options["keepalive_interval_s"] == 12.5
+    assert resolved.provider_options["trailing_silence_ms"] == 900
 
 
 def test_create_stt_backend_qwen_asr_uses_settings_and_secret() -> None:

@@ -24,9 +24,15 @@ from puripuly_heart.config.resolved import (
     CREDENTIAL_SOURCE_MANAGED,
     CREDENTIAL_SOURCE_NONE,
     CREDENTIAL_SOURCE_SECRET_STORE,
+    OVERLAY_TARGET_DESKTOP,
+    OVERLAY_TARGET_STEAMVR,
+    RUNTIME_CHANNEL_PEER,
+    RUNTIME_CHANNEL_SELF,
     ResolvedCredentialRequirement,
     ResolvedLLMConfig,
     ResolvedOptionValue,
+    ResolvedOverlayConfig,
+    ResolvedSTTConfig,
 )
 
 TRANSLATION_MODEL_GEMMA4: Final = "gemma4"
@@ -156,6 +162,40 @@ CREDENTIAL_REF_GEMINI_BYOK: Final = "gemini:byok"
 CREDENTIAL_REF_DEEPSEEK_BYOK: Final = "deepseek:byok"
 CREDENTIAL_REF_QWEN_BEIJING: Final = "qwen:beijing"
 CREDENTIAL_REF_QWEN_SINGAPORE: Final = "qwen:singapore"
+CREDENTIAL_REF_DEEPGRAM_STT: Final = "deepgram:stt"
+CREDENTIAL_REF_SONIOX_STT: Final = "soniox:stt"
+
+STT_PROVIDER_LOCAL_QWEN: Final = "local_qwen"
+STT_PROVIDER_DEEPGRAM: Final = "deepgram"
+STT_PROVIDER_QWEN_ASR: Final = "qwen_asr"
+STT_PROVIDER_SONIOX: Final = "soniox"
+STT_PROVIDERS: Final[tuple[str, ...]] = (
+    STT_PROVIDER_LOCAL_QWEN,
+    STT_PROVIDER_DEEPGRAM,
+    STT_PROVIDER_QWEN_ASR,
+    STT_PROVIDER_SONIOX,
+)
+STT_DEFAULT_SOURCE_LANGUAGE: Final = "ko"
+STT_DEFAULT_PEER_SOURCE_LANGUAGE: Final = "en"
+STT_DEFAULT_SAMPLE_RATE_HZ: Final = 16000
+STT_DEFAULT_CHANNELS: Final = 1
+STT_DEFAULT_RING_BUFFER_MS: Final = 500
+STT_DEFAULT_DRAIN_TIMEOUT_S: Final = 2.0
+STT_DEFAULT_VAD_SPEECH_THRESHOLD: Final = 0.5
+STT_DEFAULT_VAD_HANGOVER_MS: Final = 600
+STT_DEFAULT_VAD_PRE_ROLL_MS: Final = 500
+PEER_STT_DEFAULT_VAD_SPEECH_THRESHOLD: Final = 0.6
+PEER_STT_DEFAULT_VAD_HANGOVER_MS: Final = 500
+PEER_STT_DEFAULT_VAD_PRE_ROLL_MS: Final = 500
+STT_DEFAULT_LOW_LATENCY_ENABLED: Final = True
+STT_DEFAULT_LOW_LATENCY_MERGE_GAP_MS: Final = 600
+STT_DEFAULT_LOW_LATENCY_SPEC_RETRY_MAX: Final = 10
+DEEPGRAM_STT_MODEL_NOVA_3: Final = "nova-3"
+QWEN_ASR_STT_MODEL_REALTIME: Final = "qwen3-asr-flash-realtime"
+SONIOX_STT_MODEL_RT_V4: Final = "stt-rt-v4"
+SONIOX_STT_DEFAULT_ENDPOINT: Final = "wss://stt-rt.soniox.com/transcribe-websocket"
+SONIOX_STT_DEFAULT_KEEPALIVE_INTERVAL_S: Final = 10.0
+SONIOX_STT_DEFAULT_TRAILING_SILENCE_MS: Final = 100
 
 _OPENROUTER_MODELS: Final[tuple[str, ...]] = (
     OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT,
@@ -177,6 +217,10 @@ def _empty_options() -> Mapping[str, ResolvedOptionValue]:
     return MappingProxyType({})
 
 
+def _empty_custom_terms() -> Mapping[str, tuple[str, ...]]:
+    return MappingProxyType({})
+
+
 def _freeze_option_mapping(values: Mapping[str, object]) -> Mapping[str, ResolvedOptionValue]:
     frozen: dict[str, ResolvedOptionValue] = {}
     for key, value in values.items():
@@ -194,6 +238,19 @@ def _freeze_option_value(value: object) -> ResolvedOptionValue:
     if isinstance(value, tuple | list):
         return tuple(_freeze_option_value(item) for item in value)
     raise TypeError("runtime intent option values must be scalars, mappings, lists, or tuples")
+
+
+def _freeze_custom_terms(values: Mapping[str, object]) -> Mapping[str, tuple[str, ...]]:
+    frozen: dict[str, tuple[str, ...]] = {}
+    for language, terms in values.items():
+        if not isinstance(language, str):
+            raise ValueError("custom_terms keys must be strings")
+        if isinstance(terms, str) or not isinstance(terms, tuple | list):
+            raise ValueError("custom_terms values must be lists or tuples of strings")
+        if not all(isinstance(term, str) for term in terms):
+            raise ValueError("custom_terms values must contain only strings")
+        frozen[language] = tuple(terms)
+    return MappingProxyType(frozen)
 
 
 def _normalize_string(value: object, *, default: str) -> str:
@@ -355,6 +412,12 @@ def _qwen_service_endpoint(region: str) -> str:
     return "https://dashscope.aliyuncs.com/api/v1"
 
 
+def _qwen_asr_endpoint(region: str) -> str:
+    if region == QWEN_REGION_SINGAPORE:
+        return "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+    return "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+
+
 def _translation_connection_from_openrouter_source(
     selected_source: OpenRouterSource,
     *,
@@ -459,10 +522,162 @@ class DirectProviderRuntimeIntent:
 
 
 @dataclass(frozen=True, slots=True)
+class STTRuntimeIntent:
+    channel: str = RUNTIME_CHANNEL_SELF
+    provider: str = STT_PROVIDER_LOCAL_QWEN
+    source_language: str = STT_DEFAULT_SOURCE_LANGUAGE
+    input_host_api: str | None = None
+    input_device: str | None = None
+    output_device: str | None = None
+    sample_rate_hz: int = STT_DEFAULT_SAMPLE_RATE_HZ
+    channels: int = STT_DEFAULT_CHANNELS
+    ring_buffer_ms: int = STT_DEFAULT_RING_BUFFER_MS
+    drain_timeout_s: float = STT_DEFAULT_DRAIN_TIMEOUT_S
+    vad_speech_threshold: float = STT_DEFAULT_VAD_SPEECH_THRESHOLD
+    vad_hangover_ms: int = STT_DEFAULT_VAD_HANGOVER_MS
+    vad_pre_roll_ms: int = STT_DEFAULT_VAD_PRE_ROLL_MS
+    low_latency_enabled: bool = STT_DEFAULT_LOW_LATENCY_ENABLED
+    low_latency_merge_gap_ms: int = STT_DEFAULT_LOW_LATENCY_MERGE_GAP_MS
+    low_latency_spec_retry_max: int = STT_DEFAULT_LOW_LATENCY_SPEC_RETRY_MAX
+    custom_vocabulary_enabled: bool = False
+    custom_terms: Mapping[str, tuple[str, ...]] = field(default_factory=_empty_custom_terms)
+    deepgram_model: str = DEEPGRAM_STT_MODEL_NOVA_3
+    qwen_asr_model: str = QWEN_ASR_STT_MODEL_REALTIME
+    qwen_region: str = QWEN_REGION_BEIJING
+    soniox_model: str = SONIOX_STT_MODEL_RT_V4
+    soniox_endpoint: str = SONIOX_STT_DEFAULT_ENDPOINT
+    soniox_keepalive_interval_s: float = SONIOX_STT_DEFAULT_KEEPALIVE_INTERVAL_S
+    soniox_trailing_silence_ms: int = SONIOX_STT_DEFAULT_TRAILING_SILENCE_MS
+
+    def __post_init__(self) -> None:
+        channel = _normalize_allowed(
+            self.channel,
+            allowed=(RUNTIME_CHANNEL_SELF, RUNTIME_CHANNEL_PEER),
+            default=RUNTIME_CHANNEL_SELF,
+        )
+        provider = _normalize_allowed(
+            self.provider,
+            allowed=STT_PROVIDERS,
+            default=STT_PROVIDER_LOCAL_QWEN,
+        )
+        source_language = _normalize_string(
+            self.source_language,
+            default=(
+                STT_DEFAULT_PEER_SOURCE_LANGUAGE
+                if channel == RUNTIME_CHANNEL_PEER
+                else STT_DEFAULT_SOURCE_LANGUAGE
+            ),
+        )
+        qwen_region = _normalize_allowed(
+            self.qwen_region,
+            allowed=(QWEN_REGION_BEIJING, QWEN_REGION_SINGAPORE),
+            default=QWEN_REGION_BEIJING,
+        )
+        object.__setattr__(self, "channel", channel)
+        object.__setattr__(self, "provider", provider)
+        object.__setattr__(self, "source_language", source_language)
+        object.__setattr__(
+            self,
+            "sample_rate_hz",
+            _normalize_positive_int(self.sample_rate_hz, default=STT_DEFAULT_SAMPLE_RATE_HZ),
+        )
+        object.__setattr__(
+            self,
+            "channels",
+            _normalize_positive_int(self.channels, default=STT_DEFAULT_CHANNELS),
+        )
+        object.__setattr__(
+            self,
+            "ring_buffer_ms",
+            _normalize_positive_int(self.ring_buffer_ms, default=STT_DEFAULT_RING_BUFFER_MS),
+        )
+        object.__setattr__(
+            self,
+            "drain_timeout_s",
+            self.drain_timeout_s if self.drain_timeout_s > 0 else STT_DEFAULT_DRAIN_TIMEOUT_S,
+        )
+        object.__setattr__(
+            self,
+            "vad_speech_threshold",
+            (
+                self.vad_speech_threshold
+                if 0.0 <= self.vad_speech_threshold <= 1.0
+                else STT_DEFAULT_VAD_SPEECH_THRESHOLD
+            ),
+        )
+        object.__setattr__(self, "vad_hangover_ms", max(0, int(self.vad_hangover_ms)))
+        object.__setattr__(self, "vad_pre_roll_ms", max(0, int(self.vad_pre_roll_ms)))
+        object.__setattr__(
+            self,
+            "low_latency_merge_gap_ms",
+            max(0, int(self.low_latency_merge_gap_ms)),
+        )
+        object.__setattr__(
+            self,
+            "low_latency_spec_retry_max",
+            max(0, int(self.low_latency_spec_retry_max)),
+        )
+        object.__setattr__(self, "qwen_region", qwen_region)
+        object.__setattr__(
+            self,
+            "custom_terms",
+            _freeze_custom_terms(cast(Mapping[str, object], self.custom_terms)),
+        )
+
+
+def _default_peer_stt_runtime_intent() -> STTRuntimeIntent:
+    return STTRuntimeIntent(
+        channel=RUNTIME_CHANNEL_PEER,
+        source_language=STT_DEFAULT_PEER_SOURCE_LANGUAGE,
+        input_host_api=None,
+        input_device=None,
+        vad_speech_threshold=PEER_STT_DEFAULT_VAD_SPEECH_THRESHOLD,
+        vad_hangover_ms=PEER_STT_DEFAULT_VAD_HANGOVER_MS,
+        vad_pre_roll_ms=PEER_STT_DEFAULT_VAD_PRE_ROLL_MS,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class OverlayRuntimeIntent:
+    enabled: bool = False
+    target: str = OVERLAY_TARGET_STEAMVR
+    show_translation: bool = True
+    show_peer_original: bool = True
+    calibration: Mapping[str, ResolvedOptionValue] = field(default_factory=_empty_options)
+    desktop_overlay_options: Mapping[str, ResolvedOptionValue] = field(
+        default_factory=_empty_options
+    )
+
+    def __post_init__(self) -> None:
+        target = _normalize_allowed(
+            self.target,
+            allowed=(OVERLAY_TARGET_STEAMVR, OVERLAY_TARGET_DESKTOP),
+            default=OVERLAY_TARGET_STEAMVR,
+        )
+        object.__setattr__(self, "target", target)
+        object.__setattr__(self, "enabled", bool(self.enabled))
+        object.__setattr__(self, "show_translation", bool(self.show_translation))
+        object.__setattr__(self, "show_peer_original", bool(self.show_peer_original))
+        object.__setattr__(
+            self,
+            "calibration",
+            _freeze_option_mapping(cast(Mapping[str, object], self.calibration)),
+        )
+        object.__setattr__(
+            self,
+            "desktop_overlay_options",
+            _freeze_option_mapping(cast(Mapping[str, object], self.desktop_overlay_options)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeResolutionInput:
     translation: TranslationRuntimeIntent = field(default_factory=TranslationRuntimeIntent)
     openrouter: OpenRouterRuntimeIntent = field(default_factory=OpenRouterRuntimeIntent)
     direct: DirectProviderRuntimeIntent = field(default_factory=DirectProviderRuntimeIntent)
+    self_stt: STTRuntimeIntent = field(default_factory=STTRuntimeIntent)
+    peer_stt: STTRuntimeIntent = field(default_factory=_default_peer_stt_runtime_intent)
+    overlay: OverlayRuntimeIntent = field(default_factory=OverlayRuntimeIntent)
 
 
 def normalize_translation_runtime_intent(
@@ -760,6 +975,74 @@ def _resolved_direct_provider_config(
     )
 
 
+def resolve_stt_config(intent: STTRuntimeIntent) -> ResolvedSTTConfig:
+    provider = intent.provider
+    model: str | None = None
+    endpoint: str | None = None
+    region: str | None = None
+    credential = _no_credential()
+    provider_options: Mapping[str, object] = {}
+
+    if provider == STT_PROVIDER_DEEPGRAM:
+        model = intent.deepgram_model
+        credential = _required_credential(
+            CREDENTIAL_SOURCE_SECRET_STORE, CREDENTIAL_REF_DEEPGRAM_STT
+        )
+    elif provider == STT_PROVIDER_QWEN_ASR:
+        model = intent.qwen_asr_model
+        region = intent.qwen_region
+        endpoint = _qwen_asr_endpoint(intent.qwen_region)
+        credential = _required_credential(
+            CREDENTIAL_SOURCE_SECRET_STORE,
+            _qwen_credential_reference(intent.qwen_region),
+        )
+    elif provider == STT_PROVIDER_SONIOX:
+        model = intent.soniox_model
+        endpoint = intent.soniox_endpoint
+        credential = _required_credential(CREDENTIAL_SOURCE_SECRET_STORE, CREDENTIAL_REF_SONIOX_STT)
+        provider_options = {
+            "keepalive_interval_s": intent.soniox_keepalive_interval_s,
+            "trailing_silence_ms": intent.soniox_trailing_silence_ms,
+        }
+
+    return ResolvedSTTConfig(
+        channel=cast(str, intent.channel),
+        source_language=intent.source_language,
+        provider=provider,
+        model=model,
+        endpoint=endpoint,
+        region=region,
+        credential=credential,
+        input_host_api=intent.input_host_api,
+        input_device=intent.input_device,
+        output_device=intent.output_device,
+        sample_rate_hz=intent.sample_rate_hz,
+        channels=intent.channels,
+        ring_buffer_ms=intent.ring_buffer_ms,
+        drain_timeout_s=intent.drain_timeout_s,
+        vad_speech_threshold=intent.vad_speech_threshold,
+        vad_hangover_ms=intent.vad_hangover_ms,
+        vad_pre_roll_ms=intent.vad_pre_roll_ms,
+        low_latency_enabled=intent.low_latency_enabled,
+        low_latency_merge_gap_ms=intent.low_latency_merge_gap_ms,
+        low_latency_spec_retry_max=intent.low_latency_spec_retry_max,
+        custom_vocabulary_enabled=intent.custom_vocabulary_enabled,
+        custom_terms=intent.custom_terms if intent.custom_vocabulary_enabled else {},
+        provider_options=provider_options,
+    )
+
+
+def resolve_overlay_config(intent: OverlayRuntimeIntent) -> ResolvedOverlayConfig:
+    return ResolvedOverlayConfig(
+        enabled=intent.enabled,
+        target=cast(str, intent.target),
+        show_translation=intent.show_translation,
+        show_peer_original=intent.show_peer_original,
+        calibration=intent.calibration,
+        desktop_overlay_options=intent.desktop_overlay_options,
+    )
+
+
 def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConfig:
     translation = runtime_input.translation
     openrouter = runtime_input.openrouter
@@ -876,10 +1159,13 @@ __all__ = [
     "CREDENTIAL_REF_GEMINI_BYOK",
     "CREDENTIAL_REF_OPENROUTER_BYOK",
     "CREDENTIAL_REF_OPENROUTER_MANAGED",
+    "CREDENTIAL_REF_DEEPGRAM_STT",
     "CREDENTIAL_REF_QWEN_BEIJING",
     "CREDENTIAL_REF_QWEN_SINGAPORE",
+    "CREDENTIAL_REF_SONIOX_STT",
     "DEEPSEEK_MODEL_V4_FLASH",
     "DEEPSEEK_MODEL_V4_PRO",
+    "DEEPGRAM_STT_MODEL_NOVA_3",
     "DirectProviderRuntimeIntent",
     "GEMINI_MODEL_3_FLASH",
     "GEMINI_MODEL_31_FLASH_LITE",
@@ -896,6 +1182,7 @@ __all__ = [
     "OPENROUTER_SOURCE_MANAGED",
     "OPENROUTER_SOURCE_NONE",
     "OPENROUTER_SOURCES",
+    "OverlayRuntimeIntent",
     "OpenRouterRuntimeIntent",
     "OpenRouterSource",
     "PROVIDER_DEEPSEEK",
@@ -905,9 +1192,32 @@ __all__ = [
     "PROVIDER_QWEN",
     "QWEN_MODEL_35_PLUS",
     "QWEN_MODEL_35_FLASH",
+    "QWEN_ASR_STT_MODEL_REALTIME",
     "QWEN_REGION_BEIJING",
     "QWEN_REGION_SINGAPORE",
     "RuntimeResolutionInput",
+    "SONIOX_STT_DEFAULT_ENDPOINT",
+    "SONIOX_STT_DEFAULT_KEEPALIVE_INTERVAL_S",
+    "SONIOX_STT_DEFAULT_TRAILING_SILENCE_MS",
+    "SONIOX_STT_MODEL_RT_V4",
+    "STT_DEFAULT_CHANNELS",
+    "STT_DEFAULT_DRAIN_TIMEOUT_S",
+    "STT_DEFAULT_LOW_LATENCY_ENABLED",
+    "STT_DEFAULT_LOW_LATENCY_MERGE_GAP_MS",
+    "STT_DEFAULT_LOW_LATENCY_SPEC_RETRY_MAX",
+    "STT_DEFAULT_PEER_SOURCE_LANGUAGE",
+    "STT_DEFAULT_RING_BUFFER_MS",
+    "STT_DEFAULT_SAMPLE_RATE_HZ",
+    "STT_DEFAULT_SOURCE_LANGUAGE",
+    "STT_DEFAULT_VAD_HANGOVER_MS",
+    "STT_DEFAULT_VAD_PRE_ROLL_MS",
+    "STT_DEFAULT_VAD_SPEECH_THRESHOLD",
+    "STT_PROVIDER_DEEPGRAM",
+    "STT_PROVIDER_LOCAL_QWEN",
+    "STT_PROVIDER_QWEN_ASR",
+    "STT_PROVIDER_SONIOX",
+    "STT_PROVIDERS",
+    "STTRuntimeIntent",
     "TRANSLATION_CONNECTION_MANAGED",
     "TRANSLATION_CONNECTION_MANAGED_CHINA",
     "TRANSLATION_CONNECTION_OFFICIAL_BYOK",
@@ -930,5 +1240,7 @@ __all__ = [
     "derive_translation_runtime_intent_from_compatibility",
     "normalize_openrouter_runtime_intent",
     "normalize_translation_runtime_intent",
+    "resolve_overlay_config",
     "resolve_llm_config",
+    "resolve_stt_config",
 ]

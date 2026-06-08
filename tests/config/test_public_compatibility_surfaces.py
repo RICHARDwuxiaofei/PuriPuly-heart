@@ -274,12 +274,39 @@ def _assert_openrouter_byok_env_lookup(
 
 
 def _assert_local_llm_optional_secret_store_only(entry: dict[str, Any]) -> None:
-    source = inspect.getsource(wiring.create_llm_provider)
+    source = "\n".join(
+        (
+            inspect.getsource(wiring.create_llm_provider),
+            inspect.getsource(wiring._base_llm_provider_from_resolved_config),
+        )
+    )
 
     assert entry["env_vars"] == []
     assert entry["ignored_env_vars"] == ["LOCAL_LLM_API_KEY"]
     assert 'secrets.get("local_llm_api_key")' in source
     assert "LOCAL_LLM_API_KEY" not in source
+
+
+def _assert_qwen_resolved_credential_helper_preserves_legacy_fallbacks() -> None:
+    helper_source = inspect.getsource(wiring._qwen_api_key_for_resolved_credential)
+    base_llm_source = inspect.getsource(wiring._base_llm_provider_from_resolved_config)
+    stt_source = inspect.getsource(wiring.create_stt_backend_from_resolved_config)
+    self_stt_source = inspect.getsource(wiring.create_stt_backend)
+    peer_stt_source = inspect.getsource(wiring.create_peer_stt_backend)
+    peer_resolved_source = inspect.getsource(wiring.create_peer_stt_backend_from_resolved_config)
+
+    assert 'key="alibaba_api_key_beijing"' in helper_source
+    assert 'key="alibaba_api_key_singapore"' in helper_source
+    assert '"ALIBABA_API_KEY_BEIJING"' in helper_source
+    assert '"ALIBABA_API_KEY_SINGAPORE"' in helper_source
+    assert '"ALIBABA_API_KEY"' in helper_source
+    assert '"DASHSCOPE_API_KEY"' in helper_source
+    assert helper_source.count('legacy_keys=("alibaba_api_key",)') == 2
+    assert "_qwen_api_key_for_resolved_credential(config.credential" in base_llm_source
+    assert "_qwen_api_key_for_resolved_credential(config.credential" in stt_source
+    assert "create_stt_backend_from_resolved_config(" in self_stt_source
+    assert "create_peer_stt_backend_from_resolved_config(" in peer_stt_source
+    assert "create_stt_backend_from_resolved_config(" in peer_resolved_source
 
 
 def test_public_compatibility_snapshot_declares_all_required_surfaces() -> None:
@@ -335,8 +362,7 @@ def test_secret_store_key_registry_snapshot_matches_current_public_keys() -> Non
     wiring_source = inspect.getsource(wiring)
     for key in WIRING_SECRET_KEYS:
         assert f'"{key}"' in wiring_source
-    # Qwen LLM, self STT, and peer STT each keep Beijing and Singapore fallbacks.
-    assert wiring_source.count('legacy_keys=("alibaba_api_key",)') == 6
+    _assert_qwen_resolved_credential_helper_preserves_legacy_fallbacks()
 
 
 def test_secret_store_env_lookup_snapshot_matches_current_fallback_behavior(

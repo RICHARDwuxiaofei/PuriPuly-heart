@@ -379,14 +379,6 @@ KNOWN_ALLOWED_VIOLATIONS: frozenset[ImportViolation] = frozenset(
             reason="providers may use provider ports, SDKs, and message/observability protocols, but not Flet UI, settings migration internals, app services, or concrete SessionRuntimeLoggingService-style adapters",
         ),
         ImportViolation(
-            rule_id="runtime-owners-use-ports",
-            importer="src/puripuly_heart/core/runtime/peer_channel.py",
-            imported="puripuly_heart.app.wiring",
-            importer_layer="runtime owners",
-            imported_layer="adapters",
-            reason="runtime owners must coordinate through domain events, resolved DTOs, lifecycle/message/observability protocols, not app wiring, Flet UI, provider config parsing, or concrete adapters",
-        ),
-        ImportViolation(
             rule_id="ui-adapters-avoid-provider-construction",
             importer="src/puripuly_heart/ui/app.py",
             imported="puripuly_heart.config.settings",
