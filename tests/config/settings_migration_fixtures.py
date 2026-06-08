@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,130 +43,141 @@ DYNAMIC_MAPPING_PATHS = frozenset(
     }
 )
 
-SCHEMA_METADATA_CURRENT_PATHS = frozenset({"settings_version"})
-SINGLETON_SUPPORTED_VALUE_CURRENT_PATHS = frozenset({"overlay.calibration.anchor"})
-REPAIR_TO_CANONICAL_DEFAULT_CURRENT_PATHS = frozenset(
-    {
-        "audio.internal_channels",
-        "audio.internal_sample_rate_hz",
-        "local_llm.backend",
-    }
-)
+ADR_RESOLVED_CURRENT_DESTINATIONS = {
+    "ui.peer_translation_eula_accepted": "state.peer_translation.eula_accepted",
+    "ui.integrated_context_enabled": "intent.integrated_context.enabled",
+    "ui.integrated_context_bootstrapped": "state.integrated_context.bootstrapped",
+}
+DECISION_PENDING_CURRENT_DESTINATIONS: dict[str, str] = {}
 
-USER_INTENT_CURRENT_PATHS = frozenset(
-    {
-        "audio.input_device",
-        "audio.input_host_api",
-        "audio.ring_buffer_ms",
-        "deepgram_stt.model",
-        "desktop_audio.output_device",
-        "desktop_audio.vad_hangover_ms",
-        "desktop_audio.vad_pre_roll_ms",
-        "desktop_audio.vad_speech_threshold",
-        "languages.peer_source_language",
-        "languages.peer_target_language",
-        "languages.recent_source_languages",
-        "languages.recent_target_languages",
-        "languages.source_language",
-        "languages.target_language",
-        "llm.concurrency_limit",
-        "local_llm.base_url",
-        "local_llm.extra_body",
-        "local_llm.model",
-        "openrouter.broker_base_url",
-        "openrouter.fallback_selection_alias",
-        "openrouter.routing_mode",
-        "osc.chatbox_address",
-        "osc.chatbox_clear",
-        "osc.chatbox_include_source",
-        "osc.chatbox_max_chars",
-        "osc.chatbox_send",
-        "osc.host",
-        "osc.port",
-        "osc.vrc_mic_intercept",
-        "overlay.calibration.background_alpha",
-        "overlay.calibration.distance",
-        "overlay.calibration.offset_x",
-        "overlay.calibration.offset_y",
-        "overlay.calibration.text_scale",
-        "overlay.desktop_flet.position.x",
-        "overlay.desktop_flet.position.y",
-        "overlay.desktop_flet.size_preset",
-        "overlay.desktop_flet.visual.background_alpha",
-        "overlay.show_peer_original",
-        "overlay.show_translation",
-        "overlay.target",
-        "provider.peer_stt",
-        "provider.stt",
-        "qwen.llm_model",
-        "qwen.region",
-        "qwen_asr_stt.model",
-        "secrets.backend",
-        "secrets.encrypted_file_path",
-        "soniox_stt.endpoint",
-        "soniox_stt.keepalive_interval_s",
-        "soniox_stt.model",
-        "soniox_stt.trailing_silence_ms",
-        "stt.custom_terms",
-        "stt.custom_vocabulary_enabled",
-        "stt.drain_timeout_s",
-        "stt.low_latency_merge_gap_ms",
-        "stt.low_latency_mode",
-        "stt.low_latency_spec_retry_max",
-        "stt.low_latency_vad_hangover_ms",
-        "stt.vad_speech_threshold",
-        "system_prompt",
-        "translation.connection",
-        "translation.connection_history",
-        "translation.model",
-        "ui.clipboard_auto_translate_enabled",
-        "ui.integrated_context_enabled",
-        "ui.locale",
-    }
-)
+CURRENT_USER_INTENT_DESTINATIONS = {
+    "audio.input_device": "intent.audio.input_device",
+    "audio.input_host_api": "intent.audio.input_host_api",
+    "audio.ring_buffer_ms": "intent.audio.ring_buffer_ms",
+    "deepgram_stt.model": "intent.stt.deepgram.model",
+    "desktop_audio.output_device": "intent.desktop_audio.output_device",
+    "desktop_audio.vad_hangover_ms": "intent.desktop_audio.vad_hangover_ms",
+    "desktop_audio.vad_pre_roll_ms": "intent.desktop_audio.vad_pre_roll_ms",
+    "desktop_audio.vad_speech_threshold": "intent.desktop_audio.vad_speech_threshold",
+    "languages.peer_source_language": "intent.languages.peer_source_language",
+    "languages.peer_target_language": "intent.languages.peer_target_language",
+    "languages.recent_source_languages": "intent.languages.recent_source_languages",
+    "languages.recent_target_languages": "intent.languages.recent_target_languages",
+    "languages.source_language": "intent.languages.source_language",
+    "languages.target_language": "intent.languages.target_language",
+    "llm.concurrency_limit": "intent.translation.concurrency_limit",
+    "local_llm.base_url": "intent.local_llm.base_url",
+    "local_llm.extra_body": "intent.local_llm.extra_body",
+    "local_llm.model": "intent.local_llm.model",
+    "openrouter.broker_base_url": "intent.translation.openrouter_broker_base_url",
+    "openrouter.fallback_selection_alias": (
+        "intent.translation.openrouter_fallback_selection_alias"
+    ),
+    "openrouter.routing_mode": "intent.translation.openrouter_routing_mode",
+    "osc.chatbox_address": "intent.osc.chatbox_address",
+    "osc.chatbox_clear": "intent.osc.chatbox_clear",
+    "osc.chatbox_include_source": "intent.osc.chatbox_include_source",
+    "osc.chatbox_max_chars": "intent.osc.chatbox_max_chars",
+    "osc.chatbox_send": "intent.osc.chatbox_send",
+    "osc.host": "intent.osc.host",
+    "osc.port": "intent.osc.port",
+    "osc.vrc_mic_intercept": "intent.osc.vrc_mic_intercept",
+    "overlay.calibration.background_alpha": "intent.overlay.calibration.background_alpha",
+    "overlay.calibration.distance": "intent.overlay.calibration.distance",
+    "overlay.calibration.offset_x": "intent.overlay.calibration.offset_x",
+    "overlay.calibration.offset_y": "intent.overlay.calibration.offset_y",
+    "overlay.calibration.text_scale": "intent.overlay.calibration.text_scale",
+    "overlay.desktop_flet.position.x": "intent.overlay.desktop_flet.position.x",
+    "overlay.desktop_flet.position.y": "intent.overlay.desktop_flet.position.y",
+    "overlay.desktop_flet.size_preset": "intent.overlay.desktop_flet.size_preset",
+    "overlay.desktop_flet.visual.background_alpha": (
+        "intent.overlay.desktop_flet.visual.background_alpha"
+    ),
+    "overlay.show_peer_original": "intent.overlay.show_peer_original",
+    "overlay.show_translation": "intent.overlay.show_translation",
+    "overlay.target": "intent.overlay.target",
+    "provider.peer_stt": "intent.peer_stt.provider",
+    "provider.stt": "intent.stt.provider",
+    "qwen.llm_model": "intent.translation.qwen.llm_model",
+    "qwen.region": "intent.translation.qwen.region",
+    "qwen_asr_stt.model": "intent.stt.qwen_asr.model",
+    "secrets.backend": "intent.secrets.backend",
+    "secrets.encrypted_file_path": "intent.secrets.encrypted_file_path",
+    "soniox_stt.endpoint": "intent.stt.soniox.endpoint",
+    "soniox_stt.keepalive_interval_s": "intent.stt.soniox.keepalive_interval_s",
+    "soniox_stt.model": "intent.stt.soniox.model",
+    "soniox_stt.trailing_silence_ms": "intent.stt.soniox.trailing_silence_ms",
+    "stt.custom_terms": "intent.stt.custom_terms",
+    "stt.custom_vocabulary_enabled": "intent.stt.custom_vocabulary_enabled",
+    "stt.drain_timeout_s": "intent.stt.drain_timeout_s",
+    "stt.low_latency_merge_gap_ms": "intent.stt.low_latency_merge_gap_ms",
+    "stt.low_latency_mode": "intent.stt.low_latency_mode",
+    "stt.low_latency_spec_retry_max": "intent.stt.low_latency_spec_retry_max",
+    "stt.low_latency_vad_hangover_ms": "intent.stt.low_latency_vad_hangover_ms",
+    "stt.vad_speech_threshold": "intent.stt.vad_speech_threshold",
+    "system_prompt": "intent.prompts.system_prompt",
+    "translation.connection": "intent.translation.connection",
+    "translation.connection_history": "intent.translation.connection_history",
+    "translation.model": "intent.translation.model",
+    "ui.clipboard_auto_translate_enabled": "intent.clipboard.auto_translate_enabled",
+    "ui.locale": "intent.ui.locale",
+}
 
-CURRENT_COMPATIBILITY_INPUT_PATHS = frozenset(
-    {
-        "deepseek.llm_model",
-        "gemini.llm_model",
-        "openrouter.llm_model",
-        "openrouter.provider_routing",
-        "openrouter.selected_source",
-        "openrouter.selection_alias",
-        "provider.llm",
-        "qwen_asr_stt.endpoint",
-    }
-)
+CURRENT_COMPATIBILITY_INPUT_DESTINATIONS = {
+    "deepseek.llm_model": "compatibility_input.deepseek.llm_model",
+    "gemini.llm_model": "compatibility_input.gemini.llm_model",
+    "openrouter.llm_model": "compatibility_input.openrouter.llm_model",
+    "openrouter.provider_routing": "compatibility_input.openrouter.provider_routing",
+    "openrouter.selected_source": "compatibility_input.openrouter.selected_source",
+    "openrouter.selection_alias": "compatibility_input.openrouter.selection_alias",
+    "provider.llm": "compatibility_input.provider.llm",
+    "qwen_asr_stt.endpoint": "compatibility_input.qwen_asr_stt.endpoint",
+}
 
-PERSISTED_OPERATIONAL_STATE_CURRENT_PATHS = frozenset(
-    {
-        "api_key_verified.alibaba_beijing",
-        "api_key_verified.alibaba_singapore",
-        "api_key_verified.deepgram",
-        "api_key_verified.deepseek",
-        "api_key_verified.google",
-        "api_key_verified.openrouter",
-        "api_key_verified.soniox",
-        "managed_identity.active_managed_credential_ref",
-        "managed_identity.active_managed_expires_at",
-        "managed_identity.founder_letter_seen_credential_ref",
-        "managed_identity.installation_id",
-        "managed_identity.referral_id",
-        "managed_identity.release_token",
-        "managed_identity.release_token_expires_at",
-        "managed_identity.verified_hardware_hash",
-        "managed_identity.verified_hardware_hash_salt_version",
-        "ui.github_star_prompt_clicked",
-        "ui.github_star_prompt_eligible_launch_count",
-        "ui.github_star_prompt_last_shown_at",
-        "ui.github_star_prompt_show_count",
-        "ui.github_star_prompt_translation_success_observed",
-    }
-)
+CURRENT_OPERATIONAL_STATE_DESTINATIONS = {
+    "api_key_verified.alibaba_beijing": "state.provider_verification.alibaba_beijing.status",
+    "api_key_verified.alibaba_singapore": "state.provider_verification.alibaba_singapore.status",
+    "api_key_verified.deepgram": "state.provider_verification.deepgram.status",
+    "api_key_verified.deepseek": "state.provider_verification.deepseek.status",
+    "api_key_verified.google": "state.provider_verification.google.status",
+    "api_key_verified.openrouter": "state.provider_verification.openrouter.status",
+    "api_key_verified.soniox": "state.provider_verification.soniox.status",
+    "managed_identity.active_managed_credential_ref": (
+        "state.managed_connection.active_managed_credential_ref"
+    ),
+    "managed_identity.active_managed_expires_at": (
+        "state.managed_connection.active_managed_expires_at"
+    ),
+    "managed_identity.founder_letter_seen_credential_ref": (
+        "state.managed_connection.founder_letter_seen_credential_ref"
+    ),
+    "managed_identity.installation_id": "state.managed_connection.installation_id",
+    "managed_identity.referral_id": "state.managed_connection.referral_id",
+    "managed_identity.release_token": "state.managed_connection.release_token",
+    "managed_identity.release_token_expires_at": (
+        "state.managed_connection.release_token_expires_at"
+    ),
+    "managed_identity.verified_hardware_hash": ("state.managed_connection.verified_hardware_hash"),
+    "managed_identity.verified_hardware_hash_salt_version": (
+        "state.managed_connection.verified_hardware_hash_salt_version"
+    ),
+    "ui.github_star_prompt_clicked": "state.github_star_prompt.clicked",
+    "ui.github_star_prompt_eligible_launch_count": (
+        "state.github_star_prompt.eligible_launch_count"
+    ),
+    "ui.github_star_prompt_last_shown_at": "state.github_star_prompt.last_shown_at",
+    "ui.github_star_prompt_show_count": "state.github_star_prompt.show_count",
+    "ui.github_star_prompt_translation_success_observed": (
+        "state.github_star_prompt.translation_success_observed"
+    ),
+}
 
-DECISION_PENDING_CURRENT_DESTINATIONS = {
-    "ui.integrated_context_bootstrapped": "state.integrated_context.*",
-    "ui.peer_translation_eula_accepted": "state.peer_translation.* or intent.ui.*",
+REPAIR_TO_VNEXT_DEFAULT_DESTINATIONS = {
+    "local_llm.backend": "intent.local_llm.backend",
+}
+REPAIR_TO_RUNTIME_CONSTANT_DESTINATIONS = {
+    "audio.internal_channels": "runtime_resolution.audio.channels_constant",
+    "audio.internal_sample_rate_hz": "runtime_resolution.audio.sample_rate_hz_constant",
 }
 
 
@@ -403,20 +414,19 @@ def legacy_compatibility_settings_fixture() -> dict[str, Any]:
 
 def _put_classification(
     table: dict[str, FieldClassification],
-    paths: frozenset[str],
+    destinations_by_path: Mapping[str, str],
     *,
     category: str,
-    destination_prefix: str,
     status: str,
     fixture: str,
     notes: str = "",
 ) -> None:
-    for path in paths:
+    for path, destination in destinations_by_path.items():
         if path in table:
             raise ValueError(f"duplicate migration classification path: {path}")
         table[path] = FieldClassification(
             category=category,
-            destination=f"{destination_prefix}.{path}",
+            destination=destination,
             status=status,
             fixture=fixture,
             notes=notes,
@@ -427,34 +437,38 @@ def _current_migration_classification() -> dict[str, FieldClassification]:
     table: dict[str, FieldClassification] = {}
     _put_classification(
         table,
-        USER_INTENT_CURRENT_PATHS,
+        CURRENT_USER_INTENT_DESTINATIONS,
         category="persisted_user_intent",
-        destination_prefix="intent",
         status="retained",
         fixture=MAXIMAL_V24_FIXTURE_NAME,
     )
     _put_classification(
         table,
-        CURRENT_COMPATIBILITY_INPUT_PATHS,
+        CURRENT_COMPATIBILITY_INPUT_DESTINATIONS,
         category="compatibility_input",
-        destination_prefix="intent.translation.compatibility",
         status="accepted_read_no_vnext_write_projection",
         fixture=MAXIMAL_V24_FIXTURE_NAME,
     )
     _put_classification(
         table,
-        PERSISTED_OPERATIONAL_STATE_CURRENT_PATHS,
+        CURRENT_OPERATIONAL_STATE_DESTINATIONS,
         category="persisted_operational_state",
-        destination_prefix="state",
         status="retained_or_reclassified",
         fixture=MAXIMAL_V24_FIXTURE_NAME,
     )
     _put_classification(
         table,
-        REPAIR_TO_CANONICAL_DEFAULT_CURRENT_PATHS,
+        REPAIR_TO_VNEXT_DEFAULT_DESTINATIONS,
         category="compatibility_repair",
-        destination_prefix="intent",
         status="raw_fixture_non_default_repairs_to_canonical_default",
+        fixture=MAXIMAL_V24_FIXTURE_NAME,
+        notes="Maximal raw v24 fixture uses non-default input; current loader repairs it.",
+    )
+    _put_classification(
+        table,
+        REPAIR_TO_RUNTIME_CONSTANT_DESTINATIONS,
+        category="compatibility_repair",
+        status="raw_fixture_non_default_repairs_to_canonical_default_no_vnext_write_projection",
         fixture=MAXIMAL_V24_FIXTURE_NAME,
         notes="Maximal raw v24 fixture uses non-default input; current loader repairs it.",
     )
@@ -472,15 +486,20 @@ def _current_migration_classification() -> dict[str, FieldClassification]:
         fixture=MAXIMAL_V24_FIXTURE_NAME,
         notes="Current overlay calibration supports only 'head_locked'; non-default values fail validation.",
     )
-    for path, destination in DECISION_PENDING_CURRENT_DESTINATIONS.items():
+    for path, destination in ADR_RESOLVED_CURRENT_DESTINATIONS.items():
         if path in table:
             raise ValueError(f"duplicate migration classification path: {path}")
+        category = (
+            "persisted_user_intent"
+            if path == "ui.integrated_context_enabled"
+            else "persisted_operational_state"
+        )
         table[path] = FieldClassification(
-            category="decision_pending",
+            category=category,
             destination=destination,
-            status="requires_decision_before_vnext_write",
+            status="retained_adr_resolved",
             fixture=MAXIMAL_V24_FIXTURE_NAME,
-            notes="Bundle watchpoint requires an exact vNext destination before migration.",
+            notes="Accepted ADR 2026-06-08 fixed the vNext intent/state destination.",
         )
     return table
 

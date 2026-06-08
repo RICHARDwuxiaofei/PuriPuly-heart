@@ -1,0 +1,312 @@
+from __future__ import annotations
+
+import math
+from dataclasses import asdict, fields, is_dataclass
+from importlib import import_module
+from types import ModuleType
+
+import pytest
+
+from puripuly_heart.config.audio_host_api import WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+from puripuly_heart.config.settings import (
+    DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS,
+    DEFAULT_OPENROUTER_BROKER_BASE_URL,
+    SETTINGS_SCHEMA_VERSION,
+)
+
+
+def _load_schema_module() -> ModuleType:
+    try:
+        return import_module("puripuly_heart.config.settings_vnext.schema")
+    except ModuleNotFoundError as exc:
+        pytest.fail(f"vNext settings schema module should import: {exc}")
+
+
+def _dataclass_leaf_paths(value: object, prefix: str = "") -> set[str]:
+    if not is_dataclass(value) or isinstance(value, type):
+        return {prefix} if prefix else set()
+
+    paths: set[str] = set()
+    for field in fields(value):
+        child = getattr(value, field.name)
+        child_path = f"{prefix}.{field.name}" if prefix else field.name
+        if is_dataclass(child) and not isinstance(child, type):
+            paths.update(_dataclass_leaf_paths(child, child_path))
+        else:
+            paths.add(child_path)
+    return paths
+
+
+def _dict_leaf_paths(value: object, prefix: str = "") -> set[str]:
+    if isinstance(value, dict):
+        paths: set[str] = set()
+        for key, child in value.items():
+            child_path = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(child, dict) and child:
+                paths.update(_dict_leaf_paths(child, child_path))
+            else:
+                paths.add(child_path)
+        return paths
+    return {prefix} if prefix else set()
+
+
+def test_vnext_schema_imports_required_roots_and_default_adr_destinations() -> None:
+    schema = _load_schema_module()
+
+    settings = schema.AppSettingsVNext()
+
+    assert settings.settings_version == SETTINGS_SCHEMA_VERSION + 1
+    assert isinstance(settings.intent, schema.UserIntentSettings)
+    assert isinstance(settings.state, schema.PersistedOperationalState)
+    assert settings.intent.integrated_context.enabled is True
+    assert settings.state.integrated_context.bootstrapped is False
+    assert settings.state.peer_translation.eula_accepted is False
+
+
+def test_vnext_schema_defaults_match_current_persisted_settings_defaults() -> None:
+    schema = _load_schema_module()
+
+    settings = schema.AppSettingsVNext()
+
+    assert settings.intent.audio.input_host_api == WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    assert settings.intent.desktop_audio.vad_hangover_ms == DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS
+    assert (
+        settings.intent.translation.openrouter_broker_base_url == DEFAULT_OPENROUTER_BROKER_BASE_URL
+    )
+
+
+def test_vnext_schema_represents_current_intent_and_state_leaves() -> None:
+    schema = _load_schema_module()
+
+    leaf_paths = _dataclass_leaf_paths(schema.AppSettingsVNext())
+
+    assert {
+        "intent.audio.input_device",
+        "intent.audio.input_host_api",
+        "intent.audio.ring_buffer_ms",
+        "intent.clipboard.auto_translate_enabled",
+        "intent.desktop_audio.output_device",
+        "intent.desktop_audio.vad_hangover_ms",
+        "intent.desktop_audio.vad_pre_roll_ms",
+        "intent.desktop_audio.vad_speech_threshold",
+        "intent.integrated_context.enabled",
+        "intent.languages.peer_source_language",
+        "intent.languages.peer_target_language",
+        "intent.languages.recent_source_languages",
+        "intent.languages.recent_target_languages",
+        "intent.languages.source_language",
+        "intent.languages.target_language",
+        "intent.local_llm.backend",
+        "intent.local_llm.base_url",
+        "intent.local_llm.extra_body",
+        "intent.local_llm.model",
+        "intent.osc.chatbox_address",
+        "intent.osc.chatbox_clear",
+        "intent.osc.chatbox_include_source",
+        "intent.osc.chatbox_max_chars",
+        "intent.osc.chatbox_send",
+        "intent.osc.host",
+        "intent.osc.port",
+        "intent.osc.vrc_mic_intercept",
+        "intent.overlay.calibration.anchor",
+        "intent.overlay.calibration.background_alpha",
+        "intent.overlay.calibration.distance",
+        "intent.overlay.calibration.offset_x",
+        "intent.overlay.calibration.offset_y",
+        "intent.overlay.calibration.text_scale",
+        "intent.overlay.desktop_flet.position.x",
+        "intent.overlay.desktop_flet.position.y",
+        "intent.overlay.desktop_flet.size_preset",
+        "intent.overlay.desktop_flet.visual.background_alpha",
+        "intent.overlay.show_peer_original",
+        "intent.overlay.show_translation",
+        "intent.overlay.target",
+        "intent.peer_stt.provider",
+        "intent.prompts.system_prompt",
+        "intent.secrets.backend",
+        "intent.secrets.encrypted_file_path",
+        "intent.stt.custom_terms",
+        "intent.stt.custom_vocabulary_enabled",
+        "intent.stt.deepgram.model",
+        "intent.stt.drain_timeout_s",
+        "intent.stt.low_latency_merge_gap_ms",
+        "intent.stt.low_latency_mode",
+        "intent.stt.low_latency_spec_retry_max",
+        "intent.stt.low_latency_vad_hangover_ms",
+        "intent.stt.provider",
+        "intent.stt.qwen_asr.model",
+        "intent.stt.soniox.endpoint",
+        "intent.stt.soniox.keepalive_interval_s",
+        "intent.stt.soniox.model",
+        "intent.stt.soniox.trailing_silence_ms",
+        "intent.stt.vad_speech_threshold",
+        "intent.translation.concurrency_limit",
+        "intent.translation.connection",
+        "intent.translation.connection_history",
+        "intent.translation.model",
+        "intent.translation.openrouter_broker_base_url",
+        "intent.translation.openrouter_fallback_selection_alias",
+        "intent.translation.openrouter_routing_mode",
+        "intent.translation.qwen.llm_model",
+        "intent.translation.qwen.region",
+        "intent.ui.locale",
+        "state.github_star_prompt.clicked",
+        "state.github_star_prompt.eligible_launch_count",
+        "state.github_star_prompt.last_shown_at",
+        "state.github_star_prompt.show_count",
+        "state.github_star_prompt.translation_success_observed",
+        "state.integrated_context.bootstrapped",
+        "state.managed_connection.active_managed_credential_ref",
+        "state.managed_connection.active_managed_expires_at",
+        "state.managed_connection.founder_letter_seen_credential_ref",
+        "state.managed_connection.installation_id",
+        "state.managed_connection.referral_id",
+        "state.managed_connection.release_token",
+        "state.managed_connection.release_token_expires_at",
+        "state.managed_connection.verified_hardware_hash",
+        "state.managed_connection.verified_hardware_hash_salt_version",
+        "state.peer_translation.eula_accepted",
+        "state.provider_verification.alibaba_beijing.status",
+        "state.provider_verification.alibaba_singapore.status",
+        "state.provider_verification.deepgram.status",
+        "state.provider_verification.deepseek.status",
+        "state.provider_verification.google.status",
+        "state.provider_verification.openrouter.status",
+        "state.provider_verification.soniox.status",
+    } <= leaf_paths
+
+
+def test_vnext_schema_excludes_runtime_only_legacy_ui_state() -> None:
+    schema = _load_schema_module()
+
+    leaf_paths = _dataclass_leaf_paths(schema.AppSettingsVNext())
+
+    assert schema.RUNTIME_ONLY_LEGACY_SETTINGS_PATHS == frozenset(
+        {"ui.overlay_enabled", "ui.peer_translation_enabled"}
+    )
+    assert "intent.ui.overlay_enabled" not in leaf_paths
+    assert "state.ui.overlay_enabled" not in leaf_paths
+    assert "intent.ui.peer_translation_enabled" not in leaf_paths
+    assert "state.ui.peer_translation_enabled" not in leaf_paths
+
+
+def test_vnext_schema_default_tree_excludes_raw_provider_api_key_fields() -> None:
+    schema = _load_schema_module()
+
+    serialized = asdict(schema.AppSettingsVNext())
+    serialized_paths = _dict_leaf_paths(serialized)
+    forbidden_field_names = {
+        "alibaba_api_key",
+        "alibaba_api_key_beijing",
+        "alibaba_api_key_singapore",
+        "deepgram_api_key",
+        "deepseek_api_key",
+        "google_api_key",
+        "local_llm_api_key",
+        "openrouter_api_key",
+        "openrouter_managed_api_key",
+        "soniox_api_key",
+    }
+
+    assert not {
+        path
+        for path in serialized_paths
+        if path.rsplit(".", maxsplit=1)[-1] in forbidden_field_names
+    }
+    with pytest.raises(ValueError, match="secret-bearing local LLM extra_body key"):
+        schema.LocalLLMIntent(extra_body={"api_key": "not-a-real-secret"})
+
+
+def test_vnext_schema_excludes_deferred_vnext_only_operational_leaves() -> None:
+    schema = _load_schema_module()
+
+    leaf_paths = _dataclass_leaf_paths(schema.AppSettingsVNext())
+
+    assert (
+        not {
+            "state.provider_verification.alibaba_beijing.credential_hash",
+            "state.provider_verification.alibaba_beijing.credential_ref",
+            "state.provider_verification.alibaba_beijing.verified_at",
+            "state.provider_verification.alibaba_singapore.credential_hash",
+            "state.provider_verification.alibaba_singapore.credential_ref",
+            "state.provider_verification.alibaba_singapore.verified_at",
+            "state.provider_verification.deepgram.credential_hash",
+            "state.provider_verification.deepgram.credential_ref",
+            "state.provider_verification.deepgram.verified_at",
+            "state.provider_verification.deepseek.credential_hash",
+            "state.provider_verification.deepseek.credential_ref",
+            "state.provider_verification.deepseek.verified_at",
+            "state.provider_verification.google.credential_hash",
+            "state.provider_verification.google.credential_ref",
+            "state.provider_verification.google.verified_at",
+            "state.provider_verification.openrouter.credential_hash",
+            "state.provider_verification.openrouter.credential_ref",
+            "state.provider_verification.openrouter.verified_at",
+            "state.provider_verification.soniox.credential_hash",
+            "state.provider_verification.soniox.credential_ref",
+            "state.provider_verification.soniox.verified_at",
+            "state.prompts.seen_prompt_ids",
+        }
+        & leaf_paths
+    )
+
+
+@pytest.mark.parametrize(
+    "extra_body",
+    [
+        {"model": "reserved"},
+        {"api-key": "secret alias"},
+        {"x-api-key": "secret alias"},
+        {"xApiKey": "secret alias"},
+        {"openai_api_key": "secret alias"},
+        {"openaiApiKey": "secret alias"},
+        {"OpenAIApiKey": "secret alias"},
+        {"clientSecret": "secret alias"},
+        {"refreshToken": "secret alias"},
+        {"proxy_authorization": "Bearer token"},
+        {"nested": {"authorization": "Bearer token"}},
+        {"nested": {"azure-openai-api-key": "nested secret alias"}},
+        {"nested": {"openaiApiKey": "nested secret alias"}},
+        {"nested": {"clientSecret": "nested secret alias"}},
+        {"nested": {"refreshToken": "nested secret alias"}},
+        {"nested": {1: "non-string key"}},
+        {"temperature": math.nan},
+        {"temperature": math.inf},
+        {"temperature": -math.inf},
+    ],
+)
+def test_local_llm_extra_body_rejects_non_persistable_values(
+    extra_body: dict[object, object],
+) -> None:
+    schema = _load_schema_module()
+
+    with pytest.raises((TypeError, ValueError), match="local LLM extra_body"):
+        schema.LocalLLMIntent(extra_body=extra_body)
+
+
+def test_local_llm_extra_body_accepts_json_safe_nested_mappings() -> None:
+    schema = _load_schema_module()
+
+    settings = schema.LocalLLMIntent(
+        extra_body={
+            "api_key_required": False,
+            "metadata": {"temperature_label": "low", "retry_count": 2},
+            "tokenizer_model": "cl100k_base",
+        }
+    )
+
+    assert settings.extra_body == {
+        "api_key_required": False,
+        "metadata": {"temperature_label": "low", "retry_count": 2},
+        "tokenizer_model": "cl100k_base",
+    }
+
+
+def test_vnext_schema_uses_overlay_calibration_value_object() -> None:
+    schema = _load_schema_module()
+
+    settings = schema.AppSettingsVNext()
+
+    assert settings.intent.overlay.calibration.__class__.__module__ == (
+        "puripuly_heart.config.overlay_calibration"
+    )

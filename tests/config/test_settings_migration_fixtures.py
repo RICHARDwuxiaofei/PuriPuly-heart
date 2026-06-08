@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import fields, is_dataclass
 
 import pytest
 
@@ -12,9 +13,11 @@ from puripuly_heart.config.settings import (
     from_dict,
     to_dict,
 )
+from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.ui.overlay_calibration import OVERLAY_CALIBRATION_ANCHORS, OverlayCalibration
+from tests.config import settings_migration_fixtures as fixtures
 from tests.config.settings_migration_fixtures import (
-    DECISION_PENDING_CURRENT_DESTINATIONS,
+    ADR_RESOLVED_CURRENT_DESTINATIONS,
     EXPLICIT_MISSING_FIELD_DEFAULT_EXPECTATIONS,
     LEGACY_MIGRATION_CLASSIFICATION,
     V24_MIGRATION_CLASSIFICATION,
@@ -36,6 +39,27 @@ SCHEMA_OR_SINGLETON_SAME_AS_DEFAULT_PATHS = frozenset(
 )
 
 
+def _dataclass_leaf_paths(value: object, prefix: str = "") -> set[str]:
+    if not is_dataclass(value) or isinstance(value, type):
+        return {prefix} if prefix else set()
+
+    paths: set[str] = set()
+    for field in fields(value):
+        child = getattr(value, field.name)
+        child_path = f"{prefix}.{field.name}" if prefix else field.name
+        if is_dataclass(child) and not isinstance(child, type):
+            paths.update(_dataclass_leaf_paths(child, child_path))
+        else:
+            paths.add(child_path)
+    return paths
+
+
+def _claims_vnext_schema_destination(destination: str, status: str) -> bool:
+    if "no_vnext_write_projection" in status:
+        return False
+    return destination == "settings_version" or destination.startswith(("intent.", "state."))
+
+
 def test_v24_migration_classification_covers_current_serialized_settings_paths() -> None:
     current_paths = set(serialized_field_paths(to_dict(AppSettings())))
 
@@ -54,6 +78,45 @@ def test_migration_classification_guard_reports_removed_entries() -> None:
     missing_paths = missing_classification_paths(current_paths, incomplete)
 
     assert missing_paths == ["provider.stt"]
+
+
+def test_current_classification_does_not_keep_dead_path_set_constants() -> None:
+    assert not {
+        "CURRENT_COMPATIBILITY_INPUT_PATHS",
+        "PERSISTED_OPERATIONAL_STATE_CURRENT_PATHS",
+        "REPAIR_TO_CANONICAL_DEFAULT_CURRENT_PATHS",
+        "SCHEMA_METADATA_CURRENT_PATHS",
+        "SINGLETON_SUPPORTED_VALUE_CURRENT_PATHS",
+        "USER_INTENT_CURRENT_PATHS",
+    }.intersection(vars(fixtures))
+
+
+def test_current_classification_vnext_destinations_resolve_to_schema_leaves() -> None:
+    vnext_leaf_paths = _dataclass_leaf_paths(AppSettingsVNext())
+
+    unresolved = {
+        path: classification.destination
+        for path, classification in sorted(V24_MIGRATION_CLASSIFICATION.items())
+        if _claims_vnext_schema_destination(classification.destination, classification.status)
+        and classification.destination not in vnext_leaf_paths
+    }
+
+    assert unresolved == {}
+
+
+def test_vnext_schema_persisted_leaves_are_classified_from_current_settings() -> None:
+    vnext_leaf_paths = {
+        path
+        for path in _dataclass_leaf_paths(AppSettingsVNext())
+        if path == "settings_version" or path.startswith(("intent.", "state."))
+    }
+    classified_vnext_destinations = {
+        classification.destination
+        for classification in V24_MIGRATION_CLASSIFICATION.values()
+        if _claims_vnext_schema_destination(classification.destination, classification.status)
+    }
+
+    assert sorted(vnext_leaf_paths - classified_vnext_destinations) == []
 
 
 def test_serialized_field_paths_include_empty_non_dynamic_dicts() -> None:
@@ -182,14 +245,30 @@ def test_maximal_v24_fixture_round_trip_retains_explicit_stable_fields() -> None
     }
 
 
-def test_decision_pending_current_paths_block_vnext_write_destination_silence() -> None:
-    assert set(DECISION_PENDING_CURRENT_DESTINATIONS) == {
+def test_adr_resolved_current_paths_have_exact_vnext_destinations() -> None:
+    assert set(ADR_RESOLVED_CURRENT_DESTINATIONS) == {
         "ui.integrated_context_bootstrapped",
+        "ui.integrated_context_enabled",
         "ui.peer_translation_eula_accepted",
     }
     assert {
-        V24_MIGRATION_CLASSIFICATION[path].status for path in DECISION_PENDING_CURRENT_DESTINATIONS
-    } == {"requires_decision_before_vnext_write"}
+        path: V24_MIGRATION_CLASSIFICATION[path].destination
+        for path in ADR_RESOLVED_CURRENT_DESTINATIONS
+    } == ADR_RESOLVED_CURRENT_DESTINATIONS
+    assert {
+        path: V24_MIGRATION_CLASSIFICATION[path].category
+        for path in ADR_RESOLVED_CURRENT_DESTINATIONS
+    } == {
+        "ui.peer_translation_eula_accepted": "persisted_operational_state",
+        "ui.integrated_context_enabled": "persisted_user_intent",
+        "ui.integrated_context_bootstrapped": "persisted_operational_state",
+    }
+    assert {
+        V24_MIGRATION_CLASSIFICATION[path].status for path in ADR_RESOLVED_CURRENT_DESTINATIONS
+    } == {"retained_adr_resolved"}
+    assert "decision_pending" not in {
+        classification.category for classification in V24_MIGRATION_CLASSIFICATION.values()
+    }
 
 
 def test_legacy_migration_classification_covers_all_legacy_fixture_extra_paths() -> None:
