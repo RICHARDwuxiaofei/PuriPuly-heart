@@ -30,6 +30,8 @@ from puripuly_heart.app.ports.settings_repository import (
 )
 from puripuly_heart.app.services.settings_mutation import (
     ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS,
+    ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
+    SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
     SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
     SettingsMutationService,
     SettingsPathMutationValidator,
@@ -394,10 +396,15 @@ def _validate_and_save_settings(config_path: Path, settings: AppSettings) -> Non
     save_settings(config_path, settings)
 
 
+class _StrictSettingsSaveFailed(Exception):
+    pass
+
+
 @dataclass(slots=True)
 class _ControllerSettingsPatchRepository:
     controller: GuiController
     committed_settings: AppSettings
+    surface: str = "translation_provider"
 
     async def load(self) -> SettingsSnapshot:
         settings = self.controller.settings or self.committed_settings
@@ -421,9 +428,9 @@ class _ControllerSettingsPatchRepository:
                     component="settings_repository",
                     operation="save",
                     code="settings_save_failed",
+                    surface=self.surface,
                 ),
             )
-        self.controller.settings = self.committed_settings
         return SettingsCommitResult(
             succeeded=True,
             snapshot=SettingsSnapshot(values=to_dict(self.committed_settings), revision=None),
@@ -437,6 +444,8 @@ class _ControllerProviderRuntimeApply:
     controller: GuiController
     settings: AppSettings
     plan: _ProviderRuntimeApplyPlan
+    surface: str = "translation_provider"
+    operation: str = "apply_provider_runtime"
 
     async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
         _ = request
@@ -452,27 +461,74 @@ class _ControllerProviderRuntimeApply:
                 ),
                 diagnostics=_settings_mutation_diagnostics(
                     component="gui_controller",
-                    operation="apply_provider_runtime",
+                    operation=self.operation,
                     code="provider_runtime_apply_exception",
                     category=DIAGNOSTIC_CATEGORY_LIFECYCLE,
+                    surface=self.surface,
                 ),
             )
-        if self.plan.should_rebuild_llm and self.controller.hub is not None:
-            if self.controller.hub.llm is None:
-                return RuntimeApplyResult(
-                    status=RUNTIME_APPLY_STATUS_FAILED,
-                    message=UserMessageRef(
-                        key="settings.mutation.runtime_apply_failed",
-                        params={"phase": "runtime_apply"},
-                        severity=SEVERITY_WARNING,
-                    ),
-                    diagnostics=_settings_mutation_diagnostics(
-                        component="gui_controller",
-                        operation="apply_provider_runtime",
-                        code="provider_runtime_apply_unavailable",
-                        category=DIAGNOSTIC_CATEGORY_LIFECYCLE,
-                    ),
-                )
+        unavailable_result = _provider_runtime_apply_unavailable_result(
+            controller=self.controller,
+            settings=self.settings,
+            plan=self.plan,
+            operation=self.operation,
+            surface=self.surface,
+        )
+        if unavailable_result is not None:
+            return unavailable_result
+        return RuntimeApplyResult(
+            status=RUNTIME_APPLY_STATUS_APPLIED,
+            message=None,
+            diagnostics=None,
+        )
+
+
+@dataclass(slots=True)
+class _ControllerSttLanguageAudioRuntimeApply:
+    controller: GuiController
+    settings: AppSettings
+
+    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
+        _ = request
+        try:
+            await self.controller._apply_settings_direct(
+                self.settings,
+                persist=False,
+                strict_runtime_errors=True,
+            )
+        except Exception:
+            return RuntimeApplyResult(
+                status=RUNTIME_APPLY_STATUS_FAILED,
+                message=UserMessageRef(
+                    key="settings.mutation.runtime_apply_failed",
+                    params={"phase": "runtime_apply"},
+                    severity=SEVERITY_WARNING,
+                ),
+                diagnostics=_settings_mutation_diagnostics(
+                    component="gui_controller",
+                    operation="apply_stt_language_audio_runtime",
+                    code="stt_language_audio_runtime_apply_exception",
+                    category=DIAGNOSTIC_CATEGORY_LIFECYCLE,
+                    surface="stt_language_audio",
+                ),
+            )
+        unavailable_result = _stt_language_audio_runtime_unavailable_result(
+            controller=self.controller,
+            settings=self.settings,
+        )
+        if unavailable_result is not None:
+            return unavailable_result
+        return RuntimeApplyResult(
+            status=RUNTIME_APPLY_STATUS_APPLIED,
+            message=None,
+            diagnostics=None,
+        )
+
+
+@dataclass(slots=True)
+class _ControllerNoopRuntimeApply:
+    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
+        _ = request
         return RuntimeApplyResult(
             status=RUNTIME_APPLY_STATUS_APPLIED,
             message=None,
@@ -486,6 +542,7 @@ def _settings_mutation_diagnostics(
     operation: str,
     code: str,
     category=DIAGNOSTIC_CATEGORY_TRANSACTION,
+    surface: str = "translation_provider",
 ) -> ErrorDiagnostics:
     return ErrorDiagnostics(
         component=component,
@@ -496,7 +553,134 @@ def _settings_mutation_diagnostics(
         content_policy=CONTENT_POLICY_METADATA_ONLY,
         status_code=None,
         retry_after_ms=None,
-        fields={"surface": "translation_provider"},
+        fields={"surface": surface},
+    )
+
+
+def _runtime_apply_failed_result(
+    *,
+    operation: str,
+    code: str,
+    surface: str,
+) -> RuntimeApplyResult:
+    return RuntimeApplyResult(
+        status=RUNTIME_APPLY_STATUS_FAILED,
+        message=UserMessageRef(
+            key="settings.mutation.runtime_apply_failed",
+            params={"phase": "runtime_apply"},
+            severity=SEVERITY_WARNING,
+        ),
+        diagnostics=_settings_mutation_diagnostics(
+            component="gui_controller",
+            operation=operation,
+            code=code,
+            category=DIAGNOSTIC_CATEGORY_LIFECYCLE,
+            surface=surface,
+        ),
+    )
+
+
+def _runtime_apply_result_as_degraded_transaction(
+    runtime_result: RuntimeApplyResult,
+) -> TransactionResult:
+    return TransactionResult(
+        status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
+        message=runtime_result.message,
+        diagnostics=runtime_result.diagnostics,
+    )
+
+
+def _provider_runtime_apply_unavailable_result(
+    *,
+    controller: GuiController,
+    settings: AppSettings,
+    plan: _ProviderRuntimeApplyPlan,
+    operation: str,
+    surface: str,
+) -> RuntimeApplyResult | None:
+    if controller.hub is None:
+        return None
+    if plan.should_rebuild_llm and controller.hub.llm is None:
+        return _runtime_apply_failed_result(
+            operation=operation,
+            code="provider_runtime_apply_unavailable",
+            surface=surface,
+        )
+    if plan.should_refresh_self_stt and controller._stt_desired and controller.hub.stt is None:
+        return _runtime_apply_failed_result(
+            operation=operation,
+            code="stt_runtime_apply_unavailable",
+            surface=surface,
+        )
+    if (
+        plan.should_refresh_peer
+        and controller._peer_runtime_should_be_active(settings)
+        and getattr(controller.hub, "peer_stt", None) is None
+    ):
+        return _runtime_apply_failed_result(
+            operation=operation,
+            code="peer_stt_runtime_apply_unavailable",
+            surface=surface,
+        )
+    return None
+
+
+def _stt_language_audio_runtime_unavailable_result(
+    *,
+    controller: GuiController,
+    settings: AppSettings,
+) -> RuntimeApplyResult | None:
+    if controller.hub is None:
+        return None
+    if controller._stt_desired and controller.hub.stt is None:
+        return _runtime_apply_failed_result(
+            operation="apply_stt_language_audio_runtime",
+            code="stt_language_audio_runtime_unavailable",
+            surface="stt_language_audio",
+        )
+    if (
+        controller._peer_runtime_should_be_active(settings)
+        and getattr(controller.hub, "peer_stt", None) is None
+    ):
+        return _runtime_apply_failed_result(
+            operation="apply_stt_language_audio_runtime",
+            code="peer_stt_language_audio_runtime_unavailable",
+            surface="stt_language_audio",
+        )
+    if settings.provider.llm == LLMProviderName.QWEN and controller.hub.llm is None:
+        return _runtime_apply_failed_result(
+            operation="apply_stt_language_audio_runtime",
+            code="llm_stt_language_audio_runtime_unavailable",
+            surface="stt_language_audio",
+        )
+    return None
+
+
+def _stt_language_audio_runtime_degraded_transaction_result() -> TransactionResult:
+    return _runtime_apply_result_as_degraded_transaction(
+        _runtime_apply_failed_result(
+            operation="apply_stt_language_audio_runtime",
+            code="stt_language_audio_runtime_apply_exception",
+            surface="stt_language_audio",
+        )
+    )
+
+
+def _stt_language_audio_save_failed_transaction_result(*, operation: str) -> TransactionResult:
+    return TransactionResult(
+        status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
+        message=UserMessageRef(
+            key="settings.mutation.runtime_apply_failed",
+            params={"phase": "settings_save"},
+            severity=SEVERITY_WARNING,
+        ),
+        diagnostics=_settings_mutation_diagnostics(
+            component="gui_controller",
+            operation=operation,
+            code="settings_save_failed",
+            category=DIAGNOSTIC_CATEGORY_TRANSACTION,
+            surface="stt_language_audio",
+        ),
     )
 
 
@@ -648,6 +832,11 @@ class GuiController:
     _last_peer_translation_enabled: bool | None = None
     _last_peer_translation_activation_requested: bool | None = None
     _last_vrc_mic_sync_enabled: bool | None = None
+    _settings_view_order22_baseline: AppSettings | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     _vrc_receiver_lock: asyncio.Lock | None = None
     _ui_event_bridge: UIEventBridge | None = None
     _clipboard_watcher: ClipboardWatcherRuntime | None = field(init=False, default=None)
@@ -1003,6 +1192,38 @@ class GuiController:
             settings.audio.ring_buffer_ms,
             settings.audio.internal_sample_rate_hz,
             settings.audio.internal_channels,
+            (
+                settings.deepgram_stt.model
+                if settings.provider.stt == STTProviderName.DEEPGRAM
+                else None
+            ),
+            settings.qwen.region if settings.provider.stt == STTProviderName.QWEN_ASR else None,
+            (
+                settings.qwen_asr_stt.model
+                if settings.provider.stt == STTProviderName.QWEN_ASR
+                else None
+            ),
+            (
+                settings.qwen_asr_stt.endpoint
+                if settings.provider.stt == STTProviderName.QWEN_ASR
+                else None
+            ),
+            settings.soniox_stt.model if settings.provider.stt == STTProviderName.SONIOX else None,
+            (
+                settings.soniox_stt.endpoint
+                if settings.provider.stt == STTProviderName.SONIOX
+                else None
+            ),
+            (
+                settings.soniox_stt.keepalive_interval_s
+                if settings.provider.stt == STTProviderName.SONIOX
+                else None
+            ),
+            (
+                settings.soniox_stt.trailing_silence_ms
+                if settings.provider.stt == STTProviderName.SONIOX
+                else None
+            ),
             custom_vocab_enabled,
             custom_terms,
         )
@@ -3961,7 +4182,106 @@ class GuiController:
         updated.languages.peer_target_language = peer_target_code
         await self.apply_settings(updated)
 
+    def _remember_settings_view_order22_baseline(self, settings: AppSettings | None) -> None:
+        self._settings_view_order22_baseline = (
+            copy.deepcopy(settings) if settings is not None else None
+        )
+
+    def _order22_patch_base_and_values(
+        self,
+        next_settings: AppSettings,
+    ) -> tuple[AppSettings, dict[str, object]] | None:
+        base_settings = self.settings
+        if base_settings is None:
+            return None
+        patch_values = _build_settings_path_patch(
+            base_settings,
+            next_settings,
+            paths=ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
+        )
+        if patch_values or next_settings is base_settings:
+            return base_settings, patch_values
+
+        baseline = self._settings_view_order22_baseline
+        if baseline is not None:
+            baseline_patch_values = _build_settings_path_patch(
+                baseline,
+                next_settings,
+                paths=ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
+            )
+            if baseline_patch_values:
+                return baseline, baseline_patch_values
+        return base_settings, patch_values
+
+    def _sync_memory_runtime_fields_from_settings(self, settings: AppSettings) -> None:
+        restored_settings = copy.deepcopy(settings)
+        self.settings = restored_settings
+        self._sync_overlay_calibration_cache(restored_settings)
+        if self.hub is not None:
+            self.hub.source_language = restored_settings.languages.source_language
+            self.hub.target_language = restored_settings.languages.target_language
+            self.hub.peer_source_language = restored_settings.languages.peer_source_language
+            self.hub.peer_target_language = restored_settings.languages.peer_target_language
+            self.hub.system_prompt = restored_settings.system_prompt
+            self.hub.low_latency_mode = restored_settings.stt.low_latency_mode
+            self.hub.low_latency_merge_gap_ms = restored_settings.stt.low_latency_merge_gap_ms
+            self.hub.low_latency_spec_retry_max = restored_settings.stt.low_latency_spec_retry_max
+            self.hub.hangover_s = (
+                restored_settings.stt.low_latency_vad_hangover_ms / 1000.0
+                if restored_settings.stt.low_latency_mode
+                else 1.1
+            )
+            self.hub.peer_hangover_s = restored_settings.desktop_audio.vad_hangover_ms / 1000.0
+            self.hub.chatbox_include_source = restored_settings.osc.chatbox_include_source
+            self._sync_effective_hub_flags(restored_settings)
+        self._sync_signature_caches(restored_settings)
+
+    async def _resync_committed_order22_settings_after_strict_save_failure(
+        self,
+        *,
+        base_settings: AppSettings,
+        committed_settings: AppSettings,
+    ) -> None:
+        self._sync_memory_runtime_fields_from_settings(base_settings)
+        try:
+            await self._apply_settings_direct(
+                copy.deepcopy(committed_settings),
+                persist=False,
+                strict_runtime_errors=True,
+            )
+        except Exception:
+            self._log_error("Failed to resync committed order22 settings runtime")
+            self._sync_memory_runtime_fields_from_settings(committed_settings)
+
+    async def _resync_committed_order22_provider_runtime_after_strict_save_failure(
+        self,
+        *,
+        base_settings: AppSettings,
+        committed_settings: AppSettings,
+        plan: _ProviderRuntimeApplyPlan,
+    ) -> None:
+        self._sync_memory_runtime_fields_from_settings(base_settings)
+        try:
+            await self._apply_provider_runtime_plan(copy.deepcopy(committed_settings), plan)
+        except Exception:
+            self._log_error("Failed to resync committed order22 provider runtime")
+            self._sync_memory_runtime_fields_from_settings(committed_settings)
+
     async def apply_settings(self, settings: AppSettings) -> None:
+        if settings is not self.settings:
+            routed = await self._apply_stt_language_audio_settings_via_mutation_service(settings)
+            if routed:
+                return
+        await self._apply_settings_direct(settings)
+
+    async def _apply_settings_direct(
+        self,
+        settings: AppSettings,
+        *,
+        persist: bool = True,
+        strict_runtime_errors: bool = False,
+        strict_persistence_errors: bool = False,
+    ) -> None:
         def _effective_peer_language(language: str, peer_language: str) -> str:
             return peer_language or language
 
@@ -4082,7 +4402,14 @@ class GuiController:
         self._last_microphone_test_audio_settings_signature = next_microphone_test_audio_signature
         self._sync_overlay_calibration_cache(settings)
         self._sync_desktop_overlay_interaction_mode_from_settings(settings)
-        self._save_settings()
+        if persist:
+            if strict_persistence_errors:
+                try:
+                    _validate_and_save_settings(self.config_path, self.settings)
+                except Exception:
+                    raise _StrictSettingsSaveFailed from None
+            else:
+                self._save_settings()
         await self._broadcast_desktop_runtime_control_payloads(desktop_runtime_controls)
         await self._sync_clipboard_watcher()
         self._refresh_local_stt_runtime_state()
@@ -4090,6 +4417,7 @@ class GuiController:
 
         # low_latency_mode 변경 시 Qwen LLM 프로바이더 재생성 필요
         # (AsyncQwenLLMProvider vs QwenLLMProvider 전환)
+        low_latency_llm_rebuild_unavailable = False
         if (
             prev_low_latency is not None
             and prev_low_latency != settings.stt.low_latency_mode
@@ -4100,19 +4428,24 @@ class GuiController:
                 f"mode={prev_low_latency}->{settings.stt.low_latency_mode} rebuilding_llm_provider=True"
             )
             await self._rebuild_llm_provider()
+            if self.hub is not None and self.hub.llm is None:
+                low_latency_llm_rebuild_unavailable = True
 
         if self.hub is not None:
+            effective_low_latency_mode = settings.stt.low_latency_mode
+            if low_latency_llm_rebuild_unavailable:
+                effective_low_latency_mode = prev_low_latency
             self.hub.source_language = settings.languages.source_language
             self.hub.target_language = settings.languages.target_language
             self.hub.peer_source_language = settings.languages.peer_source_language
             self.hub.peer_target_language = settings.languages.peer_target_language
             self.hub.system_prompt = settings.system_prompt
-            self.hub.low_latency_mode = settings.stt.low_latency_mode
+            self.hub.low_latency_mode = effective_low_latency_mode
             self.hub.low_latency_merge_gap_ms = settings.stt.low_latency_merge_gap_ms
             self.hub.low_latency_spec_retry_max = settings.stt.low_latency_spec_retry_max
             self.hub.hangover_s = (
                 settings.stt.low_latency_vad_hangover_ms / 1000.0
-                if settings.stt.low_latency_mode
+                if effective_low_latency_mode
                 else 1.1
             )
             self.hub.peer_hangover_s = settings.desktop_audio.vad_hangover_ms / 1000.0
@@ -4123,7 +4456,14 @@ class GuiController:
                 try:
                     await self.hub.clear_language_runtime_state(channel=channel)
                 except Exception as exc:
-                    self._log_error(f"Failed to clear language runtime state for {channel}: {exc}")
+                    if strict_runtime_errors:
+                        self._log_error(f"Failed to clear language runtime state for {channel}")
+                    else:
+                        self._log_error(
+                            f"Failed to clear language runtime state for {channel}: {exc}"
+                        )
+                    if strict_runtime_errors:
+                        raise
 
             if source_language_changed or target_language_changed:
                 await _clear_language_runtime_state("self")
@@ -4186,6 +4526,7 @@ class GuiController:
                         config_path=self.config_path,
                         preserve_custom_vocab_draft=True,
                     )
+                    self._remember_settings_view_order22_baseline(settings)
 
         if prev_locale != settings.ui.locale:
             set_locale(settings.ui.locale)
@@ -4197,6 +4538,95 @@ class GuiController:
                     self._log_error(f"Failed to apply locale: {exc}")
 
         self._refresh_overlay_peer_consumers()
+        self._remember_settings_view_order22_baseline(self.settings)
+
+    async def _apply_stt_language_audio_settings_via_mutation_service(
+        self,
+        next_settings: AppSettings,
+    ) -> bool:
+        base_and_patch = self._order22_patch_base_and_values(next_settings)
+        if base_and_patch is None:
+            return False
+        base_settings, patch_values = base_and_patch
+        if not patch_values:
+            return False
+
+        committed_settings = copy.deepcopy(base_settings)
+        _apply_settings_path_patch(committed_settings, patch_values)
+        has_out_of_scope_draft = to_dict(committed_settings) != to_dict(next_settings)
+        repository = _ControllerSettingsPatchRepository(
+            controller=self,
+            committed_settings=committed_settings,
+            surface="stt_language_audio",
+        )
+        runtime_apply = (
+            _ControllerNoopRuntimeApply()
+            if has_out_of_scope_draft
+            else _ControllerSttLanguageAudioRuntimeApply(
+                controller=self,
+                settings=committed_settings,
+            )
+        )
+        service = self.settings_mutation_service or SettingsMutationService(
+            settings_repository=repository,
+            runtime_apply=runtime_apply,
+            validator=SettingsPathMutationValidator(
+                allowed_paths=ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
+                component="settings_mutation",
+                operation="validate_stt_language_audio_patch",
+            ),
+        )
+        request = SettingsPathPatch(
+            values_by_path=patch_values,
+            surface=SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
+        ).to_mutation_request(
+            expected_revision=None,
+            correlation_id=None,
+        )
+
+        result = await service.mutate(request)
+        self.last_settings_mutation_result = result
+        if not _settings_mutation_committed(result):
+            self.settings = copy.deepcopy(base_settings)
+            self._remember_settings_view_order22_baseline(self.settings)
+            return True
+
+        if has_out_of_scope_draft:
+            try:
+                await self._apply_settings_direct(
+                    next_settings,
+                    strict_runtime_errors=True,
+                    strict_persistence_errors=True,
+                )
+            except _StrictSettingsSaveFailed:
+                await self._resync_committed_order22_settings_after_strict_save_failure(
+                    base_settings=base_settings,
+                    committed_settings=committed_settings,
+                )
+                self.last_settings_mutation_result = (
+                    _stt_language_audio_save_failed_transaction_result(
+                        operation="apply_stt_language_audio_full_draft_save"
+                    )
+                )
+            except Exception:
+                self.last_settings_mutation_result = (
+                    _stt_language_audio_runtime_degraded_transaction_result()
+                )
+            else:
+                unavailable_result = _stt_language_audio_runtime_unavailable_result(
+                    controller=self,
+                    settings=next_settings,
+                )
+                if unavailable_result is not None:
+                    self.last_settings_mutation_result = (
+                        _runtime_apply_result_as_degraded_transaction(unavailable_result)
+                    )
+        else:
+            self.settings = committed_settings
+            if result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+                self._sync_signature_caches(committed_settings)
+        self._remember_settings_view_order22_baseline(self.settings)
+        return True
 
     async def verify_api_key(self, provider: str, key: str) -> tuple[bool, str]:
         """Verify API key using the respective provider's static check. Returns (success, error_msg)."""
@@ -4373,6 +4803,121 @@ class GuiController:
             )
         elif result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
             self._sync_signature_caches(committed_settings)
+        self._remember_settings_view_order22_baseline(self.settings)
+        return True
+
+    async def _apply_stt_language_audio_provider_settings_via_mutation_service(
+        self,
+        next_settings: AppSettings,
+    ) -> bool:
+        base_settings = self.settings
+        if base_settings is None:
+            return False
+
+        patch_values = _build_settings_path_patch(
+            base_settings,
+            next_settings,
+            paths=ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
+        )
+        if not patch_values:
+            return False
+
+        committed_settings = copy.deepcopy(base_settings)
+        _apply_settings_path_patch(committed_settings, patch_values)
+        has_out_of_scope_draft = to_dict(committed_settings) != to_dict(next_settings)
+        plan = self._build_provider_runtime_apply_plan(
+            committed_settings,
+            force_rebuild_llm=False,
+        )
+        repository = _ControllerSettingsPatchRepository(
+            controller=self,
+            committed_settings=committed_settings,
+            surface="stt_language_audio",
+        )
+        runtime_apply = (
+            _ControllerNoopRuntimeApply()
+            if has_out_of_scope_draft
+            else _ControllerProviderRuntimeApply(
+                controller=self,
+                settings=committed_settings,
+                plan=plan,
+                surface="stt_language_audio",
+                operation="apply_stt_language_audio_provider_runtime",
+            )
+        )
+        service = self.settings_mutation_service or SettingsMutationService(
+            settings_repository=repository,
+            runtime_apply=runtime_apply,
+            validator=SettingsPathMutationValidator(
+                allowed_paths=ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
+                component="settings_mutation",
+                operation="validate_stt_language_audio_patch",
+            ),
+        )
+        request = SettingsPathPatch(
+            values_by_path=patch_values,
+            surface=SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
+        ).to_mutation_request(
+            expected_revision=None,
+            correlation_id=None,
+        )
+
+        result = await service.mutate(request)
+        self.last_settings_mutation_result = result
+        if not _settings_mutation_committed(result):
+            self.settings = copy.deepcopy(base_settings)
+            self._remember_settings_view_order22_baseline(self.settings)
+            return True
+
+        if has_out_of_scope_draft:
+            fallback_plan = self._build_provider_runtime_apply_plan(
+                next_settings,
+                force_rebuild_llm=False,
+            )
+            try:
+                await self._apply_providers_direct(
+                    next_settings,
+                    force_rebuild_llm=False,
+                    plan=fallback_plan,
+                    route_order22=False,
+                    strict_persistence_errors=True,
+                )
+            except _StrictSettingsSaveFailed:
+                await self._resync_committed_order22_provider_runtime_after_strict_save_failure(
+                    base_settings=base_settings,
+                    committed_settings=committed_settings,
+                    plan=plan,
+                )
+                self.last_settings_mutation_result = (
+                    _stt_language_audio_save_failed_transaction_result(
+                        operation="apply_stt_language_audio_provider_full_draft_save"
+                    )
+                )
+            except Exception:
+                self.last_settings_mutation_result = _runtime_apply_result_as_degraded_transaction(
+                    _runtime_apply_failed_result(
+                        operation="apply_stt_language_audio_provider_runtime",
+                        code="provider_runtime_apply_exception",
+                        surface="stt_language_audio",
+                    )
+                )
+            else:
+                unavailable_result = _provider_runtime_apply_unavailable_result(
+                    controller=self,
+                    settings=next_settings,
+                    plan=fallback_plan,
+                    operation="apply_stt_language_audio_provider_runtime",
+                    surface="stt_language_audio",
+                )
+                if unavailable_result is not None:
+                    self.last_settings_mutation_result = (
+                        _runtime_apply_result_as_degraded_transaction(unavailable_result)
+                    )
+        else:
+            self.settings = committed_settings
+            if result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+                self._sync_signature_caches(committed_settings)
+        self._remember_settings_view_order22_baseline(self.settings)
         return True
 
     async def _apply_providers_direct(
@@ -4381,15 +4926,30 @@ class GuiController:
         *,
         force_rebuild_llm: bool,
         plan: _ProviderRuntimeApplyPlan | None = None,
+        route_order22: bool = True,
+        strict_persistence_errors: bool = False,
     ) -> None:
+        if route_order22 and not force_rebuild_llm and plan is None:
+            routed = await self._apply_stt_language_audio_provider_settings_via_mutation_service(
+                next_settings,
+            )
+            if routed:
+                return
         if plan is None:
             plan = self._build_provider_runtime_apply_plan(
                 next_settings,
                 force_rebuild_llm=force_rebuild_llm,
             )
         self.settings = next_settings
-        self._save_settings()
+        if strict_persistence_errors:
+            try:
+                _validate_and_save_settings(self.config_path, self.settings)
+            except Exception:
+                raise _StrictSettingsSaveFailed from None
+        else:
+            self._save_settings()
         await self._apply_provider_runtime_plan(next_settings, plan)
+        self._remember_settings_view_order22_baseline(self.settings)
 
     async def _apply_provider_runtime_plan(
         self,
@@ -4542,7 +5102,7 @@ class GuiController:
 
         if stt is None:
             assert stt_error is not None
-            self._log_error(f"STT backend not available: {stt_error}")
+            self._log_error("STT backend not available")
             return
 
         self.log_basic("[Settings] STT provider replacement completed successfully")
@@ -4877,8 +5437,8 @@ class GuiController:
                     self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
                 ),
             )
-        except Exception as exc:
-            self._log_error(f"STT backend not available: {exc}")
+        except Exception:
+            self._log_error("STT backend not available")
 
         sender = VrchatOscUdpSender(
             host=self.settings.osc.host,
@@ -5915,6 +6475,7 @@ class GuiController:
             view_settings = getattr(self.app, "view_settings", None)
             if view_settings is not None:
                 view_settings.load_from_settings(settings, config_path=self.config_path)
+                self._remember_settings_view_order22_baseline(settings)
                 view_settings.set_overlay_calibration(self.overlay_calibration)
 
         self._refresh_overlay_peer_consumers()
@@ -5923,9 +6484,29 @@ class GuiController:
         """Callback when recent languages change in dashboard."""
         if self.settings is None:
             return
-        self.settings.languages.recent_source_languages = list(source)
-        self.settings.languages.recent_target_languages = list(target)
-        self._save_settings()
+        next_settings = copy.deepcopy(self.settings)
+        next_settings.languages.recent_source_languages = list(source)
+        next_settings.languages.recent_target_languages = list(target)
+
+        async def _task() -> None:
+            await self.apply_settings(next_settings)
+
+        run_task = getattr(self.page, "run_task", None)
+        if callable(run_task):
+            try:
+                run_task(_task)
+                return
+            except Exception:
+                self.log_detailed(
+                    "[Settings] Recent language apply skipped reason=page_run_task_failed",
+                    level=logging.WARNING,
+                )
+                return
+
+        self.log_detailed(
+            "[Settings] Recent language apply skipped reason=page_run_task_unavailable",
+            level=logging.WARNING,
+        )
 
     @property
     def runtime_logging(self) -> SessionRuntimeLoggingService:

@@ -1433,21 +1433,88 @@ def test_sync_ui_from_settings_updates_dashboard_and_settings_view() -> None:
     assert settings_view.calls == [(settings, Path("settings.json"), False)]
 
 
-def test_on_recent_languages_change_persists_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_on_recent_languages_change_routes_order22_patch_via_page_run_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings = AppSettings()
+    page = SimpleNamespace(tasks=[])
+    page.run_task = lambda task: page.tasks.append(task)
     controller = _make_controller(app=SimpleNamespace())
+    controller.page = page
     controller.settings = settings
+    original_recent_source = list(settings.languages.recent_source_languages)
+    original_recent_target = list(settings.languages.recent_target_languages)
     saves: list[tuple[Path, AppSettings]] = []
+    requests: list[settings_mutation.SettingsMutationRequest] = []
+
+    original_mutate = settings_mutation.SettingsMutationService.mutate
+
+    async def capture_mutate(self, request):
+        requests.append(request)
+        return await original_mutate(self, request)
 
     def fake_save(path: Path, incoming: AppSettings) -> None:
-        saves.append((path, incoming))
+        saves.append((path, copy.deepcopy(incoming)))
 
+    monkeypatch.setattr(settings_mutation.SettingsMutationService, "mutate", capture_mutate)
     monkeypatch.setattr(controller_module, "save_settings", fake_save)
+
     controller._on_recent_languages_change(["ko", "fr"], ["en", "ja"])
 
-    assert settings.languages.recent_source_languages == ["ko", "fr"]
-    assert settings.languages.recent_target_languages == ["en", "ja"]
-    assert saves == [(Path("settings.json"), settings)]
+    assert settings.languages.recent_source_languages == original_recent_source
+    assert settings.languages.recent_target_languages == original_recent_target
+    assert saves == []
+    assert len(page.tasks) == 1
+
+    await page.tasks[0]()
+
+    assert len(requests) == 1
+    assert requests[0].reason == settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO
+    assert list(requests[0].values["languages.recent_source_languages"]) == ["ko", "fr"]
+    assert list(requests[0].values["languages.recent_target_languages"]) == ["en", "ja"]
+    assert len(saves) == 1
+    assert saves[0][0] == Path("settings.json")
+    assert saves[0][1].languages.recent_source_languages == ["ko", "fr"]
+    assert saves[0][1].languages.recent_target_languages == ["en", "ja"]
+    assert controller.settings.languages.recent_source_languages == ["ko", "fr"]
+    assert controller.settings.languages.recent_target_languages == ["en", "ja"]
+
+
+@pytest.mark.asyncio
+async def test_on_recent_languages_change_without_page_scheduler_skips_unowned_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    controller = _make_controller(app=SimpleNamespace())
+    controller.page = SimpleNamespace()
+    controller.settings = settings
+    controller._runtime_logging = RuntimeLoggingSpy()
+    apply_calls: list[AppSettings] = []
+    scheduled: list[object] = []
+
+    class FakeLoop:
+        def create_task(self, coro):
+            scheduled.append(coro)
+            coro.close()
+
+    async def record_apply_settings(self, incoming: AppSettings) -> None:
+        _ = self
+        apply_calls.append(incoming)
+
+    monkeypatch.setattr(GuiController, "apply_settings", record_apply_settings)
+    monkeypatch.setattr(controller_module.asyncio, "get_running_loop", lambda: FakeLoop())
+
+    controller._on_recent_languages_change(["ko", "fr"], ["en", "ja"])
+    await asyncio.sleep(0)
+
+    assert scheduled == []
+    assert apply_calls == []
+    assert settings.languages.recent_source_languages != ["ko", "fr"]
+    assert settings.languages.recent_target_languages != ["en", "ja"]
+    messages_seen = [message for _level, message in controller._runtime_logging.detailed_messages]
+    assert any("Recent language apply skipped" in message for message in messages_seen)
+    assert all("fr" not in message and "ja" not in message for message in messages_seen)
 
 
 @pytest.mark.asyncio
@@ -10892,8 +10959,73 @@ async def test_apply_settings_logs_and_continues_when_language_cleanup_fails(
 
     assert controller.hub.clear_language_runtime_state_calls == ["self"]
     assert controller.hub.target_language == "ja"
-    assert any("cleanup boom" in message for message in errors)
-    assert any("language runtime state" in message for message in errors)
+    assert controller.last_settings_mutation_result is not None
+    assert (
+        controller.last_settings_mutation_result.status
+        == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    )
+    assert not any("cleanup boom" in message for message in errors)
+
+
+@pytest.mark.asyncio
+async def test_order22_language_runtime_clear_failure_degrades_without_raw_log_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.hub = DummyHub(stt=object())
+    controller.hub.source_language = controller.settings.languages.source_language
+    controller.hub.target_language = controller.settings.languages.target_language
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_translation_enabled = controller.settings.ui.peer_translation_enabled
+    controller._last_vrc_mic_sync_enabled = controller.settings.osc.vrc_mic_intercept
+    raw_failure_text = "language cleanup failed secret-token-must-not-leak"
+    controller.hub.clear_language_runtime_state_errors["self"] = RuntimeError(raw_failure_text)
+    pending = copy.deepcopy(controller.settings)
+    pending.languages.target_language = "ja"
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(controller_module, "get_locale", lambda: controller.settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_clear_local_stt_pending_enable_if_provider_switched_away",
+        lambda self: None,
+    )
+
+    await controller.apply_settings(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_stt_language_audio_runtime",
+        code="stt_language_audio_runtime_apply_exception",
+        category=messages.DIAGNOSTIC_CATEGORY_LIFECYCLE,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "stt_language_audio"},
+    )
+    logged_text = "\n".join(
+        message
+        for _level, message in (
+            controller._runtime_logging.basic_messages
+            + controller._runtime_logging.detailed_messages
+        )
+    )
+    assert raw_failure_text not in repr(result)
+    assert raw_failure_text not in logged_text
+    assert "language runtime state" in logged_text
 
 
 @pytest.mark.asyncio
@@ -11932,6 +12064,35 @@ async def test_apply_providers_routes_local_llm_endpoint_config_through_settings
 
 
 @pytest.mark.asyncio
+async def test_apply_providers_routes_stt_provider_patch_through_order22_settings_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN
+    service = RecordingSettingsMutationService()
+    controller.settings_mutation_service = service
+
+    pending = copy.deepcopy(controller.settings)
+    pending.provider.stt = STTProviderName.SONIOX
+
+    def fail_direct_save(*_args, **_kwargs) -> None:
+        raise AssertionError("direct save should not persist routed STT provider settings")
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_direct_save)
+
+    await controller.apply_providers(pending)
+
+    assert len(service.requests) == 1
+    request = service.requests[0]
+    assert request.reason == settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO
+    assert request.values == {"provider.stt": STTProviderName.SONIOX}
+    assert "provider.llm" not in request.values
+    assert "translation.model" not in request.values
+    assert controller.settings.provider.stt == STTProviderName.SONIOX
+
+
+@pytest.mark.asyncio
 async def test_order21_snapshot_full_default_service_runtime_adapter_receives_committed_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -12379,6 +12540,805 @@ async def test_apply_providers_mixed_degraded_default_service_persists_full_prov
     assert controller.settings.system_prompt == "draft prompt"
     assert controller.hub.system_prompt == "draft prompt"
     assert rebuild_prompts == ["base prompt", "draft prompt"]
+
+
+@pytest.mark.asyncio
+async def test_order22_apply_settings_routes_stt_language_audio_patch_through_default_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.QWEN
+    controller.settings.stt.low_latency_mode = False
+    controller.settings.languages.peer_source_language = "en"
+    controller.settings.languages.peer_target_language = "ko"
+    controller.hub = DummyHub(stt=object(), peer_stt=object())
+    controller.hub.source_language = controller.settings.languages.source_language
+    controller.hub.target_language = controller.settings.languages.target_language
+    controller.hub.peer_source_language = controller.settings.languages.peer_source_language
+    controller.hub.peer_target_language = controller.settings.languages.peer_target_language
+    controller.hub.low_latency_mode = controller.settings.stt.low_latency_mode
+    controller._peer_runtime = DummyPeerRuntime()
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_microphone_test_audio_settings_signature = (
+        controller._microphone_test_audio_settings_signature(controller.settings)
+    )
+    controller._last_peer_translation_enabled = controller.settings.ui.peer_translation_enabled
+    controller._last_vrc_mic_sync_enabled = controller.settings.osc.vrc_mic_intercept
+
+    pending = copy.deepcopy(controller.settings)
+    pending.provider.stt = STTProviderName.SONIOX
+    pending.languages.source_language = "ja"
+    pending.languages.peer_source_language = ""
+    pending.audio.input_device = "Headset Mic"
+    pending.desktop_audio.vad_hangover_ms = 950
+    pending.stt.low_latency_mode = True
+    pending.soniox_stt.trailing_silence_ms = 175
+    requests: list[settings_mutation.SettingsMutationRequest] = []
+    saved_settings: list[AppSettings] = []
+    calls: list[str] = []
+
+    original_mutate = settings_mutation.SettingsMutationService.mutate
+
+    async def capture_mutate(self, request):
+        requests.append(request)
+        return await original_mutate(self, request)
+
+    def record_saved_settings(_path, settings) -> None:
+        saved_settings.append(copy.deepcopy(settings))
+
+    async def fake_stop_microphone_test_for_audio_settings_change(self) -> None:
+        calls.append("mic_stop")
+
+    async def fake_rebuild_llm_provider(self) -> None:
+        calls.append("llm")
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        calls.append("peer")
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        calls.append("replace")
+
+    monkeypatch.setattr(settings_mutation.SettingsMutationService, "mutate", capture_mutate)
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
+    monkeypatch.setattr(controller_module, "get_locale", lambda: controller.settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_clear_local_stt_pending_enable_if_provider_switched_away",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "stop_microphone_test_for_audio_settings_change",
+        fake_stop_microphone_test_for_audio_settings_change,
+    )
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
+
+    await controller.apply_settings(pending)
+
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.reason == settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO
+    assert request.values == {
+        "provider.stt": STTProviderName.SONIOX,
+        "languages.source_language": "ja",
+        "languages.peer_source_language": "",
+        "audio.input_device": "Headset Mic",
+        "desktop_audio.vad_hangover_ms": 950,
+        "stt.low_latency_mode": True,
+        "soniox_stt.trailing_silence_ms": 175,
+    }
+    assert "translation.model" not in request.values
+    assert "overlay.target" not in request.values
+    assert len(saved_settings) == 1
+    assert saved_settings[0].provider.stt == STTProviderName.SONIOX
+    assert saved_settings[0].languages.source_language == "ja"
+    assert saved_settings[0].audio.input_device == "Headset Mic"
+    assert controller.hub.clear_language_runtime_state_calls == ["self", "peer"]
+    assert calls == ["mic_stop", "llm", "peer", "replace"]
+    assert controller.hub.source_language == "ja"
+    assert controller.hub.low_latency_mode is True
+
+
+@pytest.mark.asyncio
+async def test_order22_apply_settings_runtime_failure_degrades_without_rollback_or_raw_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.hub = DummyHub(stt=object())
+    controller.hub.source_language = controller.settings.languages.source_language
+    controller.hub.target_language = controller.settings.languages.target_language
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_translation_enabled = controller.settings.ui.peer_translation_enabled
+    controller._last_vrc_mic_sync_enabled = controller.settings.osc.vrc_mic_intercept
+    pending = copy.deepcopy(controller.settings)
+    pending.provider.stt = STTProviderName.SONIOX
+    pending.languages.source_language = "ja"
+    saved_settings: list[AppSettings] = []
+    raw_failure_text = "stt runtime failed secret-token-must-not-leak"
+
+    def record_saved_settings(_path, settings) -> None:
+        saved_settings.append(copy.deepcopy(settings))
+
+    async def fail_replace_runtime_stt_provider(self) -> None:
+        raise RuntimeError(raw_failure_text)
+
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
+    monkeypatch.setattr(controller_module, "get_locale", lambda: controller.settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_clear_local_stt_pending_enable_if_provider_switched_away",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fail_replace_runtime_stt_provider
+    )
+
+    await controller.apply_settings(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.message == messages.UserMessageRef(
+        key="settings.mutation.runtime_apply_failed",
+        params={"phase": "runtime_apply"},
+        severity=messages.SEVERITY_WARNING,
+    )
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_stt_language_audio_runtime",
+        code="stt_language_audio_runtime_apply_exception",
+        category=messages.DIAGNOSTIC_CATEGORY_LIFECYCLE,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "stt_language_audio"},
+    )
+    assert raw_failure_text not in repr(result)
+    assert len(saved_settings) == 1
+    assert saved_settings[0].provider.stt == STTProviderName.SONIOX
+    assert controller.settings.provider.stt == STTProviderName.SONIOX
+
+
+@pytest.mark.asyncio
+async def test_order22_save_failure_surface_is_stt_language_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    pending = copy.deepcopy(controller.settings)
+    pending.audio.input_device = "Headset Mic"
+    raw_failure_text = "save failed secret-token-must-not-leak"
+
+    def fail_save_settings(_path, _settings) -> None:
+        raise RuntimeError(raw_failure_text)
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_save_settings)
+
+    await controller.apply_settings(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="settings_repository",
+        operation="save",
+        code="settings_save_failed",
+        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "stt_language_audio"},
+    )
+    assert raw_failure_text not in repr(result)
+    assert raw_failure_text not in repr(controller._runtime_logging.basic_messages)
+
+
+@pytest.mark.asyncio
+async def test_order22_apply_settings_self_stt_provider_specific_change_restarts_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.DEEPGRAM
+    controller.settings.deepgram_stt.model = "nova-3"
+    controller.hub = DummyHub(stt=object())
+    controller.hub.source_language = controller.settings.languages.source_language
+    controller.hub.target_language = controller.settings.languages.target_language
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_translation_enabled = controller.settings.ui.peer_translation_enabled
+    controller._last_vrc_mic_sync_enabled = controller.settings.osc.vrc_mic_intercept
+    pending = copy.deepcopy(controller.settings)
+    pending.deepgram_stt.model = "nova-2"
+    requests: list[settings_mutation.SettingsMutationRequest] = []
+    replace_calls: list[str] = []
+
+    original_mutate = settings_mutation.SettingsMutationService.mutate
+
+    async def capture_mutate(self, request):
+        requests.append(request)
+        return await original_mutate(self, request)
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        replace_calls.append("replace")
+
+    monkeypatch.setattr(settings_mutation.SettingsMutationService, "mutate", capture_mutate)
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(controller_module, "get_locale", lambda: controller.settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_clear_local_stt_pending_enable_if_provider_switched_away",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
+
+    await controller.apply_settings(pending)
+
+    assert len(requests) == 1
+    assert requests[0].values == {"deepgram_stt.model": "nova-2"}
+    assert replace_calls == ["replace"]
+
+
+@pytest.mark.asyncio
+async def test_order22_apply_settings_mixed_draft_applies_audio_runtime_and_preserves_out_of_scope_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.audio.input_device = "Base Mic"
+    controller.settings.overlay.show_translation = True
+    controller.settings.system_prompt = "base prompt"
+    controller.hub = DummyHub(stt=object())
+    controller.hub.source_language = controller.settings.languages.source_language
+    controller.hub.target_language = controller.settings.languages.target_language
+    controller.hub.system_prompt = controller.settings.system_prompt
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_translation_enabled = controller.settings.ui.peer_translation_enabled
+    controller._last_vrc_mic_sync_enabled = controller.settings.osc.vrc_mic_intercept
+    pending = copy.deepcopy(controller.settings)
+    pending.audio.input_device = "Desk Mic"
+    pending.overlay.show_translation = False
+    pending.osc.chatbox_include_source = True
+    pending.system_prompt = "draft prompt"
+    requests: list[settings_mutation.SettingsMutationRequest] = []
+    saved_settings: list[AppSettings] = []
+    calls: list[str] = []
+
+    original_mutate = settings_mutation.SettingsMutationService.mutate
+
+    async def capture_mutate(self, request):
+        requests.append(request)
+        return await original_mutate(self, request)
+
+    def record_saved_settings(_path, settings) -> None:
+        saved_settings.append(copy.deepcopy(settings))
+
+    async def fake_stop_microphone_test_for_audio_settings_change(self) -> None:
+        calls.append("mic_stop")
+
+    monkeypatch.setattr(settings_mutation.SettingsMutationService, "mutate", capture_mutate)
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
+    monkeypatch.setattr(controller_module, "get_locale", lambda: controller.settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_clear_local_stt_pending_enable_if_provider_switched_away",
+        lambda self: None,
+    )
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "stop_microphone_test_for_audio_settings_change",
+        fake_stop_microphone_test_for_audio_settings_change,
+    )
+
+    await controller.apply_settings(pending)
+
+    assert len(requests) == 1
+    assert requests[0].values == {"audio.input_device": "Desk Mic"}
+    assert "overlay.show_translation" not in requests[0].values
+    assert "osc.chatbox_include_source" not in requests[0].values
+    assert "system_prompt" not in requests[0].values
+    assert [settings.audio.input_device for settings in saved_settings] == [
+        "Desk Mic",
+        "Desk Mic",
+    ]
+    assert saved_settings[0].overlay.show_translation is True
+    assert saved_settings[0].system_prompt == "base prompt"
+    assert saved_settings[1].overlay.show_translation is False
+    assert saved_settings[1].osc.chatbox_include_source is True
+    assert saved_settings[1].system_prompt == "draft prompt"
+    assert calls == ["mic_stop"]
+    assert controller.settings.overlay.show_translation is False
+    assert controller.settings.osc.chatbox_include_source is True
+    assert controller.settings.system_prompt == "draft prompt"
+
+
+@pytest.mark.asyncio
+async def test_order22_apply_settings_mixed_full_draft_save_failure_degrades_and_restores_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.audio.input_device = "Base Mic"
+    controller.settings.overlay.calibration = OverlayCalibration(distance=0.8, offset_x=0.2)
+    controller.overlay_calibration = controller.settings.overlay.calibration.copy()
+    controller.settings.overlay.show_translation = True
+    controller.settings.system_prompt = "base prompt"
+    controller.hub = DummyHub(stt=object())
+    controller.hub.source_language = controller.settings.languages.source_language
+    controller.hub.target_language = controller.settings.languages.target_language
+    controller.hub.system_prompt = controller.settings.system_prompt
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_translation_enabled = controller.settings.ui.peer_translation_enabled
+    controller._last_vrc_mic_sync_enabled = controller.settings.osc.vrc_mic_intercept
+    pending = copy.deepcopy(controller.settings)
+    pending.audio.input_device = "Desk Mic"
+    pending.languages.source_language = "ja"
+    pending.overlay.calibration = OverlayCalibration(distance=1.6, offset_x=0.7)
+    pending.overlay.show_translation = False
+    pending.system_prompt = "draft prompt"
+    save_attempts: list[AppSettings] = []
+    raw_failure_text = "full draft save failed secret-token-must-not-leak"
+
+    def fail_second_save(_path, incoming: AppSettings) -> None:
+        save_attempts.append(copy.deepcopy(incoming))
+        if len(save_attempts) == 2:
+            raise RuntimeError(raw_failure_text)
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_second_save)
+    monkeypatch.setattr(controller_module, "get_locale", lambda: controller.settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_clear_local_stt_pending_enable_if_provider_switched_away",
+        lambda self: None,
+    )
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
+    )
+
+    await controller.apply_settings(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_stt_language_audio_full_draft_save",
+        code="settings_save_failed",
+        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "stt_language_audio"},
+    )
+    assert [settings.audio.input_device for settings in save_attempts] == ["Desk Mic", "Desk Mic"]
+    assert [settings.languages.source_language for settings in save_attempts] == ["ja", "ja"]
+    assert [settings.overlay.calibration.distance for settings in save_attempts] == [0.8, 1.6]
+    assert save_attempts[0].overlay.show_translation is True
+    assert save_attempts[0].system_prompt == "base prompt"
+    assert save_attempts[1].overlay.show_translation is False
+    assert save_attempts[1].system_prompt == "draft prompt"
+    assert controller.settings.audio.input_device == "Desk Mic"
+    assert controller.settings.languages.source_language == "ja"
+    assert controller.hub.source_language == "ja"
+    assert controller.settings.overlay.show_translation is True
+    assert controller.settings.overlay.calibration.distance == 0.8
+    assert controller.overlay_calibration.distance == 0.8
+    assert controller.settings.system_prompt == "base prompt"
+    assert controller.hub.system_prompt == "base prompt"
+    assert raw_failure_text not in repr(result)
+    assert raw_failure_text not in repr(controller._runtime_logging.basic_messages)
+
+
+@pytest.mark.asyncio
+async def test_order22_mixed_provider_draft_rebuilds_self_stt_from_pre_mutation_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.DEEPGRAM
+    controller.settings.system_prompt = "base prompt"
+    controller.hub = DummyHub()
+    controller.hub.system_prompt = controller.settings.system_prompt
+    controller._stt_desired = False
+    pending = copy.deepcopy(controller.settings)
+    pending.provider.stt = STTProviderName.SONIOX
+    pending.system_prompt = "draft prompt"
+    requests: list[settings_mutation.SettingsMutationRequest] = []
+    saved_settings: list[AppSettings] = []
+    calls: list[str] = []
+
+    original_mutate = settings_mutation.SettingsMutationService.mutate
+
+    async def capture_mutate(self, request):
+        requests.append(request)
+        return await original_mutate(self, request)
+
+    def record_saved_settings(_path, settings) -> None:
+        saved_settings.append(copy.deepcopy(settings))
+
+    async def fake_rebuild_stt_provider(self) -> None:
+        calls.append("rebuild_stt")
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        calls.append("replace")
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        calls.append("peer")
+
+    async def fake_rebuild_llm_provider(self) -> None:
+        calls.append("llm")
+
+    monkeypatch.setattr(settings_mutation.SettingsMutationService, "mutate", capture_mutate)
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild_stt_provider)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+
+    await controller.apply_providers(pending)
+
+    assert len(requests) == 1
+    assert requests[0].reason == settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO
+    assert requests[0].values == {"provider.stt": STTProviderName.SONIOX}
+    assert "system_prompt" not in requests[0].values
+    assert [settings.provider.stt for settings in saved_settings] == [
+        STTProviderName.SONIOX,
+        STTProviderName.SONIOX,
+    ]
+    assert saved_settings[0].system_prompt == "base prompt"
+    assert saved_settings[1].system_prompt == "draft prompt"
+    assert controller.settings.provider.stt == STTProviderName.SONIOX
+    assert controller.settings.system_prompt == "draft prompt"
+    assert controller.hub.system_prompt == "draft prompt"
+    assert calls == ["rebuild_stt"]
+
+
+@pytest.mark.asyncio
+async def test_order22_provider_mixed_fallback_failure_degrades_without_raw_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.DEEPGRAM
+    controller.settings.system_prompt = "base prompt"
+    controller.hub = DummyHub(stt=object())
+    controller._stt_desired = False
+    pending = copy.deepcopy(controller.settings)
+    pending.provider.stt = STTProviderName.SONIOX
+    pending.system_prompt = "draft prompt"
+    raw_failure_text = "stt rebuild failed secret-token-must-not-leak"
+    saved_settings: list[AppSettings] = []
+
+    def record_saved_settings(_path, settings) -> None:
+        saved_settings.append(copy.deepcopy(settings))
+
+    async def fail_rebuild_stt_provider(self) -> None:
+        raise RuntimeError(raw_failure_text)
+
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fail_rebuild_stt_provider)
+
+    await controller.apply_providers(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.message == messages.UserMessageRef(
+        key="settings.mutation.runtime_apply_failed",
+        params={"phase": "runtime_apply"},
+        severity=messages.SEVERITY_WARNING,
+    )
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_stt_language_audio_provider_runtime",
+        code="provider_runtime_apply_exception",
+        category=messages.DIAGNOSTIC_CATEGORY_LIFECYCLE,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "stt_language_audio"},
+    )
+    assert raw_failure_text not in repr(result)
+    assert [settings.system_prompt for settings in saved_settings] == [
+        "base prompt",
+        "draft prompt",
+    ]
+    assert controller.settings.provider.stt == STTProviderName.SONIOX
+    assert controller.settings.system_prompt == "draft prompt"
+
+
+@pytest.mark.asyncio
+async def test_order22_provider_mixed_full_draft_save_failure_degrades_and_restores_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.DEEPGRAM
+    controller.settings.system_prompt = "base prompt"
+    controller.hub = DummyHub(stt=object())
+    controller.hub.system_prompt = controller.settings.system_prompt
+    controller._stt_desired = False
+    pending = copy.deepcopy(controller.settings)
+    pending.provider.stt = STTProviderName.SONIOX
+    pending.system_prompt = "draft prompt"
+    save_attempts: list[AppSettings] = []
+    runtime_calls: list[str] = []
+    raw_failure_text = "provider full draft save failed secret-token-must-not-leak"
+
+    def fail_second_save(_path, incoming: AppSettings) -> None:
+        save_attempts.append(copy.deepcopy(incoming))
+        if len(save_attempts) == 2:
+            raise RuntimeError(raw_failure_text)
+
+    async def record_rebuild_stt_provider(self) -> None:
+        _ = self
+        runtime_calls.append("rebuild_stt")
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_second_save)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", record_rebuild_stt_provider)
+
+    await controller.apply_providers(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_stt_language_audio_provider_full_draft_save",
+        code="settings_save_failed",
+        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "stt_language_audio"},
+    )
+    assert [settings.provider.stt for settings in save_attempts] == [
+        STTProviderName.SONIOX,
+        STTProviderName.SONIOX,
+    ]
+    assert save_attempts[0].system_prompt == "base prompt"
+    assert save_attempts[1].system_prompt == "draft prompt"
+    assert controller.settings.provider.stt == STTProviderName.SONIOX
+    assert controller.settings.system_prompt == "base prompt"
+    assert controller.hub.system_prompt == "base prompt"
+    assert runtime_calls == ["rebuild_stt"]
+    assert raw_failure_text not in repr(result)
+    assert raw_failure_text not in repr(controller._runtime_logging.basic_messages)
+
+
+@pytest.mark.asyncio
+async def test_order22_mixed_settings_direct_fallback_degrades_when_stt_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.DEEPGRAM
+    controller.settings.overlay.show_translation = True
+    controller.hub = DummyHub(stt=object())
+    controller.hub.source_language = controller.settings.languages.source_language
+    controller.hub.target_language = controller.settings.languages.target_language
+    controller._stt_desired = True
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_translation_enabled = controller.settings.ui.peer_translation_enabled
+    controller._last_vrc_mic_sync_enabled = controller.settings.osc.vrc_mic_intercept
+    pending = copy.deepcopy(controller.settings)
+    pending.provider.stt = STTProviderName.SONIOX
+    pending.overlay.show_translation = False
+
+    async def unavailable_replace_runtime_stt_provider(self) -> None:
+        assert self.hub is not None
+        self.hub.stt = None
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(controller_module, "get_locale", lambda: controller.settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_clear_local_stt_pending_enable_if_provider_switched_away",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", unavailable_replace_runtime_stt_provider
+    )
+
+    await controller.apply_settings(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_stt_language_audio_runtime",
+        code="stt_language_audio_runtime_unavailable",
+        category=messages.DIAGNOSTIC_CATEGORY_LIFECYCLE,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "stt_language_audio"},
+    )
+    assert controller.hub.stt is None
+
+
+@pytest.mark.asyncio
+async def test_order22_qwen_low_latency_rebuild_unavailable_llm_degrades_default_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.QWEN
+    controller.settings.stt.low_latency_mode = False
+    controller.hub = DummyHub(llm=object(), stt=object())
+    controller.hub.source_language = controller.settings.languages.source_language
+    controller.hub.target_language = controller.settings.languages.target_language
+    controller.hub.low_latency_mode = controller.settings.stt.low_latency_mode
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_translation_enabled = controller.settings.ui.peer_translation_enabled
+    controller._last_vrc_mic_sync_enabled = controller.settings.osc.vrc_mic_intercept
+    pending = copy.deepcopy(controller.settings)
+    pending.stt.low_latency_mode = True
+
+    async def unavailable_rebuild_llm_provider(self) -> None:
+        assert self.hub is not None
+        self.hub.llm = None
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(controller_module, "get_locale", lambda: controller.settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_clear_local_stt_pending_enable_if_provider_switched_away",
+        lambda self: None,
+    )
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", unavailable_rebuild_llm_provider)
+
+    await controller.apply_settings(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_stt_language_audio_runtime",
+        code="llm_stt_language_audio_runtime_unavailable",
+        category=messages.DIAGNOSTIC_CATEGORY_LIFECYCLE,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "stt_language_audio"},
+    )
+    assert controller.hub.llm is None
+
+
+@pytest.mark.asyncio
+async def test_order22_qwen_low_latency_unavailable_preserves_retry_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.QWEN
+    controller.settings.stt.low_latency_mode = False
+    controller.hub = DummyHub(llm=object(), stt=object())
+    controller.hub.source_language = controller.settings.languages.source_language
+    controller.hub.target_language = controller.settings.languages.target_language
+    controller.hub.low_latency_mode = controller.settings.stt.low_latency_mode
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_translation_enabled = controller.settings.ui.peer_translation_enabled
+    controller._last_vrc_mic_sync_enabled = controller.settings.osc.vrc_mic_intercept
+    pending = copy.deepcopy(controller.settings)
+    pending.stt.low_latency_mode = True
+    recovered_llm = object()
+    rebuild_markers: list[bool] = []
+
+    async def fail_then_recover_rebuild_llm_provider(self) -> None:
+        assert self.hub is not None
+        rebuild_markers.append(self.hub.low_latency_mode)
+        self.hub.llm = None if len(rebuild_markers) == 1 else recovered_llm
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(controller_module, "get_locale", lambda: controller.settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_clear_local_stt_pending_enable_if_provider_switched_away",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        GuiController, "_rebuild_llm_provider", fail_then_recover_rebuild_llm_provider
+    )
+
+    await controller.apply_settings(pending)
+
+    first_result = controller.last_settings_mutation_result
+    assert first_result is not None
+    assert (
+        first_result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    )
+    assert rebuild_markers == [False]
+    assert controller.hub.llm is None
+    assert controller.hub.low_latency_mode is False
+
+    await controller.apply_settings(copy.deepcopy(controller.settings))
+
+    assert rebuild_markers == [False, False]
+    assert controller.hub.llm is recovered_llm
+    assert controller.hub.low_latency_mode is True
 
 
 @pytest.mark.asyncio
@@ -13240,7 +14200,7 @@ async def test_rebuild_stt_provider_logs_only_failure_when_backend_unavailable(
     monkeypatch.setattr(
         controller_module,
         "create_stt_backend",
-        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom secret-token-must-not-leak")),
     )
 
     await controller._rebuild_stt_provider()
@@ -13249,8 +14209,9 @@ async def test_rebuild_stt_provider_logs_only_failure_when_backend_unavailable(
     assert dash.stt_needs_key is True
     assert dash.stt_enabled is False
     assert controller._runtime_logging.basic_messages == [
-        (logging.ERROR, "STT backend not available: boom")
+        (logging.ERROR, "STT backend not available")
     ]
+    assert "secret-token-must-not-leak" not in repr(controller._runtime_logging.basic_messages)
 
 
 @pytest.mark.asyncio
@@ -13267,7 +14228,7 @@ async def test_rebuild_stt_provider_logs_basic_failure_when_secret_store_setup_f
     monkeypatch.setattr(
         controller_module,
         "create_secret_store",
-        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom secret-token-must-not-leak")),
     )
 
     await controller._rebuild_stt_provider()
@@ -13276,8 +14237,9 @@ async def test_rebuild_stt_provider_logs_basic_failure_when_secret_store_setup_f
     assert dash.stt_needs_key is True
     assert dash.stt_enabled is False
     assert controller._runtime_logging.basic_messages == [
-        (logging.ERROR, "STT backend not available: boom")
+        (logging.ERROR, "STT backend not available")
     ]
+    assert "secret-token-must-not-leak" not in repr(controller._runtime_logging.basic_messages)
 
 
 @pytest.mark.asyncio

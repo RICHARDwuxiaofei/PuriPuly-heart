@@ -29,6 +29,7 @@ from puripuly_heart.core.messages import (
 )
 
 SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER: Final = "settings.translation_provider"
+SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO: Final = "settings.stt_language_audio"
 
 ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS: Final[tuple[str, ...]] = (
     "translation.model",
@@ -51,6 +52,40 @@ ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS: Final[tuple[str, ...]] = (
     "local_llm.model",
     "local_llm.extra_body",
     "llm.concurrency_limit",
+)
+
+ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS: Final[tuple[str, ...]] = (
+    "provider.stt",
+    "provider.peer_stt",
+    "languages.source_language",
+    "languages.target_language",
+    "languages.peer_source_language",
+    "languages.peer_target_language",
+    "languages.recent_source_languages",
+    "languages.recent_target_languages",
+    "audio.internal_sample_rate_hz",
+    "audio.internal_channels",
+    "audio.ring_buffer_ms",
+    "audio.input_host_api",
+    "audio.input_device",
+    "desktop_audio.output_device",
+    "desktop_audio.vad_speech_threshold",
+    "desktop_audio.vad_hangover_ms",
+    "desktop_audio.vad_pre_roll_ms",
+    "stt.drain_timeout_s",
+    "stt.vad_speech_threshold",
+    "stt.low_latency_mode",
+    "stt.low_latency_vad_hangover_ms",
+    "stt.low_latency_merge_gap_ms",
+    "stt.low_latency_spec_retry_max",
+    "stt.custom_vocabulary_enabled",
+    "stt.custom_terms",
+    "deepgram_stt.model",
+    "qwen_asr_stt.model",
+    "soniox_stt.model",
+    "soniox_stt.endpoint",
+    "soniox_stt.keepalive_interval_s",
+    "soniox_stt.trailing_silence_ms",
 )
 
 
@@ -286,7 +321,9 @@ def _runtime_apply_exception_transaction_result() -> TransactionResult:
 
 __all__ = [
     "ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS",
+    "ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS",
     "RuntimeApplyResultPublisher",
+    "SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO",
     "SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER",
     "SettingsMutationRequest",
     "SettingsMutationService",

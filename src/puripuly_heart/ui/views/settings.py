@@ -4577,9 +4577,10 @@ class SettingsView(ft.Column):
 
     def _emit_settings_changed(self) -> None:
         if self._settings and self.on_settings_changed:
+            settings = copy.deepcopy(self._settings)
             self.on_settings_changed(
                 self._sanitize_provider_apply_settings(
-                    self._settings_with_desktop_overlay_runtime_state(self._settings)
+                    self._settings_with_desktop_overlay_runtime_state(settings)
                 )
             )
 

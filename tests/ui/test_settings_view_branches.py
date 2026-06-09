@@ -10,6 +10,7 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.app.services import settings_mutation
 from puripuly_heart.config.audio_host_api import WINDOWS_WASAPI_COMPATIBILITY_HOST_API
 from puripuly_heart.config.settings import (
     LOCAL_LLM_RESERVED_EXTRA_BODY_KEYS,
@@ -35,9 +36,11 @@ from puripuly_heart.config.settings import (
     to_dict,
 )
 from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
+from puripuly_heart.ui import controller as controller_module
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.components import subtab_shell as subtab_shell_module
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
+from puripuly_heart.ui.controller import GuiController
 from puripuly_heart.ui.fonts import font_for_language
 from puripuly_heart.ui.i18n import language_name, provider_label, t
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
@@ -1457,6 +1460,98 @@ def test_load_from_settings_loads_local_llm_api_key(
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
     assert view._local_llm_api_key.value == "server-secret"
+
+
+@pytest.mark.asyncio
+async def test_order22_live_settings_view_audio_change_emits_copied_draft_and_routes_controller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(view_dashboard=None, view_settings=view),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = AppSettings()
+    controller.settings.audio.input_device = "Built-in Mic"
+    controller._sync_ui_from_settings()
+
+    emitted: list[AppSettings] = []
+    requests: list[settings_mutation.SettingsMutationRequest] = []
+    original_mutate = settings_mutation.SettingsMutationService.mutate
+
+    async def capture_mutate(self, request):
+        requests.append(request)
+        return await original_mutate(self, request)
+
+    view.on_settings_changed = emitted.append
+    view._audio_settings.microphone = "Headset Mic"
+    monkeypatch.setattr(settings_mutation.SettingsMutationService, "mutate", capture_mutate)
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+
+    view._on_audio_change()
+
+    assert controller.settings.audio.input_device == "Headset Mic"
+    assert len(emitted) == 1
+    assert emitted[0] is not controller.settings
+    assert emitted[0] is not view._settings
+    assert emitted[0].audio.input_device == "Headset Mic"
+
+    await controller.apply_settings(emitted[0])
+
+    assert len(requests) == 1
+    assert requests[0].reason == settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO
+    assert requests[0].values == {"audio.input_device": "Headset Mic"}
+
+
+@pytest.mark.asyncio
+async def test_order22_live_settings_view_audio_change_save_failure_restores_controller_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(view_dashboard=None, view_settings=view),
+        config_path=Path("settings.json"),
+    )
+    controller._runtime_logging = controller_module.SessionRuntimeLoggingService(
+        ui_handler_factory=controller_module.FletLogHandler
+    )
+    controller.settings = AppSettings()
+    controller.settings.audio.input_device = "Built-in Mic"
+    controller._sync_ui_from_settings()
+    emitted: list[AppSettings] = []
+    raw_failure_text = "save failed secret-token-must-not-leak"
+
+    def fail_save_settings(_path, _settings) -> None:
+        raise RuntimeError(raw_failure_text)
+
+    view.on_settings_changed = emitted.append
+    view._audio_settings.microphone = "Headset Mic"
+    monkeypatch.setattr(controller_module, "save_settings", fail_save_settings)
+
+    view._on_audio_change()
+    assert controller.settings.audio.input_device == "Headset Mic"
+
+    await controller.apply_settings(emitted[-1])
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == settings_mutation.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED
+    assert result.diagnostics == settings_mutation.ErrorDiagnostics(
+        component="settings_repository",
+        operation="save",
+        code="settings_save_failed",
+        category=settings_mutation.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=settings_mutation.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=settings_mutation.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "stt_language_audio"},
+    )
+    assert controller.settings.audio.input_device == "Built-in Mic"
+    assert raw_failure_text not in repr(result)
+    assert raw_failure_text not in repr(controller._runtime_logging)
 
 
 def test_load_from_settings_without_local_llm_api_key_shows_empty_field(
@@ -3476,6 +3571,11 @@ def test_audio_vad_and_low_latency_handlers_update_state(
     view._on_peer_vad_threshold_change(SimpleNamespace(control=view._peer_vad_field))
     view._on_low_latency_selected("on")
 
+    assert view._settings.audio.input_host_api == "MME"
+    assert view._settings.audio.input_device == "Mic 2"
+    assert view._settings.stt.vad_speech_threshold == 0.72
+    assert view._settings.desktop_audio.vad_speech_threshold == 0.61
+    assert view._settings.stt.low_latency_mode is True
     assert settings.audio.input_host_api == "MME"
     assert settings.audio.input_device == "Mic 2"
     assert settings.stt.vad_speech_threshold == 0.72
@@ -3505,11 +3605,13 @@ def test_peer_vad_slider_change_skips_hidden_field_update_when_view_is_mounted(
 
     view._handle_peer_vad_change(SimpleNamespace(control=SimpleNamespace(value=0.77)))
 
-    assert settings.desktop_audio.vad_speech_threshold == 0.77
+    assert view._settings.desktop_audio.vad_speech_threshold == 0.77
     assert view._peer_vad_field.value == "0.77"
     assert view._peer_vad_slider.label == "0.77"
     assert slider_page.updated == [view._peer_vad_slider]
-    assert changed == [settings]
+    assert len(changed) == 1
+    assert changed[0] is not settings
+    assert changed[0].desktop_audio.vad_speech_threshold == 0.77
 
 
 def test_audio_change_messages_use_basic_runtime_log(
@@ -3549,10 +3651,14 @@ def test_audio_change_messages_use_basic_runtime_log(
 
     assert all(message in basic_messages for message in expected_messages)
     assert not any(message.startswith(audio_change_prefixes) for message in detailed_messages)
+    assert view._settings.audio.input_host_api == "MME"
+    assert view._settings.audio.input_device == "New Mic"
+    assert view._settings.desktop_audio.output_device == "New Speakers"
     assert settings.audio.input_host_api == "MME"
     assert settings.audio.input_device == "New Mic"
     assert settings.desktop_audio.output_device == "New Speakers"
     assert len(changed) == 1
+    assert changed[0] is not settings
     assert changed[0].audio.input_host_api == "MME"
     assert changed[0].audio.input_device == "New Mic"
     assert changed[0].desktop_audio.output_device == "New Speakers"
@@ -4082,7 +4188,10 @@ def test_overlay_display_toggles_update_persistent_settings(
 
     assert settings.overlay.show_translation is False
     assert settings.overlay.show_peer_original is False
-    assert settings_calls == [settings, settings]
+    assert len(settings_calls) == 2
+    assert all(incoming is not settings for incoming in settings_calls)
+    assert settings_calls[-1].overlay.show_translation is False
+    assert settings_calls[-1].overlay.show_peer_original is False
 
 
 def test_overlay_anchor_click_opens_modal_with_current_selection(
@@ -4433,7 +4542,8 @@ def test_desktop_gui_background_alpha_emits_copy_without_mutating_loaded_setting
     assert changed
     assert changed[-1] is not settings
     assert changed[-1].overlay.desktop_flet.visual.background_alpha == pytest.approx(0.4)
-    assert view._settings is changed[-1]
+    assert view._settings is not changed[-1]
+    assert view._settings.overlay.desktop_flet.visual.background_alpha == pytest.approx(0.4)
 
 
 def test_desktop_gui_background_transparency_card_clamps_to_zero_and_one(
@@ -4811,7 +4921,11 @@ def test_overlay_position_reset_card_separates_vr_and_desktop_reset_actions(
         "settings.overlay.desktop.lock.value.move"
     )
     assert desktop_resets == []
-    assert changed == [settings, settings]
+    assert len(changed) == 2
+    assert all(incoming is not settings for incoming in changed)
+    assert changed[-1].overlay.desktop_flet.position.x is None
+    assert changed[-1].overlay.desktop_flet.position.y is None
+    assert changed[-1].overlay.desktop_flet.locked is False
 
 
 def test_desktop_gui_runtime_position_reset_defers_to_callback_without_stale_emit(
@@ -4946,11 +5060,20 @@ def test_audio_change_updates_desktop_loopback_controls(monkeypatch: pytest.Monk
     view._peer_pre_roll_field.value = "420"
     view._on_peer_pre_roll_change(SimpleNamespace(control=view._peer_pre_roll_field))
 
+    assert view._settings.desktop_audio.output_device == "Speakers (Loopback)"
+    assert view._settings.desktop_audio.vad_speech_threshold == 0.72
+    assert view._settings.desktop_audio.vad_hangover_ms == 950
+    assert view._settings.desktop_audio.vad_pre_roll_ms == 420
     assert settings.desktop_audio.output_device == "Speakers (Loopback)"
     assert settings.desktop_audio.vad_speech_threshold == 0.72
     assert settings.desktop_audio.vad_hangover_ms == 950
     assert settings.desktop_audio.vad_pre_roll_ms == 420
-    assert changed == [settings, settings, settings, settings]
+    assert len(changed) == 4
+    assert all(incoming is not settings for incoming in changed)
+    assert changed[-1].desktop_audio.output_device == "Speakers (Loopback)"
+    assert changed[-1].desktop_audio.vad_speech_threshold == 0.72
+    assert changed[-1].desktop_audio.vad_hangover_ms == 950
+    assert changed[-1].desktop_audio.vad_pre_roll_ms == 420
 
 
 def test_general_tab_places_microphone_test_and_displaced_cards(
@@ -7139,7 +7262,7 @@ def test_apply_locale_refreshes_custom_vocabulary_text(
     assert view._custom_vocab_tag_editor._input_field.hint_text == ""  # noqa: SLF001
     assert view._custom_vocab_tag_editor._empty_text.visible is False  # noqa: SLF001
     chip = view._custom_vocab_tag_editor._chips_wrap.controls[0]  # noqa: SLF001
-    assert chip.tooltip == t("settings.custom_vocabulary.remove_hint", term="Puripuly")
+    assert chip.tooltip is None
 
 
 def test_settings_view_uses_generic_subtab_shell(monkeypatch: pytest.MonkeyPatch) -> None:

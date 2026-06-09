@@ -823,6 +823,58 @@ def test_order21_translation_provider_patch_records_initial_covered_surface_list
     }
 
 
+def test_order22_stt_language_audio_patch_records_initial_covered_surface_list() -> None:
+    settings_mutation = _service_module()
+
+    assert set(settings_mutation.ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS) == {
+        "provider.stt",
+        "provider.peer_stt",
+        "languages.source_language",
+        "languages.target_language",
+        "languages.peer_source_language",
+        "languages.peer_target_language",
+        "languages.recent_source_languages",
+        "languages.recent_target_languages",
+        "audio.internal_sample_rate_hz",
+        "audio.internal_channels",
+        "audio.ring_buffer_ms",
+        "audio.input_host_api",
+        "audio.input_device",
+        "desktop_audio.output_device",
+        "desktop_audio.vad_speech_threshold",
+        "desktop_audio.vad_hangover_ms",
+        "desktop_audio.vad_pre_roll_ms",
+        "stt.drain_timeout_s",
+        "stt.vad_speech_threshold",
+        "stt.low_latency_mode",
+        "stt.low_latency_vad_hangover_ms",
+        "stt.low_latency_merge_gap_ms",
+        "stt.low_latency_spec_retry_max",
+        "stt.custom_vocabulary_enabled",
+        "stt.custom_terms",
+        "deepgram_stt.model",
+        "qwen_asr_stt.model",
+        "soniox_stt.model",
+        "soniox_stt.endpoint",
+        "soniox_stt.keepalive_interval_s",
+        "soniox_stt.trailing_silence_ms",
+    }
+
+
+def test_nondurable_order22_compatibility_fields_are_not_covered() -> None:
+    settings_mutation = _service_module()
+
+    assert {
+        "qwen_asr_stt.endpoint",
+        "peer_qwen_asr_stt.model",
+        "peer_qwen_asr_stt.region",
+        "peer_soniox_stt.model",
+        "peer_soniox_stt.endpoint",
+        "peer_soniox_stt.keepalive_interval_s",
+        "peer_soniox_stt.trailing_silence_ms",
+    }.isdisjoint(settings_mutation.ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS)
+
+
 def test_settings_path_patch_builds_typed_mutation_request_for_order21_surface() -> None:
     settings_mutation = _service_module()
 
@@ -847,6 +899,35 @@ def test_settings_path_patch_builds_typed_mutation_request_for_order21_surface()
         expected_revision="settings-r1",
         reason=settings_mutation.SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
         correlation_id="corr-order21",
+    )
+
+
+def test_settings_path_patch_builds_typed_mutation_request_for_order22_surface() -> None:
+    settings_mutation = _service_module()
+
+    patch = settings_mutation.SettingsPathPatch(
+        values_by_path={
+            "languages.source_language": "ja",
+            "stt.low_latency_mode": False,
+            "audio.input_device": "Headset Mic",
+        },
+        surface=settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
+    )
+
+    request = patch.to_mutation_request(
+        expected_revision="settings-r2",
+        correlation_id="corr-order22",
+    )
+
+    assert request == settings_mutation.SettingsMutationRequest(
+        values={
+            "languages.source_language": "ja",
+            "stt.low_latency_mode": False,
+            "audio.input_device": "Headset Mic",
+        },
+        expected_revision="settings-r2",
+        reason=settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
+        correlation_id="corr-order22",
     )
 
 
@@ -915,6 +996,79 @@ async def test_order21_path_validator_rejects_out_of_scope_paths_without_secret_
         fields={"path": "audio.input_device"},
     )
     assert "secret-value-must-not-leak" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_order22_path_validator_accepts_only_stt_language_audio_paths() -> None:
+    settings_mutation = _service_module()
+    validator = settings_mutation.SettingsPathMutationValidator(
+        allowed_paths=settings_mutation.ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
+        component="settings_mutation",
+        operation="validate_stt_language_audio_patch",
+    )
+    request = settings_mutation.SettingsMutationRequest(
+        values={
+            "provider.stt": "soniox",
+            "provider.peer_stt": "local_qwen",
+            "languages.source_language": "ja",
+            "audio.input_device": "Headset Mic",
+            "desktop_audio.vad_hangover_ms": 900,
+            "stt.low_latency_mode": False,
+            "soniox_stt.trailing_silence_ms": 150,
+        },
+        expected_revision=None,
+        reason=settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
+        correlation_id="corr-valid-order22-paths",
+    )
+
+    result = await validator.validate(request)
+
+    assert result == settings_mutation.SettingsMutationValidationResult(
+        succeeded=True,
+        message=None,
+        diagnostics=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_order22_path_validator_rejects_order21_overlay_and_secret_paths_without_values() -> (
+    None
+):
+    settings_mutation = _service_module()
+    validator = settings_mutation.SettingsPathMutationValidator(
+        allowed_paths=settings_mutation.ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
+        component="settings_mutation",
+        operation="validate_stt_language_audio_patch",
+    )
+    request = settings_mutation.SettingsMutationRequest(
+        values={
+            "translation.model": "gemma4-secret-ish",
+            "openrouter.selection_alias": "managed-secret-ish",
+            "overlay.target": "desktop-secret-ish",
+            "secrets.deepgram_api_key": "secret-value-must-not-leak",
+        },
+        expected_revision=None,
+        reason=settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
+        correlation_id="corr-invalid-order22-paths",
+    )
+
+    result = await validator.validate(request)
+
+    assert result.succeeded is False
+    assert result.message is None
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="settings_mutation",
+        operation="validate_stt_language_audio_patch",
+        code="settings_path_not_covered",
+        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"path": "openrouter.selection_alias"},
+    )
+    assert "secret-value-must-not-leak" not in repr(result)
+    assert "gemma4-secret-ish" not in repr(result)
 
 
 def test_settings_mutation_service_module_avoids_concrete_ui_provider_and_i18n_imports() -> None:
