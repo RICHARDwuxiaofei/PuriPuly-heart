@@ -796,6 +796,127 @@ async def test_runtime_message_and_diagnostics_take_precedence_over_commit_value
     )
 
 
+def test_order21_translation_provider_patch_records_initial_covered_surface_list() -> None:
+    settings_mutation = _service_module()
+
+    assert set(settings_mutation.ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS) == {
+        "translation.model",
+        "translation.connection",
+        "translation.connection_history",
+        "provider.llm",
+        "gemini.llm_model",
+        "openrouter.llm_model",
+        "openrouter.routing_mode",
+        "openrouter.provider_routing",
+        "openrouter.selected_source",
+        "openrouter.selection_alias",
+        "openrouter.fallback_selection_alias",
+        "openrouter.broker_base_url",
+        "qwen.llm_model",
+        "qwen.region",
+        "deepseek.llm_model",
+        "local_llm.backend",
+        "local_llm.base_url",
+        "local_llm.model",
+        "local_llm.extra_body",
+        "llm.concurrency_limit",
+    }
+
+
+def test_settings_path_patch_builds_typed_mutation_request_for_order21_surface() -> None:
+    settings_mutation = _service_module()
+
+    patch = settings_mutation.SettingsPathPatch(
+        values_by_path={
+            "translation.model": "gemma4",
+            "openrouter.selection_alias": "gemma4_byok",
+        },
+        surface=settings_mutation.SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
+    )
+
+    request = patch.to_mutation_request(
+        expected_revision="settings-r1",
+        correlation_id="corr-order21",
+    )
+
+    assert request == settings_mutation.SettingsMutationRequest(
+        values={
+            "translation.model": "gemma4",
+            "openrouter.selection_alias": "gemma4_byok",
+        },
+        expected_revision="settings-r1",
+        reason=settings_mutation.SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
+        correlation_id="corr-order21",
+    )
+
+
+@pytest.mark.asyncio
+async def test_order21_path_validator_accepts_only_translation_provider_paths() -> None:
+    settings_mutation = _service_module()
+    validator = settings_mutation.SettingsPathMutationValidator(
+        allowed_paths=settings_mutation.ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS,
+        component="settings_mutation",
+        operation="validate_translation_provider_patch",
+    )
+    request = settings_mutation.SettingsMutationRequest(
+        values={
+            "translation.connection": "openrouter",
+            "openrouter.fallback_selection_alias": "qwen35_flash",
+            "local_llm.base_url": "http://127.0.0.1:11434/v1",
+            "llm.concurrency_limit": 3,
+        },
+        expected_revision=None,
+        reason=settings_mutation.SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
+        correlation_id="corr-valid-paths",
+    )
+
+    result = await validator.validate(request)
+
+    assert result == settings_mutation.SettingsMutationValidationResult(
+        succeeded=True,
+        message=None,
+        diagnostics=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_order21_path_validator_rejects_out_of_scope_paths_without_secret_values() -> None:
+    settings_mutation = _service_module()
+    validator = settings_mutation.SettingsPathMutationValidator(
+        allowed_paths=settings_mutation.ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS,
+        component="settings_mutation",
+        operation="validate_translation_provider_patch",
+    )
+    request = settings_mutation.SettingsMutationRequest(
+        values={
+            "stt.low_latency_mode": False,
+            "audio.input_device": "default microphone",
+            "overlay.target": "desktop",
+            "secrets.openrouter_api_key": "secret-value-must-not-leak",
+        },
+        expected_revision=None,
+        reason=settings_mutation.SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
+        correlation_id="corr-invalid-paths",
+    )
+
+    result = await validator.validate(request)
+
+    assert result.succeeded is False
+    assert result.message is None
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="settings_mutation",
+        operation="validate_translation_provider_patch",
+        code="settings_path_not_covered",
+        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"path": "audio.input_device"},
+    )
+    assert "secret-value-must-not-leak" not in repr(result)
+
+
 def test_settings_mutation_service_module_avoids_concrete_ui_provider_and_i18n_imports() -> None:
     module = _service_module()
     tree = ast.parse(Path(module.__file__ or "").read_text(encoding="utf-8"))

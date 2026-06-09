@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Final, Protocol
 
 from puripuly_heart.app.ports._settings_values import freeze_settings_values
 from puripuly_heart.app.ports.runtime_apply import RuntimeApplyPort, RuntimeApplyRequest
@@ -15,6 +15,7 @@ from puripuly_heart.app.ports.settings_repository import (
 from puripuly_heart.core.messages import (
     CONTENT_POLICY_METADATA_ONLY,
     DIAGNOSTIC_CATEGORY_LIFECYCLE,
+    DIAGNOSTIC_CATEGORY_TRANSACTION,
     DIAGNOSTIC_VISIBILITY_BASIC,
     RUNTIME_APPLY_STATUS_APPLIED,
     SEVERITY_WARNING,
@@ -25,6 +26,31 @@ from puripuly_heart.core.messages import (
     RuntimeApplyResult,
     TransactionResult,
     UserMessageRef,
+)
+
+SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER: Final = "settings.translation_provider"
+
+ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS: Final[tuple[str, ...]] = (
+    "translation.model",
+    "translation.connection",
+    "translation.connection_history",
+    "provider.llm",
+    "gemini.llm_model",
+    "openrouter.llm_model",
+    "openrouter.routing_mode",
+    "openrouter.provider_routing",
+    "openrouter.selected_source",
+    "openrouter.selection_alias",
+    "openrouter.fallback_selection_alias",
+    "openrouter.broker_base_url",
+    "qwen.llm_model",
+    "qwen.region",
+    "deepseek.llm_model",
+    "local_llm.backend",
+    "local_llm.base_url",
+    "local_llm.model",
+    "local_llm.extra_body",
+    "llm.concurrency_limit",
 )
 
 
@@ -44,6 +70,80 @@ class SettingsMutationValidationResult:
     succeeded: bool
     message: UserMessageRef | None
     diagnostics: ErrorDiagnostics | None
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsPathPatch:
+    values_by_path: Mapping[str, object]
+    surface: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "values_by_path",
+            freeze_settings_values(self.values_by_path),
+        )
+
+    def to_mutation_request(
+        self,
+        *,
+        expected_revision: str | None,
+        correlation_id: str | None,
+    ) -> SettingsMutationRequest:
+        return SettingsMutationRequest(
+            values=self.values_by_path,
+            expected_revision=expected_revision,
+            reason=self.surface,
+            correlation_id=correlation_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsPathMutationValidator:
+    allowed_paths: tuple[str, ...]
+    component: str
+    operation: str | None
+
+    def __init__(
+        self,
+        *,
+        allowed_paths: tuple[str, ...],
+        component: str,
+        operation: str | None,
+    ) -> None:
+        object.__setattr__(self, "allowed_paths", tuple(allowed_paths))
+        object.__setattr__(self, "component", component)
+        object.__setattr__(self, "operation", operation)
+
+    async def validate(
+        self,
+        request: SettingsMutationRequest,
+    ) -> SettingsMutationValidationResult:
+        allowed = frozenset(self.allowed_paths)
+        disallowed_paths = sorted(
+            str(path) for path in request.values if not isinstance(path, str) or path not in allowed
+        )
+        if disallowed_paths:
+            return SettingsMutationValidationResult(
+                succeeded=False,
+                message=None,
+                diagnostics=ErrorDiagnostics(
+                    component=self.component,
+                    operation=self.operation,
+                    code="settings_path_not_covered",
+                    category=DIAGNOSTIC_CATEGORY_TRANSACTION,
+                    visibility=DIAGNOSTIC_VISIBILITY_BASIC,
+                    content_policy=CONTENT_POLICY_METADATA_ONLY,
+                    status_code=None,
+                    retry_after_ms=None,
+                    fields={"path": disallowed_paths[0]},
+                ),
+            )
+        return SettingsMutationValidationResult(
+            succeeded=True,
+            message=None,
+            diagnostics=None,
+        )
 
 
 class SettingsMutationValidator(Protocol):
@@ -185,9 +285,13 @@ def _runtime_apply_exception_transaction_result() -> TransactionResult:
 
 
 __all__ = [
+    "ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS",
     "RuntimeApplyResultPublisher",
+    "SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER",
     "SettingsMutationRequest",
     "SettingsMutationService",
+    "SettingsPathMutationValidator",
+    "SettingsPathPatch",
     "SettingsMutationValidationResult",
     "SettingsMutationValidator",
     "SettingsSnapshotPublisher",

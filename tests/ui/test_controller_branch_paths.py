@@ -5,6 +5,7 @@ import contextlib
 import copy
 import logging
 import re
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Literal
@@ -16,6 +17,7 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.app.services import settings_mutation
 from puripuly_heart.config.audio_host_api import (
     WINDOWS_MME_HOST_API,
     WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
@@ -44,6 +46,7 @@ from puripuly_heart.config.settings import (
     TranslationSettings,
     to_dict,
 )
+from puripuly_heart.core import messages
 from puripuly_heart.core.audio.format import AudioFrameF32
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.audio.source import (
@@ -394,6 +397,23 @@ class DummyManagedReleaseService:
 
     async def close(self) -> None:
         self.close_calls += 1
+
+
+class RecordingSettingsMutationService:
+    def __init__(self, result: messages.TransactionResult | None = None) -> None:
+        self.requests: list[settings_mutation.SettingsMutationRequest] = []
+        self.result = result or messages.TransactionResult(
+            status=messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
+            message=None,
+            diagnostics=None,
+        )
+
+    async def mutate(
+        self,
+        request: settings_mutation.SettingsMutationRequest,
+    ) -> messages.TransactionResult:
+        self.requests.append(request)
+        return self.result
 
 
 class InspectingManagedReleaseService(DummyManagedReleaseService):
@@ -2932,22 +2952,23 @@ def test_verified_key_and_runtime_signature_depend_on_region_and_settings() -> N
     assert baseline != changed
 
 
-def test_build_llm_provider_signature_tracks_openrouter_fallback_alias_only() -> None:
+def test_build_llm_provider_signature_tracks_openrouter_selection_and_fallback_aliases() -> None:
     controller = _make_controller(app=SimpleNamespace())
     base = AppSettings()
     base.provider.llm = LLMProviderName.OPENROUTER
-    base.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
+    base.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    base.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_MANAGED
     base.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
 
-    same_runtime_missing_ui_alias = copy.deepcopy(base)
-    same_runtime_missing_ui_alias.openrouter.selection_alias = None
+    different_selection = copy.deepcopy(base)
+    different_selection.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
 
     different_fallback = copy.deepcopy(base)
     different_fallback.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.NONE
 
     assert controller._build_llm_provider_signature(
         base
-    ) == controller._build_llm_provider_signature(same_runtime_missing_ui_alias)
+    ) != controller._build_llm_provider_signature(different_selection)
     assert controller._build_llm_provider_signature(
         base
     ) != controller._build_llm_provider_signature(different_fallback)
@@ -11766,6 +11787,601 @@ def test_merge_settings_tab_apply_with_current_languages_preserves_all_language_
 
 
 @pytest.mark.asyncio
+async def test_apply_providers_routes_translation_provider_patch_through_settings_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.GEMINI
+    controller.settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_31_FLASH_LITE,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+        connection_history={
+            TranslationModel.GEMINI_31_FLASH_LITE.value: TranslationConnection.OFFICIAL_BYOK,
+        },
+    )
+    service = RecordingSettingsMutationService()
+    controller.settings_mutation_service = service
+
+    pending = copy.deepcopy(controller.settings)
+    pending.provider.llm = LLMProviderName.OPENROUTER
+    pending.translation = TranslationSettings(
+        model=TranslationModel.GEMMA4,
+        connection=TranslationConnection.OPENROUTER,
+        connection_history={
+            TranslationModel.GEMINI_31_FLASH_LITE.value: TranslationConnection.OFFICIAL_BYOK,
+            TranslationModel.GEMMA4.value: TranslationConnection.OPENROUTER,
+        },
+    )
+    pending.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    pending.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
+    pending.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+
+    def fail_direct_save(*_args, **_kwargs) -> None:
+        raise AssertionError("direct save should not persist routed translation/provider settings")
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_direct_save)
+
+    await controller.apply_providers(pending)
+
+    assert len(service.requests) == 1
+    request = service.requests[0]
+    assert request.reason == settings_mutation.SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER
+    assert request.values["provider.llm"] == LLMProviderName.OPENROUTER
+    assert request.values["translation.model"] == TranslationModel.GEMMA4
+    assert request.values["translation.connection"] == TranslationConnection.OPENROUTER
+    assert request.values["openrouter.selected_source"] == OpenRouterCredentialSource.BYOK
+    assert request.values["openrouter.selection_alias"] == OpenRouterSelectionAlias.GEMMA4_BYOK
+    assert (
+        request.values["openrouter.fallback_selection_alias"]
+        == OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    )
+    assert "provider.stt" not in request.values
+    assert "stt.low_latency_mode" not in request.values
+    assert controller.settings.provider.llm == LLMProviderName.OPENROUTER
+    assert controller.settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_surfaces_degraded_service_result_without_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    degraded_result = messages.TransactionResult(
+        status=messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
+        message=messages.UserMessageRef(
+            key="settings.mutation.runtime_apply_failed",
+            params={"phase": "runtime_apply"},
+            severity=messages.SEVERITY_WARNING,
+        ),
+        diagnostics=messages.ErrorDiagnostics(
+            component="settings_mutation",
+            operation="runtime_apply",
+            code="runtime_failed",
+            category=messages.DIAGNOSTIC_CATEGORY_LIFECYCLE,
+            visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+            content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+            status_code=None,
+            retry_after_ms=None,
+            fields={"surface": "translation_provider"},
+        ),
+    )
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.fallback_selection_alias = (
+        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
+    )
+    controller.settings_mutation_service = RecordingSettingsMutationService(degraded_result)
+
+    pending = copy.deepcopy(controller.settings)
+    pending.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+
+    def fail_direct_save(*_args, **_kwargs) -> None:
+        raise AssertionError("direct save should not run after routed service commit")
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_direct_save)
+
+    await controller.apply_providers(pending)
+
+    assert controller.last_settings_mutation_result == degraded_result
+    assert (
+        controller.settings.openrouter.fallback_selection_alias
+        == OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    )
+    assert degraded_result.message.key == "settings.mutation.runtime_apply_failed"
+    assert "runtime_failed" in repr(controller.last_settings_mutation_result)
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_routes_local_llm_endpoint_config_through_settings_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.LOCAL_LLM
+    controller.settings.translation = TranslationSettings(
+        model=TranslationModel.LOCAL_LLM,
+        connection=TranslationConnection.OLLAMA,
+        connection_history={TranslationModel.LOCAL_LLM.value: TranslationConnection.OLLAMA},
+    )
+    service = RecordingSettingsMutationService()
+    controller.settings_mutation_service = service
+
+    pending = copy.deepcopy(controller.settings)
+    pending.local_llm.base_url = "http://127.0.0.1:8080/v1"
+    pending.local_llm.model = "llama3.3:70b"
+    pending.local_llm.extra_body = {"reasoning_effort": "low", "temperature": 0.2}
+
+    def fail_direct_save(*_args, **_kwargs) -> None:
+        raise AssertionError("direct save should not persist routed local LLM settings")
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_direct_save)
+
+    await controller.apply_providers(pending)
+
+    assert len(service.requests) == 1
+    request = service.requests[0]
+    assert request.values["local_llm.base_url"] == "http://127.0.0.1:8080/v1"
+    assert request.values["local_llm.model"] == "llama3.3:70b"
+    assert request.values["local_llm.extra_body"] == {
+        "reasoning_effort": "low",
+        "temperature": 0.2,
+    }
+    assert "secrets.local_llm_api_key" not in request.values
+    assert controller.settings.local_llm.base_url == "http://127.0.0.1:8080/v1"
+
+
+@pytest.mark.asyncio
+async def test_order21_snapshot_full_default_service_runtime_adapter_receives_committed_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.languages.source_language = "ja"
+    controller.settings.languages.target_language = "en"
+    controller.settings.openrouter.fallback_selection_alias = (
+        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
+    )
+    pending = copy.deepcopy(controller.settings)
+    pending.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    runtime_snapshots: list[object] = []
+
+    async def capture_apply_runtime(self, request) -> messages.RuntimeApplyResult:
+        _ = self
+        runtime_snapshots.append(request.settings_values)
+        return messages.RuntimeApplyResult(
+            status=messages.RUNTIME_APPLY_STATUS_APPLIED,
+            message=None,
+            diagnostics=None,
+        )
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        controller_module._ControllerProviderRuntimeApply,
+        "apply_runtime",
+        capture_apply_runtime,
+    )
+
+    await controller.apply_providers(pending)
+
+    assert len(runtime_snapshots) == 1
+    values = runtime_snapshots[0]
+    assert "openrouter.fallback_selection_alias" not in values
+    assert values["provider"]["llm"] == LLMProviderName.OPENROUTER.value
+    assert values["languages"]["source_language"] == "ja"
+    assert values["languages"]["target_language"] == "en"
+    assert (
+        values["openrouter"]["fallback_selection_alias"]
+        == OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value
+    )
+    assert values["llm"]["concurrency_limit"] == pending.llm.concurrency_limit
+
+
+@pytest.mark.asyncio
+async def test_order21_snapshot_full_repository_save_offloads_persistence_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    committed = AppSettings()
+    committed.provider.llm = LLMProviderName.OPENROUTER
+    committed.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    event_loop_thread_id = threading.get_ident()
+    save_thread_ids: list[int] = []
+
+    def record_save_thread(*_args, **_kwargs) -> None:
+        save_thread_ids.append(threading.get_ident())
+
+    monkeypatch.setattr(controller_module, "save_settings", record_save_thread)
+    repository = controller_module._ControllerSettingsPatchRepository(
+        controller=controller,
+        committed_settings=committed,
+    )
+
+    result = await repository.save(
+        controller_module.SettingsCommitRequest(
+            values={
+                "provider.llm": LLMProviderName.OPENROUTER,
+                "openrouter.fallback_selection_alias": OpenRouterFallbackSelectionAlias.QWEN35_FLASH,
+            },
+            expected_revision=None,
+            reason=settings_mutation.SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
+        )
+    )
+
+    assert result.succeeded is True
+    assert save_thread_ids and save_thread_ids[0] != event_loop_thread_id
+    assert result.snapshot is not None
+    assert "openrouter.fallback_selection_alias" not in result.snapshot.values
+    assert result.snapshot.values["provider"]["llm"] == LLMProviderName.OPENROUTER.value
+    assert (
+        result.snapshot.values["openrouter"]["fallback_selection_alias"]
+        == OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_provider_unavailable_default_service_degrades_without_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.GEMINI
+    controller.hub = DummyHub(llm=object())
+    controller._last_self_stt_provider_signature = controller._build_self_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_provider_signature = controller._build_peer_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_llm_provider_signature = controller._build_llm_provider_signature(
+        controller.settings
+    )
+    pending = copy.deepcopy(controller.settings)
+    pending.provider.llm = LLMProviderName.OPENROUTER
+    pending.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    pending.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
+    saved_settings: list[AppSettings] = []
+
+    def record_saved_settings(_path, settings) -> None:
+        saved_settings.append(copy.deepcopy(settings))
+
+    def fail_create_llm_provider(*_args, **_kwargs) -> object:
+        raise RuntimeError("provider unavailable secret-token-must-not-leak")
+
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
+    monkeypatch.setattr(
+        controller_module, "create_secret_store", lambda *_args, **_kwargs: DummySecrets({})
+    )
+    monkeypatch.setattr(controller_module, "create_llm_provider", fail_create_llm_provider)
+
+    await controller.apply_providers(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.message == messages.UserMessageRef(
+        key="settings.mutation.runtime_apply_failed",
+        params={"phase": "runtime_apply"},
+        severity=messages.SEVERITY_WARNING,
+    )
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_provider_runtime",
+        code="provider_runtime_apply_unavailable",
+        category=messages.DIAGNOSTIC_CATEGORY_LIFECYCLE,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "translation_provider"},
+    )
+    assert "secret-token-must-not-leak" not in repr(result)
+    assert len(saved_settings) == 1
+    assert saved_settings[0].provider.llm == LLMProviderName.OPENROUTER
+    assert controller.settings.provider.llm == LLMProviderName.OPENROUTER
+    assert controller.hub.llm is None
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_failed_signature_retries_same_settings_without_raw_exception_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.GEMINI
+    controller.hub = DummyHub(llm=object())
+    controller._last_self_stt_provider_signature = controller._build_self_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_provider_signature = controller._build_peer_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_llm_provider_signature = controller._build_llm_provider_signature(
+        controller.settings
+    )
+    pending = copy.deepcopy(controller.settings)
+    pending.provider.llm = LLMProviderName.OPENROUTER
+    pending.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    pending.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
+    pending_signature = controller._build_llm_provider_signature(pending)
+    recovered_llm = object()
+    create_attempts: list[LLMProviderName] = []
+    saved_settings: list[AppSettings] = []
+    raw_exception_text = "provider unavailable secret-token-must-not-leak"
+
+    def record_saved_settings(_path, settings) -> None:
+        saved_settings.append(copy.deepcopy(settings))
+
+    def fail_then_recover_llm_provider(settings, **_kwargs) -> object:
+        create_attempts.append(settings.provider.llm)
+        if len(create_attempts) == 1:
+            raise RuntimeError(raw_exception_text)
+        return recovered_llm
+
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
+    monkeypatch.setattr(
+        controller_module, "create_secret_store", lambda *_args, **_kwargs: DummySecrets({})
+    )
+    monkeypatch.setattr(controller_module, "create_llm_provider", fail_then_recover_llm_provider)
+
+    await controller.apply_providers(pending)
+
+    first_result = controller.last_settings_mutation_result
+    first_signature_after_failure = controller._last_llm_provider_signature
+    first_basic_logs = "\n".join(
+        message for _level, message in controller._runtime_logging.basic_messages
+    )
+    assert first_result is not None
+    assert (
+        first_result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    )
+    assert saved_settings[0].provider.llm == LLMProviderName.OPENROUTER
+    assert controller.settings.provider.llm == LLMProviderName.OPENROUTER
+    assert controller.hub.llm is None
+    assert raw_exception_text not in first_basic_logs
+    assert first_signature_after_failure != pending_signature
+
+    await controller.apply_providers(pending)
+
+    assert create_attempts == [LLMProviderName.OPENROUTER, LLMProviderName.OPENROUTER]
+    assert controller.hub.llm is recovered_llm
+    assert controller._last_llm_provider_signature == pending_signature
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_force_rebuild_failed_signature_uses_miss_sentinel_for_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.GEMINI
+    controller.hub = DummyHub(llm=object())
+    controller._last_self_stt_provider_signature = controller._build_self_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_provider_signature = controller._build_peer_stt_provider_signature(
+        controller.settings
+    )
+    target_signature = controller._build_llm_provider_signature(controller.settings)
+    controller._last_llm_provider_signature = target_signature
+    recovered_llm = object()
+    create_attempts: list[LLMProviderName] = []
+
+    def fail_then_recover_llm_provider(settings, **_kwargs) -> object:
+        create_attempts.append(settings.provider.llm)
+        if len(create_attempts) == 1:
+            raise RuntimeError("provider unavailable")
+        return recovered_llm
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        controller_module, "create_secret_store", lambda *_args, **_kwargs: DummySecrets({})
+    )
+    monkeypatch.setattr(controller_module, "create_llm_provider", fail_then_recover_llm_provider)
+
+    await controller.apply_providers(force_rebuild_llm=True)
+
+    assert create_attempts == [LLMProviderName.GEMINI]
+    assert controller.hub.llm is None
+    assert controller._last_llm_provider_signature == ()
+
+    await controller.apply_providers()
+
+    assert create_attempts == [LLMProviderName.GEMINI, LLMProviderName.GEMINI]
+    assert controller.hub.llm is recovered_llm
+    assert controller._last_llm_provider_signature == target_signature
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_concurrency_limit_rebuilds_llm_runtime_through_default_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.GEMINI
+    controller.hub = DummyHub()
+    controller._last_self_stt_provider_signature = controller._build_self_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_provider_signature = controller._build_peer_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_llm_provider_signature = controller._build_llm_provider_signature(
+        controller.settings
+    )
+    pending = copy.deepcopy(controller.settings)
+    pending.llm.concurrency_limit = controller.settings.llm.concurrency_limit + 2
+    calls: list[str] = []
+
+    async def fake_rebuild_llm_provider(self) -> None:
+        _ = self
+        calls.append("llm")
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+
+    await controller.apply_providers(pending)
+
+    assert controller.settings.llm.concurrency_limit == pending.llm.concurrency_limit
+    assert calls == ["llm"]
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_broker_base_url_rebuilds_managed_broker_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_MANAGED
+    controller.settings.openrouter.broker_base_url = "https://old-broker.example.test/"
+    controller.hub = DummyHub()
+    old_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+        )
+    )
+    controller._managed_openrouter_release_service = old_service
+    controller._last_self_stt_provider_signature = controller._build_self_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_provider_signature = controller._build_peer_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_llm_provider_signature = controller._build_llm_provider_signature(
+        controller.settings
+    )
+    pending = copy.deepcopy(controller.settings)
+    pending.openrouter.broker_base_url = "https://new-broker.example.test/"
+    captured_services: list[object | None] = []
+
+    def capture_llm_provider(*_args, managed_release_service=None, **_kwargs) -> object:
+        captured_services.append(managed_release_service)
+        return object()
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        controller_module, "create_secret_store", lambda *_args, **_kwargs: DummySecrets({})
+    )
+    monkeypatch.setattr(controller_module, "create_llm_provider", capture_llm_provider)
+
+    await controller.apply_providers(pending)
+
+    assert old_service.close_calls == 1
+    assert len(captured_services) == 1
+    service = captured_services[0]
+    assert isinstance(service, ManagedOpenRouterReleaseService)
+    assert service.settings.openrouter.broker_base_url == "https://new-broker.example.test/"
+    assert isinstance(service.client, HttpManagedOpenRouterBrokerClient)
+    assert service.client.base_url == "https://new-broker.example.test"
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_managed_identity_rebuilds_service_with_pending_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_MANAGED
+    controller.settings.managed_identity.verified_hardware_hash = "old-hardware-hash"
+    controller.settings.managed_identity.verified_hardware_hash_salt_version = 1
+    controller.hub = DummyHub()
+    controller._last_self_stt_provider_signature = controller._build_self_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_provider_signature = controller._build_peer_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_llm_provider_signature = controller._build_llm_provider_signature(
+        controller.settings
+    )
+    pending = copy.deepcopy(controller.settings)
+    pending.managed_identity.verified_hardware_hash = "pending-hardware-hash"
+    pending.managed_identity.verified_hardware_hash_salt_version = 9
+    captured_services: list[object | None] = []
+
+    def capture_llm_provider(*_args, managed_release_service=None, **_kwargs) -> object:
+        captured_services.append(managed_release_service)
+        return object()
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        controller_module, "create_secret_store", lambda *_args, **_kwargs: DummySecrets({})
+    )
+    monkeypatch.setattr(controller_module, "create_llm_provider", capture_llm_provider)
+
+    await controller.apply_providers(pending)
+
+    assert len(captured_services) == 1
+    service = captured_services[0]
+    assert isinstance(service, ManagedOpenRouterReleaseService)
+    assert service.settings.managed_identity.verified_hardware_hash == "pending-hardware-hash"
+    assert service.settings.managed_identity.verified_hardware_hash_salt_version == 9
+    assert controller.settings.managed_identity.verified_hardware_hash == "pending-hardware-hash"
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_mixed_degraded_default_service_persists_full_provider_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.fallback_selection_alias = (
+        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
+    )
+    controller.settings.system_prompt = "base prompt"
+    controller.hub = DummyHub()
+    controller._last_self_stt_provider_signature = controller._build_self_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_provider_signature = controller._build_peer_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_llm_provider_signature = controller._build_llm_provider_signature(
+        controller.settings
+    )
+    pending = copy.deepcopy(controller.settings)
+    pending.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    pending.system_prompt = "draft prompt"
+    saved_settings: list[AppSettings] = []
+    rebuild_prompts: list[str] = []
+
+    def record_saved_settings(_path, settings) -> None:
+        saved_settings.append(copy.deepcopy(settings))
+
+    async def fail_first_rebuild_llm_provider(self) -> None:
+        assert self.settings is not None
+        rebuild_prompts.append(self.settings.system_prompt)
+        if len(rebuild_prompts) == 1:
+            raise RuntimeError("first runtime apply failed")
+
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fail_first_rebuild_llm_provider)
+
+    await controller.apply_providers(pending)
+
+    assert controller.last_settings_mutation_result is not None
+    assert (
+        controller.last_settings_mutation_result.status
+        == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    )
+    assert [settings.system_prompt for settings in saved_settings] == [
+        "base prompt",
+        "draft prompt",
+    ]
+    assert controller.settings.system_prompt == "draft prompt"
+    assert controller.hub.system_prompt == "draft prompt"
+    assert rebuild_prompts == ["base prompt", "draft prompt"]
+
+
+@pytest.mark.asyncio
 async def test_apply_providers_preserves_current_languages_while_applying_provider_and_prompt_draft(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -11813,8 +12429,6 @@ async def test_apply_providers_preserves_current_languages_while_applying_provid
     pending.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
     pending.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
     pending.openrouter.routing_mode = OpenRouterRoutingMode.NOVITA_FIRST
-    pending.managed_identity.verified_hardware_hash = "pending-hash"
-    pending.managed_identity.verified_hardware_hash_salt_version = 5
     pending.system_prompt = "draft prompt"
     pending.system_prompts = {"openrouter": "draft prompt"}
 
@@ -11858,8 +12472,6 @@ async def test_apply_providers_preserves_current_languages_while_applying_provid
         == OpenRouterFallbackSelectionAlias.QWEN35_FLASH
     )
     assert controller.settings.openrouter.routing_mode == OpenRouterRoutingMode.NOVITA_FIRST
-    assert controller.settings.managed_identity.verified_hardware_hash == "pending-hash"
-    assert controller.settings.managed_identity.verified_hardware_hash_salt_version == 5
     assert controller.settings.system_prompt == "draft prompt"
     assert controller.settings.system_prompts == {}
     assert controller.hub.hangover_s == 0.65
@@ -12466,7 +13078,7 @@ async def test_rebuild_llm_provider_closes_existing_provider_and_updates_dashboa
         (lambda *_a, **_k: None, "LLM provider not available"),
         (
             lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
-            "LLM provider not available: boom",
+            "LLM provider not available",
         ),
     ],
 )
@@ -12512,7 +13124,7 @@ async def test_rebuild_llm_provider_logs_basic_failure_when_secret_store_setup_f
     assert controller.hub.llm is None
     assert dash.translation_needs_key is True
     assert controller._runtime_logging.basic_messages == [
-        (logging.ERROR, "LLM provider not available: boom")
+        (logging.ERROR, "LLM provider not available")
     ]
 
 

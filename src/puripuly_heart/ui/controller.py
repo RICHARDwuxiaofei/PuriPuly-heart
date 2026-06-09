@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import hashlib
 import inspect
 import json
 import logging
@@ -21,6 +22,19 @@ from typing import Protocol
 import flet as ft
 import numpy as np
 
+from puripuly_heart.app.ports.runtime_apply import RuntimeApplyRequest
+from puripuly_heart.app.ports.settings_repository import (
+    SettingsCommitRequest,
+    SettingsCommitResult,
+    SettingsSnapshot,
+)
+from puripuly_heart.app.services.settings_mutation import (
+    ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS,
+    SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
+    SettingsMutationService,
+    SettingsPathMutationValidator,
+    SettingsPathPatch,
+)
 from puripuly_heart.app.wiring import (
     build_peer_stt_provider_signature,
     create_llm_provider,
@@ -56,6 +70,7 @@ from puripuly_heart.config.settings import (
     new_settings_for_first_run,
     normalize_owned_referral_id,
     save_settings,
+    to_dict,
 )
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
 from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
@@ -96,6 +111,21 @@ from puripuly_heart.core.managed_openrouter_release import (
     TalkTogetherPassStatus,
     UnavailableManagedOpenRouterReleaseClient,
     format_managed_openrouter_diagnostics,
+)
+from puripuly_heart.core.messages import (
+    CONTENT_POLICY_METADATA_ONLY,
+    DIAGNOSTIC_CATEGORY_LIFECYCLE,
+    DIAGNOSTIC_CATEGORY_TRANSACTION,
+    DIAGNOSTIC_VISIBILITY_BASIC,
+    RUNTIME_APPLY_STATUS_APPLIED,
+    RUNTIME_APPLY_STATUS_FAILED,
+    SEVERITY_WARNING,
+    TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
+    TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
+    ErrorDiagnostics,
+    RuntimeApplyResult,
+    TransactionResult,
+    UserMessageRef,
 )
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_BYOK_API_KEY_SECRET,
@@ -352,6 +382,200 @@ class ClipboardWatcherRuntime(Protocol):
         pass
 
 
+@dataclass(frozen=True, slots=True)
+class _ProviderRuntimeApplyPlan:
+    should_rebuild_llm: bool
+    should_refresh_peer: bool
+    should_refresh_self_stt: bool
+
+
+def _validate_and_save_settings(config_path: Path, settings: AppSettings) -> None:
+    settings.validate()
+    save_settings(config_path, settings)
+
+
+@dataclass(slots=True)
+class _ControllerSettingsPatchRepository:
+    controller: GuiController
+    committed_settings: AppSettings
+
+    async def load(self) -> SettingsSnapshot:
+        settings = self.controller.settings or self.committed_settings
+        return SettingsSnapshot(values=to_dict(settings), revision=None)
+
+    async def save(self, request: SettingsCommitRequest) -> SettingsCommitResult:
+        _ = request
+        try:
+            await asyncio.to_thread(
+                _validate_and_save_settings,
+                self.controller.config_path,
+                self.committed_settings,
+            )
+        except Exception:
+            self.controller._log_error("Failed to save settings mutation")
+            return SettingsCommitResult(
+                succeeded=False,
+                snapshot=None,
+                message=None,
+                diagnostics=_settings_mutation_diagnostics(
+                    component="settings_repository",
+                    operation="save",
+                    code="settings_save_failed",
+                ),
+            )
+        self.controller.settings = self.committed_settings
+        return SettingsCommitResult(
+            succeeded=True,
+            snapshot=SettingsSnapshot(values=to_dict(self.committed_settings), revision=None),
+            message=None,
+            diagnostics=None,
+        )
+
+
+@dataclass(slots=True)
+class _ControllerProviderRuntimeApply:
+    controller: GuiController
+    settings: AppSettings
+    plan: _ProviderRuntimeApplyPlan
+
+    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
+        _ = request
+        try:
+            await self.controller._apply_provider_runtime_plan(self.settings, self.plan)
+        except Exception:
+            return RuntimeApplyResult(
+                status=RUNTIME_APPLY_STATUS_FAILED,
+                message=UserMessageRef(
+                    key="settings.mutation.runtime_apply_failed",
+                    params={"phase": "runtime_apply"},
+                    severity=SEVERITY_WARNING,
+                ),
+                diagnostics=_settings_mutation_diagnostics(
+                    component="gui_controller",
+                    operation="apply_provider_runtime",
+                    code="provider_runtime_apply_exception",
+                    category=DIAGNOSTIC_CATEGORY_LIFECYCLE,
+                ),
+            )
+        if self.plan.should_rebuild_llm and self.controller.hub is not None:
+            if self.controller.hub.llm is None:
+                return RuntimeApplyResult(
+                    status=RUNTIME_APPLY_STATUS_FAILED,
+                    message=UserMessageRef(
+                        key="settings.mutation.runtime_apply_failed",
+                        params={"phase": "runtime_apply"},
+                        severity=SEVERITY_WARNING,
+                    ),
+                    diagnostics=_settings_mutation_diagnostics(
+                        component="gui_controller",
+                        operation="apply_provider_runtime",
+                        code="provider_runtime_apply_unavailable",
+                        category=DIAGNOSTIC_CATEGORY_LIFECYCLE,
+                    ),
+                )
+        return RuntimeApplyResult(
+            status=RUNTIME_APPLY_STATUS_APPLIED,
+            message=None,
+            diagnostics=None,
+        )
+
+
+def _settings_mutation_diagnostics(
+    *,
+    component: str,
+    operation: str,
+    code: str,
+    category=DIAGNOSTIC_CATEGORY_TRANSACTION,
+) -> ErrorDiagnostics:
+    return ErrorDiagnostics(
+        component=component,
+        operation=operation,
+        code=code,
+        category=category,
+        visibility=DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "translation_provider"},
+    )
+
+
+def _mutable_settings_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _mutable_settings_value(nested) for key, nested in value.items()}
+    if isinstance(value, tuple):
+        return [_mutable_settings_value(item) for item in value]
+    if isinstance(value, list):
+        return [_mutable_settings_value(item) for item in value]
+    return copy.deepcopy(value)
+
+
+def _get_settings_path_value(settings: AppSettings, path: str) -> object:
+    current: object = settings
+    for segment in path.split("."):
+        current = getattr(current, segment)
+    return copy.deepcopy(current)
+
+
+def _set_settings_path_value(settings: AppSettings, path: str, value: object) -> None:
+    current: object = settings
+    segments = path.split(".")
+    for segment in segments[:-1]:
+        current = getattr(current, segment)
+    setattr(current, segments[-1], _mutable_settings_value(value))
+
+
+def _build_settings_path_patch(
+    previous: AppSettings,
+    next_settings: AppSettings,
+    *,
+    paths: tuple[str, ...],
+) -> dict[str, object]:
+    patch: dict[str, object] = {}
+    for path in paths:
+        previous_value = _get_settings_path_value(previous, path)
+        next_value = _get_settings_path_value(next_settings, path)
+        if previous_value != next_value:
+            patch[path] = next_value
+    return patch
+
+
+def _apply_settings_path_patch(settings: AppSettings, patch: Mapping[str, object]) -> None:
+    for path, value in patch.items():
+        _set_settings_path_value(settings, path, value)
+
+
+def _settings_mutation_committed(result: TransactionResult) -> bool:
+    return result.status in {
+        TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
+        TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
+    }
+
+
+def _sensitive_optional_text_signature(value: str | None) -> tuple[int, str] | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return (len(normalized), digest)
+
+
+def _managed_openrouter_identity_signature(settings: AppSettings) -> tuple[object, ...]:
+    identity = settings.managed_identity
+    return (
+        identity.installation_id,
+        _sensitive_optional_text_signature(identity.release_token),
+        identity.release_token_expires_at,
+        identity.verified_hardware_hash,
+        identity.verified_hardware_hash_salt_version,
+        identity.active_managed_credential_ref,
+        identity.active_managed_expires_at,
+        identity.referral_id,
+    )
+
+
 @dataclass(slots=True)
 class _HubVadSink:
     hub: ClientHub
@@ -369,8 +593,13 @@ class GuiController:
     page: ft.Page
     app: object
     config_path: Path
+    settings_mutation_service: SettingsMutationService | None = None
 
     settings: AppSettings | None = None
+    last_settings_mutation_result: TransactionResult | None = field(
+        init=False,
+        default=None,
+    )
     clock: SystemClock = SystemClock()
     _managed_openrouter_release_service: ManagedOpenRouterReleaseService | None = None
     _openrouter_pkce_client: OpenRouterPKCEClient | None = None
@@ -1750,34 +1979,27 @@ class GuiController:
         return True
 
     def _build_llm_provider_signature(self, settings: AppSettings) -> tuple[object, ...]:
+        uses_openrouter = settings.provider.llm == LLMProviderName.OPENROUTER
+        uses_managed_openrouter = (
+            uses_openrouter
+            and settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+        )
         return (
             settings.provider.llm,
+            settings.llm.concurrency_limit,
             settings.gemini.llm_model if settings.provider.llm == LLMProviderName.GEMINI else None,
-            (
-                settings.openrouter.llm_model
-                if settings.provider.llm == LLMProviderName.OPENROUTER
-                else None
-            ),
-            (
-                settings.openrouter.routing_mode
-                if settings.provider.llm == LLMProviderName.OPENROUTER
-                else None
-            ),
+            (settings.openrouter.llm_model if uses_openrouter else None),
+            (settings.openrouter.routing_mode if uses_openrouter else None),
             (
                 settings.openrouter.provider_routing
-                if settings.provider.llm == LLMProviderName.OPENROUTER
+                if uses_openrouter
                 else OpenRouterProviderRouting.DEFAULT
             ),
-            (
-                settings.openrouter.selected_source
-                if settings.provider.llm == LLMProviderName.OPENROUTER
-                else None
-            ),
-            (
-                settings.openrouter.fallback_selection_alias
-                if settings.provider.llm == LLMProviderName.OPENROUTER
-                else None
-            ),
+            (settings.openrouter.selected_source if uses_openrouter else None),
+            (settings.openrouter.selection_alias if uses_openrouter else None),
+            (settings.openrouter.fallback_selection_alias if uses_openrouter else None),
+            (settings.openrouter.broker_base_url if uses_openrouter else None),
+            (_managed_openrouter_identity_signature(settings) if uses_managed_openrouter else None),
             settings.qwen.llm_model if settings.provider.llm == LLMProviderName.QWEN else None,
             settings.qwen.region if settings.provider.llm == LLMProviderName.QWEN else None,
             (
@@ -1825,10 +2047,12 @@ class GuiController:
         target.openrouter.selected_source = source.openrouter.selected_source
         target.openrouter.selection_alias = source.openrouter.selection_alias
         target.openrouter.fallback_selection_alias = source.openrouter.fallback_selection_alias
+        target.openrouter.broker_base_url = source.openrouter.broker_base_url
         target.qwen.llm_model = source.qwen.llm_model
         target.qwen.region = source.qwen.region
         target.deepseek.llm_model = source.deepseek.llm_model
         target.local_llm = copy.deepcopy(source.local_llm)
+        target.llm.concurrency_limit = source.llm.concurrency_limit
         if source.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:
             target.managed_identity.verified_hardware_hash = (
                 source.managed_identity.verified_hardware_hash
@@ -4032,6 +4256,24 @@ class GuiController:
 
         await self._preserve_github_star_prompt_observation_before_settings_replace(next_settings)
 
+        if settings is not None and not force_rebuild_llm:
+            routed = await self._apply_translation_provider_settings_via_mutation_service(
+                next_settings,
+            )
+            if routed:
+                return
+
+        await self._apply_providers_direct(
+            next_settings,
+            force_rebuild_llm=force_rebuild_llm,
+        )
+
+    def _build_provider_runtime_apply_plan(
+        self,
+        next_settings: AppSettings,
+        *,
+        force_rebuild_llm: bool,
+    ) -> _ProviderRuntimeApplyPlan:
         prev_settings = self.settings
         prev_self_provider_signature = self._last_self_stt_provider_signature
         prev_peer_provider_signature = self._last_peer_stt_provider_signature
@@ -4053,21 +4295,109 @@ class GuiController:
         next_peer_provider_signature = self._build_peer_stt_provider_signature(next_settings)
         next_llm_provider_signature = self._build_llm_provider_signature(next_settings)
 
-        should_rebuild_llm = force_rebuild_llm or (
-            prev_llm_provider_signature is None
-            or next_llm_provider_signature != prev_llm_provider_signature
-        )
-        should_refresh_peer = (
-            prev_peer_provider_signature is None
-            or next_peer_provider_signature != prev_peer_provider_signature
-        )
-        should_refresh_self_stt = (
-            prev_self_provider_signature is None
-            or next_self_provider_signature != prev_self_provider_signature
+        return _ProviderRuntimeApplyPlan(
+            should_rebuild_llm=force_rebuild_llm
+            or (
+                prev_llm_provider_signature is None
+                or next_llm_provider_signature != prev_llm_provider_signature
+            ),
+            should_refresh_peer=(
+                prev_peer_provider_signature is None
+                or next_peer_provider_signature != prev_peer_provider_signature
+            ),
+            should_refresh_self_stt=(
+                prev_self_provider_signature is None
+                or next_self_provider_signature != prev_self_provider_signature
+            ),
         )
 
+    async def _apply_translation_provider_settings_via_mutation_service(
+        self,
+        next_settings: AppSettings,
+    ) -> bool:
+        base_settings = self.settings
+        if base_settings is None:
+            return False
+
+        patch_values = _build_settings_path_patch(
+            base_settings,
+            next_settings,
+            paths=ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS,
+        )
+        if not patch_values:
+            return False
+
+        committed_settings = copy.deepcopy(base_settings)
+        _apply_settings_path_patch(committed_settings, patch_values)
+        has_out_of_scope_draft = to_dict(committed_settings) != to_dict(next_settings)
+        plan = self._build_provider_runtime_apply_plan(
+            committed_settings,
+            force_rebuild_llm=False,
+        )
+        repository = _ControllerSettingsPatchRepository(
+            controller=self,
+            committed_settings=committed_settings,
+        )
+        runtime_apply = _ControllerProviderRuntimeApply(
+            controller=self,
+            settings=committed_settings,
+            plan=plan,
+        )
+        service = self.settings_mutation_service or SettingsMutationService(
+            settings_repository=repository,
+            runtime_apply=runtime_apply,
+            validator=SettingsPathMutationValidator(
+                allowed_paths=ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS,
+                component="settings_mutation",
+                operation="validate_translation_provider_patch",
+            ),
+        )
+        request = SettingsPathPatch(
+            values_by_path=patch_values,
+            surface=SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
+        ).to_mutation_request(
+            expected_revision=None,
+            correlation_id=None,
+        )
+
+        result = await service.mutate(request)
+        self.last_settings_mutation_result = result
+        if not _settings_mutation_committed(result):
+            return True
+
+        self.settings = committed_settings
+        if has_out_of_scope_draft:
+            await self._apply_providers_direct(
+                next_settings,
+                force_rebuild_llm=False,
+            )
+        elif result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+            self._sync_signature_caches(committed_settings)
+        return True
+
+    async def _apply_providers_direct(
+        self,
+        next_settings: AppSettings,
+        *,
+        force_rebuild_llm: bool,
+        plan: _ProviderRuntimeApplyPlan | None = None,
+    ) -> None:
+        if plan is None:
+            plan = self._build_provider_runtime_apply_plan(
+                next_settings,
+                force_rebuild_llm=force_rebuild_llm,
+            )
         self.settings = next_settings
         self._save_settings()
+        await self._apply_provider_runtime_plan(next_settings, plan)
+
+    async def _apply_provider_runtime_plan(
+        self,
+        next_settings: AppSettings,
+        plan: _ProviderRuntimeApplyPlan,
+    ) -> None:
+        self.settings = next_settings
+
         self._clear_local_stt_pending_enable_if_provider_switched_away()
         self._sync_local_stt_notice()
         if (
@@ -4096,21 +4426,23 @@ class GuiController:
             self.hub.chatbox_include_source = next_settings.osc.chatbox_include_source
             self._sync_effective_hub_flags(next_settings)
 
-        if should_rebuild_llm:
+        if plan.should_rebuild_llm:
             await self._rebuild_llm_provider()
 
-        if should_refresh_peer:
+        if plan.should_refresh_peer:
             await self._refresh_peer_stt_runtime()
             self._sync_effective_hub_flags(next_settings)
             self._refresh_overlay_peer_consumers()
 
-        if should_refresh_self_stt:
+        if plan.should_refresh_self_stt:
             if self._stt_desired:
                 await self._replace_runtime_stt_provider()
             else:
                 await self._rebuild_stt_provider()
 
         self._sync_signature_caches(next_settings)
+        if plan.should_rebuild_llm and self.hub is not None and self.hub.llm is None:
+            self._last_llm_provider_signature = ()
 
     def _load_or_init_settings(self, path: Path) -> AppSettings:
         if path.exists():
@@ -4134,7 +4466,6 @@ class GuiController:
 
         # Create new LLM provider with current settings
         llm = None
-        llm_error: Exception | None = None
         try:
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
             new_managed_release_service = self._create_managed_openrouter_release_service(
@@ -4148,8 +4479,8 @@ class GuiController:
                 managed_delegate_ready=self._on_managed_trial_delegate_ready,
                 runtime_logging=self.runtime_logging,
             )
-        except Exception as exc:
-            llm_error = exc
+        except Exception:
+            pass
 
         # Update hub's LLM provider
         self.hub.llm = llm
@@ -4164,10 +4495,7 @@ class GuiController:
         await self._refresh_managed_trial_usage_state_best_effort()
 
         if llm is None:
-            message = "LLM provider not available"
-            if llm_error is not None:
-                message = f"{message}: {llm_error}"
-            self._log_error(message)
+            self._log_error("LLM provider not available")
             return
 
         self.log_basic("[Settings] LLM provider rebuilt successfully")
