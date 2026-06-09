@@ -4548,12 +4548,11 @@ async def test_desktop_initial_control_manifest_uses_saved_position_without_clam
     _patch_overlay_runtime(monkeypatch)
     saved_desktop: list[tuple[object, object, str]] = []
 
-    def fake_save_settings(self: GuiController) -> None:
-        assert self.settings is not None
-        desktop = self.settings.overlay.desktop_flet
+    def record_saved_settings(_path, settings) -> None:
+        desktop = settings.overlay.desktop_flet
         saved_desktop.append((desktop.position.x, desktop.position.y, desktop.size_preset))
 
-    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
     monkeypatch.setattr(
         GuiController,
         "_desktop_work_area_for_current_launch",
@@ -4600,12 +4599,11 @@ async def test_desktop_move_persistence_debounces_position_only_and_ignores_prog
     _patch_overlay_runtime(monkeypatch)
     saved_desktop: list[tuple[object, object, str]] = []
 
-    def fake_save_settings(self: GuiController) -> None:
-        assert self.settings is not None
-        desktop = self.settings.overlay.desktop_flet
+    def record_saved_settings(_path, settings) -> None:
+        desktop = settings.overlay.desktop_flet
         saved_desktop.append((desktop.position.x, desktop.position.y, desktop.size_preset))
 
-    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
 
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
@@ -4681,7 +4679,12 @@ async def test_desktop_move_persistence_debounces_position_only_and_ignores_prog
         }
     )
 
-    await _wait_until(lambda: len(saved_desktop) == 1, attempts=20, delay_s=0.02)
+    await _wait_until(
+        lambda: len(saved_desktop) == 1
+        and controller.settings.overlay.desktop_flet.position.x == 333,
+        attempts=20,
+        delay_s=0.02,
+    )
 
     assert saved_desktop == [(333, 444, "medium")]
     assert controller.settings.overlay.desktop_flet.position.x == 333
@@ -4692,18 +4695,53 @@ async def test_desktop_move_persistence_debounces_position_only_and_ignores_prog
 
 
 @pytest.mark.asyncio
+async def test_desktop_bounds_debounce_routes_position_through_order23_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller._active_overlay_target = OVERLAY_TARGET_DESKTOP
+    service = RecordingSettingsMutationService()
+    controller.settings_mutation_service = service
+
+    def fail_direct_save(*_args, **_kwargs) -> None:
+        raise AssertionError("desktop bounds must not use direct settings save")
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_direct_save)
+    monkeypatch.setattr(controller_module, "DESKTOP_BOUNDS_PERSIST_DEBOUNCE_S", 0)
+    controller._pending_desktop_bounds = {
+        "x": 321,
+        "y": 654,
+        "width": 1152,
+        "height": 288,
+    }
+
+    await controller._persist_desktop_bounds_after_debounce()
+
+    assert len(service.requests) == 1
+    request = service.requests[0]
+    assert request.reason == settings_mutation.SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT
+    assert request.values == {
+        "overlay.desktop_flet.position.x": 321,
+        "overlay.desktop_flet.position.y": 654,
+    }
+    assert controller.settings.overlay.desktop_flet.position.x == 321
+    assert controller.settings.overlay.desktop_flet.position.y == 654
+
+
+@pytest.mark.asyncio
 async def test_desktop_locked_mode_user_bounds_events_do_not_persist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
     saved_desktop: list[tuple[object, object, str]] = []
 
-    def fake_save_settings(self: GuiController) -> None:
-        assert self.settings is not None
-        desktop = self.settings.overlay.desktop_flet
+    def record_saved_settings(_path, settings) -> None:
+        desktop = settings.overlay.desktop_flet
         saved_desktop.append((desktop.position.x, desktop.position.y, desktop.size_preset))
 
-    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
 
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
@@ -4818,12 +4856,11 @@ async def test_desktop_size_preset_change_preserves_current_center_without_clamp
     _patch_overlay_runtime(monkeypatch)
     saved_desktop: list[tuple[object, object, str]] = []
 
-    def fake_save_settings(self: GuiController) -> None:
-        assert self.settings is not None
-        desktop = self.settings.overlay.desktop_flet
+    def record_saved_settings(_path, settings) -> None:
+        desktop = settings.overlay.desktop_flet
         saved_desktop.append((desktop.position.x, desktop.position.y, desktop.size_preset))
 
-    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
     monkeypatch.setattr(
         GuiController,
         "_configure_vrc_mic_receiver",
@@ -4896,12 +4933,11 @@ async def test_desktop_size_preset_change_drains_queued_pre_resize_user_bounds(
     _patch_overlay_runtime(monkeypatch)
     saved_desktop: list[tuple[object, object, str]] = []
 
-    def fake_save_settings(self: GuiController) -> None:
-        assert self.settings is not None
-        desktop = self.settings.overlay.desktop_flet
+    def record_saved_settings(_path, settings) -> None:
+        desktop = settings.overlay.desktop_flet
         saved_desktop.append((desktop.position.x, desktop.position.y, desktop.size_preset))
 
-    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
     monkeypatch.setattr(
         GuiController,
         "_configure_vrc_mic_receiver",
@@ -4960,12 +4996,11 @@ async def test_desktop_size_preset_change_supersedes_pending_user_position_debou
     _patch_overlay_runtime(monkeypatch)
     saved_desktop: list[tuple[object, object, str]] = []
 
-    def fake_save_settings(self: GuiController) -> None:
-        assert self.settings is not None
-        desktop = self.settings.overlay.desktop_flet
+    def record_saved_settings(_path, settings) -> None:
+        desktop = settings.overlay.desktop_flet
         saved_desktop.append((desktop.position.x, desktop.position.y, desktop.size_preset))
 
-    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
     monkeypatch.setattr(
         GuiController,
         "_configure_vrc_mic_receiver",
@@ -5025,6 +5060,76 @@ async def test_desktop_size_preset_change_supersedes_pending_user_position_debou
 
 
 @pytest.mark.asyncio
+async def test_desktop_size_preset_change_cancels_pending_bounds_before_order23_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, *, enabled: asyncio.sleep(0),
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.size_preset = "small"
+    controller.settings.overlay.desktop_flet.position.x = -100
+    controller.settings.overlay.desktop_flet.position.y = 20
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    renderer_events = manager.renderer_events
+    assert isinstance(renderer_events, asyncio.Queue)
+    await renderer_events.put(
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "x": 111,
+                "y": 222,
+                "width": 1152,
+                "height": 288,
+            },
+        }
+    )
+    await _wait_until(
+        lambda: controller._desktop_bounds_persist_task is not None
+        and controller._pending_desktop_bounds is not None
+    )
+
+    class InspectingOrder23Service(RecordingSettingsMutationService):
+        async def mutate(
+            self,
+            request: settings_mutation.SettingsMutationRequest,
+        ) -> messages.TransactionResult:
+            if request.reason == settings_mutation.SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT:
+                task = controller._desktop_bounds_persist_task
+                assert task is None or task.cancelled() or task.done()
+                assert controller._pending_desktop_bounds is None
+            return await super().mutate(request)
+
+    controller.settings_mutation_service = InspectingOrder23Service()
+
+    await controller.set_desktop_overlay_size_preset("xlarge")
+    await asyncio.sleep(controller_module.DESKTOP_BOUNDS_PERSIST_DEBOUNCE_S * 2)
+
+    request = controller.settings_mutation_service.requests[0]
+    assert request.values["overlay.desktop_flet.size_preset"] == "xlarge"
+    assert request.values["overlay.desktop_flet.position.x"] == pytest.approx(-420)
+    assert request.values["overlay.desktop_flet.position.y"] == pytest.approx(-60)
+
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
 async def test_desktop_reset_clears_position_unlocks_preserves_size_and_alpha_and_centers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5032,9 +5137,8 @@ async def test_desktop_reset_clears_position_unlocks_preserves_size_and_alpha_an
     saved_desktop: list[tuple[object, object, str, bool, float]] = []
     state_changes: list[dict[str, object]] = []
 
-    def fake_save_settings(self: GuiController) -> None:
-        assert self.settings is not None
-        desktop = self.settings.overlay.desktop_flet
+    def record_saved_settings(_path, settings) -> None:
+        desktop = settings.overlay.desktop_flet
         saved_desktop.append(
             (
                 desktop.position.x,
@@ -5045,7 +5149,7 @@ async def test_desktop_reset_clears_position_unlocks_preserves_size_and_alpha_an
             )
         )
 
-    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
     monkeypatch.setattr(
         GuiController,
         "_desktop_work_area_for_current_launch",
@@ -5081,7 +5185,7 @@ async def test_desktop_reset_clears_position_unlocks_preserves_size_and_alpha_an
 
     await _wait_until(lambda: len(saved_desktop) == 1, attempts=20, delay_s=0.02)
 
-    assert saved_desktop == [(None, None, "large", False, 0.44)]
+    assert saved_desktop == [(None, None, "large", True, 0.44)]
     assert controller.settings.overlay.desktop_flet.position.x is None
     assert controller.settings.overlay.desktop_flet.position.y is None
     assert controller.settings.overlay.desktop_flet.size_preset == "large"
@@ -5111,9 +5215,8 @@ async def test_desktop_reset_persists_configured_desktop_target_without_running_
     runtime_payloads: list[dict[str, object]] = []
     bounds_payloads: list[dict[str, int | float]] = []
 
-    def fake_save_settings(self: GuiController) -> None:
-        assert self.settings is not None
-        desktop = self.settings.overlay.desktop_flet
+    def record_saved_settings(_path, settings) -> None:
+        desktop = settings.overlay.desktop_flet
         saved_desktop.append(
             (
                 desktop.position.x,
@@ -5139,7 +5242,7 @@ async def test_desktop_reset_persists_configured_desktop_target_without_running_
         _ = self
         bounds_payloads.append(dict(bounds))
 
-    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
     monkeypatch.setattr(
         GuiController,
         "_broadcast_desktop_runtime_control",
@@ -5162,12 +5265,118 @@ async def test_desktop_reset_persists_configured_desktop_target_without_running_
 
     await controller.reset_desktop_overlay_position()
 
-    assert saved_desktop == [(None, None, "large", False, 0.44)]
+    assert saved_desktop == [(None, None, "large", True, 0.44)]
     assert controller.settings.overlay.desktop_flet.position.x is None
     assert controller.settings.overlay.desktop_flet.position.y is None
     assert controller.settings.overlay.desktop_flet.size_preset == "large"
     assert controller.settings.overlay.desktop_flet.locked is False
     assert controller.settings.overlay.desktop_flet.visual.background_alpha == 0.44
+    assert runtime_payloads == []
+    assert bounds_payloads == []
+
+
+@pytest.mark.asyncio
+async def test_desktop_reset_routes_position_clear_through_order23_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.size_preset = "large"
+    controller.settings.overlay.desktop_flet.position.x = 80
+    controller.settings.overlay.desktop_flet.position.y = 90
+    controller.settings.overlay.desktop_flet.locked = True
+    controller._set_desktop_overlay_interaction_mode("pass_through")
+    service = RecordingSettingsMutationService()
+    controller.settings_mutation_service = service
+
+    def fail_direct_save(*_args, **_kwargs) -> None:
+        raise AssertionError("desktop reset must not use direct settings save")
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_direct_save)
+
+    await controller.reset_desktop_overlay_position()
+
+    assert len(service.requests) == 1
+    request = service.requests[0]
+    assert request.reason == settings_mutation.SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT
+    assert request.values == {
+        "overlay.desktop_flet.position.x": None,
+        "overlay.desktop_flet.position.y": None,
+    }
+    assert "overlay.desktop_flet.locked" not in request.values
+    assert controller.settings.overlay.desktop_flet.position.x is None
+    assert controller.settings.overlay.desktop_flet.position.y is None
+    assert controller.settings.overlay.desktop_flet.size_preset == "large"
+    assert controller.settings.overlay.desktop_flet.locked is False
+    assert controller.desktop_overlay_captions_locked is False
+
+
+@pytest.mark.asyncio
+async def test_desktop_reset_keeps_runtime_state_when_order23_commit_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_payloads: list[dict[str, object]] = []
+    bounds_payloads: list[dict[str, int | float]] = []
+
+    async def fake_broadcast_runtime_control(
+        self: GuiController,
+        payload: dict[str, object],
+    ) -> bool:
+        _ = self
+        runtime_payloads.append(dict(payload))
+        return True
+
+    async def fake_broadcast_window_bounds_control(
+        self: GuiController,
+        bounds: dict[str, int | float],
+    ) -> None:
+        _ = self
+        bounds_payloads.append(dict(bounds))
+
+    monkeypatch.setattr(
+        GuiController,
+        "_broadcast_desktop_runtime_control",
+        fake_broadcast_runtime_control,
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_broadcast_desktop_window_bounds_control",
+        fake_broadcast_window_bounds_control,
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.size_preset = "large"
+    controller.settings.overlay.desktop_flet.position.x = 80
+    controller.settings.overlay.desktop_flet.position.y = 90
+    controller.settings.overlay.desktop_flet.locked = True
+    controller._active_overlay_target = OVERLAY_TARGET_DESKTOP
+    controller._overlay_bridge = object()  # type: ignore[assignment]
+    controller._set_desktop_overlay_interaction_mode("pass_through")
+    failed_result = messages.TransactionResult(
+        status=messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED,
+        message=None,
+        diagnostics=None,
+    )
+    service = RecordingSettingsMutationService(failed_result)
+    controller.settings_mutation_service = service
+
+    await controller.reset_desktop_overlay_position()
+
+    assert len(service.requests) == 1
+    request = service.requests[0]
+    assert request.reason == settings_mutation.SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT
+    assert request.values == {
+        "overlay.desktop_flet.position.x": None,
+        "overlay.desktop_flet.position.y": None,
+    }
+    assert controller.settings.overlay.desktop_flet.position.x == 80
+    assert controller.settings.overlay.desktop_flet.position.y == 90
+    assert controller.settings.overlay.desktop_flet.locked is True
+    assert controller.desktop_overlay_interaction_mode == "pass_through"
+    assert controller.desktop_overlay_captions_locked is True
     assert runtime_payloads == []
     assert bounds_payloads == []
 
@@ -5179,14 +5388,13 @@ async def test_desktop_reset_persistence_cancels_pending_user_position_debounce(
     _patch_overlay_runtime(monkeypatch)
     saved_desktop: list[tuple[object, object, str, bool]] = []
 
-    def fake_save_settings(self: GuiController) -> None:
-        assert self.settings is not None
-        desktop = self.settings.overlay.desktop_flet
+    def record_saved_settings(_path, settings) -> None:
+        desktop = settings.overlay.desktop_flet
         saved_desktop.append(
             (desktop.position.x, desktop.position.y, desktop.size_preset, desktop.locked)
         )
 
-    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
     monkeypatch.setattr(
         GuiController,
         "_desktop_work_area_for_current_launch",
@@ -5229,10 +5437,15 @@ async def test_desktop_reset_persistence_cancels_pending_user_position_debounce(
         }
     )
 
-    await _wait_until(lambda: len(saved_desktop) == 1, attempts=20, delay_s=0.02)
+    await _wait_until(
+        lambda: controller._desktop_bounds_persist_task is None
+        and controller._pending_desktop_bounds is None,
+        attempts=20,
+        delay_s=0.02,
+    )
     await asyncio.sleep(controller_module.DESKTOP_BOUNDS_PERSIST_DEBOUNCE_S * 2)
 
-    assert saved_desktop == [(None, None, "medium", False)]
+    assert saved_desktop == []
     assert controller.settings.overlay.desktop_flet.position.x is None
     assert controller.settings.overlay.desktop_flet.position.y is None
 
@@ -5246,14 +5459,13 @@ async def test_desktop_reset_drains_queued_pre_reset_user_bounds(
     _patch_overlay_runtime(monkeypatch)
     saved_desktop: list[tuple[object, object, str, bool]] = []
 
-    def fake_save_settings(self: GuiController) -> None:
-        assert self.settings is not None
-        desktop = self.settings.overlay.desktop_flet
+    def record_saved_settings(_path, settings) -> None:
+        desktop = settings.overlay.desktop_flet
         saved_desktop.append(
             (desktop.position.x, desktop.position.y, desktop.size_preset, desktop.locked)
         )
 
-    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
     monkeypatch.setattr(
         GuiController,
         "_desktop_work_area_for_current_launch",
@@ -5313,14 +5525,13 @@ async def test_desktop_source_reset_ignores_event_size_and_cancels_pending_user_
     _patch_overlay_runtime(monkeypatch)
     saved_desktop: list[tuple[object, object, str, bool]] = []
 
-    def fake_save_settings(self: GuiController) -> None:
-        assert self.settings is not None
-        desktop = self.settings.overlay.desktop_flet
+    def record_saved_settings(_path, settings) -> None:
+        desktop = settings.overlay.desktop_flet
         saved_desktop.append(
             (desktop.position.x, desktop.position.y, desktop.size_preset, desktop.locked)
         )
 
-    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
     monkeypatch.setattr(
         GuiController,
         "_desktop_work_area_for_current_launch",
@@ -5372,10 +5583,15 @@ async def test_desktop_source_reset_ignores_event_size_and_cancels_pending_user_
         }
     )
 
-    await _wait_until(lambda: len(saved_desktop) == 1, attempts=20, delay_s=0.02)
+    await _wait_until(
+        lambda: controller._desktop_bounds_persist_task is None
+        and controller._pending_desktop_bounds is None,
+        attempts=20,
+        delay_s=0.02,
+    )
     await asyncio.sleep(controller_module.DESKTOP_BOUNDS_PERSIST_DEBOUNCE_S * 2)
 
-    assert saved_desktop == [(None, None, "small", False)]
+    assert saved_desktop == []
     assert controller.settings.overlay.desktop_flet.position.x is None
     assert controller.settings.overlay.desktop_flet.position.y is None
     assert controller.settings.overlay.desktop_flet.size_preset == "small"
@@ -5386,36 +5602,46 @@ async def test_desktop_source_reset_ignores_event_size_and_cancels_pending_user_
 def test_vr_overlay_calibration_reset_does_not_mutate_desktop_overlay_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    saved_desktop: list[tuple[object, object, str, bool, float]] = []
+    class FakePage:
+        def __init__(self) -> None:
+            self.tasks: list[object] = []
 
-    def fake_save_settings(self: GuiController) -> None:
-        assert self.settings is not None
-        desktop = self.settings.overlay.desktop_flet
-        saved_desktop.append(
-            (
-                desktop.position.x,
-                desktop.position.y,
-                desktop.size_preset,
-                desktop.locked,
-                desktop.visual.background_alpha,
-            )
-        )
+        def run_task(self, coro_fn) -> None:
+            self.tasks.append(coro_fn)
 
-    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    def fail_direct_save(*_args, **_kwargs) -> None:
+        raise AssertionError("overlay calibration must not use direct settings save")
 
-    controller = _make_controller(app=SimpleNamespace())
+    monkeypatch.setattr(controller_module, "save_settings", fail_direct_save)
+
+    page = FakePage()
+    controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
     controller.settings = AppSettings()
+    service = RecordingSettingsMutationService()
+    controller.settings_mutation_service = service
     controller.settings.overlay.desktop_flet.size_preset = "xlarge"
     controller.settings.overlay.desktop_flet.position.x = 123
     controller.settings.overlay.desktop_flet.position.y = 456
     controller.settings.overlay.desktop_flet.locked = True
     controller.settings.overlay.desktop_flet.visual.background_alpha = 0.33
     controller.overlay_calibration = OverlayCalibration(distance=3.0, offset_x=2.0)
+    controller.settings.overlay.calibration = controller.overlay_calibration.copy()
     controller._overlay_calibration_draft = OverlayCalibration()
 
     controller.apply_overlay_calibration()
 
-    assert saved_desktop == [(123, 456, "xlarge", True, 0.33)]
+    assert len(page.tasks) == 1
+
+    asyncio.run(page.tasks[0]())
+
+    assert len(service.requests) == 1
+    assert (
+        service.requests[0].reason == settings_mutation.SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT
+    )
+    assert service.requests[0].values == {
+        "overlay.calibration.offset_x": 0.0,
+        "overlay.calibration.distance": 1.1,
+    }
     assert controller.settings.overlay.desktop_flet.position.x == 123
     assert controller.settings.overlay.desktop_flet.position.y == 456
     assert controller.settings.overlay.desktop_flet.size_preset == "xlarge"
@@ -5630,11 +5856,10 @@ async def test_desktop_apply_settings_preserves_runtime_lock_without_persisting_
 ) -> None:
     serialized_desktop: list[dict[str, object]] = []
 
-    def fake_save_settings(self: GuiController) -> None:
-        assert self.settings is not None
-        serialized_desktop.append(to_dict(self.settings)["overlay"]["desktop_flet"])
+    def record_saved_settings(_path, settings) -> None:
+        serialized_desktop.append(to_dict(settings)["overlay"]["desktop_flet"])
 
-    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.ui.overlay_enabled = True
@@ -12874,12 +13099,17 @@ async def test_order22_apply_settings_mixed_draft_applies_audio_runtime_and_pres
 
     await controller.apply_settings(pending)
 
-    assert len(requests) == 1
+    assert len(requests) == 2
     assert requests[0].values == {"audio.input_device": "Desk Mic"}
+    assert requests[1].values == {
+        "overlay.show_translation": False,
+        "osc.chatbox_include_source": True,
+    }
     assert "overlay.show_translation" not in requests[0].values
     assert "osc.chatbox_include_source" not in requests[0].values
     assert "system_prompt" not in requests[0].values
     assert [settings.audio.input_device for settings in saved_settings] == [
+        "Desk Mic",
         "Desk Mic",
         "Desk Mic",
     ]
@@ -12887,7 +13117,10 @@ async def test_order22_apply_settings_mixed_draft_applies_audio_runtime_and_pres
     assert saved_settings[0].system_prompt == "base prompt"
     assert saved_settings[1].overlay.show_translation is False
     assert saved_settings[1].osc.chatbox_include_source is True
-    assert saved_settings[1].system_prompt == "draft prompt"
+    assert saved_settings[1].system_prompt == "base prompt"
+    assert saved_settings[2].overlay.show_translation is False
+    assert saved_settings[2].osc.chatbox_include_source is True
+    assert saved_settings[2].system_prompt == "draft prompt"
     assert calls == ["mic_stop"]
     assert controller.settings.overlay.show_translation is False
     assert controller.settings.osc.chatbox_include_source is True
@@ -12927,12 +13160,12 @@ async def test_order22_apply_settings_mixed_full_draft_save_failure_degrades_and
     save_attempts: list[AppSettings] = []
     raw_failure_text = "full draft save failed secret-token-must-not-leak"
 
-    def fail_second_save(_path, incoming: AppSettings) -> None:
+    def fail_third_save(_path, incoming: AppSettings) -> None:
         save_attempts.append(copy.deepcopy(incoming))
-        if len(save_attempts) == 2:
+        if len(save_attempts) == 3:
             raise RuntimeError(raw_failure_text)
 
-    monkeypatch.setattr(controller_module, "save_settings", fail_second_save)
+    monkeypatch.setattr(controller_module, "save_settings", fail_third_save)
     monkeypatch.setattr(controller_module, "get_locale", lambda: controller.settings.ui.locale)
     monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", lambda self: asyncio.sleep(0))
     monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
@@ -12953,28 +13186,42 @@ async def test_order22_apply_settings_mixed_full_draft_save_failure_degrades_and
     assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
     assert result.diagnostics == messages.ErrorDiagnostics(
         component="gui_controller",
-        operation="apply_stt_language_audio_full_draft_save",
+        operation="apply_overlay_osc_output_full_draft_save",
         code="settings_save_failed",
         category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
         visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
         content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
         status_code=None,
         retry_after_ms=None,
-        fields={"surface": "stt_language_audio"},
+        fields={"surface": "overlay_osc_output"},
     )
-    assert [settings.audio.input_device for settings in save_attempts] == ["Desk Mic", "Desk Mic"]
-    assert [settings.languages.source_language for settings in save_attempts] == ["ja", "ja"]
-    assert [settings.overlay.calibration.distance for settings in save_attempts] == [0.8, 1.6]
+    assert [settings.audio.input_device for settings in save_attempts] == [
+        "Desk Mic",
+        "Desk Mic",
+        "Desk Mic",
+    ]
+    assert [settings.languages.source_language for settings in save_attempts] == [
+        "ja",
+        "ja",
+        "ja",
+    ]
+    assert [settings.overlay.calibration.distance for settings in save_attempts] == [
+        0.8,
+        1.6,
+        1.6,
+    ]
     assert save_attempts[0].overlay.show_translation is True
     assert save_attempts[0].system_prompt == "base prompt"
     assert save_attempts[1].overlay.show_translation is False
-    assert save_attempts[1].system_prompt == "draft prompt"
+    assert save_attempts[1].system_prompt == "base prompt"
+    assert save_attempts[2].overlay.show_translation is False
+    assert save_attempts[2].system_prompt == "draft prompt"
     assert controller.settings.audio.input_device == "Desk Mic"
     assert controller.settings.languages.source_language == "ja"
     assert controller.hub.source_language == "ja"
-    assert controller.settings.overlay.show_translation is True
-    assert controller.settings.overlay.calibration.distance == 0.8
-    assert controller.overlay_calibration.distance == 0.8
+    assert controller.settings.overlay.show_translation is False
+    assert controller.settings.overlay.calibration.distance == 1.6
+    assert controller.overlay_calibration.distance == 1.6
     assert controller.settings.system_prompt == "base prompt"
     assert controller.hub.system_prompt == "base prompt"
     assert raw_failure_text not in repr(result)
@@ -13339,6 +13586,289 @@ async def test_order22_qwen_low_latency_unavailable_preserves_retry_marker(
     assert rebuild_markers == [False, False]
     assert controller.hub.llm is recovered_llm
     assert controller.hub.low_latency_mode is True
+
+
+@pytest.mark.asyncio
+async def test_order23_apply_settings_routes_overlay_osc_output_patch_through_settings_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.ui.overlay_enabled = False
+    controller.settings.ui.peer_translation_enabled = False
+    service = RecordingSettingsMutationService()
+    controller.settings_mutation_service = service
+
+    pending = copy.deepcopy(controller.settings)
+    pending.overlay.target = OVERLAY_TARGET_DESKTOP
+    pending.overlay.show_translation = False
+    pending.overlay.show_peer_original = False
+    pending.overlay.calibration = OverlayCalibration(distance=1.7, offset_x=0.4)
+    pending.overlay.desktop_flet.size_preset = "large"
+    pending.overlay.desktop_flet.position.x = 12
+    pending.overlay.desktop_flet.position.y = 34
+    pending.overlay.desktop_flet.visual.background_alpha = 0.42
+    pending.osc.host = "192.0.2.44"
+    pending.osc.port = 9001
+    pending.osc.chatbox_address = "/chatbox/custom"
+    pending.osc.chatbox_send = False
+    pending.osc.chatbox_clear = True
+    pending.osc.chatbox_max_chars = 120
+    pending.osc.vrc_mic_intercept = True
+    pending.osc.chatbox_include_source = True
+    pending.ui.overlay_enabled = True
+    pending.ui.peer_translation_enabled = True
+
+    def fail_direct_save(*_args, **_kwargs) -> None:
+        raise AssertionError("direct save should not persist routed order23 settings")
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_direct_save)
+
+    await controller.apply_settings(pending)
+
+    assert len(service.requests) == 1
+    request = service.requests[0]
+    assert request.reason == settings_mutation.SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT
+    assert request.values == {
+        "overlay.target": OVERLAY_TARGET_DESKTOP,
+        "overlay.show_translation": False,
+        "overlay.show_peer_original": False,
+        "overlay.calibration.offset_x": 0.4,
+        "overlay.calibration.distance": 1.7,
+        "overlay.desktop_flet.size_preset": "large",
+        "overlay.desktop_flet.position.x": 12,
+        "overlay.desktop_flet.position.y": 34,
+        "overlay.desktop_flet.visual.background_alpha": 0.42,
+        "osc.host": "192.0.2.44",
+        "osc.port": 9001,
+        "osc.chatbox_address": "/chatbox/custom",
+        "osc.chatbox_send": False,
+        "osc.chatbox_clear": True,
+        "osc.chatbox_max_chars": 120,
+        "osc.vrc_mic_intercept": True,
+        "osc.chatbox_include_source": True,
+    }
+    assert "ui.overlay_enabled" not in request.values
+    assert "ui.peer_translation_enabled" not in request.values
+    assert "active_chatbox_channel" not in request.values
+    assert controller.settings.overlay.target == OVERLAY_TARGET_DESKTOP
+    assert controller.settings.osc.chatbox_include_source is True
+    assert controller.settings.ui.overlay_enabled is False
+    assert controller.settings.ui.peer_translation_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_order23_apply_settings_restore_baseline_on_live_settings_view_save_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.overlay.show_translation = True
+    controller.settings.osc.chatbox_include_source = False
+    controller._remember_settings_view_order23_baseline(controller.settings)
+    raw_failure_text = "order23 save failed secret-token-must-not-leak"
+
+    # SettingsView mutates the loaded AppSettings object in place before emitting a copy.
+    controller.settings.overlay.show_translation = False
+    controller.settings.osc.chatbox_include_source = True
+    pending = copy.deepcopy(controller.settings)
+
+    def fail_save_settings(_path, _settings) -> None:
+        raise RuntimeError(raw_failure_text)
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_save_settings)
+
+    await controller.apply_settings(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="settings_repository",
+        operation="save",
+        code="settings_save_failed",
+        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "overlay_osc_output"},
+    )
+    assert controller.settings.overlay.show_translation is True
+    assert controller.settings.osc.chatbox_include_source is False
+    assert raw_failure_text not in repr(result)
+    assert raw_failure_text not in repr(controller._runtime_logging.basic_messages)
+
+
+@pytest.mark.asyncio
+async def test_order23_first_live_settings_view_mutation_after_sync_uses_baseline_and_restores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_view = DummySettingsView()
+    controller = _make_controller(app=SimpleNamespace(view_settings=settings_view))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.overlay.show_translation = True
+    controller.settings.osc.chatbox_include_source = False
+    raw_failure_text = "order23 synced baseline save failed secret-token-must-not-leak"
+
+    controller._sync_ui_from_settings()
+
+    assert settings_view.calls
+
+    # SettingsView mutates the loaded AppSettings object in place before emitting a copy.
+    controller.settings.overlay.show_translation = False
+    controller.settings.osc.chatbox_include_source = True
+    pending = copy.deepcopy(controller.settings)
+
+    def fail_save_settings(_path, _settings) -> None:
+        raise RuntimeError(raw_failure_text)
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_save_settings)
+
+    await controller.apply_settings(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="settings_repository",
+        operation="save",
+        code="settings_save_failed",
+        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "overlay_osc_output"},
+    )
+    assert controller.settings.overlay.show_translation is True
+    assert controller.settings.osc.chatbox_include_source is False
+    assert raw_failure_text not in repr(result)
+    assert raw_failure_text not in repr(controller._runtime_logging.basic_messages)
+
+
+@pytest.mark.asyncio
+async def test_order23_apply_settings_runtime_failure_degrades_without_rollback_or_raw_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingOverlayPresenter:
+        async def update_display_preferences(self, **_kwargs) -> None:
+            raise RuntimeError("overlay runtime failed secret-token-must-not-leak")
+
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+    controller._overlay_presenter = FailingOverlayPresenter()  # type: ignore[assignment]
+    pending = copy.deepcopy(controller.settings)
+    pending.overlay.show_translation = False
+    saved_settings: list[AppSettings] = []
+
+    def record_saved_settings(_path, settings) -> None:
+        saved_settings.append(copy.deepcopy(settings))
+
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
+
+    await controller.apply_settings(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.message == messages.UserMessageRef(
+        key="settings.mutation.runtime_apply_failed",
+        params={"phase": "runtime_apply"},
+        severity=messages.SEVERITY_WARNING,
+    )
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_overlay_osc_output_runtime",
+        code="overlay_osc_output_runtime_apply_exception",
+        category=messages.DIAGNOSTIC_CATEGORY_LIFECYCLE,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "overlay_osc_output"},
+    )
+    assert "secret-token-must-not-leak" not in repr(result)
+    assert len(saved_settings) == 1
+    assert saved_settings[0].overlay.show_translation is False
+    assert controller.settings.overlay.show_translation is False
+
+
+@pytest.mark.asyncio
+async def test_order23_runtime_only_overlay_active_flags_are_not_routed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    service = RecordingSettingsMutationService()
+    controller.settings_mutation_service = service
+    begin_calls: list[bool] = []
+    saved_settings: list[AppSettings] = []
+
+    async def fake_begin_overlay_start(self: GuiController) -> None:
+        begin_calls.append(True)
+        self.overlay_state = "starting"
+
+    def record_saved_settings(_path, settings) -> None:
+        saved_settings.append(copy.deepcopy(settings))
+
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
+    monkeypatch.setattr(GuiController, "_begin_overlay_start", fake_begin_overlay_start)
+
+    pending = copy.deepcopy(controller.settings)
+    pending.ui.overlay_enabled = True
+    pending.ui.peer_translation_enabled = True
+
+    await controller.apply_settings(pending)
+
+    assert service.requests == []
+    assert begin_calls == [True]
+    assert controller.settings.ui.overlay_enabled is True
+    assert controller.settings.ui.peer_translation_enabled is True
+    assert saved_settings and to_dict(saved_settings[0])["ui"].get("overlay_enabled") is None
+
+
+@pytest.mark.asyncio
+async def test_combined_order22_and_order23_apply_settings_routes_both_services_without_direct_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.languages.source_language = "ko"
+    controller.settings.overlay.show_translation = True
+    controller.settings.osc.chatbox_include_source = False
+    service = RecordingSettingsMutationService()
+    controller.settings_mutation_service = service
+    direct_saves: list[AppSettings] = []
+
+    def record_direct_save(_path, settings) -> None:
+        direct_saves.append(copy.deepcopy(settings))
+
+    monkeypatch.setattr(controller_module, "save_settings", record_direct_save)
+
+    pending = copy.deepcopy(controller.settings)
+    pending.languages.source_language = "ja"
+    pending.overlay.show_translation = False
+    pending.osc.chatbox_include_source = True
+
+    await controller.apply_settings(pending)
+
+    assert [request.reason for request in service.requests] == [
+        settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
+        settings_mutation.SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT,
+    ]
+    assert service.requests[0].values == {"languages.source_language": "ja"}
+    assert service.requests[1].values == {
+        "overlay.show_translation": False,
+        "osc.chatbox_include_source": True,
+    }
+    assert direct_saves == []
+    assert controller.settings.languages.source_language == "ja"
+    assert controller.settings.overlay.show_translation is False
+    assert controller.settings.osc.chatbox_include_source is True
 
 
 @pytest.mark.asyncio
@@ -14463,11 +14993,6 @@ def test_overlay_calibration_controls_follow_apply_cancel_contract() -> None:
 def test_apply_overlay_calibration_uses_page_run_task_when_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    saved: list[tuple[Path, AppSettings]] = []
-
-    def fake_save(path: Path, settings: AppSettings) -> None:
-        saved.append((path, settings))
-
     class FakePage:
         def __init__(self) -> None:
             self.tasks: list[object] = []
@@ -14475,11 +15000,16 @@ def test_apply_overlay_calibration_uses_page_run_task_when_available(
         def run_task(self, coro_fn) -> None:
             self.tasks.append(coro_fn)
 
-    monkeypatch.setattr(controller_module, "save_settings", fake_save)
+    def fail_direct_save(*_args, **_kwargs) -> None:
+        raise AssertionError("overlay calibration must not use direct settings save")
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_direct_save)
 
     page = FakePage()
     controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
     controller.settings = AppSettings()
+    service = RecordingSettingsMutationService()
+    controller.settings_mutation_service = service
     controller._overlay_bridge = FakeOverlayBridge(session_token="token")
     controller._overlay_presenter = OverlayPresenter(
         bridge=controller._overlay_bridge,
@@ -14489,15 +15019,52 @@ def test_apply_overlay_calibration_uses_page_run_task_when_available(
 
     controller.begin_overlay_calibration_for_test()
     controller.set_overlay_calibration_field_for_test("offset_x", 0.25)
-    controller.apply_overlay_calibration_for_test()
+    applied = controller.apply_overlay_calibration()
 
+    assert applied.offset_x == 0.25
+    assert controller.overlay_calibration.offset_x == 0.25
+    assert controller.settings.overlay.calibration.offset_x == 0.0
+    assert len(page.tasks) == 2
+
+    for task in list(page.tasks):
+        asyncio.run(task())
+
+    assert len(service.requests) == 1
+    assert (
+        service.requests[0].reason == settings_mutation.SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT
+    )
+    assert service.requests[0].values == {"overlay.calibration.offset_x": 0.25}
     assert controller.settings.overlay.calibration.offset_x == 0.25
-    assert saved == [(Path("settings.json"), controller.settings)]
-    assert len(page.tasks) == 1
-
-    asyncio.run(page.tasks[0]())
-
     assert controller._overlay_bridge.snapshots[-1].calibration.offset_x == 0.25
+
+
+def test_apply_overlay_calibration_without_page_run_task_skips_persistence_and_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_direct_save(*_args, **_kwargs) -> None:
+        raise AssertionError("overlay calibration must not use direct settings save")
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_direct_save)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
+    controller.settings = AppSettings()
+    service = RecordingSettingsMutationService()
+    controller.settings_mutation_service = service
+
+    controller.begin_overlay_calibration_for_test()
+    controller.set_overlay_calibration_field_for_test("distance", 1.2)
+    applied = controller.apply_overlay_calibration()
+
+    assert applied.distance == 1.2
+    assert controller.overlay_calibration.distance == 1.2
+    assert controller.settings.overlay.calibration.distance == 1.1
+    assert service.requests == []
+    messages = [message for _level, message in controller._runtime_logging.detailed_messages]
+    assert any(
+        "[Overlay] Calibration persistence skipped reason=page_run_task_unavailable" in message
+        for message in messages
+    )
 
 
 def test_schedule_overlay_calibration_emit_preserves_traceback_in_detailed_log() -> None:
@@ -14529,15 +15096,23 @@ def test_schedule_overlay_calibration_emit_preserves_traceback_in_detailed_log()
 async def test_apply_overlay_calibration_persists_settings_and_emits_overlay_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    saved: list[tuple[Path, AppSettings]] = []
+    class FakePage:
+        def __init__(self) -> None:
+            self.tasks: list[object] = []
 
-    def fake_save(path: Path, settings: AppSettings) -> None:
-        saved.append((path, settings))
+        def run_task(self, coro_fn) -> None:
+            self.tasks.append(coro_fn)
 
-    monkeypatch.setattr(controller_module, "save_settings", fake_save)
+    def fail_direct_save(*_args, **_kwargs) -> None:
+        raise AssertionError("overlay calibration must not use direct settings save")
 
-    controller = _make_controller(app=SimpleNamespace())
+    monkeypatch.setattr(controller_module, "save_settings", fail_direct_save)
+
+    page = FakePage()
+    controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
     controller.settings = AppSettings()
+    service = RecordingSettingsMutationService()
+    controller.settings_mutation_service = service
     controller._overlay_bridge = FakeOverlayBridge(session_token="token")
     controller._overlay_presenter = OverlayPresenter(
         bridge=controller._overlay_bridge,
@@ -14548,10 +15123,15 @@ async def test_apply_overlay_calibration_persists_settings_and_emits_overlay_eve
     controller.begin_overlay_calibration_for_test()
     controller.set_overlay_calibration_field_for_test("distance", 1.2)
     controller.apply_overlay_calibration_for_test()
-    await asyncio.sleep(0)
+
+    assert len(page.tasks) == 2
+
+    for task in list(page.tasks):
+        await task()
 
     assert controller.settings.overlay.calibration.distance == 1.2
-    assert saved == [(Path("settings.json"), controller.settings)]
+    assert len(service.requests) == 1
+    assert service.requests[0].values == {"overlay.calibration.distance": 1.2}
     assert controller._overlay_bridge.snapshots[-1].calibration.distance == 1.2
 
 

@@ -861,6 +861,34 @@ def test_order22_stt_language_audio_patch_records_initial_covered_surface_list()
     }
 
 
+def test_order23_overlay_osc_output_patch_records_initial_covered_surface_list() -> None:
+    settings_mutation = _service_module()
+
+    assert set(settings_mutation.ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS) == {
+        "overlay.target",
+        "overlay.show_translation",
+        "overlay.show_peer_original",
+        "overlay.calibration.anchor",
+        "overlay.calibration.offset_x",
+        "overlay.calibration.offset_y",
+        "overlay.calibration.distance",
+        "overlay.calibration.text_scale",
+        "overlay.calibration.background_alpha",
+        "overlay.desktop_flet.size_preset",
+        "overlay.desktop_flet.position.x",
+        "overlay.desktop_flet.position.y",
+        "overlay.desktop_flet.visual.background_alpha",
+        "osc.host",
+        "osc.port",
+        "osc.chatbox_address",
+        "osc.chatbox_send",
+        "osc.chatbox_clear",
+        "osc.chatbox_max_chars",
+        "osc.vrc_mic_intercept",
+        "osc.chatbox_include_source",
+    }
+
+
 def test_nondurable_order22_compatibility_fields_are_not_covered() -> None:
     settings_mutation = _service_module()
 
@@ -873,6 +901,21 @@ def test_nondurable_order22_compatibility_fields_are_not_covered() -> None:
         "peer_soniox_stt.keepalive_interval_s",
         "peer_soniox_stt.trailing_silence_ms",
     }.isdisjoint(settings_mutation.ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS)
+
+
+def test_runtime_only_and_nondurable_order23_fields_are_not_covered() -> None:
+    settings_mutation = _service_module()
+
+    assert {
+        "ui.overlay_enabled",
+        "ui.peer_translation_enabled",
+        "active_chatbox_channel",
+        "overlay.desktop_flet.locked",
+        "overlay.desktop_flet.bounds",
+        "overlay.desktop_flet.visual.text_scale",
+        "overlay.desktop_flet.visual.outline_width",
+        "desktop_audio.output_device",
+    }.isdisjoint(settings_mutation.ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS)
 
 
 def test_settings_path_patch_builds_typed_mutation_request_for_order21_surface() -> None:
@@ -928,6 +971,35 @@ def test_settings_path_patch_builds_typed_mutation_request_for_order22_surface()
         expected_revision="settings-r2",
         reason=settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
         correlation_id="corr-order22",
+    )
+
+
+def test_settings_path_patch_builds_typed_mutation_request_for_order23_surface() -> None:
+    settings_mutation = _service_module()
+
+    patch = settings_mutation.SettingsPathPatch(
+        values_by_path={
+            "overlay.show_translation": False,
+            "overlay.desktop_flet.size_preset": "large",
+            "osc.chatbox_max_chars": 120,
+        },
+        surface=settings_mutation.SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT,
+    )
+
+    request = patch.to_mutation_request(
+        expected_revision="settings-r3",
+        correlation_id="corr-order23",
+    )
+
+    assert request == settings_mutation.SettingsMutationRequest(
+        values={
+            "overlay.show_translation": False,
+            "overlay.desktop_flet.size_preset": "large",
+            "osc.chatbox_max_chars": 120,
+        },
+        expected_revision="settings-r3",
+        reason=settings_mutation.SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT,
+        correlation_id="corr-order23",
     )
 
 
@@ -1069,6 +1141,80 @@ async def test_order22_path_validator_rejects_order21_overlay_and_secret_paths_w
     )
     assert "secret-value-must-not-leak" not in repr(result)
     assert "gemma4-secret-ish" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_order23_path_validator_accepts_only_overlay_osc_output_paths() -> None:
+    settings_mutation = _service_module()
+    validator = settings_mutation.SettingsPathMutationValidator(
+        allowed_paths=settings_mutation.ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
+        component="settings_mutation",
+        operation="validate_overlay_osc_output_patch",
+    )
+    request = settings_mutation.SettingsMutationRequest(
+        values={
+            "overlay.target": "desktop",
+            "overlay.calibration.distance": 1.4,
+            "overlay.desktop_flet.position.x": 24,
+            "overlay.desktop_flet.visual.background_alpha": 0.45,
+            "osc.host": "127.0.0.1",
+            "osc.port": 9001,
+            "osc.chatbox_max_chars": 120,
+            "osc.chatbox_include_source": True,
+        },
+        expected_revision=None,
+        reason=settings_mutation.SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT,
+        correlation_id="corr-valid-order23-paths",
+    )
+
+    result = await validator.validate(request)
+
+    assert result == settings_mutation.SettingsMutationValidationResult(
+        succeeded=True,
+        message=None,
+        diagnostics=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_order23_path_validator_rejects_runtime_only_peer_and_secret_paths_without_values() -> (
+    None
+):
+    settings_mutation = _service_module()
+    validator = settings_mutation.SettingsPathMutationValidator(
+        allowed_paths=settings_mutation.ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
+        component="settings_mutation",
+        operation="validate_overlay_osc_output_patch",
+    )
+    request = settings_mutation.SettingsMutationRequest(
+        values={
+            "active_chatbox_channel": "peer-secret-ish",
+            "ui.overlay_enabled": True,
+            "ui.peer_translation_enabled": True,
+            "secrets.openrouter_api_key": "secret-value-must-not-leak",
+        },
+        expected_revision=None,
+        reason=settings_mutation.SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT,
+        correlation_id="corr-invalid-order23-paths",
+    )
+
+    result = await validator.validate(request)
+
+    assert result.succeeded is False
+    assert result.message is None
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="settings_mutation",
+        operation="validate_overlay_osc_output_patch",
+        code="settings_path_not_covered",
+        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"path": "active_chatbox_channel"},
+    )
+    assert "secret-value-must-not-leak" not in repr(result)
+    assert "peer-secret-ish" not in repr(result)
 
 
 def test_settings_mutation_service_module_avoids_concrete_ui_provider_and_i18n_imports() -> None:

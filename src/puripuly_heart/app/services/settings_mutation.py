@@ -30,6 +30,7 @@ from puripuly_heart.core.messages import (
 
 SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER: Final = "settings.translation_provider"
 SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO: Final = "settings.stt_language_audio"
+SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT: Final = "settings.overlay_osc_output"
 
 ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS: Final[tuple[str, ...]] = (
     "translation.model",
@@ -86,6 +87,30 @@ ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS: Final[tuple[str, ...]] = (
     "soniox_stt.endpoint",
     "soniox_stt.keepalive_interval_s",
     "soniox_stt.trailing_silence_ms",
+)
+
+ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS: Final[tuple[str, ...]] = (
+    "overlay.target",
+    "overlay.show_translation",
+    "overlay.show_peer_original",
+    "overlay.calibration.anchor",
+    "overlay.calibration.offset_x",
+    "overlay.calibration.offset_y",
+    "overlay.calibration.distance",
+    "overlay.calibration.text_scale",
+    "overlay.calibration.background_alpha",
+    "overlay.desktop_flet.size_preset",
+    "overlay.desktop_flet.position.x",
+    "overlay.desktop_flet.position.y",
+    "overlay.desktop_flet.visual.background_alpha",
+    "osc.host",
+    "osc.port",
+    "osc.chatbox_address",
+    "osc.chatbox_send",
+    "osc.chatbox_clear",
+    "osc.chatbox_max_chars",
+    "osc.vrc_mic_intercept",
+    "osc.chatbox_include_source",
 )
 
 
@@ -322,7 +347,9 @@ def _runtime_apply_exception_transaction_result() -> TransactionResult:
 __all__ = [
     "ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS",
     "ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS",
+    "ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS",
     "RuntimeApplyResultPublisher",
+    "SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT",
     "SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO",
     "SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER",
     "SettingsMutationRequest",

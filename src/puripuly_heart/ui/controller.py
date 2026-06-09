@@ -31,6 +31,8 @@ from puripuly_heart.app.ports.settings_repository import (
 from puripuly_heart.app.services.settings_mutation import (
     ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS,
     ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
+    ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
+    SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT,
     SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
     SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
     SettingsMutationService,
@@ -487,6 +489,7 @@ class _ControllerProviderRuntimeApply:
 class _ControllerSttLanguageAudioRuntimeApply:
     controller: GuiController
     settings: AppSettings
+    reload_settings_view: bool = True
 
     async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
         _ = request
@@ -495,6 +498,7 @@ class _ControllerSttLanguageAudioRuntimeApply:
                 self.settings,
                 persist=False,
                 strict_runtime_errors=True,
+                reload_settings_view=self.reload_settings_view,
             )
         except Exception:
             return RuntimeApplyResult(
@@ -518,6 +522,32 @@ class _ControllerSttLanguageAudioRuntimeApply:
         )
         if unavailable_result is not None:
             return unavailable_result
+        return RuntimeApplyResult(
+            status=RUNTIME_APPLY_STATUS_APPLIED,
+            message=None,
+            diagnostics=None,
+        )
+
+
+@dataclass(slots=True)
+class _ControllerOverlayOscOutputRuntimeApply:
+    controller: GuiController
+    settings: AppSettings
+
+    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
+        _ = request
+        try:
+            await self.controller._apply_settings_direct(
+                self.settings,
+                persist=False,
+                strict_runtime_errors=True,
+            )
+        except Exception:
+            return _runtime_apply_failed_result(
+                operation="apply_overlay_osc_output_runtime",
+                code="overlay_osc_output_runtime_apply_exception",
+                surface="overlay_osc_output",
+            )
         return RuntimeApplyResult(
             status=RUNTIME_APPLY_STATUS_APPLIED,
             message=None,
@@ -684,6 +714,34 @@ def _stt_language_audio_save_failed_transaction_result(*, operation: str) -> Tra
     )
 
 
+def _overlay_osc_output_runtime_degraded_transaction_result() -> TransactionResult:
+    return _runtime_apply_result_as_degraded_transaction(
+        _runtime_apply_failed_result(
+            operation="apply_overlay_osc_output_runtime",
+            code="overlay_osc_output_runtime_apply_exception",
+            surface="overlay_osc_output",
+        )
+    )
+
+
+def _overlay_osc_output_save_failed_transaction_result(*, operation: str) -> TransactionResult:
+    return TransactionResult(
+        status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
+        message=UserMessageRef(
+            key="settings.mutation.runtime_apply_failed",
+            params={"phase": "settings_save"},
+            severity=SEVERITY_WARNING,
+        ),
+        diagnostics=_settings_mutation_diagnostics(
+            component="gui_controller",
+            operation=operation,
+            code="settings_save_failed",
+            category=DIAGNOSTIC_CATEGORY_TRANSACTION,
+            surface="overlay_osc_output",
+        ),
+    )
+
+
 def _mutable_settings_value(value: object) -> object:
     if isinstance(value, Mapping):
         return {key: _mutable_settings_value(nested) for key, nested in value.items()}
@@ -833,6 +891,11 @@ class GuiController:
     _last_peer_translation_activation_requested: bool | None = None
     _last_vrc_mic_sync_enabled: bool | None = None
     _settings_view_order22_baseline: AppSettings | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _settings_view_order23_baseline: AppSettings | None = field(
         init=False,
         default=None,
         repr=False,
@@ -2802,28 +2865,33 @@ class GuiController:
             self._pending_desktop_bounds = None
             if bounds is None:
                 return
-            self._persist_desktop_bounds(bounds)
+            await self._persist_desktop_bounds(bounds)
         except asyncio.CancelledError:
             raise
         finally:
             if self._desktop_bounds_persist_task is current_task:
                 self._desktop_bounds_persist_task = None
 
-    def _persist_desktop_bounds(self, bounds: dict[str, int | float]) -> None:
+    async def _persist_desktop_bounds(self, bounds: dict[str, int | float]) -> None:
         if self.settings is None or self._active_overlay_target != OVERLAY_TARGET_DESKTOP:
             return
         if self._desktop_bounds_from_payload({"event": "window_bounds_changed", **bounds}) is None:
             return
-        desktop_settings = self.settings.overlay.desktop_flet
+        next_settings = copy.deepcopy(self.settings)
+        desktop_settings = next_settings.overlay.desktop_flet
         desktop_settings.position.x = bounds["x"]
         desktop_settings.position.y = bounds["y"]
         desktop_settings.position.validate()
+        routed = await self._apply_overlay_osc_output_settings_via_mutation_service(next_settings)
+        if not routed or self.last_settings_mutation_result is None:
+            return
+        if not _settings_mutation_committed(self.last_settings_mutation_result):
+            return
         self.log_detailed(
             "[DesktopOverlay][Bounds] persisted "
             f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
             f"height={bounds['height']} size_preset={desktop_settings.size_preset}"
         )
-        self._save_settings()
 
     async def _handle_desktop_overlay_reset_requested(
         self,
@@ -2844,13 +2912,20 @@ class GuiController:
         await self._cancel_desktop_bounds_persistence()
         self._drain_pending_desktop_user_bounds_events()
         _ = bounds
-        desktop_settings = self.settings.overlay.desktop_flet
+        next_settings = copy.deepcopy(self.settings)
+        desktop_settings = next_settings.overlay.desktop_flet
         desktop_settings.position.x = None
         desktop_settings.position.y = None
-        desktop_settings.locked = False
         desktop_settings.validate()
+        routed = await self._apply_overlay_osc_output_settings_via_mutation_service(next_settings)
+        if routed and (
+            self.last_settings_mutation_result is None
+            or not _settings_mutation_committed(self.last_settings_mutation_result)
+        ):
+            return
+        if self.settings is not None:
+            self.settings.overlay.desktop_flet.locked = False
         self._set_desktop_overlay_interaction_mode(DESKTOP_INTERACTION_MODE_EDIT)
-        self._save_settings()
         if not desktop_renderer_active:
             return
         await self._broadcast_desktop_runtime_control(
@@ -3019,6 +3094,31 @@ class GuiController:
                     await self._broadcast_desktop_window_bounds_control(bounds)
                 continue
             await self._broadcast_desktop_runtime_control(payload)
+
+    async def _apply_desktop_size_preset_persistence_adjustment(
+        self,
+        previous_settings: AppSettings,
+        next_settings: AppSettings,
+    ) -> None:
+        previous_desktop = copy.deepcopy(previous_settings.overlay.desktop_flet)
+        previous_desktop.validate()
+        next_desktop = next_settings.overlay.desktop_flet
+        next_desktop.validate()
+        if previous_desktop.size_preset == next_desktop.size_preset:
+            return
+        if not self._desktop_runtime_is_running_for_settings_update(next_settings):
+            return
+        await self._cancel_desktop_bounds_persistence()
+        self._drain_pending_desktop_user_bounds_events()
+        if previous_desktop.position.x is None or previous_desktop.position.y is None:
+            return
+        bounds = self._desktop_center_preserving_bounds_for_size_preset_change(
+            previous_desktop_settings=previous_desktop,
+            next_size_preset=next_desktop.size_preset,
+        )
+        next_desktop.position.x = bounds["x"]
+        next_desktop.position.y = bounds["y"]
+        next_desktop.position.validate()
 
     def _build_peer_runtime_config(self, settings: AppSettings) -> PeerRuntimeConfig:
         backend = resolve_peer_stt_runtime_config(settings)
@@ -3518,11 +3618,46 @@ class GuiController:
         self._overlay_calibration_draft.validate()
         self.overlay_calibration = self._overlay_calibration_draft.copy()
         self._overlay_calibration_draft = None
-        if self.settings is not None:
-            self.settings.overlay.calibration = self.overlay_calibration.copy()
-            self._save_settings()
+        self._schedule_overlay_calibration_persistence(self.overlay_calibration.copy())
         self._schedule_overlay_calibration_emit()
         return self.overlay_calibration.copy()
+
+    async def _apply_overlay_calibration_persistence(
+        self,
+        calibration: OverlayCalibration,
+    ) -> None:
+        if self.settings is None:
+            return
+        next_settings = copy.deepcopy(self.settings)
+        next_settings.overlay.calibration = calibration.copy()
+        await self._apply_overlay_osc_output_settings_via_mutation_service(next_settings)
+
+    def _schedule_overlay_calibration_persistence(
+        self,
+        calibration: OverlayCalibration,
+    ) -> None:
+        if self.settings is None:
+            return
+
+        async def _task() -> None:
+            await self._apply_overlay_calibration_persistence(calibration.copy())
+
+        run_task = getattr(self.page, "run_task", None)
+        if callable(run_task):
+            try:
+                run_task(_task)
+                return
+            except Exception:
+                self.log_detailed(
+                    "[Overlay] Calibration persistence skipped reason=page_run_task_failed",
+                    level=logging.WARNING,
+                )
+                return
+
+        self.log_detailed(
+            "[Overlay] Calibration persistence skipped reason=page_run_task_unavailable",
+            level=logging.WARNING,
+        )
 
     def cancel_overlay_calibration(self) -> OverlayCalibration:
         self._overlay_calibration_draft = None
@@ -3557,13 +3692,10 @@ class GuiController:
                 )
                 return
 
-        try:
-            asyncio.get_running_loop().create_task(self._emit_overlay_calibration_update())
-        except RuntimeError:
-            self.log_detailed(
-                "[Overlay] Skipping calibration update; no running loop and page.run_task unavailable",
-                level=logging.WARNING,
-            )
+        self.log_detailed(
+            "[Overlay] Skipping calibration update; page.run_task unavailable",
+            level=logging.WARNING,
+        )
 
     def begin_overlay_calibration_for_test(self) -> None:
         self.begin_overlay_calibration()
@@ -4187,6 +4319,29 @@ class GuiController:
             copy.deepcopy(settings) if settings is not None else None
         )
 
+    def _remember_settings_view_order23_baseline(self, settings: AppSettings | None) -> None:
+        self._settings_view_order23_baseline = (
+            copy.deepcopy(settings) if settings is not None else None
+        )
+
+    def _reload_settings_view_from_settings(
+        self,
+        settings: AppSettings,
+        *,
+        preserve_custom_vocab_draft: bool,
+    ) -> None:
+        view_settings = getattr(self.app, "view_settings", None)
+        if view_settings is None:
+            return
+        with contextlib.suppress(Exception):
+            view_settings.load_from_settings(
+                settings,
+                config_path=self.config_path,
+                preserve_custom_vocab_draft=preserve_custom_vocab_draft,
+            )
+            self._remember_settings_view_order22_baseline(settings)
+            self._remember_settings_view_order23_baseline(settings)
+
     def _order22_patch_base_and_values(
         self,
         next_settings: AppSettings,
@@ -4208,6 +4363,32 @@ class GuiController:
                 baseline,
                 next_settings,
                 paths=ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
+            )
+            if baseline_patch_values:
+                return baseline, baseline_patch_values
+        return base_settings, patch_values
+
+    def _order23_patch_base_and_values(
+        self,
+        next_settings: AppSettings,
+    ) -> tuple[AppSettings, dict[str, object]] | None:
+        base_settings = self.settings
+        if base_settings is None:
+            return None
+        patch_values = _build_settings_path_patch(
+            base_settings,
+            next_settings,
+            paths=ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
+        )
+        if patch_values or next_settings is base_settings:
+            return base_settings, patch_values
+
+        baseline = self._settings_view_order23_baseline
+        if baseline is not None:
+            baseline_patch_values = _build_settings_path_patch(
+                baseline,
+                next_settings,
+                paths=ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
             )
             if baseline_patch_values:
                 return baseline, baseline_patch_values
@@ -4267,9 +4448,32 @@ class GuiController:
             self._log_error("Failed to resync committed order22 provider runtime")
             self._sync_memory_runtime_fields_from_settings(committed_settings)
 
+    async def _resync_committed_order23_settings_after_strict_save_failure(
+        self,
+        *,
+        base_settings: AppSettings,
+        committed_settings: AppSettings,
+    ) -> None:
+        self._sync_memory_runtime_fields_from_settings(base_settings)
+        try:
+            await self._apply_settings_direct(
+                copy.deepcopy(committed_settings),
+                persist=False,
+                strict_runtime_errors=True,
+            )
+        except Exception:
+            self._log_error("Failed to resync committed order23 settings runtime")
+            self._sync_memory_runtime_fields_from_settings(committed_settings)
+
     async def apply_settings(self, settings: AppSettings) -> None:
         if settings is not self.settings:
+            routed = await self._apply_order22_then_order23_settings_via_mutation_services(settings)
+            if routed:
+                return
             routed = await self._apply_stt_language_audio_settings_via_mutation_service(settings)
+            if routed:
+                return
+            routed = await self._apply_overlay_osc_output_settings_via_mutation_service(settings)
             if routed:
                 return
         await self._apply_settings_direct(settings)
@@ -4281,6 +4485,7 @@ class GuiController:
         persist: bool = True,
         strict_runtime_errors: bool = False,
         strict_persistence_errors: bool = False,
+        reload_settings_view: bool = True,
     ) -> None:
         def _effective_peer_language(language: str, peer_language: str) -> str:
             return peer_language or language
@@ -4517,16 +4722,11 @@ class GuiController:
         if should_restart_stt:
             await self._replace_runtime_stt_provider()
 
-        if source_language_changed or target_language_changed:
-            view_settings = getattr(self.app, "view_settings", None)
-            if view_settings is not None:
-                with contextlib.suppress(Exception):
-                    view_settings.load_from_settings(
-                        settings,
-                        config_path=self.config_path,
-                        preserve_custom_vocab_draft=True,
-                    )
-                    self._remember_settings_view_order22_baseline(settings)
+        if reload_settings_view and (source_language_changed or target_language_changed):
+            self._reload_settings_view_from_settings(
+                settings,
+                preserve_custom_vocab_draft=True,
+            )
 
         if prev_locale != settings.ui.locale:
             set_locale(settings.ui.locale)
@@ -4539,10 +4739,67 @@ class GuiController:
 
         self._refresh_overlay_peer_consumers()
         self._remember_settings_view_order22_baseline(self.settings)
+        self._remember_settings_view_order23_baseline(self.settings)
+
+    async def _apply_order22_then_order23_settings_via_mutation_services(
+        self,
+        next_settings: AppSettings,
+    ) -> bool:
+        order22_base_and_patch = self._order22_patch_base_and_values(next_settings)
+        order23_base_and_patch = self._order23_patch_base_and_values(next_settings)
+        if order22_base_and_patch is None or order23_base_and_patch is None:
+            return False
+        order22_base_settings, order22_patch_values = order22_base_and_patch
+        _order23_base_settings, order23_patch_values = order23_base_and_patch
+        if not order22_patch_values or not order23_patch_values:
+            return False
+
+        order22_only_settings = copy.deepcopy(order22_base_settings)
+        _apply_settings_path_patch(order22_only_settings, order22_patch_values)
+        routed_order22 = await self._apply_stt_language_audio_settings_via_mutation_service(
+            order22_only_settings,
+            reload_settings_view=False,
+        )
+        if not routed_order22:
+            return False
+        if self.last_settings_mutation_result is None or not _settings_mutation_committed(
+            self.last_settings_mutation_result,
+        ):
+            return True
+        order22_result = self.last_settings_mutation_result
+
+        routed_order23 = await self._apply_overlay_osc_output_settings_via_mutation_service(
+            next_settings,
+        )
+        if routed_order23:
+            if (
+                self.settings is not None
+                and self.last_settings_mutation_result is not None
+                and _settings_mutation_committed(self.last_settings_mutation_result)
+            ):
+                self._reload_settings_view_from_settings(
+                    self.settings,
+                    preserve_custom_vocab_draft=True,
+                )
+            if (
+                self.last_settings_mutation_result is not None
+                and self.last_settings_mutation_result.status
+                == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+                and order22_result.status
+                == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+            ):
+                self.last_settings_mutation_result = order22_result
+            return True
+
+        if self.settings is not None and to_dict(self.settings) != to_dict(next_settings):
+            await self._apply_settings_direct(next_settings)
+        return True
 
     async def _apply_stt_language_audio_settings_via_mutation_service(
         self,
         next_settings: AppSettings,
+        *,
+        reload_settings_view: bool = True,
     ) -> bool:
         base_and_patch = self._order22_patch_base_and_values(next_settings)
         if base_and_patch is None:
@@ -4565,6 +4822,7 @@ class GuiController:
             else _ControllerSttLanguageAudioRuntimeApply(
                 controller=self,
                 settings=committed_settings,
+                reload_settings_view=reload_settings_view,
             )
         )
         service = self.settings_mutation_service or SettingsMutationService(
@@ -4597,6 +4855,7 @@ class GuiController:
                     next_settings,
                     strict_runtime_errors=True,
                     strict_persistence_errors=True,
+                    reload_settings_view=reload_settings_view,
                 )
             except _StrictSettingsSaveFailed:
                 await self._resync_committed_order22_settings_after_strict_save_failure(
@@ -4626,6 +4885,94 @@ class GuiController:
             if result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
                 self._sync_signature_caches(committed_settings)
         self._remember_settings_view_order22_baseline(self.settings)
+        return True
+
+    async def _apply_overlay_osc_output_settings_via_mutation_service(
+        self,
+        next_settings: AppSettings,
+    ) -> bool:
+        base_and_patch = self._order23_patch_base_and_values(next_settings)
+        if base_and_patch is None:
+            return False
+        base_settings, patch_values = base_and_patch
+        if not patch_values:
+            return False
+
+        next_settings = copy.deepcopy(next_settings)
+        await self._apply_desktop_size_preset_persistence_adjustment(
+            base_settings,
+            next_settings,
+        )
+        patch_values = _build_settings_path_patch(
+            base_settings,
+            next_settings,
+            paths=ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
+        )
+        committed_settings = copy.deepcopy(base_settings)
+        _apply_settings_path_patch(committed_settings, patch_values)
+        has_out_of_scope_draft = to_dict(committed_settings) != to_dict(next_settings)
+        repository = _ControllerSettingsPatchRepository(
+            controller=self,
+            committed_settings=committed_settings,
+            surface="overlay_osc_output",
+        )
+        runtime_apply = (
+            _ControllerNoopRuntimeApply()
+            if has_out_of_scope_draft
+            else _ControllerOverlayOscOutputRuntimeApply(
+                controller=self,
+                settings=committed_settings,
+            )
+        )
+        service = self.settings_mutation_service or SettingsMutationService(
+            settings_repository=repository,
+            runtime_apply=runtime_apply,
+            validator=SettingsPathMutationValidator(
+                allowed_paths=ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
+                component="settings_mutation",
+                operation="validate_overlay_osc_output_patch",
+            ),
+        )
+        request = SettingsPathPatch(
+            values_by_path=patch_values,
+            surface=SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT,
+        ).to_mutation_request(
+            expected_revision=None,
+            correlation_id=None,
+        )
+
+        result = await service.mutate(request)
+        self.last_settings_mutation_result = result
+        if not _settings_mutation_committed(result):
+            self.settings = copy.deepcopy(base_settings)
+            self._remember_settings_view_order23_baseline(self.settings)
+            return True
+
+        if has_out_of_scope_draft:
+            try:
+                await self._apply_settings_direct(
+                    next_settings,
+                    strict_runtime_errors=True,
+                    strict_persistence_errors=True,
+                )
+            except _StrictSettingsSaveFailed:
+                await self._resync_committed_order23_settings_after_strict_save_failure(
+                    base_settings=base_settings,
+                    committed_settings=committed_settings,
+                )
+                self.last_settings_mutation_result = (
+                    _overlay_osc_output_save_failed_transaction_result(
+                        operation="apply_overlay_osc_output_full_draft_save"
+                    )
+                )
+            except Exception:
+                self.last_settings_mutation_result = (
+                    _overlay_osc_output_runtime_degraded_transaction_result()
+                )
+        else:
+            if self.settings is None or self.settings is base_settings:
+                self.settings = committed_settings
+        self._remember_settings_view_order23_baseline(self.settings)
         return True
 
     async def verify_api_key(self, provider: str, key: str) -> tuple[bool, str]:
@@ -6476,6 +6823,7 @@ class GuiController:
             if view_settings is not None:
                 view_settings.load_from_settings(settings, config_path=self.config_path)
                 self._remember_settings_view_order22_baseline(settings)
+                self._remember_settings_view_order23_baseline(settings)
                 view_settings.set_overlay_calibration(self.overlay_calibration)
 
         self._refresh_overlay_peer_consumers()
