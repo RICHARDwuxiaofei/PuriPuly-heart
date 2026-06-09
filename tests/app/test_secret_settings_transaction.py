@@ -1,0 +1,1003 @@
+from __future__ import annotations
+
+import ast
+import hashlib
+import importlib
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from puripuly_heart.app.ports import secret_store, settings_repository
+from puripuly_heart.core import messages
+
+SERVICE_MODULE = "puripuly_heart.app.services.secret_settings_transaction"
+
+RAW_SET_SECRET = "sk-test-order26-new-secret-must-not-leak"
+RAW_PREVIOUS_SECRET = "sk-test-order26-previous-secret-must-not-leak"
+RAW_RESTORE_DIAGNOSTIC = "sk-test-order26-restore-diagnostic-must-not-leak"
+
+FORBIDDEN_SERVICE_IMPORT_PREFIXES = (
+    "flet",
+    "keyring",
+    "puripuly_heart.app.adapters",
+    "puripuly_heart.app.wiring",
+    "puripuly_heart.config.settings",
+    "puripuly_heart.config.settings_vnext",
+    "puripuly_heart.core.storage",
+    "puripuly_heart.providers",
+    "puripuly_heart.ui",
+)
+
+
+class RecordingSecretStore:
+    def __init__(
+        self,
+        secrets: dict[str, str] | None = None,
+        *,
+        events: list[tuple[str, str]] | None = None,
+        fail_set: bool = False,
+        fail_clear: bool = False,
+        fail_restore: bool = False,
+    ) -> None:
+        self.secrets = dict(secrets or {})
+        self.events = events if events is not None else []
+        self.fail_set = fail_set
+        self.fail_clear = fail_clear
+        self.fail_restore = fail_restore
+        self.snapshots: list[secret_store.SecretSnapshot] = []
+        self.restores: list[secret_store.SecretSnapshot] = []
+
+    async def get_secret(self, key: str) -> secret_store.SecretReadResult:
+        value = self.secrets.get(key)
+        return secret_store.SecretReadResult(
+            key=key,
+            value=value,
+            revision="secret-current" if value is not None else None,
+            message=None,
+            diagnostics=None,
+        )
+
+    async def set_secret(self, key: str, value: str) -> secret_store.SecretWriteResult:
+        self.events.append(("set", key))
+        if self.fail_set:
+            return secret_store.SecretWriteResult(
+                succeeded=False,
+                key=key,
+                revision=None,
+                message=None,
+                diagnostics=_secret_store_diagnostics(
+                    "set_failed",
+                    operation="set_secret",
+                    raw_value=value,
+                ),
+            )
+        self.secrets[key] = value
+        return secret_store.SecretWriteResult(
+            succeeded=True,
+            key=key,
+            revision="secret-written",
+            message=None,
+            diagnostics=None,
+        )
+
+    async def clear_secret(self, key: str) -> secret_store.SecretWriteResult:
+        self.events.append(("clear", key))
+        if self.fail_clear:
+            return secret_store.SecretWriteResult(
+                succeeded=False,
+                key=key,
+                revision=None,
+                message=None,
+                diagnostics=_secret_store_diagnostics(
+                    "clear_failed",
+                    operation="clear_secret",
+                    raw_value=self.secrets.get(key) or RAW_RESTORE_DIAGNOSTIC,
+                ),
+            )
+        self.secrets.pop(key, None)
+        return secret_store.SecretWriteResult(
+            succeeded=True,
+            key=key,
+            revision="secret-cleared",
+            message=None,
+            diagnostics=None,
+        )
+
+    async def snapshot_secret(self, key: str) -> secret_store.SecretSnapshot:
+        self.events.append(("snapshot", key))
+        value = self.secrets.get(key)
+        snapshot = secret_store.SecretSnapshot(
+            key=key,
+            value=value,
+            revision="secret-before" if value is not None else None,
+            existed=value is not None,
+        )
+        self.snapshots.append(snapshot)
+        return snapshot
+
+    async def restore_secret(
+        self,
+        snapshot: secret_store.SecretSnapshot,
+    ) -> secret_store.SecretWriteResult:
+        self.events.append(("restore", snapshot.key))
+        self.restores.append(snapshot)
+        if self.fail_restore:
+            return secret_store.SecretWriteResult(
+                succeeded=False,
+                key=snapshot.key,
+                revision=None,
+                message=None,
+                diagnostics=_secret_store_diagnostics(
+                    "restore_failed",
+                    operation="restore_secret",
+                    raw_value=RAW_RESTORE_DIAGNOSTIC,
+                ),
+            )
+        if snapshot.existed:
+            assert snapshot.value is not None
+            self.secrets[snapshot.key] = snapshot.value
+        else:
+            self.secrets.pop(snapshot.key, None)
+        return secret_store.SecretWriteResult(
+            succeeded=True,
+            key=snapshot.key,
+            revision="secret-restored",
+            message=None,
+            diagnostics=None,
+        )
+
+
+class RecordingSettingsRepository:
+    def __init__(
+        self,
+        result: settings_repository.SettingsCommitResult,
+        *,
+        events: list[tuple[str, str]] | None = None,
+        raise_on_save: bool = False,
+    ) -> None:
+        self.result = result
+        self.events = events if events is not None else []
+        self.raise_on_save = raise_on_save
+        self.saved_requests: list[settings_repository.SettingsCommitRequest] = []
+
+    async def load(self) -> settings_repository.SettingsSnapshot:
+        raise AssertionError("SecretSettingsTransaction should not load settings here")
+
+    async def save(
+        self,
+        request: settings_repository.SettingsCommitRequest,
+    ) -> settings_repository.SettingsCommitResult:
+        self.events.append(("save", request.reason or ""))
+        self.saved_requests.append(request)
+        if self.raise_on_save:
+            raise RuntimeError("simulated settings save failure")
+        return self.result
+
+
+class RecordingDashboardNeedsKeyPublisher:
+    def __init__(
+        self,
+        *,
+        events: list[tuple[str, str]] | None = None,
+        fail_publish: bool = False,
+    ) -> None:
+        self.events = events if events is not None else []
+        self.fail_publish = fail_publish
+        self.publications: list[tuple[Any, str | None]] = []
+
+    async def publish_dashboard_needs_key_snapshot(
+        self,
+        snapshot: Any,
+        *,
+        correlation_id: str | None,
+    ) -> None:
+        self.events.append(("publish", correlation_id or ""))
+        if self.fail_publish:
+            raise RuntimeError("simulated dashboard needs-key publish failure")
+        self.publications.append((snapshot, correlation_id))
+
+
+def _service_module():
+    return importlib.import_module(SERVICE_MODULE)
+
+
+def _commit_success(
+    values: dict[str, object],
+    *,
+    revision: str = "settings-r2",
+) -> settings_repository.SettingsCommitResult:
+    return settings_repository.SettingsCommitResult(
+        succeeded=True,
+        snapshot=settings_repository.SettingsSnapshot(values=values, revision=revision),
+        message=None,
+        diagnostics=None,
+    )
+
+
+def _commit_failure() -> settings_repository.SettingsCommitResult:
+    return settings_repository.SettingsCommitResult(
+        succeeded=False,
+        snapshot=None,
+        message=None,
+        diagnostics=messages.ErrorDiagnostics(
+            component="settings_repository",
+            operation="save",
+            code="settings_commit_failed",
+            category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
+            visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+            content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+            status_code=None,
+            retry_after_ms=None,
+            fields={"phase": "settings_commit"},
+        ),
+    )
+
+
+def _secret_store_diagnostics(
+    code: str,
+    *,
+    operation: str,
+    raw_value: str,
+) -> messages.ErrorDiagnostics:
+    return messages.ErrorDiagnostics(
+        component="fake_secret_store",
+        operation=operation,
+        code=code,
+        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"raw_value_that_service_must_not_return": raw_value},
+    )
+
+
+FORBIDDEN_RAW_SECRET_VALUES = (
+    RAW_SET_SECRET,
+    RAW_PREVIOUS_SECRET,
+    RAW_RESTORE_DIAGNOSTIC,
+)
+
+
+def _assert_no_raw_secret_values(value: object, *, label: str = "value") -> None:
+    rendered = repr(value)
+    for index, raw in enumerate(FORBIDDEN_RAW_SECRET_VALUES, start=1):
+        if raw in rendered:
+            pytest.fail(f"{label} repr exposed forbidden raw secret sentinel #{index}")
+
+
+def _redacted_repr(value: object) -> str:
+    rendered = repr(value)
+    for raw in FORBIDDEN_RAW_SECRET_VALUES:
+        rendered = rendered.replace(raw, "<raw-secret-redacted>")
+    return rendered
+
+
+def _secret_fingerprint(value: str | None) -> tuple[str] | tuple[str, int, str]:
+    if value is None:
+        return ("absent",)
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return ("present", len(value), digest)
+
+
+def _assert_secret_value_matches(
+    actual: str | None,
+    expected: str | None,
+    *,
+    label: str,
+) -> None:
+    actual_fingerprint = _secret_fingerprint(actual)
+    expected_fingerprint = _secret_fingerprint(expected)
+    if actual_fingerprint != expected_fingerprint:
+        pytest.fail(
+            f"{label} secret fingerprint mismatch: "
+            f"actual={actual_fingerprint!r}, expected={expected_fingerprint!r}"
+        )
+
+
+def _assert_secret_key_absent(
+    secrets: Mapping[str, str],
+    key: str,
+    *,
+    label: str,
+) -> None:
+    if key in secrets:
+        pytest.fail(
+            f"{label} unexpectedly retained secret key {key!r} with "
+            f"fingerprint={_secret_fingerprint(secrets.get(key))!r}"
+        )
+
+
+def _values_match(actual: object, expected: object) -> bool:
+    if isinstance(expected, bool):
+        return actual is expected
+    return actual == expected
+
+
+def _assert_diagnostics_field_matches(
+    actual_fields: Mapping[str, Any],
+    key: str,
+    expected_value: object,
+    *,
+    label: str,
+) -> None:
+    if key not in actual_fields:
+        pytest.fail(f"{label} missing field {key!r}; actual keys={sorted(actual_fields)!r}")
+
+    actual_value = actual_fields[key]
+    if not _values_match(actual_value, expected_value):
+        pytest.fail(
+            f"{label} field {key!r} mismatch: "
+            f"actual={_redacted_repr(actual_value)}, "
+            f"expected={_redacted_repr(expected_value)}"
+        )
+
+
+def _assert_diagnostics_fields_match(
+    actual_fields: Mapping[str, Any],
+    expected_fields: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    actual_keys = set(actual_fields)
+    expected_keys = set(expected_fields)
+    if actual_keys != expected_keys:
+        pytest.fail(
+            f"{label} field keys mismatch: "
+            f"actual={sorted(actual_keys)!r}, expected={sorted(expected_keys)!r}"
+        )
+
+    for key, expected_value in expected_fields.items():
+        actual_value = actual_fields[key]
+        if not _values_match(actual_value, expected_value):
+            pytest.fail(
+                f"{label} field {key!r} mismatch: "
+                f"actual={_redacted_repr(actual_value)}, "
+                f"expected={_redacted_repr(expected_value)}"
+            )
+
+
+def _only_item(items: list[Any], *, label: str) -> Any:
+    if len(items) != 1:
+        pytest.fail(f"{label} count mismatch: actual={len(items)}, expected=1")
+    return items[0]
+
+
+def _assert_secret_snapshot_matches(
+    snapshot: secret_store.SecretSnapshot,
+    *,
+    expected_key: str,
+    expected_value: str | None,
+    expected_revision: str | None,
+    expected_existed: bool,
+    label: str,
+) -> None:
+    if snapshot.key != expected_key:
+        pytest.fail(
+            f"{label} key mismatch: "
+            f"actual={_redacted_repr(snapshot.key)}, expected={_redacted_repr(expected_key)}"
+        )
+    if snapshot.revision != expected_revision:
+        pytest.fail(
+            f"{label} revision mismatch: "
+            f"actual={_redacted_repr(snapshot.revision)}, "
+            f"expected={_redacted_repr(expected_revision)}"
+        )
+    if snapshot.existed is not expected_existed:
+        pytest.fail(
+            f"{label} existed mismatch: "
+            f"actual={snapshot.existed!r}, expected={expected_existed!r}"
+        )
+    _assert_secret_value_matches(
+        snapshot.value,
+        expected_value,
+        label=f"{label} value",
+    )
+
+
+def _imported_modules(module_file: str) -> set[str]:
+    tree = ast.parse(Path(module_file).read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    return imported
+
+
+def test_secret_settings_transaction_service_has_no_ui_or_concrete_store_imports() -> None:
+    module = _service_module()
+    imports = _imported_modules(module.__file__ or "")
+
+    assert not {
+        imported
+        for imported in imports
+        for forbidden in FORBIDDEN_SERVICE_IMPORT_PREFIXES
+        if imported == forbidden or imported.startswith(f"{forbidden}.")
+    }
+
+
+@pytest.mark.asyncio
+async def test_successful_set_snapshots_writes_commits_then_publishes_dashboard_snapshot() -> None:
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    store = RecordingSecretStore(
+        {"openrouter_api_key": RAW_PREVIOUS_SECRET},
+        events=events,
+    )
+    repository = RecordingSettingsRepository(
+        _commit_success({"api_key_verified": {"openrouter": False}}),
+        events=events,
+    )
+    publisher = RecordingDashboardNeedsKeyPublisher(events=events)
+    request = secret_settings.SecretSetRequest(
+        secret_key="openrouter_api_key",
+        secret_value=RAW_SET_SECRET,
+        settings_values={"api_key_verified": {"openrouter": False}},
+        expected_settings_revision="settings-r1",
+        reason="secret_set",
+        correlation_id="corr-set-success",
+        dashboard_needs_key=secret_settings.DashboardNeedsKeySnapshot(
+            translation_needs_key=True,
+            stt_needs_key=None,
+        ),
+    )
+    _assert_no_raw_secret_values(request, label="SecretSetRequest")
+
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=store,
+        settings_repository=repository,
+        dashboard_needs_key_publisher=publisher,
+    ).set_provider_secret(request)
+
+    _assert_no_raw_secret_values(result, label="set success result")
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    assert result.message is None
+    assert result.diagnostics is None
+    assert events == [
+        ("snapshot", "openrouter_api_key"),
+        ("set", "openrouter_api_key"),
+        ("save", "secret_set"),
+        ("publish", "corr-set-success"),
+    ]
+    _assert_secret_snapshot_matches(
+        _only_item(store.snapshots, label="secret snapshots"),
+        expected_key="openrouter_api_key",
+        expected_value=RAW_PREVIOUS_SECRET,
+        expected_revision="secret-before",
+        expected_existed=True,
+        label="set snapshot",
+    )
+    _assert_secret_value_matches(
+        store.secrets.get("openrouter_api_key"),
+        RAW_SET_SECRET,
+        label="stored openrouter secret",
+    )
+    assert len(repository.saved_requests) == 1
+    saved_request = repository.saved_requests[0]
+    _assert_no_raw_secret_values(saved_request, label="settings commit request")
+    assert saved_request.expected_revision == "settings-r1"
+    assert saved_request.reason == "secret_set"
+    assert saved_request.values["api_key_verified"]["openrouter"] is False  # type: ignore[index]
+    assert publisher.publications == [
+        (
+            secret_settings.DashboardNeedsKeySnapshot(
+                translation_needs_key=True,
+                stt_needs_key=None,
+                settings_revision="settings-r2",
+            ),
+            "corr-set-success",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dashboard_publish_failure_does_not_change_successful_transaction_result() -> None:
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    store = RecordingSecretStore(events=events)
+    repository = RecordingSettingsRepository(
+        _commit_success({"api_key_verified": {"openrouter": False}}),
+        events=events,
+    )
+    publisher = RecordingDashboardNeedsKeyPublisher(events=events, fail_publish=True)
+
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=store,
+        settings_repository=repository,
+        dashboard_needs_key_publisher=publisher,
+    ).set_provider_secret(
+        secret_settings.SecretSetRequest(
+            secret_key="openrouter_api_key",
+            secret_value=RAW_SET_SECRET,
+            settings_values={"api_key_verified": {"openrouter": False}},
+            expected_settings_revision="settings-r1",
+            reason="secret_set",
+            correlation_id="corr-set-publish-failed",
+            dashboard_needs_key=secret_settings.DashboardNeedsKeySnapshot(
+                translation_needs_key=True,
+                stt_needs_key=None,
+            ),
+        )
+    )
+
+    _assert_no_raw_secret_values(result, label="publish failure result")
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    assert events == [
+        ("snapshot", "openrouter_api_key"),
+        ("set", "openrouter_api_key"),
+        ("save", "secret_set"),
+        ("publish", "corr-set-publish-failed"),
+    ]
+    _assert_secret_value_matches(
+        store.secrets.get("openrouter_api_key"),
+        RAW_SET_SECRET,
+        label="stored openrouter secret after publish failure",
+    )
+    assert len(repository.saved_requests) == 1
+    assert publisher.publications == []
+
+
+@pytest.mark.asyncio
+async def test_settings_commit_failure_after_set_restores_previous_secret_without_dashboard_publish() -> (
+    None
+):
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    store = RecordingSecretStore(
+        {"openrouter_api_key": RAW_PREVIOUS_SECRET},
+        events=events,
+    )
+    repository = RecordingSettingsRepository(_commit_failure(), events=events)
+    publisher = RecordingDashboardNeedsKeyPublisher(events=events)
+
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=store,
+        settings_repository=repository,
+        dashboard_needs_key_publisher=publisher,
+    ).set_provider_secret(
+        secret_settings.SecretSetRequest(
+            secret_key="openrouter_api_key",
+            secret_value=RAW_SET_SECRET,
+            settings_values={"api_key_verified": {"openrouter": False}},
+            expected_settings_revision="settings-r1",
+            reason="secret_set",
+            correlation_id="corr-set-commit-failed",
+            dashboard_needs_key=secret_settings.DashboardNeedsKeySnapshot(
+                translation_needs_key=True,
+                stt_needs_key=None,
+            ),
+        )
+    )
+
+    _assert_no_raw_secret_values(result, label="set commit failure result")
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORED
+    assert events == [
+        ("snapshot", "openrouter_api_key"),
+        ("set", "openrouter_api_key"),
+        ("save", "secret_set"),
+        ("restore", "openrouter_api_key"),
+    ]
+    _assert_secret_value_matches(
+        store.secrets.get("openrouter_api_key"),
+        RAW_PREVIOUS_SECRET,
+        label="restored openrouter secret",
+    )
+    assert len(repository.saved_requests) == 1
+    assert publisher.publications == []
+    assert result.diagnostics is not None
+    assert result.diagnostics.content_policy == messages.CONTENT_POLICY_METADATA_ONLY
+    _assert_diagnostics_field_matches(
+        result.diagnostics.fields,
+        "secret_key",
+        "openrouter_api_key",
+        label="set commit failure diagnostics",
+    )
+    _assert_diagnostics_field_matches(
+        result.diagnostics.fields,
+        "previous_secret_existed",
+        True,
+        label="set commit failure diagnostics",
+    )
+
+
+@pytest.mark.asyncio
+async def test_settings_save_exception_after_set_restores_previous_secret() -> None:
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    store = RecordingSecretStore(
+        {"openrouter_api_key": RAW_PREVIOUS_SECRET},
+        events=events,
+    )
+    repository = RecordingSettingsRepository(
+        _commit_success({"api_key_verified": {"openrouter": False}}),
+        events=events,
+        raise_on_save=True,
+    )
+    publisher = RecordingDashboardNeedsKeyPublisher(events=events)
+
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=store,
+        settings_repository=repository,
+        dashboard_needs_key_publisher=publisher,
+    ).set_provider_secret(
+        secret_settings.SecretSetRequest(
+            secret_key="openrouter_api_key",
+            secret_value=RAW_SET_SECRET,
+            settings_values={"api_key_verified": {"openrouter": False}},
+            expected_settings_revision="settings-r1",
+            reason="secret_set",
+            correlation_id="corr-set-save-raised",
+            dashboard_needs_key=secret_settings.DashboardNeedsKeySnapshot(
+                translation_needs_key=True,
+                stt_needs_key=None,
+            ),
+        )
+    )
+
+    _assert_no_raw_secret_values(result, label="save exception restore result")
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORED
+    assert events == [
+        ("snapshot", "openrouter_api_key"),
+        ("set", "openrouter_api_key"),
+        ("save", "secret_set"),
+        ("restore", "openrouter_api_key"),
+    ]
+    _assert_secret_value_matches(
+        store.secrets.get("openrouter_api_key"),
+        RAW_PREVIOUS_SECRET,
+        label="restored openrouter secret after save exception",
+    )
+    _assert_secret_snapshot_matches(
+        _only_item(store.restores, label="secret restores"),
+        expected_key="openrouter_api_key",
+        expected_value=RAW_PREVIOUS_SECRET,
+        expected_revision="secret-before",
+        expected_existed=True,
+        label="save exception restore snapshot",
+    )
+    assert len(repository.saved_requests) == 1
+    assert publisher.publications == []
+    assert result.diagnostics is not None
+    _assert_diagnostics_field_matches(
+        result.diagnostics.fields,
+        "previous_secret_existed",
+        True,
+        label="save exception restore diagnostics",
+    )
+
+
+@pytest.mark.asyncio
+async def test_absent_secret_set_commit_failure_clears_newly_written_secret_on_restore() -> None:
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    store = RecordingSecretStore(events=events)
+    repository = RecordingSettingsRepository(_commit_failure(), events=events)
+    publisher = RecordingDashboardNeedsKeyPublisher(events=events)
+
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=store,
+        settings_repository=repository,
+        dashboard_needs_key_publisher=publisher,
+    ).set_provider_secret(
+        secret_settings.SecretSetRequest(
+            secret_key="openrouter_api_key",
+            secret_value=RAW_SET_SECRET,
+            settings_values={"api_key_verified": {"openrouter": False}},
+            expected_settings_revision="settings-r1",
+            reason="secret_set",
+            correlation_id="corr-set-absent-commit-failed",
+            dashboard_needs_key=secret_settings.DashboardNeedsKeySnapshot(
+                translation_needs_key=True,
+                stt_needs_key=None,
+            ),
+        )
+    )
+
+    _assert_no_raw_secret_values(result, label="absent set restore result")
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORED
+    assert events == [
+        ("snapshot", "openrouter_api_key"),
+        ("set", "openrouter_api_key"),
+        ("save", "secret_set"),
+        ("restore", "openrouter_api_key"),
+    ]
+    _assert_secret_snapshot_matches(
+        _only_item(store.restores, label="secret restores"),
+        expected_key="openrouter_api_key",
+        expected_value=None,
+        expected_revision=None,
+        expected_existed=False,
+        label="absent set restore snapshot",
+    )
+    _assert_secret_key_absent(
+        store.secrets,
+        "openrouter_api_key",
+        label="absent set restore",
+    )
+    assert len(repository.saved_requests) == 1
+    assert publisher.publications == []
+    assert result.diagnostics is not None
+    _assert_diagnostics_field_matches(
+        result.diagnostics.fields,
+        "previous_secret_existed",
+        False,
+        label="absent set restore diagnostics",
+    )
+
+
+@pytest.mark.asyncio
+async def test_restore_failure_after_settings_commit_failure_reports_compensation_failure_only() -> (
+    None
+):
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    store = RecordingSecretStore(
+        {"openrouter_api_key": RAW_PREVIOUS_SECRET},
+        events=events,
+        fail_restore=True,
+    )
+    repository = RecordingSettingsRepository(_commit_failure(), events=events)
+    publisher = RecordingDashboardNeedsKeyPublisher(events=events)
+
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=store,
+        settings_repository=repository,
+        dashboard_needs_key_publisher=publisher,
+    ).set_provider_secret(
+        secret_settings.SecretSetRequest(
+            secret_key="openrouter_api_key",
+            secret_value=RAW_SET_SECRET,
+            settings_values={"api_key_verified": {"openrouter": False}},
+            expected_settings_revision="settings-r1",
+            reason="secret_set",
+            correlation_id="corr-set-restore-failed",
+            dashboard_needs_key=secret_settings.DashboardNeedsKeySnapshot(
+                translation_needs_key=True,
+                stt_needs_key=None,
+            ),
+        )
+    )
+
+    _assert_no_raw_secret_values(result, label="restore failure result")
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORE_FAILED
+    assert events == [
+        ("snapshot", "openrouter_api_key"),
+        ("set", "openrouter_api_key"),
+        ("save", "secret_set"),
+        ("restore", "openrouter_api_key"),
+    ]
+    _assert_secret_value_matches(
+        store.secrets.get("openrouter_api_key"),
+        RAW_SET_SECRET,
+        label="unrestored openrouter secret",
+    )
+    assert publisher.publications == []
+    assert result.diagnostics is not None
+    assert result.diagnostics.component == "secret_settings_transaction"
+    assert result.diagnostics.operation == "restore_secret"
+    assert result.diagnostics.code == "settings_commit_failed_secret_restore_failed"
+    assert result.diagnostics.content_policy == messages.CONTENT_POLICY_METADATA_ONLY
+    _assert_diagnostics_fields_match(
+        result.diagnostics.fields,
+        {
+            "secret_key": "openrouter_api_key",
+            "action": "set",
+            "previous_secret_existed": True,
+            "settings_commit_succeeded": False,
+            "secret_restore_succeeded": False,
+        },
+        label="restore failure diagnostics",
+    )
+
+
+@pytest.mark.asyncio
+async def test_successful_clear_snapshots_clears_commits_then_publishes_dashboard_snapshot() -> (
+    None
+):
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    store = RecordingSecretStore(
+        {"deepgram_api_key": RAW_PREVIOUS_SECRET},
+        events=events,
+    )
+    repository = RecordingSettingsRepository(
+        _commit_success({"api_key_verified": {"deepgram": False}}, revision="settings-r-clear"),
+        events=events,
+    )
+    publisher = RecordingDashboardNeedsKeyPublisher(events=events)
+
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=store,
+        settings_repository=repository,
+        dashboard_needs_key_publisher=publisher,
+    ).clear_provider_secret(
+        secret_settings.SecretClearRequest(
+            secret_key="deepgram_api_key",
+            settings_values={"api_key_verified": {"deepgram": False}},
+            expected_settings_revision="settings-r-before-clear",
+            reason="secret_clear",
+            correlation_id="corr-clear-success",
+            dashboard_needs_key=secret_settings.DashboardNeedsKeySnapshot(
+                translation_needs_key=None,
+                stt_needs_key=True,
+            ),
+        )
+    )
+
+    _assert_no_raw_secret_values(result, label="clear success result")
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    assert events == [
+        ("snapshot", "deepgram_api_key"),
+        ("clear", "deepgram_api_key"),
+        ("save", "secret_clear"),
+        ("publish", "corr-clear-success"),
+    ]
+    _assert_secret_key_absent(
+        store.secrets,
+        "deepgram_api_key",
+        label="successful clear",
+    )
+    _assert_no_raw_secret_values(
+        repository.saved_requests[0],
+        label="clear settings commit request",
+    )
+    assert repository.saved_requests[0].values["api_key_verified"]["deepgram"] is False  # type: ignore[index]
+    assert publisher.publications == [
+        (
+            secret_settings.DashboardNeedsKeySnapshot(
+                translation_needs_key=None,
+                stt_needs_key=True,
+                settings_revision="settings-r-clear",
+            ),
+            "corr-clear-success",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_clear_absent_secret_commit_failure_restores_absent_snapshot_by_clearing() -> None:
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    store = RecordingSecretStore(events=events)
+    repository = RecordingSettingsRepository(_commit_failure(), events=events)
+    publisher = RecordingDashboardNeedsKeyPublisher(events=events)
+
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=store,
+        settings_repository=repository,
+        dashboard_needs_key_publisher=publisher,
+    ).clear_provider_secret(
+        secret_settings.SecretClearRequest(
+            secret_key="soniox_api_key",
+            settings_values={"api_key_verified": {"soniox": False}},
+            expected_settings_revision="settings-r-before-clear",
+            reason="secret_clear",
+            correlation_id="corr-clear-absent-failed",
+            dashboard_needs_key=secret_settings.DashboardNeedsKeySnapshot(
+                translation_needs_key=None,
+                stt_needs_key=True,
+            ),
+        )
+    )
+
+    _assert_no_raw_secret_values(result, label="absent clear restore result")
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORED
+    assert events == [
+        ("snapshot", "soniox_api_key"),
+        ("clear", "soniox_api_key"),
+        ("save", "secret_clear"),
+        ("restore", "soniox_api_key"),
+    ]
+    _assert_secret_snapshot_matches(
+        _only_item(store.restores, label="secret restores"),
+        expected_key="soniox_api_key",
+        expected_value=None,
+        expected_revision=None,
+        expected_existed=False,
+        label="absent clear restore snapshot",
+    )
+    _assert_secret_key_absent(
+        store.secrets,
+        "soniox_api_key",
+        label="absent clear restore",
+    )
+    assert publisher.publications == []
+    assert result.diagnostics is not None
+    _assert_diagnostics_field_matches(
+        result.diagnostics.fields,
+        "previous_secret_existed",
+        False,
+        label="absent clear restore diagnostics",
+    )
+
+
+@pytest.mark.asyncio
+async def test_clear_write_failure_returns_secret_write_failed_without_settings_or_dashboard() -> (
+    None
+):
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    store = RecordingSecretStore(
+        {"deepgram_api_key": RAW_PREVIOUS_SECRET},
+        events=events,
+        fail_clear=True,
+    )
+    repository = RecordingSettingsRepository(_commit_success({}), events=events)
+    publisher = RecordingDashboardNeedsKeyPublisher(events=events)
+
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=store,
+        settings_repository=repository,
+        dashboard_needs_key_publisher=publisher,
+    ).clear_provider_secret(
+        secret_settings.SecretClearRequest(
+            secret_key="deepgram_api_key",
+            settings_values={"api_key_verified": {"deepgram": False}},
+            expected_settings_revision="settings-r-before-clear",
+            reason="secret_clear",
+            correlation_id="corr-clear-write-failed",
+            dashboard_needs_key=secret_settings.DashboardNeedsKeySnapshot(
+                translation_needs_key=None,
+                stt_needs_key=True,
+            ),
+        )
+    )
+
+    _assert_no_raw_secret_values(result, label="clear write failure result")
+    assert result.status == messages.TRANSACTION_STATUS_SECRET_WRITE_FAILED
+    assert events == [("snapshot", "deepgram_api_key"), ("clear", "deepgram_api_key")]
+    _assert_secret_value_matches(
+        store.secrets.get("deepgram_api_key"),
+        RAW_PREVIOUS_SECRET,
+        label="uncleared deepgram secret after clear failure",
+    )
+    assert repository.saved_requests == []
+    assert publisher.publications == []
+    assert result.diagnostics is not None
+    assert result.diagnostics.component == "secret_settings_transaction"
+    assert result.diagnostics.operation == "clear_secret"
+    assert result.diagnostics.content_policy == messages.CONTENT_POLICY_METADATA_ONLY
+
+
+@pytest.mark.asyncio
+async def test_secret_write_failure_returns_secret_write_failed_without_settings_or_dashboard() -> (
+    None
+):
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    store = RecordingSecretStore(events=events, fail_set=True)
+    repository = RecordingSettingsRepository(_commit_success({}), events=events)
+    publisher = RecordingDashboardNeedsKeyPublisher(events=events)
+
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=store,
+        settings_repository=repository,
+        dashboard_needs_key_publisher=publisher,
+    ).set_provider_secret(
+        secret_settings.SecretSetRequest(
+            secret_key="openrouter_api_key",
+            secret_value=RAW_SET_SECRET,
+            settings_values={"api_key_verified": {"openrouter": False}},
+            expected_settings_revision="settings-r1",
+            reason="secret_set",
+            correlation_id="corr-set-write-failed",
+            dashboard_needs_key=secret_settings.DashboardNeedsKeySnapshot(
+                translation_needs_key=True,
+                stt_needs_key=None,
+            ),
+        )
+    )
+
+    _assert_no_raw_secret_values(result, label="set write failure result")
+    assert result.status == messages.TRANSACTION_STATUS_SECRET_WRITE_FAILED
+    assert events == [("snapshot", "openrouter_api_key"), ("set", "openrouter_api_key")]
+    assert repository.saved_requests == []
+    assert publisher.publications == []
+    assert result.diagnostics is not None
+    assert result.diagnostics.component == "secret_settings_transaction"
+    assert result.diagnostics.operation == "set_secret"
+    assert result.diagnostics.content_policy == messages.CONTENT_POLICY_METADATA_ONLY
