@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Protocol
 
 from puripuly_heart.app.ports._settings_values import freeze_settings_values
+from puripuly_heart.app.ports.provider_verifier import (
+    PROVIDER_VERIFICATION_STATUS_VERIFIED,
+    ProviderVerificationRequest,
+    ProviderVerificationResult,
+    ProviderVerifierPort,
+)
 from puripuly_heart.app.ports.secret_store import SecretSnapshot, SecretStorePort
 from puripuly_heart.app.ports.settings_repository import (
     SettingsCommitRequest,
@@ -14,13 +22,32 @@ from puripuly_heart.core.messages import (
     CONTENT_POLICY_METADATA_ONLY,
     DIAGNOSTIC_CATEGORY_TRANSACTION,
     DIAGNOSTIC_VISIBILITY_BASIC,
+    TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED,
     TRANSACTION_STATUS_SECRET_WRITE_FAILED,
+    TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORE_FAILED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
+    DiagnosticFieldValue,
     ErrorDiagnostics,
     TransactionResult,
     UserMessageRef,
+)
+
+_VERIFICATION_EVIDENCE_SENSITIVE_KEY_FRAGMENTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "bearer",
+    "body",
+    "credential_value",
+    "password",
+    "payload",
+    "private_key",
+    "raw",
+    "refresh_token",
+    "secret",
+    "token",
 )
 
 
@@ -58,6 +85,30 @@ class SecretClearRequest:
         object.__setattr__(self, "settings_values", freeze_settings_values(self.settings_values))
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderSecretVerificationRequest:
+    provider: str
+    secret_key: str
+    secret_value: str = field(repr=False)
+    secret_revision: str | None = None
+    verifier_context: Mapping[str, DiagnosticFieldValue] = field(default_factory=dict)
+    expected_settings_revision: str | None = None
+    reason: str | None = None
+    correlation_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "verifier_context",
+            MappingProxyType(
+                _sanitize_verification_fields(
+                    self.verifier_context,
+                    secret_value=self.secret_value,
+                )
+            ),
+        )
+
+
 class DashboardNeedsKeySnapshotPublisher(Protocol):
     async def publish_dashboard_needs_key_snapshot(
         self,
@@ -72,6 +123,7 @@ class SecretSettingsTransaction:
     secret_store: SecretStorePort
     settings_repository: SettingsRepositoryPort
     dashboard_needs_key_publisher: DashboardNeedsKeySnapshotPublisher | None = None
+    provider_verifier: ProviderVerifierPort | None = None
 
     async def set_provider_secret(self, request: SecretSetRequest) -> TransactionResult:
         try:
@@ -138,6 +190,103 @@ class SecretSettingsTransaction:
             request=request,
             snapshot=snapshot,
             action="clear",
+        )
+
+    async def verify_provider_secret(
+        self,
+        request: ProviderSecretVerificationRequest,
+    ) -> TransactionResult:
+        if self.provider_verifier is None:
+            return _provider_verification_failed_result(
+                provider=request.provider,
+                secret_key=request.secret_key,
+                code="provider_verifier_missing",
+                phase="verify_provider_secret",
+            )
+        if not request.verifier_context:
+            return _provider_verification_failed_result(
+                provider=request.provider,
+                secret_key=request.secret_key,
+                code="provider_verification_context_missing",
+                phase="verify_provider_secret",
+            )
+
+        try:
+            verification_result = await self.provider_verifier.verify_provider_secret(
+                ProviderVerificationRequest(
+                    provider=request.provider,
+                    secret_key=request.secret_key,
+                    secret_value=request.secret_value,
+                    secret_revision=request.secret_revision,
+                    context=request.verifier_context,
+                )
+            )
+        except Exception:
+            return _provider_verification_failed_result(
+                provider=request.provider,
+                secret_key=request.secret_key,
+                code="provider_verifier_exception",
+                phase="verify_provider_secret",
+            )
+
+        if (
+            verification_result.provider != request.provider
+            or verification_result.secret_key != request.secret_key
+        ):
+            return _provider_verification_failed_result(
+                provider=request.provider,
+                secret_key=request.secret_key,
+                code="provider_verifier_result_mismatch",
+                phase="verify_provider_secret",
+                verifier_status=verification_result.status,
+            )
+
+        settings_values = {
+            f"state.provider_verification.{request.provider}": _verification_entry_values(
+                request=request,
+                result=verification_result,
+            )
+        }
+        try:
+            commit_result = await self.settings_repository.save(
+                SettingsCommitRequest(
+                    values=settings_values,
+                    expected_revision=request.expected_settings_revision,
+                    reason=request.reason,
+                )
+            )
+        except Exception:
+            return _settings_commit_failed_result(
+                provider=request.provider,
+                secret_key=request.secret_key,
+                message=None,
+            )
+
+        if not commit_result.succeeded or commit_result.snapshot is None:
+            return TransactionResult(
+                status=TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED,
+                message=commit_result.message,
+                diagnostics=commit_result.diagnostics
+                or _settings_commit_failed_diagnostics(
+                    provider=request.provider,
+                    secret_key=request.secret_key,
+                ),
+            )
+
+        if verification_result.status == PROVIDER_VERIFICATION_STATUS_VERIFIED:
+            return TransactionResult(
+                status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
+                message=verification_result.message or commit_result.message,
+                diagnostics=commit_result.diagnostics,
+            )
+
+        return _provider_verification_failed_result(
+            provider=request.provider,
+            secret_key=request.secret_key,
+            code="provider_verification_failed",
+            phase="verify_provider_secret",
+            verifier_status=verification_result.status,
+            message=verification_result.message or commit_result.message,
         )
 
     async def _commit_settings_or_restore_secret(
@@ -263,6 +412,138 @@ def _secret_write_failed_result(
     )
 
 
+def _normalized_evidence_key(key: str) -> str:
+    return "".join(character.lower() if character.isalnum() else "_" for character in key)
+
+
+def _is_sensitive_evidence_key(key: str) -> bool:
+    normalized = _normalized_evidence_key(key)
+    return any(
+        fragment in normalized for fragment in _VERIFICATION_EVIDENCE_SENSITIVE_KEY_FRAGMENTS
+    )
+
+
+def _is_safe_diagnostic_field_value(value: object) -> bool:
+    return value is None or isinstance(value, str | int | float | bool)
+
+
+def _sanitize_verification_fields(
+    values: Mapping[str, DiagnosticFieldValue],
+    *,
+    secret_value: str,
+) -> dict[str, DiagnosticFieldValue]:
+    sanitized: dict[str, DiagnosticFieldValue] = {}
+    for raw_key, raw_value in values.items():
+        if not isinstance(raw_key, str):
+            continue
+        if secret_value and secret_value in raw_key:
+            continue
+        if _is_sensitive_evidence_key(raw_key):
+            continue
+        if not _is_safe_diagnostic_field_value(raw_value):
+            continue
+        if isinstance(raw_value, str) and secret_value and secret_value in raw_value:
+            continue
+        sanitized[raw_key] = raw_value
+    return sanitized
+
+
+def _secret_fingerprint(secret_value: str) -> str:
+    digest = hashlib.sha256(secret_value.encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
+
+
+def _verification_entry_values(
+    *,
+    request: ProviderSecretVerificationRequest,
+    result: ProviderVerificationResult,
+) -> dict[str, object]:
+    return {
+        "status": result.status,
+        "provider": request.provider,
+        "secret_key": request.secret_key,
+        "secret_revision": result.secret_revision or request.secret_revision,
+        "secret_fingerprint": _secret_fingerprint(request.secret_value),
+        "verifier_context": dict(request.verifier_context),
+        "verifier_evidence": _sanitize_verification_fields(
+            result.evidence,
+            secret_value=request.secret_value,
+        ),
+    }
+
+
+def _provider_verification_failed_result(
+    *,
+    provider: str,
+    secret_key: str,
+    code: str,
+    phase: str,
+    verifier_status: str | None = None,
+    message: UserMessageRef | None = None,
+) -> TransactionResult:
+    fields: dict[str, DiagnosticFieldValue] = {
+        "provider": provider,
+        "secret_key": secret_key,
+        "phase": phase,
+        "verification_succeeded": False,
+    }
+    if verifier_status is not None:
+        fields["verifier_status"] = verifier_status
+    return TransactionResult(
+        status=TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED,
+        message=message,
+        diagnostics=ErrorDiagnostics(
+            component="secret_settings_transaction",
+            operation="verify_provider_secret",
+            code=code,
+            category=DIAGNOSTIC_CATEGORY_TRANSACTION,
+            visibility=DIAGNOSTIC_VISIBILITY_BASIC,
+            content_policy=CONTENT_POLICY_METADATA_ONLY,
+            status_code=None,
+            retry_after_ms=None,
+            fields=fields,
+        ),
+    )
+
+
+def _settings_commit_failed_result(
+    *,
+    provider: str,
+    secret_key: str,
+    message: UserMessageRef | None,
+) -> TransactionResult:
+    return TransactionResult(
+        status=TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED,
+        message=message,
+        diagnostics=_settings_commit_failed_diagnostics(
+            provider=provider,
+            secret_key=secret_key,
+        ),
+    )
+
+
+def _settings_commit_failed_diagnostics(
+    *,
+    provider: str,
+    secret_key: str,
+) -> ErrorDiagnostics:
+    return ErrorDiagnostics(
+        component="secret_settings_transaction",
+        operation="commit_provider_verification",
+        code="settings_commit_failed",
+        category=DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={
+            "provider": provider,
+            "secret_key": secret_key,
+            "settings_commit_succeeded": False,
+        },
+    )
+
+
 def _compensation_diagnostics(
     *,
     code: str,
@@ -293,6 +574,7 @@ def _compensation_diagnostics(
 __all__ = [
     "DashboardNeedsKeySnapshot",
     "DashboardNeedsKeySnapshotPublisher",
+    "ProviderSecretVerificationRequest",
     "SecretClearRequest",
     "SecretSetRequest",
     "SecretSettingsTransaction",

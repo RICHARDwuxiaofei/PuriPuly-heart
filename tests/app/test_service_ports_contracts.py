@@ -220,6 +220,7 @@ def test_secret_broker_provider_and_runtime_ports_expose_service_result_seams() 
 
     request_hints = get_type_hints(provider_verifier.ProviderVerificationRequest)
     assert request_hints["secret_value"] is str
+    assert "not-logged" not in repr(verification_request)
     assert "secret_value" not in {
         field.name for field in fields(provider_verifier.ProviderVerificationResult)
     }

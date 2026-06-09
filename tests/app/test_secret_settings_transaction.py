@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from puripuly_heart.app.ports import secret_store, settings_repository
+from puripuly_heart.app.ports import provider_verifier, secret_store, settings_repository
 from puripuly_heart.core import messages
 
 SERVICE_MODULE = "puripuly_heart.app.services.secret_settings_transaction"
@@ -17,6 +17,8 @@ SERVICE_MODULE = "puripuly_heart.app.services.secret_settings_transaction"
 RAW_SET_SECRET = "sk-test-order26-new-secret-must-not-leak"
 RAW_PREVIOUS_SECRET = "sk-test-order26-previous-secret-must-not-leak"
 RAW_RESTORE_DIAGNOSTIC = "sk-test-order26-restore-diagnostic-must-not-leak"
+RAW_VERIFY_SECRET = "sk-test-order27-verify-secret-must-not-leak"
+RAW_VERIFY_KEY_MATERIAL = "sk-order27-material-must-not-leak"
 
 FORBIDDEN_SERVICE_IMPORT_PREFIXES = (
     "flet",
@@ -199,6 +201,32 @@ class RecordingDashboardNeedsKeyPublisher:
         self.publications.append((snapshot, correlation_id))
 
 
+class RecordingProviderVerifier:
+    def __init__(
+        self,
+        result: provider_verifier.ProviderVerificationResult | None = None,
+        *,
+        events: list[tuple[str, str]] | None = None,
+        raise_on_verify: bool = False,
+    ) -> None:
+        self.result = result
+        self.events = events if events is not None else []
+        self.raise_on_verify = raise_on_verify
+        self.requests: list[provider_verifier.ProviderVerificationRequest] = []
+
+    async def verify_provider_secret(
+        self,
+        request: provider_verifier.ProviderVerificationRequest,
+    ) -> provider_verifier.ProviderVerificationResult:
+        self.events.append(("verify", request.provider))
+        self.requests.append(request)
+        if self.raise_on_verify:
+            raise RuntimeError("simulated verifier failure with redacted secret")
+        if self.result is None:
+            pytest.fail("RecordingProviderVerifier requires a configured result")
+        return self.result
+
+
 def _service_module():
     return importlib.import_module(SERVICE_MODULE)
 
@@ -258,6 +286,8 @@ FORBIDDEN_RAW_SECRET_VALUES = (
     RAW_SET_SECRET,
     RAW_PREVIOUS_SECRET,
     RAW_RESTORE_DIAGNOSTIC,
+    RAW_VERIFY_SECRET,
+    RAW_VERIFY_KEY_MATERIAL,
 )
 
 
@@ -418,6 +448,341 @@ def test_secret_settings_transaction_service_has_no_ui_or_concrete_store_imports
         for forbidden in FORBIDDEN_SERVICE_IMPORT_PREFIXES
         if imported == forbidden or imported.startswith(f"{forbidden}.")
     }
+
+
+@pytest.mark.asyncio
+async def test_verify_provider_secret_commits_bound_evidence_after_verifier_success() -> None:
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    verifier = RecordingProviderVerifier(
+        provider_verifier.ProviderVerificationResult(
+            status="verified",
+            provider="openrouter",
+            secret_key="openrouter_api_key",
+            secret_revision="secret-r1",
+            evidence={
+                "verifier": "openrouter",
+                "latency_ms": 12.5,
+                "raw_provider_payload": RAW_VERIFY_SECRET,
+                "api_key": RAW_VERIFY_SECRET,
+            },
+            message=None,
+            diagnostics=None,
+        ),
+        events=events,
+    )
+    repository = RecordingSettingsRepository(
+        _commit_success({"state.provider_verification.openrouter": {}}),
+        events=events,
+    )
+    request = secret_settings.ProviderSecretVerificationRequest(
+        provider="openrouter",
+        secret_key="openrouter_api_key",
+        secret_value=RAW_VERIFY_SECRET,
+        secret_revision="secret-r1",
+        verifier_context={"flow": "settings.verify_api_key"},
+        expected_settings_revision="settings-r1",
+        reason="api_key_verify",
+        correlation_id="corr-verify-success",
+    )
+    _assert_no_raw_secret_values(request, label="ProviderSecretVerificationRequest")
+
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=RecordingSecretStore(events=events),
+        settings_repository=repository,
+        provider_verifier=verifier,
+    ).verify_provider_secret(request)
+
+    _assert_no_raw_secret_values(result, label="verification success result")
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    assert events == [("verify", "openrouter"), ("save", "api_key_verify")]
+    verifier_request = _only_item(verifier.requests, label="provider verifier requests")
+    _assert_no_raw_secret_values(verifier_request, label="provider verifier request")
+    _assert_secret_value_matches(
+        verifier_request.secret_value,
+        RAW_VERIFY_SECRET,
+        label="provider verifier secret value",
+    )
+    assert len(repository.saved_requests) == 1
+    saved_request = repository.saved_requests[0]
+    _assert_no_raw_secret_values(saved_request, label="verification settings commit request")
+    entry = saved_request.values["state.provider_verification.openrouter"]
+    if not isinstance(entry, Mapping):
+        pytest.fail("verification evidence entry should be a mapping")
+    assert entry["status"] == "verified"
+    assert entry["provider"] == "openrouter"
+    assert entry["secret_key"] == "openrouter_api_key"
+    assert entry["secret_revision"] == "secret-r1"
+    assert str(entry["secret_fingerprint"]).startswith("sha256:")
+    assert entry["verifier_context"]["flow"] == "settings.verify_api_key"  # type: ignore[index]
+    evidence = entry["verifier_evidence"]
+    if not isinstance(evidence, Mapping):
+        pytest.fail("verification evidence details should be a mapping")
+    assert evidence["verifier"] == "openrouter"
+    assert evidence["latency_ms"] == 12.5
+    assert "raw_provider_payload" not in evidence
+    assert "api_key" not in evidence
+
+
+def test_provider_secret_verification_request_freezes_sanitized_context() -> None:
+    secret_settings = _service_module()
+    request = secret_settings.ProviderSecretVerificationRequest(
+        provider="openrouter",
+        secret_key="openrouter_api_key",
+        secret_value=RAW_VERIFY_SECRET,
+        secret_revision="secret-r1",
+        verifier_context={"flow": "settings.verify_api_key"},
+        expected_settings_revision="settings-r1",
+        reason="api_key_verify",
+        correlation_id="corr-verify-freeze",
+    )
+
+    with pytest.raises(TypeError):
+        request.verifier_context["flow"] = "mutated"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_verify_provider_secret_strips_raw_secret_material_from_context_and_evidence_keys() -> (
+    None
+):
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    raw_context_key = f"context-{RAW_VERIFY_KEY_MATERIAL}"
+    raw_evidence_key = f"evidence-{RAW_VERIFY_KEY_MATERIAL}"
+    verifier = RecordingProviderVerifier(
+        provider_verifier.ProviderVerificationResult(
+            status="verified",
+            provider="openrouter",
+            secret_key="openrouter_api_key",
+            secret_revision="secret-r1",
+            evidence={"verifier": "openrouter", raw_evidence_key: "drop-me"},
+            message=None,
+            diagnostics=None,
+        ),
+        events=events,
+    )
+    repository = RecordingSettingsRepository(
+        _commit_success({"state.provider_verification.openrouter": {}}),
+        events=events,
+    )
+    request = secret_settings.ProviderSecretVerificationRequest(
+        provider="openrouter",
+        secret_key="openrouter_api_key",
+        secret_value=RAW_VERIFY_KEY_MATERIAL,
+        secret_revision="secret-r1",
+        verifier_context={"flow": "settings.verify_api_key", raw_context_key: "drop-me"},
+        expected_settings_revision="settings-r1",
+        reason="api_key_verify",
+        correlation_id="corr-verify-raw-key",
+    )
+
+    _assert_no_raw_secret_values(request, label="raw-key verification request")
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=RecordingSecretStore(events=events),
+        settings_repository=repository,
+        provider_verifier=verifier,
+    ).verify_provider_secret(request)
+
+    _assert_no_raw_secret_values(result, label="raw-key verification result")
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    verifier_request = _only_item(verifier.requests, label="provider verifier requests")
+    _assert_no_raw_secret_values(verifier_request, label="raw-key provider verifier request")
+    assert set(verifier_request.context) == {"flow"}
+    saved_request = _only_item(repository.saved_requests, label="verification settings saves")
+    _assert_no_raw_secret_values(saved_request, label="raw-key settings commit request")
+    entry = saved_request.values["state.provider_verification.openrouter"]
+    if not isinstance(entry, Mapping):
+        pytest.fail("raw-key verification evidence entry should be a mapping")
+    _assert_no_raw_secret_values(entry, label="raw-key verification evidence entry")
+    assert set(entry["verifier_context"]) == {"flow"}  # type: ignore[arg-type]
+    assert set(entry["verifier_evidence"]) == {"verifier"}  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_verify_provider_secret_rejects_empty_sanitized_context_before_verifier() -> None:
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    verifier = RecordingProviderVerifier(events=events)
+    repository = RecordingSettingsRepository(_commit_success({}), events=events)
+
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=RecordingSecretStore(events=events),
+        settings_repository=repository,
+        provider_verifier=verifier,
+    ).verify_provider_secret(
+        secret_settings.ProviderSecretVerificationRequest(
+            provider="openrouter",
+            secret_key="openrouter_api_key",
+            secret_value=RAW_VERIFY_SECRET,
+            secret_revision="secret-r1",
+            verifier_context={"api_key": "dropped-by-policy"},
+            expected_settings_revision="settings-r1",
+            reason="api_key_verify",
+            correlation_id="corr-verify-empty-context",
+        )
+    )
+
+    _assert_no_raw_secret_values(result, label="empty-context verification result")
+    assert result.status == messages.TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED
+    assert events == []
+    assert repository.saved_requests == []
+    assert result.diagnostics is not None
+    assert result.diagnostics.code == "provider_verification_context_missing"
+    assert result.diagnostics.content_policy == messages.CONTENT_POLICY_METADATA_ONLY
+
+
+@pytest.mark.asyncio
+async def test_verify_provider_secret_failure_commits_failed_evidence_without_raw_diagnostics() -> (
+    None
+):
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    verifier = RecordingProviderVerifier(
+        provider_verifier.ProviderVerificationResult(
+            status="failed",
+            provider="openrouter",
+            secret_key="openrouter_api_key",
+            secret_revision="secret-r1",
+            evidence={"error_code": "unauthorized", "response_body": RAW_VERIFY_SECRET},
+            message=None,
+            diagnostics=_secret_store_diagnostics(
+                "provider_rejected_secret",
+                operation="verify_provider_secret",
+                raw_value=RAW_VERIFY_SECRET,
+            ),
+        ),
+        events=events,
+    )
+    repository = RecordingSettingsRepository(
+        _commit_success({"state.provider_verification.openrouter": {}}),
+        events=events,
+    )
+
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=RecordingSecretStore(events=events),
+        settings_repository=repository,
+        provider_verifier=verifier,
+    ).verify_provider_secret(
+        secret_settings.ProviderSecretVerificationRequest(
+            provider="openrouter",
+            secret_key="openrouter_api_key",
+            secret_value=RAW_VERIFY_SECRET,
+            secret_revision="secret-r1",
+            verifier_context={"flow": "settings.verify_api_key"},
+            expected_settings_revision="settings-r1",
+            reason="api_key_verify",
+            correlation_id="corr-verify-failed",
+        )
+    )
+
+    _assert_no_raw_secret_values(result, label="verification failed result")
+    assert result.status == messages.TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED
+    assert events == [("verify", "openrouter"), ("save", "api_key_verify")]
+    saved_request = _only_item(repository.saved_requests, label="verification settings saves")
+    _assert_no_raw_secret_values(saved_request, label="failed verification settings commit request")
+    entry = saved_request.values["state.provider_verification.openrouter"]
+    if not isinstance(entry, Mapping):
+        pytest.fail("failed verification evidence entry should be a mapping")
+    assert entry["status"] == "failed"
+    evidence = entry["verifier_evidence"]
+    if not isinstance(evidence, Mapping):
+        pytest.fail("failed verification evidence details should be a mapping")
+    assert evidence["error_code"] == "unauthorized"
+    assert "response_body" not in evidence
+    assert result.diagnostics is not None
+    assert result.diagnostics.component == "secret_settings_transaction"
+    assert result.diagnostics.operation == "verify_provider_secret"
+    assert result.diagnostics.content_policy == messages.CONTENT_POLICY_METADATA_ONLY
+    _assert_diagnostics_field_matches(
+        result.diagnostics.fields,
+        "provider",
+        "openrouter",
+        label="verification failed diagnostics",
+    )
+
+
+@pytest.mark.asyncio
+async def test_verify_provider_secret_exception_returns_safe_failure_without_settings_commit() -> (
+    None
+):
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    verifier = RecordingProviderVerifier(events=events, raise_on_verify=True)
+    repository = RecordingSettingsRepository(_commit_success({}), events=events)
+
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=RecordingSecretStore(events=events),
+        settings_repository=repository,
+        provider_verifier=verifier,
+    ).verify_provider_secret(
+        secret_settings.ProviderSecretVerificationRequest(
+            provider="openrouter",
+            secret_key="openrouter_api_key",
+            secret_value=RAW_VERIFY_SECRET,
+            secret_revision="secret-r1",
+            verifier_context={"flow": "settings.verify_api_key"},
+            expected_settings_revision="settings-r1",
+            reason="api_key_verify",
+            correlation_id="corr-verify-exception",
+        )
+    )
+
+    _assert_no_raw_secret_values(result, label="verification exception result")
+    assert result.status == messages.TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED
+    assert events == [("verify", "openrouter")]
+    assert repository.saved_requests == []
+    assert result.diagnostics is not None
+    assert result.diagnostics.component == "secret_settings_transaction"
+    assert result.diagnostics.operation == "verify_provider_secret"
+    assert result.diagnostics.content_policy == messages.CONTENT_POLICY_METADATA_ONLY
+
+
+@pytest.mark.asyncio
+async def test_verify_provider_secret_settings_commit_failure_returns_safe_settings_failure() -> (
+    None
+):
+    secret_settings = _service_module()
+    events: list[tuple[str, str]] = []
+    verifier = RecordingProviderVerifier(
+        provider_verifier.ProviderVerificationResult(
+            status="verified",
+            provider="openrouter",
+            secret_key="openrouter_api_key",
+            secret_revision="secret-r1",
+            evidence={"verifier": "openrouter"},
+            message=None,
+            diagnostics=None,
+        ),
+        events=events,
+    )
+    repository = RecordingSettingsRepository(_commit_failure(), events=events)
+
+    result = await secret_settings.SecretSettingsTransaction(
+        secret_store=RecordingSecretStore(events=events),
+        settings_repository=repository,
+        provider_verifier=verifier,
+    ).verify_provider_secret(
+        secret_settings.ProviderSecretVerificationRequest(
+            provider="openrouter",
+            secret_key="openrouter_api_key",
+            secret_value=RAW_VERIFY_SECRET,
+            secret_revision="secret-r1",
+            verifier_context={"flow": "settings.verify_api_key"},
+            expected_settings_revision="settings-r1",
+            reason="api_key_verify",
+            correlation_id="corr-verify-commit-failed",
+        )
+    )
+
+    _assert_no_raw_secret_values(result, label="verification settings failure result")
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED
+    assert events == [("verify", "openrouter"), ("save", "api_key_verify")]
+    saved_request = _only_item(repository.saved_requests, label="verification settings saves")
+    _assert_no_raw_secret_values(
+        saved_request, label="settings failure verification commit request"
+    )
+    assert result.diagnostics is not None
+    assert result.diagnostics.content_policy == messages.CONTENT_POLICY_METADATA_ONLY
 
 
 @pytest.mark.asyncio

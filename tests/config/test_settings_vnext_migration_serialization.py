@@ -22,6 +22,9 @@ from puripuly_heart.config.settings import (
 from puripuly_heart.config.settings_vnext.schema import (
     VNEXT_SETTINGS_SCHEMA_VERSION,
     AppSettingsVNext,
+    PersistedOperationalState,
+    ProviderVerificationEntry,
+    ProviderVerificationState,
 )
 from tests.config.settings_migration_fixtures import (
     legacy_compatibility_settings_fixture,
@@ -116,15 +119,23 @@ def test_v24_boolean_api_key_verification_migrates_every_provider_to_unknown() -
     )
 
     serialized = serialization.to_dict(migration.from_dict(raw))
-    persisted_statuses = {
-        provider: serialized["state"]["provider_verification"][provider]["status"]
+    provider_entries = serialized["state"]["provider_verification"]
+
+    assert provider_entries == {
+        provider: {
+            "status": "unknown",
+            "provider": None,
+            "secret_key": None,
+            "secret_revision": None,
+            "secret_fingerprint": None,
+            "verifier_context": {},
+            "verifier_evidence": {},
+        }
         for provider in PROVIDER_VERIFICATION_FIELDS
     }
 
-    assert persisted_statuses == {provider: "unknown" for provider in PROVIDER_VERIFICATION_FIELDS}
 
-
-def test_public_facade_save_preserves_live_api_key_verified_booleans_in_vnext(
+def test_public_facade_save_treats_bare_api_key_verified_booleans_as_unknown(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "settings.json"
@@ -138,15 +149,125 @@ def test_public_facade_save_preserves_live_api_key_verified_booleans_in_vnext(
     assert set(raw) == {"settings_version", "intent", "state"}
     assert raw["settings_version"] == VNEXT_SETTINGS_SCHEMA_VERSION
     assert {
-        provider: raw["state"]["provider_verification"][provider]["status"]
+        provider: raw["state"]["provider_verification"][provider]
         for provider in PROVIDER_VERIFICATION_FIELDS
-    } == {provider: "verified" for provider in PROVIDER_VERIFICATION_FIELDS}
+    } == {
+        provider: {
+            "status": "unknown",
+            "provider": None,
+            "secret_key": None,
+            "secret_revision": None,
+            "secret_fingerprint": None,
+            "verifier_context": {},
+            "verifier_evidence": {},
+        }
+        for provider in PROVIDER_VERIFICATION_FIELDS
+    }
 
     loaded = load_settings(path)
     assert all(
-        getattr(loaded.api_key_verified, provider) is True
+        getattr(loaded.api_key_verified, provider) is False
         for provider in PROVIDER_VERIFICATION_FIELDS
     )
+
+
+def test_evidence_bound_verified_entry_serializes_and_projects_legacy_true(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "settings.json"
+    verified_openrouter = ProviderVerificationEntry(
+        status="verified",
+        provider="openrouter",
+        secret_key="openrouter_api_key",
+        secret_revision="secret-r1",
+        secret_fingerprint="sha256:0123456789abcdef",
+        verifier_context={"flow": "settings.verify_api_key"},
+        verifier_evidence={"verifier": "openrouter", "latency_ms": 12.5},
+    )
+    settings = AppSettingsVNext(
+        state=PersistedOperationalState(
+            provider_verification=ProviderVerificationState(openrouter=verified_openrouter)
+        )
+    )
+
+    save_settings(path, settings)
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    openrouter_entry = raw["state"]["provider_verification"]["openrouter"]
+    assert openrouter_entry == {
+        "status": "verified",
+        "provider": "openrouter",
+        "secret_key": "openrouter_api_key",
+        "secret_revision": "secret-r1",
+        "secret_fingerprint": "sha256:0123456789abcdef",
+        "verifier_context": {"flow": "settings.verify_api_key"},
+        "verifier_evidence": {"verifier": "openrouter", "latency_ms": 12.5},
+    }
+
+    loaded = load_settings(path)
+    assert loaded.api_key_verified.openrouter is True
+    assert loaded.api_key_verified.deepgram is False
+
+
+def test_current_vnext_status_only_provider_verification_entries_load_as_unknown() -> None:
+    migration = _migration()
+    serialization = _serialization()
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["state"]["provider_verification"] = {
+        "deepgram": {"status": "verified"},
+        "soniox": {"status": "failed"},
+        "google": {"status": "skipped"},
+        "openrouter": {"status": "verified"},
+        "deepseek": {"status": "failed"},
+        "alibaba_beijing": {"status": "skipped"},
+        "alibaba_singapore": {"status": "verified"},
+    }
+
+    for loader in (serialization.from_dict, migration.from_dict):
+        settings = loader(raw)
+        serialized = serialization.to_dict(settings)
+
+        assert serialized["state"]["provider_verification"] == {
+            provider: {
+                "status": "unknown",
+                "provider": None,
+                "secret_key": None,
+                "secret_revision": None,
+                "secret_fingerprint": None,
+                "verifier_context": {},
+                "verifier_evidence": {},
+            }
+            for provider in PROVIDER_VERIFICATION_FIELDS
+        }
+        assert migration.to_legacy_dict(settings)["api_key_verified"] == {
+            provider: False for provider in PROVIDER_VERIFICATION_FIELDS
+        }
+
+
+def test_current_vnext_evidence_bound_provider_verification_entry_survives_compatibility_shim() -> (
+    None
+):
+    migration = _migration()
+    serialization = _serialization()
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["state"]["provider_verification"]["openrouter"] = {
+        "status": "verified",
+        "provider": "openrouter",
+        "secret_key": "openrouter_api_key",
+        "secret_revision": None,
+        "secret_fingerprint": "sha256:0123456789abcdef",
+        "verifier_context": {"flow": "settings.verify_api_key"},
+        "verifier_evidence": {"verifier": "openrouter"},
+    }
+
+    settings = migration.from_dict(raw)
+    serialized = serialization.to_dict(settings)
+
+    assert (
+        serialized["state"]["provider_verification"]["openrouter"]
+        == raw["state"]["provider_verification"]["openrouter"]
+    )
+    assert migration.to_legacy_dict(settings)["api_key_verified"]["openrouter"] is True
 
 
 def test_legacy_accepted_keys_read_without_reintroducing_legacy_write_projection() -> None:

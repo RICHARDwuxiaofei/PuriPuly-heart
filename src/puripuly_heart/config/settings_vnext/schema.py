@@ -69,6 +69,27 @@ _LOCAL_LLM_SECRET_BEARING_EXTRA_BODY_KEY_PREFIXES: Final = (
     "private_key_",
     "secret_",
 )
+_PROVIDER_VERIFICATION_STATUSES: Final = frozenset({"unknown", "verified", "failed", "skipped"})
+_PROVIDER_VERIFICATION_SECRET_BEARING_KEY_FRAGMENTS: Final = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "bearer",
+    "body",
+    "client_secret",
+    "credential_value",
+    "password",
+    "payload",
+    "private_key",
+    "provider_payload",
+    "raw",
+    "raw_payload",
+    "refresh_token",
+    "request_body",
+    "response_body",
+    "secret",
+    "token",
+)
 
 
 def _default_translation_connection_history() -> dict[str, str]:
@@ -126,6 +147,60 @@ def _copy_local_llm_extra_body(values: Mapping[object, object]) -> dict[str, obj
     except (TypeError, ValueError) as exc:
         raise ValueError("local LLM extra_body must be JSON serializable") from exc
     return copied
+
+
+def _is_secret_bearing_provider_verification_metadata_key(key: str) -> bool:
+    return any(fragment in key for fragment in _PROVIDER_VERIFICATION_SECRET_BEARING_KEY_FRAGMENTS)
+
+
+def _copy_provider_verification_metadata_value(value: object) -> object:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    raise TypeError("provider verification metadata values must be JSON-like scalars")
+
+
+def _copy_provider_verification_metadata(values: Mapping[object, object]) -> dict[str, object]:
+    copied: dict[str, object] = {}
+    for raw_key, raw_value in values.items():
+        if not isinstance(raw_key, str):
+            raise ValueError("provider verification metadata keys must be strings")
+        key = _normalize_extra_body_key(raw_key)
+        if _is_secret_bearing_provider_verification_metadata_key(key):
+            raise ValueError(
+                f"secret-bearing provider verification metadata key is not allowed: {raw_key}"
+            )
+        copied[raw_key] = _copy_provider_verification_metadata_value(raw_value)
+    try:
+        json.dumps(copied, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("provider verification metadata must be JSON serializable") from exc
+    return copied
+
+
+def _optional_string(value: object, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"provider verification {field_name} must be a string or null")
+    return value
+
+
+def _required_provider_verification_string(value: object, *, field_name: str) -> str:
+    raw = _optional_string(value, field_name=field_name)
+    if raw is None:
+        raise ValueError(f"provider verification evidence requires non-empty {field_name}")
+    normalized = raw.strip()
+    if not normalized:
+        raise ValueError(f"provider verification evidence requires non-empty {field_name}")
+    return normalized
+
+
+def _optional_provider_verification_string(value: object, *, field_name: str) -> str | None:
+    raw = _optional_string(value, field_name=field_name)
+    if raw is None:
+        return None
+    normalized = raw.strip()
+    return normalized or None
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,6 +386,75 @@ class UserIntentSettings:
 @dataclass(frozen=True, slots=True)
 class ProviderVerificationEntry:
     status: str = "unknown"
+    provider: str | None = None
+    secret_key: str | None = None
+    secret_revision: str | None = None
+    secret_fingerprint: str | None = None
+    verifier_context: dict[str, object] = field(default_factory=dict)
+    verifier_evidence: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        status = str(self.status)
+        if status not in _PROVIDER_VERIFICATION_STATUSES:
+            raise ValueError(f"unsupported provider verification status: {self.status}")
+        object.__setattr__(self, "status", status)
+        if status == "unknown":
+            object.__setattr__(self, "provider", None)
+            object.__setattr__(self, "secret_key", None)
+            object.__setattr__(self, "secret_revision", None)
+            object.__setattr__(self, "secret_fingerprint", None)
+            object.__setattr__(self, "verifier_context", {})
+            object.__setattr__(self, "verifier_evidence", {})
+            return
+
+        provider = _required_provider_verification_string(self.provider, field_name="provider")
+        secret_key = _required_provider_verification_string(
+            self.secret_key,
+            field_name="secret_key",
+        )
+        secret_revision = _optional_provider_verification_string(
+            self.secret_revision,
+            field_name="secret_revision",
+        )
+        secret_fingerprint = _optional_provider_verification_string(
+            self.secret_fingerprint,
+            field_name="secret_fingerprint",
+        )
+        verifier_context = _copy_provider_verification_metadata(self.verifier_context)
+        if secret_revision is None and secret_fingerprint is None:
+            raise ValueError(
+                "provider verification evidence requires non-empty secret_revision or "
+                "secret_fingerprint"
+            )
+        if not verifier_context:
+            raise ValueError("provider verification evidence requires non-empty verifier_context")
+
+        object.__setattr__(self, "provider", provider)
+        object.__setattr__(
+            self,
+            "secret_key",
+            secret_key,
+        )
+        object.__setattr__(
+            self,
+            "secret_revision",
+            secret_revision,
+        )
+        object.__setattr__(
+            self,
+            "secret_fingerprint",
+            secret_fingerprint,
+        )
+        object.__setattr__(
+            self,
+            "verifier_context",
+            verifier_context,
+        )
+        object.__setattr__(
+            self,
+            "verifier_evidence",
+            _copy_provider_verification_metadata(self.verifier_evidence),
+        )
 
 
 @dataclass(frozen=True, slots=True)

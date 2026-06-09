@@ -110,6 +110,7 @@ TransactionStatus: TypeAlias = Literal[
     "settings_commit_success_runtime_applied",
     "settings_commit_success_runtime_degraded",
     "secret_write_failed",
+    "provider_verification_failed",
     "settings_commit_failed_secret_restored",
     "settings_commit_failed_secret_restore_failed",
     "remote_active_local_missing",
@@ -122,6 +123,9 @@ TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED: Final[TransactionSt
     "settings_commit_success_runtime_degraded"
 )
 TRANSACTION_STATUS_SECRET_WRITE_FAILED: Final[TransactionStatus] = "secret_write_failed"
+TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED: Final[TransactionStatus] = (
+    "provider_verification_failed"
+)
 TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORED: Final[TransactionStatus] = (
     "settings_commit_failed_secret_restored"
 )
@@ -136,6 +140,7 @@ TRANSACTION_RESULT_STATUSES: Final[tuple[TransactionStatus, ...]] = (
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
     TRANSACTION_STATUS_SECRET_WRITE_FAILED,
+    TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORE_FAILED,
     TRANSACTION_STATUS_REMOTE_ACTIVE_LOCAL_MISSING,
@@ -233,6 +238,7 @@ __all__ = [
     "SEVERITY_WARNING",
     "TRANSACTION_RESULT_STATUSES",
     "TRANSACTION_STATUS_REMOTE_ACTIVE_LOCAL_MISSING",
+    "TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED",
     "TRANSACTION_STATUS_SECRET_WRITE_FAILED",
     "TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED",
     "TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORE_FAILED",

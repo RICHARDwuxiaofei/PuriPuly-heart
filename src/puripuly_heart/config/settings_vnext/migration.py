@@ -243,12 +243,10 @@ def _provider_verification_state(
     *,
     preserve_provider_verification: bool,
 ) -> ProviderVerificationState:
+    _ = (raw_verification, preserve_provider_verification)
     entries: dict[str, ProviderVerificationEntry] = {}
     for provider in _PROVIDER_VERIFICATION_FIELDS:
-        verified = preserve_provider_verification and bool(raw_verification.get(provider, False))
-        entries[provider] = ProviderVerificationEntry(
-            status="verified" if verified else "unknown",
-        )
+        entries[provider] = ProviderVerificationEntry(status="unknown")
     return ProviderVerificationState(**entries)
 
 
@@ -382,13 +380,34 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
         ),
     }
     data["api_key_verified"] = {
-        "deepgram": state.provider_verification.deepgram.status == "verified",
-        "soniox": state.provider_verification.soniox.status == "verified",
-        "google": state.provider_verification.google.status == "verified",
-        "openrouter": state.provider_verification.openrouter.status == "verified",
-        "deepseek": state.provider_verification.deepseek.status == "verified",
-        "alibaba_beijing": state.provider_verification.alibaba_beijing.status == "verified",
-        "alibaba_singapore": state.provider_verification.alibaba_singapore.status == "verified",
+        "deepgram": _is_evidence_bound_verified_entry(
+            state.provider_verification.deepgram,
+            provider="deepgram",
+        ),
+        "soniox": _is_evidence_bound_verified_entry(
+            state.provider_verification.soniox,
+            provider="soniox",
+        ),
+        "google": _is_evidence_bound_verified_entry(
+            state.provider_verification.google,
+            provider="google",
+        ),
+        "openrouter": _is_evidence_bound_verified_entry(
+            state.provider_verification.openrouter,
+            provider="openrouter",
+        ),
+        "deepseek": _is_evidence_bound_verified_entry(
+            state.provider_verification.deepseek,
+            provider="deepseek",
+        ),
+        "alibaba_beijing": _is_evidence_bound_verified_entry(
+            state.provider_verification.alibaba_beijing,
+            provider="alibaba_beijing",
+        ),
+        "alibaba_singapore": _is_evidence_bound_verified_entry(
+            state.provider_verification.alibaba_singapore,
+            provider="alibaba_singapore",
+        ),
     }
     data["managed_identity"] = {
         "installation_id": state.managed_connection.installation_id,
@@ -428,6 +447,20 @@ def _legacy_provider_llm_for_translation(model: str, connection: str) -> str:
     if model == "qwen35_plus":
         return "qwen"
     return "openrouter"
+
+
+def _is_evidence_bound_verified_entry(
+    entry: ProviderVerificationEntry,
+    *,
+    provider: str,
+) -> bool:
+    return (
+        entry.status == "verified"
+        and entry.provider == provider
+        and bool(entry.secret_key)
+        and bool(entry.verifier_context)
+        and bool(entry.secret_revision or entry.secret_fingerprint)
+    )
 
 
 __all__ = [

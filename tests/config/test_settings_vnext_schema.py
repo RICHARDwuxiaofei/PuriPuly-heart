@@ -217,6 +217,83 @@ def test_vnext_schema_default_tree_excludes_raw_provider_api_key_fields() -> Non
         schema.LocalLLMIntent(extra_body={"api_key": "not-a-real-secret"})
 
 
+def test_provider_verification_entry_defaults_to_unknown_without_bound_evidence() -> None:
+    schema = _load_schema_module()
+
+    entry = schema.ProviderVerificationEntry()
+
+    assert entry.status == "unknown"
+    assert entry.provider is None
+    assert entry.secret_key is None
+    assert entry.secret_revision is None
+    assert entry.secret_fingerprint is None
+    assert entry.verifier_context == {}
+    assert entry.verifier_evidence == {}
+
+
+def _bound_provider_verification_entry_kwargs() -> dict[str, object]:
+    return {
+        "status": "verified",
+        "provider": "openrouter",
+        "secret_key": "openrouter_api_key",
+        "secret_revision": "secret-r1",
+        "secret_fingerprint": None,
+        "verifier_context": {"flow": "settings.verify_api_key"},
+        "verifier_evidence": {"verifier": "openrouter"},
+    }
+
+
+@pytest.mark.parametrize("status", ["verified", "failed", "skipped"])
+@pytest.mark.parametrize(
+    ("overrides", "case_id"),
+    [
+        ({"provider": None}, "missing-provider"),
+        ({"provider": "   "}, "blank-provider"),
+        ({"secret_key": None}, "missing-secret-key"),
+        ({"secret_key": "   "}, "blank-secret-key"),
+        (
+            {"secret_revision": None, "secret_fingerprint": None},
+            "missing-secret-binding",
+        ),
+        (
+            {"secret_revision": "", "secret_fingerprint": "   "},
+            "blank-secret-binding",
+        ),
+        ({"verifier_context": {}}, "missing-verifier-context"),
+    ],
+)
+def test_provider_verification_entry_rejects_unbound_non_unknown_entries(
+    status: str,
+    overrides: dict[str, object],
+    case_id: str,
+) -> None:
+    _ = case_id
+    schema = _load_schema_module()
+    kwargs = _bound_provider_verification_entry_kwargs()
+    kwargs.update(overrides)
+    kwargs["status"] = status
+
+    with pytest.raises(ValueError, match="provider verification evidence"):
+        schema.ProviderVerificationEntry(**kwargs)
+
+
+@pytest.mark.parametrize("evidence_key", ["api_key", "raw_response", "response_body"])
+def test_provider_verification_entry_rejects_secret_bearing_evidence_keys(
+    evidence_key: str,
+) -> None:
+    schema = _load_schema_module()
+
+    with pytest.raises(ValueError, match="secret-bearing provider verification"):
+        schema.ProviderVerificationEntry(
+            status="verified",
+            provider="openrouter",
+            secret_key="openrouter_api_key",
+            secret_revision="secret-r1",
+            verifier_context={"flow": "settings.verify_api_key"},
+            verifier_evidence={evidence_key: "redacted-test-sentinel"},
+        )
+
+
 def test_vnext_schema_excludes_deferred_vnext_only_operational_leaves() -> None:
     schema = _load_schema_module()
 

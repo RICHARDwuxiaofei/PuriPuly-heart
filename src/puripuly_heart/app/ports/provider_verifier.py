@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final, Literal, Protocol
 
@@ -32,7 +32,7 @@ def _freeze_fields(
 class ProviderVerificationRequest:
     provider: str
     secret_key: str
-    secret_value: str
+    secret_value: str = field(repr=False)
     secret_revision: str | None
     context: Mapping[str, DiagnosticFieldValue]
 
