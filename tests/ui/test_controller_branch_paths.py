@@ -40,6 +40,7 @@ from puripuly_heart.config.settings import (
     ProviderSettings,
     QwenLLMModel,
     QwenRegion,
+    SecretsBackend,
     STTProviderName,
     TranslationConnection,
     TranslationModel,
@@ -3366,11 +3367,13 @@ async def test_apply_settings_routes_peer_activation_toggles_through_peer_runtim
     enabled.ui.peer_translation_eula_accepted = True
     await controller.apply_settings(enabled)
 
-    disabled = AppSettings()
+    assert controller.settings is not None
+    disabled = copy.deepcopy(controller.settings)
     disabled.ui.peer_translation_enabled = False
     await controller.apply_settings(disabled)
 
     assert [call["desired_active"] for call in controller._peer_runtime.policy_calls] == [
+        False,
         True,
         False,
     ]
@@ -11254,6 +11257,423 @@ async def test_order22_language_runtime_clear_failure_degrades_without_raw_log_t
 
 
 @pytest.mark.asyncio
+async def test_order24_apply_settings_routes_ui_prompt_clipboard_state_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(apply_locale=lambda: None))
+    controller.settings = AppSettings()
+    controller.settings_mutation_service = RecordingSettingsMutationService()
+    direct_saves: list[str] = []
+
+    async def noop_sync_clipboard(_self: GuiController) -> None:
+        return None
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: direct_saves.append("save"))
+    monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", noop_sync_clipboard)
+
+    updated = copy.deepcopy(controller.settings)
+    updated.secrets.backend = SecretsBackend.ENCRYPTED_FILE
+    updated.secrets.encrypted_file_path = "secure-secrets.json"
+    updated.ui.locale = "ja"
+    updated.ui.peer_translation_eula_accepted = True
+    updated.ui.integrated_context_enabled = False
+    updated.ui.integrated_context_bootstrapped = True
+    updated.ui.clipboard_auto_translate_enabled = True
+    updated.ui.github_star_prompt_clicked = True
+    updated.ui.github_star_prompt_last_shown_at = "2026-06-08T00:00:00Z"
+    updated.ui.github_star_prompt_show_count = 2
+    updated.ui.github_star_prompt_translation_success_observed = True
+    updated.ui.github_star_prompt_eligible_launch_count = 3
+    updated.system_prompt = "custom translation style"
+
+    await controller.apply_settings(updated)
+
+    service = controller.settings_mutation_service
+    assert service is not None
+    assert len(service.requests) == 1
+    request = service.requests[0]
+    assert request.reason == settings_mutation.SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE
+    assert dict(request.values) == {
+        "secrets.backend": SecretsBackend.ENCRYPTED_FILE,
+        "secrets.encrypted_file_path": "secure-secrets.json",
+        "ui.locale": "ja",
+        "ui.peer_translation_eula_accepted": True,
+        "ui.integrated_context_enabled": False,
+        "ui.integrated_context_bootstrapped": True,
+        "ui.clipboard_auto_translate_enabled": True,
+        "ui.github_star_prompt_clicked": True,
+        "ui.github_star_prompt_last_shown_at": "2026-06-08T00:00:00Z",
+        "ui.github_star_prompt_show_count": 2,
+        "ui.github_star_prompt_translation_success_observed": True,
+        "ui.github_star_prompt_eligible_launch_count": 3,
+        "system_prompt": "custom translation style",
+    }
+    assert "ui.overlay_enabled" not in request.values
+    assert "ui.peer_translation_enabled" not in request.values
+    assert controller.settings is not None
+    assert controller.settings.ui.locale == "ja"
+    assert controller.settings.system_prompt == "custom translation style"
+    assert direct_saves == []
+
+
+@pytest.mark.asyncio
+async def test_order24_locale_runtime_failure_degrades_without_raw_exception_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_failure_text = "locale failed secret-token-must-not-leak"
+    applied_locales: list[str] = []
+    saved_settings: list[AppSettings] = []
+
+    class LocaleApp:
+        def apply_locale(self) -> None:
+            raise RuntimeError(raw_failure_text)
+
+    controller = _make_controller(app=LocaleApp())
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    pending = copy.deepcopy(controller.settings)
+    pending.ui.locale = "ja"
+
+    def record_saved_settings(_path, incoming: AppSettings) -> None:
+        saved_settings.append(copy.deepcopy(incoming))
+
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
+    monkeypatch.setattr(controller_module, "get_locale", lambda: "en")
+    monkeypatch.setattr(
+        controller_module, "set_locale", lambda locale: applied_locales.append(locale)
+    )
+    monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", lambda self: asyncio.sleep(0))
+
+    await controller.apply_settings(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_ui_prompt_clipboard_state_runtime",
+        code="ui_prompt_clipboard_state_runtime_apply_exception",
+        category=messages.DIAGNOSTIC_CATEGORY_LIFECYCLE,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "ui_prompt_clipboard_state"},
+    )
+    assert [settings.ui.locale for settings in saved_settings] == ["ja"]
+    assert applied_locales == ["ja"]
+    assert controller.settings is not None
+    assert controller.settings.ui.locale == "ja"
+    logged_text = "\n".join(
+        message
+        for _level, message in (
+            controller._runtime_logging.basic_messages
+            + controller._runtime_logging.detailed_messages
+        )
+    )
+    assert raw_failure_text not in repr(result)
+    assert raw_failure_text not in logged_text
+
+
+@pytest.mark.asyncio
+async def test_order24_clipboard_start_failure_degrades_without_raw_exception_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_failure_text = "clipboard start failed secret-token-must-not-leak"
+    saved_settings: list[AppSettings] = []
+
+    class FailingStartClipboardWatcher:
+        def start(self) -> None:
+            raise RuntimeError(raw_failure_text)
+
+        def stop(self) -> None:
+            return None
+
+    controller = _make_controller(app=SimpleNamespace(apply_locale=lambda: None))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    pending = copy.deepcopy(controller.settings)
+    pending.ui.clipboard_auto_translate_enabled = True
+
+    def record_saved_settings(_path, incoming: AppSettings) -> None:
+        saved_settings.append(copy.deepcopy(incoming))
+
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
+    monkeypatch.setattr(controller_module, "get_locale", lambda: controller.settings.ui.locale)
+    monkeypatch.setattr(controller_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        controller_module,
+        "create_clipboard_watcher",
+        lambda _on_text: FailingStartClipboardWatcher(),
+    )
+
+    await controller.apply_settings(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_ui_prompt_clipboard_state_runtime",
+        code="ui_prompt_clipboard_state_runtime_apply_exception",
+        category=messages.DIAGNOSTIC_CATEGORY_LIFECYCLE,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "ui_prompt_clipboard_state"},
+    )
+    assert [settings.ui.clipboard_auto_translate_enabled for settings in saved_settings] == [True]
+    assert controller.settings is not None
+    assert controller.settings.ui.clipboard_auto_translate_enabled is True
+    assert controller._clipboard_watcher is None
+    logged_text = "\n".join(
+        message
+        for _level, message in (
+            controller._runtime_logging.basic_messages
+            + controller._runtime_logging.detailed_messages
+        )
+    )
+    assert raw_failure_text not in repr(result)
+    assert raw_failure_text not in logged_text
+
+
+@pytest.mark.asyncio
+async def test_order24_clipboard_stop_failure_degrades_without_raw_exception_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_failure_text = "clipboard stop failed secret-token-must-not-leak"
+    saved_settings: list[AppSettings] = []
+
+    class FailingStopClipboardWatcher:
+        def stop(self) -> None:
+            raise RuntimeError(raw_failure_text)
+
+    controller = _make_controller(app=SimpleNamespace(apply_locale=lambda: None))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.ui.clipboard_auto_translate_enabled = True
+    controller._clipboard_watcher = FailingStopClipboardWatcher()
+    pending = copy.deepcopy(controller.settings)
+    pending.ui.clipboard_auto_translate_enabled = False
+
+    def record_saved_settings(_path, incoming: AppSettings) -> None:
+        saved_settings.append(copy.deepcopy(incoming))
+
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
+    monkeypatch.setattr(controller_module, "get_locale", lambda: controller.settings.ui.locale)
+
+    await controller.apply_settings(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_ui_prompt_clipboard_state_runtime",
+        code="ui_prompt_clipboard_state_runtime_apply_exception",
+        category=messages.DIAGNOSTIC_CATEGORY_LIFECYCLE,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "ui_prompt_clipboard_state"},
+    )
+    assert [settings.ui.clipboard_auto_translate_enabled for settings in saved_settings] == [False]
+    assert controller.settings is not None
+    assert controller.settings.ui.clipboard_auto_translate_enabled is False
+    assert controller._clipboard_watcher is None
+    logged_text = "\n".join(
+        message
+        for _level, message in (
+            controller._runtime_logging.basic_messages
+            + controller._runtime_logging.detailed_messages
+        )
+    )
+    assert raw_failure_text not in repr(result)
+    assert raw_failure_text not in logged_text
+
+
+@pytest.mark.asyncio
+async def test_order24_runtime_only_overlay_and_peer_toggles_are_not_service_routed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings_mutation_service = RecordingSettingsMutationService()
+    direct_saves: list[str] = []
+
+    async def noop_sync_clipboard(_self: GuiController) -> None:
+        return None
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: direct_saves.append("save"))
+    monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", noop_sync_clipboard)
+    monkeypatch.setattr(
+        GuiController, "set_overlay_enabled", lambda self, enabled: asyncio.sleep(0)
+    )
+
+    updated = copy.deepcopy(controller.settings)
+    updated.ui.overlay_enabled = True
+    updated.ui.peer_translation_enabled = True
+
+    await controller.apply_settings(updated)
+
+    service = controller.settings_mutation_service
+    assert service is not None
+    assert service.requests == []
+    assert direct_saves == ["save"]
+    assert controller.settings is updated
+
+
+@pytest.mark.asyncio
+async def test_mixed_order22_order23_order24_apply_settings_routes_each_before_direct_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(apply_locale=lambda: None))
+    controller.settings = AppSettings()
+    controller.settings_mutation_service = RecordingSettingsMutationService()
+    direct_saves: list[str] = []
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: direct_saves.append("save"))
+
+    updated = copy.deepcopy(controller.settings)
+    updated.languages.source_language = "ja"
+    updated.overlay.show_translation = False
+    updated.ui.locale = "ko"
+    updated.system_prompt = "mixed prompt"
+
+    await controller.apply_settings(updated)
+
+    service = controller.settings_mutation_service
+    assert service is not None
+    assert [request.reason for request in service.requests] == [
+        settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
+        settings_mutation.SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT,
+        settings_mutation.SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE,
+    ]
+    assert service.requests[0].values == {"languages.source_language": "ja"}
+    assert service.requests[1].values == {"overlay.show_translation": False}
+    assert service.requests[2].values == {"ui.locale": "ko", "system_prompt": "mixed prompt"}
+    assert direct_saves == []
+    assert controller.settings is not None
+    assert controller.settings.languages.source_language == "ja"
+    assert controller.settings.overlay.show_translation is False
+    assert controller.settings.ui.locale == "ko"
+    assert controller.settings.system_prompt == "mixed prompt"
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_routes_prompt_only_changes_through_order24_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings_mutation_service = RecordingSettingsMutationService()
+    direct_saves: list[str] = []
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: direct_saves.append("save"))
+
+    pending = copy.deepcopy(controller.settings)
+    pending.system_prompt = "settings tab prompt"
+
+    await controller.apply_providers(pending)
+
+    service = controller.settings_mutation_service
+    assert service is not None
+    assert [request.reason for request in service.requests] == [
+        settings_mutation.SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE
+    ]
+    assert service.requests[0].values == {"system_prompt": "settings tab prompt"}
+    assert controller.settings is not None
+    assert controller.settings.system_prompt == "settings tab prompt"
+    assert direct_saves == []
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_routes_provider_and_prompt_changes_as_order21_then_order24(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings_mutation_service = RecordingSettingsMutationService()
+    direct_saves: list[str] = []
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: direct_saves.append("save"))
+
+    pending = copy.deepcopy(controller.settings)
+    pending.llm.concurrency_limit = 3
+    pending.system_prompt = "provider prompt"
+
+    await controller.apply_providers(pending)
+
+    service = controller.settings_mutation_service
+    assert service is not None
+    assert [request.reason for request in service.requests] == [
+        settings_mutation.SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
+        settings_mutation.SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE,
+    ]
+    assert service.requests[0].values == {"llm.concurrency_limit": 3}
+    assert service.requests[1].values == {"system_prompt": "provider prompt"}
+    assert direct_saves == []
+
+
+@pytest.mark.asyncio
+async def test_github_star_prompt_click_persistence_routes_through_order24_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings_mutation_service = RecordingSettingsMutationService()
+
+    def fail_direct_save(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("github star prompt state should use order24 service")
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_direct_save)
+
+    assert await controller.persist_github_star_prompt_clicked() is True
+
+    service = controller.settings_mutation_service
+    assert service is not None
+    assert len(service.requests) == 1
+    assert service.requests[0].reason == (
+        settings_mutation.SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE
+    )
+    assert service.requests[0].values == {"ui.github_star_prompt_clicked": True}
+    assert controller.settings.ui.github_star_prompt_clicked is True
+
+
+@pytest.mark.asyncio
+async def test_first_live_settings_view_order24_mutation_uses_synced_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings_view = DummySettingsView()
+    controller = _make_controller(app=SimpleNamespace(view_settings=settings_view))
+    controller.settings = settings
+    controller.settings_mutation_service = RecordingSettingsMutationService()
+    direct_saves: list[str] = []
+
+    async def noop_sync_clipboard(_self: GuiController) -> None:
+        return None
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: direct_saves.append("save"))
+    monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", noop_sync_clipboard)
+
+    controller._sync_ui_from_settings()
+    settings.ui.clipboard_auto_translate_enabled = True
+    pending = copy.deepcopy(settings)
+
+    await controller.apply_settings(pending)
+
+    service = controller.settings_mutation_service
+    assert service is not None
+    assert len(service.requests) == 1
+    assert service.requests[0].reason == (
+        settings_mutation.SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE
+    )
+    assert service.requests[0].values == {"ui.clipboard_auto_translate_enabled": True}
+    assert direct_saves == []
+
+
+@pytest.mark.asyncio
 async def test_apply_settings_reload_updates_overlay_calibration_baseline_without_clobbering_draft(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -11316,7 +11736,10 @@ async def test_apply_settings_restarts_stt_and_reports_locale_failure(
     switch_calls: list[str] = []
     locale_calls: list[str] = []
 
-    app = SimpleNamespace(apply_locale=lambda: (_ for _ in ()).throw(RuntimeError("locale boom")))
+    raw_failure_text = "locale boom"
+    app = SimpleNamespace(
+        apply_locale=lambda: (_ for _ in ()).throw(RuntimeError(raw_failure_text))
+    )
     controller = _make_controller(app=app)
     controller.settings = settings
     controller.hub = DummyHub()
@@ -11371,7 +11794,8 @@ async def test_apply_settings_restarts_stt_and_reports_locale_failure(
     assert switch_calls == ["stop_mic", "rebuild_stt", "switch"]
     assert locale_calls == ["ko"]
     assert controller.hub.low_latency_mode is True
-    assert any("Failed to apply locale: locale boom" in message for message in errors)
+    assert "Failed to apply locale" in errors
+    assert raw_failure_text not in "\n".join(errors)
 
 
 @pytest.mark.asyncio
@@ -12764,7 +13188,7 @@ async def test_apply_providers_mixed_degraded_default_service_persists_full_prov
     ]
     assert controller.settings.system_prompt == "draft prompt"
     assert controller.hub.system_prompt == "draft prompt"
-    assert rebuild_prompts == ["base prompt", "draft prompt"]
+    assert rebuild_prompts == ["base prompt"]
 
 
 @pytest.mark.asyncio
@@ -13099,12 +13523,16 @@ async def test_order22_apply_settings_mixed_draft_applies_audio_runtime_and_pres
 
     await controller.apply_settings(pending)
 
-    assert len(requests) == 2
+    assert len(requests) == 3
     assert requests[0].values == {"audio.input_device": "Desk Mic"}
     assert requests[1].values == {
         "overlay.show_translation": False,
         "osc.chatbox_include_source": True,
     }
+    assert (
+        requests[2].reason == settings_mutation.SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE
+    )
+    assert requests[2].values == {"system_prompt": "draft prompt"}
     assert "overlay.show_translation" not in requests[0].values
     assert "osc.chatbox_include_source" not in requests[0].values
     assert "system_prompt" not in requests[0].values
@@ -13125,6 +13553,95 @@ async def test_order22_apply_settings_mixed_draft_applies_audio_runtime_and_pres
     assert controller.settings.overlay.show_translation is False
     assert controller.settings.osc.chatbox_include_source is True
     assert controller.settings.system_prompt == "draft prompt"
+
+
+@pytest.mark.asyncio
+async def test_mixed_order22_order23_order24_fallback_save_failure_restores_committed_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(apply_locale=lambda: None))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.llm.concurrency_limit = 2
+    controller.settings.overlay.calibration = OverlayCalibration(distance=0.8, offset_x=0.2)
+    controller.overlay_calibration = controller.settings.overlay.calibration.copy()
+    controller.settings.overlay.show_translation = True
+    controller.settings.system_prompt = "base prompt"
+    controller.hub = DummyHub(stt=object())
+    controller.hub.source_language = controller.settings.languages.source_language
+    controller.hub.target_language = controller.settings.languages.target_language
+    controller.hub.system_prompt = controller.settings.system_prompt
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_translation_enabled = controller.settings.ui.peer_translation_enabled
+    controller._last_vrc_mic_sync_enabled = controller.settings.osc.vrc_mic_intercept
+    pending = copy.deepcopy(controller.settings)
+    pending.languages.source_language = "ja"
+    pending.overlay.calibration = OverlayCalibration(distance=1.6, offset_x=0.7)
+    pending.overlay.show_translation = False
+    pending.system_prompt = "draft prompt"
+    pending.llm.concurrency_limit = 3
+    saved_settings: list[AppSettings] = []
+    raw_failure_text = "mixed full draft save failed secret-token-must-not-leak"
+
+    def fail_uncommitted_full_draft_save(_path, incoming: AppSettings) -> None:
+        saved_settings.append(copy.deepcopy(incoming))
+        if incoming.llm.concurrency_limit == pending.llm.concurrency_limit:
+            raise RuntimeError(raw_failure_text)
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_uncommitted_full_draft_save)
+    monkeypatch.setattr(controller_module, "get_locale", lambda: controller.settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_clear_local_stt_pending_enable_if_provider_switched_away",
+        lambda self: None,
+    )
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
+    )
+
+    await controller.apply_settings(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_order22_order23_order24_full_draft_save",
+        code="settings_save_failed",
+        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "ui_prompt_clipboard_state"},
+    )
+    assert [settings.llm.concurrency_limit for settings in saved_settings] == [2, 2, 2, 3]
+    assert controller.settings is not None
+    assert controller.settings.languages.source_language == "ja"
+    assert controller.hub.source_language == "ja"
+    assert controller.settings.overlay.show_translation is False
+    assert controller.settings.overlay.calibration.distance == 1.6
+    assert controller.overlay_calibration.distance == 1.6
+    assert controller.settings.system_prompt == "draft prompt"
+    assert controller.hub.system_prompt == "draft prompt"
+    assert controller.settings.llm.concurrency_limit == 2
+    logged_text = "\n".join(
+        message
+        for _level, message in (
+            controller._runtime_logging.basic_messages
+            + controller._runtime_logging.detailed_messages
+        )
+    )
+    assert raw_failure_text not in repr(result)
+    assert raw_failure_text not in logged_text
 
 
 @pytest.mark.asyncio
@@ -13183,17 +13700,17 @@ async def test_order22_apply_settings_mixed_full_draft_save_failure_degrades_and
 
     result = controller.last_settings_mutation_result
     assert result is not None
-    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED
     assert result.diagnostics == messages.ErrorDiagnostics(
-        component="gui_controller",
-        operation="apply_overlay_osc_output_full_draft_save",
+        component="settings_repository",
+        operation="save",
         code="settings_save_failed",
         category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
         visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
         content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
         status_code=None,
         retry_after_ms=None,
-        fields={"surface": "overlay_osc_output"},
+        fields={"surface": "ui_prompt_clipboard_state"},
     )
     assert [settings.audio.input_device for settings in save_attempts] == [
         "Desk Mic",
@@ -13278,10 +13795,14 @@ async def test_order22_mixed_provider_draft_rebuilds_self_stt_from_pre_mutation_
 
     await controller.apply_providers(pending)
 
-    assert len(requests) == 1
+    assert len(requests) == 2
     assert requests[0].reason == settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO
     assert requests[0].values == {"provider.stt": STTProviderName.SONIOX}
     assert "system_prompt" not in requests[0].values
+    assert (
+        requests[1].reason == settings_mutation.SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE
+    )
+    assert requests[1].values == {"system_prompt": "draft prompt"}
     assert [settings.provider.stt for settings in saved_settings] == [
         STTProviderName.SONIOX,
         STTProviderName.SONIOX,
@@ -13292,6 +13813,83 @@ async def test_order22_mixed_provider_draft_rebuilds_self_stt_from_pre_mutation_
     assert controller.settings.system_prompt == "draft prompt"
     assert controller.hub.system_prompt == "draft prompt"
     assert calls == ["rebuild_stt"]
+
+
+@pytest.mark.asyncio
+async def test_provider_order21_order24_fallback_save_failure_restores_committed_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(apply_locale=lambda: None))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.llm.concurrency_limit = 2
+    controller.settings.system_prompt = "base prompt"
+    controller.hub = DummyHub(stt=object(), llm=object())
+    controller.hub.system_prompt = controller.settings.system_prompt
+    controller._stt_desired = False
+    pending = copy.deepcopy(controller.settings)
+    pending.llm.concurrency_limit = 3
+    pending.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    pending.managed_identity.verified_hardware_hash = "pending-hardware-hash"
+    pending.managed_identity.verified_hardware_hash_salt_version = 9
+    pending.system_prompt = "provider prompt"
+    saved_settings: list[AppSettings] = []
+    raw_failure_text = "provider mixed full draft save failed secret-token-must-not-leak"
+
+    def fail_uncommitted_full_draft_save(_path, incoming: AppSettings) -> None:
+        saved_settings.append(copy.deepcopy(incoming))
+        if (
+            incoming.managed_identity.verified_hardware_hash
+            == pending.managed_identity.verified_hardware_hash
+        ):
+            raise RuntimeError(raw_failure_text)
+
+    async def fake_rebuild_llm_provider(self) -> None:
+        assert self.hub is not None
+        self.hub.llm = object()
+
+    monkeypatch.setattr(controller_module, "save_settings", fail_uncommitted_full_draft_save)
+    monkeypatch.setattr(controller_module, "get_locale", lambda: controller.settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_sync_clipboard_watcher", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+
+    await controller.apply_providers(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_order21_order22_order24_provider_full_draft_save",
+        code="settings_save_failed",
+        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "translation_provider"},
+    )
+    assert [settings.managed_identity.verified_hardware_hash for settings in saved_settings] == [
+        None,
+        None,
+        "pending-hardware-hash",
+    ]
+    assert controller.settings is not None
+    assert controller.settings.llm.concurrency_limit == 3
+    assert controller.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert controller.settings.system_prompt == "provider prompt"
+    assert controller.hub.system_prompt == "provider prompt"
+    assert controller.settings.managed_identity.verified_hardware_hash is None
+    assert controller.settings.managed_identity.verified_hardware_hash_salt_version is None
+    logged_text = "\n".join(
+        message
+        for _level, message in (
+            controller._runtime_logging.basic_messages
+            + controller._runtime_logging.detailed_messages
+        )
+    )
+    assert raw_failure_text not in repr(result)
+    assert raw_failure_text not in logged_text
 
 
 @pytest.mark.asyncio
@@ -13384,17 +13982,17 @@ async def test_order22_provider_mixed_full_draft_save_failure_degrades_and_resto
 
     result = controller.last_settings_mutation_result
     assert result is not None
-    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED
     assert result.diagnostics == messages.ErrorDiagnostics(
-        component="gui_controller",
-        operation="apply_stt_language_audio_provider_full_draft_save",
+        component="settings_repository",
+        operation="save",
         code="settings_save_failed",
         category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
         visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
         content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
         status_code=None,
         retry_after_ms=None,
-        fields={"surface": "stt_language_audio"},
+        fields={"surface": "ui_prompt_clipboard_state"},
     )
     assert [settings.provider.stt for settings in save_attempts] == [
         STTProviderName.SONIOX,

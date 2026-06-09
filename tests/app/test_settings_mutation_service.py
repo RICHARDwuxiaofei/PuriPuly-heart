@@ -889,6 +889,26 @@ def test_order23_overlay_osc_output_patch_records_initial_covered_surface_list()
     }
 
 
+def test_order24_ui_prompt_clipboard_state_patch_records_initial_covered_surface_list() -> None:
+    settings_mutation = _service_module()
+
+    assert set(settings_mutation.ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS) == {
+        "secrets.backend",
+        "secrets.encrypted_file_path",
+        "ui.locale",
+        "ui.peer_translation_eula_accepted",
+        "ui.integrated_context_enabled",
+        "ui.integrated_context_bootstrapped",
+        "ui.clipboard_auto_translate_enabled",
+        "ui.github_star_prompt_clicked",
+        "ui.github_star_prompt_last_shown_at",
+        "ui.github_star_prompt_show_count",
+        "ui.github_star_prompt_translation_success_observed",
+        "ui.github_star_prompt_eligible_launch_count",
+        "system_prompt",
+    }
+
+
 def test_nondurable_order22_compatibility_fields_are_not_covered() -> None:
     settings_mutation = _service_module()
 
@@ -916,6 +936,20 @@ def test_runtime_only_and_nondurable_order23_fields_are_not_covered() -> None:
         "overlay.desktop_flet.visual.outline_width",
         "desktop_audio.output_device",
     }.isdisjoint(settings_mutation.ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS)
+
+
+def test_runtime_only_secret_and_legacy_order24_fields_are_not_covered() -> None:
+    settings_mutation = _service_module()
+
+    assert {
+        "ui.overlay_enabled",
+        "ui.peer_translation_enabled",
+        "system_prompts",
+        "api_key_verified.openrouter",
+        "managed_identity.installation_id",
+        "secrets.openrouter_api_key",
+        "secrets.deepgram_api_key",
+    }.isdisjoint(settings_mutation.ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS)
 
 
 def test_settings_path_patch_builds_typed_mutation_request_for_order21_surface() -> None:
@@ -1000,6 +1034,35 @@ def test_settings_path_patch_builds_typed_mutation_request_for_order23_surface()
         expected_revision="settings-r3",
         reason=settings_mutation.SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT,
         correlation_id="corr-order23",
+    )
+
+
+def test_settings_path_patch_builds_typed_mutation_request_for_order24_surface() -> None:
+    settings_mutation = _service_module()
+
+    patch = settings_mutation.SettingsPathPatch(
+        values_by_path={
+            "ui.locale": "ja",
+            "ui.clipboard_auto_translate_enabled": True,
+            "system_prompt": "custom translation style",
+        },
+        surface=settings_mutation.SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE,
+    )
+
+    request = patch.to_mutation_request(
+        expected_revision="settings-r4",
+        correlation_id="corr-order24",
+    )
+
+    assert request == settings_mutation.SettingsMutationRequest(
+        values={
+            "ui.locale": "ja",
+            "ui.clipboard_auto_translate_enabled": True,
+            "system_prompt": "custom translation style",
+        },
+        expected_revision="settings-r4",
+        reason=settings_mutation.SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE,
+        correlation_id="corr-order24",
     )
 
 
@@ -1215,6 +1278,88 @@ async def test_order23_path_validator_rejects_runtime_only_peer_and_secret_paths
     )
     assert "secret-value-must-not-leak" not in repr(result)
     assert "peer-secret-ish" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_order24_path_validator_accepts_only_ui_prompt_clipboard_state_paths() -> None:
+    settings_mutation = _service_module()
+    validator = settings_mutation.SettingsPathMutationValidator(
+        allowed_paths=settings_mutation.ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS,
+        component="settings_mutation",
+        operation="validate_ui_prompt_clipboard_state_patch",
+    )
+    request = settings_mutation.SettingsMutationRequest(
+        values={
+            "secrets.backend": "encrypted_file",
+            "secrets.encrypted_file_path": "secure-secrets.json",
+            "ui.locale": "ja",
+            "ui.peer_translation_eula_accepted": True,
+            "ui.integrated_context_enabled": False,
+            "ui.integrated_context_bootstrapped": True,
+            "ui.clipboard_auto_translate_enabled": True,
+            "ui.github_star_prompt_clicked": False,
+            "ui.github_star_prompt_last_shown_at": "2026-06-08T00:00:00Z",
+            "ui.github_star_prompt_show_count": 2,
+            "ui.github_star_prompt_translation_success_observed": True,
+            "ui.github_star_prompt_eligible_launch_count": 3,
+            "system_prompt": "custom translation style",
+        },
+        expected_revision=None,
+        reason=settings_mutation.SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE,
+        correlation_id="corr-valid-order24-paths",
+    )
+
+    result = await validator.validate(request)
+
+    assert result == settings_mutation.SettingsMutationValidationResult(
+        succeeded=True,
+        message=None,
+        diagnostics=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_order24_path_validator_rejects_runtime_secret_and_legacy_paths_without_values() -> (
+    None
+):
+    settings_mutation = _service_module()
+    validator = settings_mutation.SettingsPathMutationValidator(
+        allowed_paths=settings_mutation.ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS,
+        component="settings_mutation",
+        operation="validate_ui_prompt_clipboard_state_patch",
+    )
+    request = settings_mutation.SettingsMutationRequest(
+        values={
+            "api_key_verified.openrouter": True,
+            "managed_identity.installation_id": "device-secret-ish",
+            "system_prompts": {"openrouter": "prompt-secret-ish"},
+            "ui.overlay_enabled": True,
+            "ui.peer_translation_enabled": True,
+            "secrets.openrouter_api_key": "secret-value-must-not-leak",
+        },
+        expected_revision=None,
+        reason=settings_mutation.SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE,
+        correlation_id="corr-invalid-order24-paths",
+    )
+
+    result = await validator.validate(request)
+
+    assert result.succeeded is False
+    assert result.message is None
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="settings_mutation",
+        operation="validate_ui_prompt_clipboard_state_patch",
+        code="settings_path_not_covered",
+        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"path": "api_key_verified.openrouter"},
+    )
+    assert "secret-value-must-not-leak" not in repr(result)
+    assert "device-secret-ish" not in repr(result)
+    assert "prompt-secret-ish" not in repr(result)
 
 
 def test_settings_mutation_service_module_avoids_concrete_ui_provider_and_i18n_imports() -> None:

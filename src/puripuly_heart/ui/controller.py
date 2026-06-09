@@ -32,9 +32,11 @@ from puripuly_heart.app.services.settings_mutation import (
     ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS,
     ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
     ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
+    ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS,
     SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT,
     SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
     SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
+    SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE,
     SettingsMutationService,
     SettingsPathMutationValidator,
     SettingsPathPatch,
@@ -556,6 +558,32 @@ class _ControllerOverlayOscOutputRuntimeApply:
 
 
 @dataclass(slots=True)
+class _ControllerUiPromptClipboardStateRuntimeApply:
+    controller: GuiController
+    settings: AppSettings
+
+    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
+        _ = request
+        try:
+            await self.controller._apply_settings_direct(
+                self.settings,
+                persist=False,
+                strict_runtime_errors=True,
+            )
+        except Exception:
+            return _runtime_apply_failed_result(
+                operation="apply_ui_prompt_clipboard_state_runtime",
+                code="ui_prompt_clipboard_state_runtime_apply_exception",
+                surface="ui_prompt_clipboard_state",
+            )
+        return RuntimeApplyResult(
+            status=RUNTIME_APPLY_STATUS_APPLIED,
+            message=None,
+            diagnostics=None,
+        )
+
+
+@dataclass(slots=True)
 class _ControllerNoopRuntimeApply:
     async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
         _ = request
@@ -696,6 +724,24 @@ def _stt_language_audio_runtime_degraded_transaction_result() -> TransactionResu
     )
 
 
+def _translation_provider_save_failed_transaction_result(*, operation: str) -> TransactionResult:
+    return TransactionResult(
+        status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
+        message=UserMessageRef(
+            key="settings.mutation.runtime_apply_failed",
+            params={"phase": "settings_save"},
+            severity=SEVERITY_WARNING,
+        ),
+        diagnostics=_settings_mutation_diagnostics(
+            component="gui_controller",
+            operation=operation,
+            code="settings_save_failed",
+            category=DIAGNOSTIC_CATEGORY_TRANSACTION,
+            surface="translation_provider",
+        ),
+    )
+
+
 def _stt_language_audio_save_failed_transaction_result(*, operation: str) -> TransactionResult:
     return TransactionResult(
         status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
@@ -738,6 +784,36 @@ def _overlay_osc_output_save_failed_transaction_result(*, operation: str) -> Tra
             code="settings_save_failed",
             category=DIAGNOSTIC_CATEGORY_TRANSACTION,
             surface="overlay_osc_output",
+        ),
+    )
+
+
+def _ui_prompt_clipboard_state_runtime_degraded_transaction_result() -> TransactionResult:
+    return _runtime_apply_result_as_degraded_transaction(
+        _runtime_apply_failed_result(
+            operation="apply_ui_prompt_clipboard_state_runtime",
+            code="ui_prompt_clipboard_state_runtime_apply_exception",
+            surface="ui_prompt_clipboard_state",
+        )
+    )
+
+
+def _ui_prompt_clipboard_state_save_failed_transaction_result(
+    *, operation: str
+) -> TransactionResult:
+    return TransactionResult(
+        status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
+        message=UserMessageRef(
+            key="settings.mutation.runtime_apply_failed",
+            params={"phase": "settings_save"},
+            severity=SEVERITY_WARNING,
+        ),
+        diagnostics=_settings_mutation_diagnostics(
+            component="gui_controller",
+            operation=operation,
+            code="settings_save_failed",
+            category=DIAGNOSTIC_CATEGORY_TRANSACTION,
+            surface="ui_prompt_clipboard_state",
         ),
     )
 
@@ -785,6 +861,11 @@ def _build_settings_path_patch(
 def _apply_settings_path_patch(settings: AppSettings, patch: Mapping[str, object]) -> None:
     for path, value in patch.items():
         _set_settings_path_value(settings, path, value)
+
+
+def _copy_runtime_only_ui_state(source: AppSettings, target: AppSettings) -> None:
+    target.ui.overlay_enabled = bool(source.ui.overlay_enabled)
+    target.ui.peer_translation_enabled = bool(source.ui.peer_translation_enabled)
 
 
 def _settings_mutation_committed(result: TransactionResult) -> bool:
@@ -900,11 +981,21 @@ class GuiController:
         default=None,
         repr=False,
     )
+    _settings_view_order24_baseline: AppSettings | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     _vrc_receiver_lock: asyncio.Lock | None = None
     _ui_event_bridge: UIEventBridge | None = None
     _clipboard_watcher: ClipboardWatcherRuntime | None = field(init=False, default=None)
     _clipboard_loop: asyncio.AbstractEventLoop | None = field(init=False, default=None)
     _clipboard_watcher_lock: asyncio.Lock | None = field(init=False, default=None)
+    _strict_runtime_errors_for_clipboard_watcher: bool = field(
+        init=False,
+        default=False,
+        repr=False,
+    )
     _local_stt_install_state: LocalSTTInstallState = field(
         init=False,
         default_factory=lambda: LocalSTTInstallState(status="ready"),
@@ -1646,9 +1737,31 @@ class GuiController:
         exc: Exception,
     ) -> None:
         self.log_basic(
-            f"[GitHubStar] Failed to persist prompt {failure_context}: {exc}",
+            "[GitHubStar] Failed to persist prompt "
+            f"{failure_context}: exception_class={type(exc).__name__}",
             level=logging.WARNING,
         )
+
+    async def _persist_order24_state_mutation(
+        self,
+        *,
+        base_settings: AppSettings,
+        committed_settings: AppSettings,
+    ) -> bool:
+        patch_values = _build_settings_path_patch(
+            base_settings,
+            committed_settings,
+            paths=ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS,
+        )
+        if not patch_values:
+            return True
+        result = await self._mutate_order24_settings_patch(
+            patch_values=patch_values,
+            committed_settings=copy.deepcopy(committed_settings),
+            runtime_apply=_ControllerNoopRuntimeApply(),
+        )
+        self.last_settings_mutation_result = result
+        return _settings_mutation_committed(result)
 
     async def _persist_github_star_prompt_mutation(
         self,
@@ -1663,11 +1776,15 @@ class GuiController:
                 if settings is None:
                     return False
                 snapshot = self._github_star_prompt_state_snapshot(settings)
+                base_settings = copy.deepcopy(settings)
                 if not mutate(settings):
                     return attempted_mutation
                 attempted_mutation = True
                 try:
-                    await asyncio.to_thread(save_settings, self.config_path, settings)
+                    persisted = await self._persist_order24_state_mutation(
+                        base_settings=base_settings,
+                        committed_settings=settings,
+                    )
                 except asyncio.CancelledError:
                     if self.settings is settings:
                         self._restore_github_star_prompt_state_snapshot(settings, snapshot)
@@ -1676,6 +1793,10 @@ class GuiController:
                     if self.settings is settings:
                         self._restore_github_star_prompt_state_snapshot(settings, snapshot)
                     self._log_github_star_prompt_save_failure(failure_context, exc)
+                    return False
+                if not persisted:
+                    if self.settings is settings:
+                        self._restore_github_star_prompt_state_snapshot(settings, snapshot)
                     return False
                 if self.settings is settings:
                     return True
@@ -1697,6 +1818,7 @@ class GuiController:
                 if should_open is not None and not should_open():
                     return False
                 snapshot = self._github_star_prompt_state_snapshot(settings)
+                base_settings = copy.deepcopy(settings)
                 settings.ui.github_star_prompt_last_shown_at = opened_timestamp
                 settings.ui.github_star_prompt_show_count = (
                     _github_star_prompt_non_negative_count(
@@ -1705,7 +1827,10 @@ class GuiController:
                     + 1
                 )
                 try:
-                    await asyncio.to_thread(save_settings, self.config_path, settings)
+                    persisted = await self._persist_order24_state_mutation(
+                        base_settings=base_settings,
+                        committed_settings=settings,
+                    )
                 except asyncio.CancelledError:
                     if self.settings is settings:
                         self._restore_github_star_prompt_state_snapshot(settings, snapshot)
@@ -1715,11 +1840,19 @@ class GuiController:
                         self._restore_github_star_prompt_state_snapshot(settings, snapshot)
                     self._log_github_star_prompt_save_failure("open state", exc)
                     return False
+                if not persisted:
+                    if self.settings is settings:
+                        self._restore_github_star_prompt_state_snapshot(settings, snapshot)
+                    return False
                 if self.settings is settings:
                     if should_open is not None and not should_open():
+                        rollback_base_settings = copy.deepcopy(settings)
                         self._restore_github_star_prompt_state_snapshot(settings, snapshot)
                         try:
-                            await asyncio.to_thread(save_settings, self.config_path, settings)
+                            await self._persist_order24_state_mutation(
+                                base_settings=rollback_base_settings,
+                                committed_settings=settings,
+                            )
                         except asyncio.CancelledError:
                             raise
                         except Exception as exc:
@@ -4231,6 +4364,7 @@ class GuiController:
         return self._clipboard_watcher_lock
 
     async def _sync_clipboard_watcher(self) -> None:
+        strict_runtime_errors = self._strict_runtime_errors_for_clipboard_watcher
         enabled = bool(
             self.settings is not None and self.settings.ui.clipboard_auto_translate_enabled
         )
@@ -4245,11 +4379,13 @@ class GuiController:
             watcher = create_clipboard_watcher(self._on_clipboard_text_from_thread)
             try:
                 await asyncio.to_thread(watcher.start)
-            except Exception as exc:
+            except Exception:
                 self._clipboard_loop = None
                 with contextlib.suppress(Exception):
                     await asyncio.to_thread(watcher.stop)
-                self._log_error(f"Clipboard watcher failed to start: {exc}")
+                self._log_error("Clipboard watcher failed to start")
+                if strict_runtime_errors:
+                    raise
                 return
             self._clipboard_watcher = watcher
 
@@ -4262,8 +4398,10 @@ class GuiController:
                 return
             try:
                 await asyncio.to_thread(watcher.stop)
-            except Exception as exc:
-                self._log_error(f"Clipboard watcher failed to stop: {exc}")
+            except Exception:
+                self._log_error("Clipboard watcher failed to stop")
+                if self._strict_runtime_errors_for_clipboard_watcher:
+                    raise
 
     def _on_clipboard_text_from_thread(self, text: str) -> None:
         trimmed = text.strip()
@@ -4324,6 +4462,11 @@ class GuiController:
             copy.deepcopy(settings) if settings is not None else None
         )
 
+    def _remember_settings_view_order24_baseline(self, settings: AppSettings | None) -> None:
+        self._settings_view_order24_baseline = (
+            copy.deepcopy(settings) if settings is not None else None
+        )
+
     def _reload_settings_view_from_settings(
         self,
         settings: AppSettings,
@@ -4341,6 +4484,7 @@ class GuiController:
             )
             self._remember_settings_view_order22_baseline(settings)
             self._remember_settings_view_order23_baseline(settings)
+            self._remember_settings_view_order24_baseline(settings)
 
     def _order22_patch_base_and_values(
         self,
@@ -4389,6 +4533,32 @@ class GuiController:
                 baseline,
                 next_settings,
                 paths=ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
+            )
+            if baseline_patch_values:
+                return baseline, baseline_patch_values
+        return base_settings, patch_values
+
+    def _order24_patch_base_and_values(
+        self,
+        next_settings: AppSettings,
+    ) -> tuple[AppSettings, dict[str, object]] | None:
+        base_settings = self.settings
+        if base_settings is None:
+            return None
+        patch_values = _build_settings_path_patch(
+            base_settings,
+            next_settings,
+            paths=ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS,
+        )
+        if patch_values or next_settings is base_settings:
+            return base_settings, patch_values
+
+        baseline = self._settings_view_order24_baseline
+        if baseline is not None:
+            baseline_patch_values = _build_settings_path_patch(
+                baseline,
+                next_settings,
+                paths=ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS,
             )
             if baseline_patch_values:
                 return baseline, baseline_patch_values
@@ -4465,15 +4635,39 @@ class GuiController:
             self._log_error("Failed to resync committed order23 settings runtime")
             self._sync_memory_runtime_fields_from_settings(committed_settings)
 
+    async def _resync_committed_order24_settings_after_strict_save_failure(
+        self,
+        *,
+        base_settings: AppSettings,
+        committed_settings: AppSettings,
+    ) -> None:
+        self._sync_memory_runtime_fields_from_settings(base_settings)
+        try:
+            await self._apply_settings_direct(
+                copy.deepcopy(committed_settings),
+                persist=False,
+                strict_runtime_errors=True,
+            )
+        except Exception:
+            self._log_error("Failed to resync committed order24 settings runtime")
+            self._sync_memory_runtime_fields_from_settings(committed_settings)
+
     async def apply_settings(self, settings: AppSettings) -> None:
         if settings is not self.settings:
-            routed = await self._apply_order22_then_order23_settings_via_mutation_services(settings)
+            routed = await self._apply_order22_order23_order24_settings_via_mutation_services(
+                settings
+            )
             if routed:
                 return
             routed = await self._apply_stt_language_audio_settings_via_mutation_service(settings)
             if routed:
                 return
             routed = await self._apply_overlay_osc_output_settings_via_mutation_service(settings)
+            if routed:
+                return
+            routed = await self._apply_ui_prompt_clipboard_state_settings_via_mutation_service(
+                settings
+            )
             if routed:
                 return
         await self._apply_settings_direct(settings)
@@ -4616,7 +4810,14 @@ class GuiController:
             else:
                 self._save_settings()
         await self._broadcast_desktop_runtime_control_payloads(desktop_runtime_controls)
-        await self._sync_clipboard_watcher()
+        previous_strict_clipboard_runtime_errors = self._strict_runtime_errors_for_clipboard_watcher
+        self._strict_runtime_errors_for_clipboard_watcher = strict_runtime_errors
+        try:
+            await self._sync_clipboard_watcher()
+        finally:
+            self._strict_runtime_errors_for_clipboard_watcher = (
+                previous_strict_clipboard_runtime_errors
+            )
         self._refresh_local_stt_runtime_state()
         self._clear_local_stt_pending_enable_if_provider_switched_away()
 
@@ -4734,65 +4935,161 @@ class GuiController:
             if callable(apply_locale):
                 try:
                     apply_locale()
-                except Exception as exc:
-                    self._log_error(f"Failed to apply locale: {exc}")
+                except Exception:
+                    self._log_error("Failed to apply locale")
+                    if strict_runtime_errors:
+                        raise
 
         self._refresh_overlay_peer_consumers()
         self._remember_settings_view_order22_baseline(self.settings)
         self._remember_settings_view_order23_baseline(self.settings)
+        self._remember_settings_view_order24_baseline(self.settings)
 
-    async def _apply_order22_then_order23_settings_via_mutation_services(
+    async def _apply_order22_order23_order24_settings_via_mutation_services(
         self,
         next_settings: AppSettings,
     ) -> bool:
         order22_base_and_patch = self._order22_patch_base_and_values(next_settings)
         order23_base_and_patch = self._order23_patch_base_and_values(next_settings)
-        if order22_base_and_patch is None or order23_base_and_patch is None:
-            return False
-        order22_base_settings, order22_patch_values = order22_base_and_patch
-        _order23_base_settings, order23_patch_values = order23_base_and_patch
-        if not order22_patch_values or not order23_patch_values:
-            return False
-
-        order22_only_settings = copy.deepcopy(order22_base_settings)
-        _apply_settings_path_patch(order22_only_settings, order22_patch_values)
-        routed_order22 = await self._apply_stt_language_audio_settings_via_mutation_service(
-            order22_only_settings,
-            reload_settings_view=False,
-        )
-        if not routed_order22:
-            return False
-        if self.last_settings_mutation_result is None or not _settings_mutation_committed(
-            self.last_settings_mutation_result,
+        order24_base_and_patch = self._order24_patch_base_and_values(next_settings)
+        if (
+            order22_base_and_patch is None
+            or order23_base_and_patch is None
+            or order24_base_and_patch is None
         ):
-            return True
-        order22_result = self.last_settings_mutation_result
-
-        routed_order23 = await self._apply_overlay_osc_output_settings_via_mutation_service(
-            next_settings,
+            return False
+        _order22_base_settings, order22_patch_values = order22_base_and_patch
+        _order23_base_settings, order23_patch_values = order23_base_and_patch
+        _order24_base_settings, order24_patch_values = order24_base_and_patch
+        patch_count = sum(
+            1
+            for patch_values in (
+                order22_patch_values,
+                order23_patch_values,
+                order24_patch_values,
+            )
+            if patch_values
         )
-        if routed_order23:
-            if (
-                self.settings is not None
-                and self.last_settings_mutation_result is not None
-                and _settings_mutation_committed(self.last_settings_mutation_result)
-            ):
-                self._reload_settings_view_from_settings(
-                    self.settings,
-                    preserve_custom_vocab_draft=True,
+        if patch_count < 2:
+            return False
+
+        committed_results: list[TransactionResult] = []
+
+        async def _route_patch_only(
+            patch_values: dict[str, object],
+            route,
+            *,
+            route_stt: bool = False,
+            reload_settings_view: bool = True,
+            runtime_only_source: AppSettings | None = None,
+        ) -> bool:
+            if self.settings is None:
+                return False
+            patch_only_settings = copy.deepcopy(self.settings)
+            _apply_settings_path_patch(patch_only_settings, patch_values)
+            if runtime_only_source is not None:
+                _copy_runtime_only_ui_state(runtime_only_source, patch_only_settings)
+            if route_stt:
+                routed = await route(
+                    patch_only_settings,
+                    reload_settings_view=reload_settings_view,
                 )
-            if (
-                self.last_settings_mutation_result is not None
-                and self.last_settings_mutation_result.status
-                == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
-                and order22_result.status
-                == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
-            ):
-                self.last_settings_mutation_result = order22_result
+            else:
+                routed = await route(patch_only_settings)
+            if not routed:
+                return False
+            result = self.last_settings_mutation_result
+            if result is None or not _settings_mutation_committed(result):
+                return True
+            committed_results.append(result)
             return True
 
+        if order22_patch_values:
+            routed_order22 = await _route_patch_only(
+                order22_patch_values,
+                self._apply_stt_language_audio_settings_via_mutation_service,
+                route_stt=True,
+                reload_settings_view=False,
+            )
+            if not routed_order22:
+                return False
+            if self.last_settings_mutation_result is None or not _settings_mutation_committed(
+                self.last_settings_mutation_result,
+            ):
+                return True
+
+        if order23_patch_values:
+            routed_order23 = await _route_patch_only(
+                order23_patch_values,
+                self._apply_overlay_osc_output_settings_via_mutation_service,
+            )
+            if not routed_order23:
+                return False
+            if self.last_settings_mutation_result is None or not _settings_mutation_committed(
+                self.last_settings_mutation_result,
+            ):
+                return True
+
+        if order24_patch_values:
+            routed_order24 = await _route_patch_only(
+                order24_patch_values,
+                self._apply_ui_prompt_clipboard_state_settings_via_mutation_service,
+                runtime_only_source=next_settings,
+            )
+            if not routed_order24:
+                return False
+            if self.last_settings_mutation_result is None or not _settings_mutation_committed(
+                self.last_settings_mutation_result,
+            ):
+                return True
+
+        committed_settings_before_full_draft = (
+            copy.deepcopy(self.settings) if self.settings is not None else None
+        )
         if self.settings is not None and to_dict(self.settings) != to_dict(next_settings):
-            await self._apply_settings_direct(next_settings)
+            try:
+                await self._apply_settings_direct(
+                    next_settings,
+                    strict_runtime_errors=True,
+                    strict_persistence_errors=True,
+                )
+            except _StrictSettingsSaveFailed:
+                if committed_settings_before_full_draft is not None:
+                    await self._resync_committed_order24_settings_after_strict_save_failure(
+                        base_settings=committed_settings_before_full_draft,
+                        committed_settings=committed_settings_before_full_draft,
+                    )
+                self.last_settings_mutation_result = (
+                    _ui_prompt_clipboard_state_save_failed_transaction_result(
+                        operation="apply_order22_order23_order24_full_draft_save"
+                    )
+                )
+            except Exception:
+                self.last_settings_mutation_result = (
+                    _ui_prompt_clipboard_state_runtime_degraded_transaction_result()
+                )
+
+        if self.settings is not None:
+            self._reload_settings_view_from_settings(
+                self.settings,
+                preserve_custom_vocab_draft=True,
+            )
+
+        if (
+            self.last_settings_mutation_result is not None
+            and self.last_settings_mutation_result.status
+            == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+        ):
+            degraded_result = next(
+                (
+                    result
+                    for result in committed_results
+                    if result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+                ),
+                None,
+            )
+            if degraded_result is not None:
+                self.last_settings_mutation_result = degraded_result
         return True
 
     async def _apply_stt_language_audio_settings_via_mutation_service(
@@ -4975,6 +5272,99 @@ class GuiController:
         self._remember_settings_view_order23_baseline(self.settings)
         return True
 
+    async def _mutate_order24_settings_patch(
+        self,
+        *,
+        patch_values: Mapping[str, object],
+        committed_settings: AppSettings,
+        runtime_apply,
+    ) -> TransactionResult:
+        repository = _ControllerSettingsPatchRepository(
+            controller=self,
+            committed_settings=committed_settings,
+            surface="ui_prompt_clipboard_state",
+        )
+        service = self.settings_mutation_service or SettingsMutationService(
+            settings_repository=repository,
+            runtime_apply=runtime_apply,
+            validator=SettingsPathMutationValidator(
+                allowed_paths=ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS,
+                component="settings_mutation",
+                operation="validate_ui_prompt_clipboard_state_patch",
+            ),
+        )
+        request = SettingsPathPatch(
+            values_by_path=patch_values,
+            surface=SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE,
+        ).to_mutation_request(
+            expected_revision=None,
+            correlation_id=None,
+        )
+        return await service.mutate(request)
+
+    async def _apply_ui_prompt_clipboard_state_settings_via_mutation_service(
+        self,
+        next_settings: AppSettings,
+    ) -> bool:
+        base_and_patch = self._order24_patch_base_and_values(next_settings)
+        if base_and_patch is None:
+            return False
+        base_settings, patch_values = base_and_patch
+        if not patch_values:
+            return False
+
+        committed_settings = copy.deepcopy(base_settings)
+        _apply_settings_path_patch(committed_settings, patch_values)
+        has_out_of_scope_draft = to_dict(committed_settings) != to_dict(next_settings)
+        runtime_settings = copy.deepcopy(next_settings)
+        runtime_apply = (
+            _ControllerNoopRuntimeApply()
+            if has_out_of_scope_draft
+            else _ControllerUiPromptClipboardStateRuntimeApply(
+                controller=self,
+                settings=runtime_settings,
+            )
+        )
+
+        result = await self._mutate_order24_settings_patch(
+            patch_values=patch_values,
+            committed_settings=committed_settings,
+            runtime_apply=runtime_apply,
+        )
+        self.last_settings_mutation_result = result
+        if not _settings_mutation_committed(result):
+            self.settings = copy.deepcopy(base_settings)
+            self._remember_settings_view_order24_baseline(self.settings)
+            return True
+
+        if has_out_of_scope_draft:
+            try:
+                await self._apply_settings_direct(
+                    next_settings,
+                    strict_runtime_errors=True,
+                    strict_persistence_errors=True,
+                )
+            except _StrictSettingsSaveFailed:
+                await self._resync_committed_order24_settings_after_strict_save_failure(
+                    base_settings=base_settings,
+                    committed_settings=committed_settings,
+                )
+                self.last_settings_mutation_result = (
+                    _ui_prompt_clipboard_state_save_failed_transaction_result(
+                        operation="apply_ui_prompt_clipboard_state_full_draft_save"
+                    )
+                )
+            except Exception:
+                self.last_settings_mutation_result = (
+                    _ui_prompt_clipboard_state_runtime_degraded_transaction_result()
+                )
+        else:
+            self.settings = runtime_settings
+            if result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+                self._sync_signature_caches(runtime_settings)
+        self._remember_settings_view_order24_baseline(self.settings)
+        return True
+
     async def verify_api_key(self, provider: str, key: str) -> tuple[bool, str]:
         """Verify API key using the respective provider's static check. Returns (success, error_msg)."""
         if not key:
@@ -5034,7 +5424,19 @@ class GuiController:
         await self._preserve_github_star_prompt_observation_before_settings_replace(next_settings)
 
         if settings is not None and not force_rebuild_llm:
+            routed = (
+                await self._apply_order21_order22_order24_provider_settings_via_mutation_services(
+                    next_settings,
+                )
+            )
+            if routed:
+                return
             routed = await self._apply_translation_provider_settings_via_mutation_service(
+                next_settings,
+            )
+            if routed:
+                return
+            routed = await self._apply_ui_prompt_clipboard_state_settings_via_mutation_service(
                 next_settings,
             )
             if routed:
@@ -5087,6 +5489,146 @@ class GuiController:
                 or next_self_provider_signature != prev_self_provider_signature
             ),
         )
+
+    async def _apply_order21_order22_order24_provider_settings_via_mutation_services(
+        self,
+        next_settings: AppSettings,
+    ) -> bool:
+        base_settings = self.settings
+        if base_settings is None:
+            return False
+
+        order21_patch_values = _build_settings_path_patch(
+            base_settings,
+            next_settings,
+            paths=ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS,
+        )
+        order22_patch_values = _build_settings_path_patch(
+            base_settings,
+            next_settings,
+            paths=ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
+        )
+        order24_base_and_patch = self._order24_patch_base_and_values(next_settings)
+        if order24_base_and_patch is None:
+            return False
+        _order24_base_settings, order24_patch_values = order24_base_and_patch
+        patch_count = sum(
+            1
+            for patch_values in (
+                order21_patch_values,
+                order22_patch_values,
+                order24_patch_values,
+            )
+            if patch_values
+        )
+        if patch_count < 2:
+            return False
+
+        committed_results: list[TransactionResult] = []
+
+        async def _route_provider_patch_only(patch_values: dict[str, object], route) -> bool:
+            if self.settings is None:
+                return False
+            patch_only_settings = copy.deepcopy(self.settings)
+            _apply_settings_path_patch(patch_only_settings, patch_values)
+            routed = await route(patch_only_settings)
+            if not routed:
+                return False
+            result = self.last_settings_mutation_result
+            if result is None or not _settings_mutation_committed(result):
+                return True
+            committed_results.append(result)
+            return True
+
+        if order21_patch_values:
+            routed_order21 = await _route_provider_patch_only(
+                order21_patch_values,
+                self._apply_translation_provider_settings_via_mutation_service,
+            )
+            if not routed_order21:
+                return False
+            if self.last_settings_mutation_result is None or not _settings_mutation_committed(
+                self.last_settings_mutation_result,
+            ):
+                return True
+
+        if order22_patch_values:
+            routed_order22 = await _route_provider_patch_only(
+                order22_patch_values,
+                self._apply_stt_language_audio_provider_settings_via_mutation_service,
+            )
+            if not routed_order22:
+                return False
+            if self.last_settings_mutation_result is None or not _settings_mutation_committed(
+                self.last_settings_mutation_result,
+            ):
+                return True
+
+        if order24_patch_values:
+            if self.settings is None:
+                return True
+            order24_only_settings = copy.deepcopy(self.settings)
+            _apply_settings_path_patch(order24_only_settings, order24_patch_values)
+            _copy_runtime_only_ui_state(next_settings, order24_only_settings)
+            routed_order24 = (
+                await self._apply_ui_prompt_clipboard_state_settings_via_mutation_service(
+                    order24_only_settings,
+                )
+            )
+            if not routed_order24:
+                return False
+            if self.last_settings_mutation_result is None or not _settings_mutation_committed(
+                self.last_settings_mutation_result,
+            ):
+                return True
+
+        committed_settings_before_full_draft = (
+            copy.deepcopy(self.settings) if self.settings is not None else None
+        )
+        if self.settings is not None and to_dict(self.settings) != to_dict(next_settings):
+            try:
+                await self._apply_providers_direct(
+                    next_settings,
+                    force_rebuild_llm=False,
+                    route_order22=False,
+                    strict_persistence_errors=True,
+                )
+            except _StrictSettingsSaveFailed:
+                if committed_settings_before_full_draft is not None:
+                    self._sync_memory_runtime_fields_from_settings(
+                        committed_settings_before_full_draft
+                    )
+                self.last_settings_mutation_result = (
+                    _translation_provider_save_failed_transaction_result(
+                        operation="apply_order21_order22_order24_provider_full_draft_save"
+                    )
+                )
+            except Exception:
+                self.last_settings_mutation_result = _runtime_apply_result_as_degraded_transaction(
+                    _runtime_apply_failed_result(
+                        operation="apply_order21_order22_order24_provider_runtime",
+                        code="provider_runtime_apply_exception",
+                        surface="translation_provider",
+                    )
+                )
+
+        if (
+            self.last_settings_mutation_result is not None
+            and self.last_settings_mutation_result.status
+            == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+            and committed_results
+        ):
+            degraded_result = next(
+                (
+                    result
+                    for result in committed_results
+                    if result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+                ),
+                None,
+            )
+            if degraded_result is not None:
+                self.last_settings_mutation_result = degraded_result
+        return True
 
     async def _apply_translation_provider_settings_via_mutation_service(
         self,
@@ -6824,6 +7366,7 @@ class GuiController:
                 view_settings.load_from_settings(settings, config_path=self.config_path)
                 self._remember_settings_view_order22_baseline(settings)
                 self._remember_settings_view_order23_baseline(settings)
+                self._remember_settings_view_order24_baseline(settings)
                 view_settings.set_overlay_calibration(self.overlay_calibration)
 
         self._refresh_overlay_peer_consumers()

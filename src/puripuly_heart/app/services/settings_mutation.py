@@ -31,6 +31,7 @@ from puripuly_heart.core.messages import (
 SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER: Final = "settings.translation_provider"
 SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO: Final = "settings.stt_language_audio"
 SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT: Final = "settings.overlay_osc_output"
+SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE: Final = "settings.ui_prompt_clipboard_state"
 
 ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS: Final[tuple[str, ...]] = (
     "translation.model",
@@ -111,6 +112,22 @@ ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS: Final[tuple[str, ...]] = (
     "osc.chatbox_max_chars",
     "osc.vrc_mic_intercept",
     "osc.chatbox_include_source",
+)
+
+ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS: Final[tuple[str, ...]] = (
+    "secrets.backend",
+    "secrets.encrypted_file_path",
+    "ui.locale",
+    "ui.peer_translation_eula_accepted",
+    "ui.integrated_context_enabled",
+    "ui.integrated_context_bootstrapped",
+    "ui.clipboard_auto_translate_enabled",
+    "ui.github_star_prompt_clicked",
+    "ui.github_star_prompt_last_shown_at",
+    "ui.github_star_prompt_show_count",
+    "ui.github_star_prompt_translation_success_observed",
+    "ui.github_star_prompt_eligible_launch_count",
+    "system_prompt",
 )
 
 
@@ -348,10 +365,12 @@ __all__ = [
     "ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS",
     "ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS",
     "ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS",
+    "ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS",
     "RuntimeApplyResultPublisher",
     "SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT",
     "SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO",
     "SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER",
+    "SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE",
     "SettingsMutationRequest",
     "SettingsMutationService",
     "SettingsPathMutationValidator",

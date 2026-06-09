@@ -1675,7 +1675,7 @@ def test_peer_translation_toggle_first_enable_opens_eula_without_running_task(
 
 
 @pytest.mark.asyncio
-async def test_peer_translation_toggle_after_eula_acceptance_saves_and_enables(
+async def test_peer_translation_toggle_after_eula_acceptance_routes_and_enables(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = TranslatorApp.__new__(TranslatorApp)
@@ -1683,13 +1683,19 @@ async def test_peer_translation_toggle_after_eula_acceptance_saves_and_enables(
     settings = AppSettings()
     settings.ui.peer_translation_eula_accepted = False
     calls: list[bool] = []
+    applied: list[AppSettings] = []
 
     async def fake_enable(enabled: bool):
         calls.append(enabled)
 
+    async def fake_apply_settings(updated: AppSettings) -> None:
+        applied.append(updated)
+        app.controller.settings = updated
+
     app.controller = SimpleNamespace(
         settings=settings,
         config_path="settings.json",
+        apply_settings=fake_apply_settings,
         set_peer_translation_enabled=fake_enable,
     )
     saves: list[tuple[str, AppSettings]] = []
@@ -1698,9 +1704,43 @@ async def test_peer_translation_toggle_after_eula_acceptance_saves_and_enables(
     app._accept_peer_translation_eula_and_enable()
     await app.page.tasks[0]()
 
-    assert settings.ui.peer_translation_eula_accepted is True
+    assert settings.ui.peer_translation_eula_accepted is False
+    assert len(applied) == 1
+    assert applied[0].ui.peer_translation_eula_accepted is True
     assert calls == [True]
-    assert saves == [("settings.json", settings)]
+    assert saves == []
+
+
+@pytest.mark.asyncio
+async def test_peer_translation_eula_acceptance_routes_settings_patch_before_enable() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.ui.peer_translation_eula_accepted = False
+    applied: list[AppSettings] = []
+    enable_calls: list[bool] = []
+
+    async def fake_apply_settings(updated: AppSettings) -> None:
+        applied.append(updated)
+        app.controller.settings = updated
+
+    async def fake_enable(enabled: bool) -> None:
+        enable_calls.append(enabled)
+
+    app.controller = SimpleNamespace(
+        settings=settings,
+        apply_settings=fake_apply_settings,
+        set_peer_translation_enabled=fake_enable,
+    )
+
+    app._accept_peer_translation_eula_and_enable()
+    await app.page.tasks[0]()
+
+    assert len(applied) == 1
+    assert applied[0] is not settings
+    assert applied[0].ui.peer_translation_eula_accepted is True
+    assert settings.ui.peer_translation_eula_accepted is False
+    assert enable_calls == [True]
 
 
 @pytest.mark.asyncio

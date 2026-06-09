@@ -521,11 +521,11 @@ class TranslatorApp:
     def _accept_peer_translation_eula_and_enable(self) -> None:
         async def _task():
             settings = getattr(self.controller, "settings", None)
-            if settings is not None:
-                settings.ui.peer_translation_eula_accepted = True
-                config_path = getattr(self.controller, "config_path", None)
-                if config_path is not None:
-                    save_settings(config_path, settings)
+            apply_settings = getattr(self.controller, "apply_settings", None)
+            if settings is not None and callable(apply_settings):
+                updated = copy.deepcopy(settings)
+                updated.ui.peer_translation_eula_accepted = True
+                await apply_settings(updated)
             await self.controller.set_peer_translation_enabled(True)
 
         self.page.run_task(_task)
