@@ -5686,10 +5686,48 @@ class GuiController:
 
         self.settings = committed_settings
         if has_out_of_scope_draft:
-            await self._apply_providers_direct(
+            fallback_plan = self._build_provider_runtime_apply_plan(
                 next_settings,
                 force_rebuild_llm=False,
             )
+            try:
+                await self._apply_providers_direct(
+                    next_settings,
+                    force_rebuild_llm=False,
+                    plan=fallback_plan,
+                    route_order22=False,
+                    strict_persistence_errors=True,
+                )
+            except _StrictSettingsSaveFailed:
+                preserve_llm_provider_retry_marker = self._last_llm_provider_signature == ()
+                self._sync_memory_runtime_fields_from_settings(committed_settings)
+                if preserve_llm_provider_retry_marker:
+                    self._last_llm_provider_signature = ()
+                self.last_settings_mutation_result = (
+                    _translation_provider_save_failed_transaction_result(
+                        operation="apply_translation_provider_full_draft_save"
+                    )
+                )
+            except Exception:
+                self.last_settings_mutation_result = _runtime_apply_result_as_degraded_transaction(
+                    _runtime_apply_failed_result(
+                        operation="apply_translation_provider_runtime",
+                        code="provider_runtime_apply_exception",
+                        surface="translation_provider",
+                    )
+                )
+            else:
+                unavailable_result = _provider_runtime_apply_unavailable_result(
+                    controller=self,
+                    settings=next_settings,
+                    plan=fallback_plan,
+                    operation="apply_translation_provider_runtime",
+                    surface="translation_provider",
+                )
+                if unavailable_result is not None:
+                    self.last_settings_mutation_result = (
+                        _runtime_apply_result_as_degraded_transaction(unavailable_result)
+                    )
         elif result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
             self._sync_signature_caches(committed_settings)
         self._remember_settings_view_order22_baseline(self.settings)

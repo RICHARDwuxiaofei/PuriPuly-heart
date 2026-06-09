@@ -13816,6 +13816,244 @@ async def test_order22_mixed_provider_draft_rebuilds_self_stt_from_pre_mutation_
 
 
 @pytest.mark.asyncio
+async def test_order21_provider_only_mixed_full_draft_save_failure_restores_committed_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.llm.concurrency_limit = 2
+    controller.hub = DummyHub(llm=object(), stt=object())
+    controller._sync_signature_caches(controller.settings)
+    pending = copy.deepcopy(controller.settings)
+    pending.llm.concurrency_limit = 3
+    pending.managed_identity.verified_hardware_hash = "pending-hardware-hash"
+    pending.managed_identity.verified_hardware_hash_salt_version = 9
+    requests: list[settings_mutation.SettingsMutationRequest] = []
+    saved_settings: list[AppSettings] = []
+    raw_failure_text = "order21 full draft save failed secret-token-must-not-leak"
+
+    original_mutate = settings_mutation.SettingsMutationService.mutate
+
+    async def capture_mutate(self, request):
+        requests.append(request)
+        return await original_mutate(self, request)
+
+    def fail_uncommitted_full_draft_save(_path, incoming: AppSettings) -> None:
+        saved_settings.append(copy.deepcopy(incoming))
+        if (
+            incoming.managed_identity.verified_hardware_hash
+            == pending.managed_identity.verified_hardware_hash
+        ):
+            raise RuntimeError(raw_failure_text)
+
+    async def fake_rebuild_llm_provider(self) -> None:
+        assert self.hub is not None
+        self.hub.llm = object()
+
+    monkeypatch.setattr(settings_mutation.SettingsMutationService, "mutate", capture_mutate)
+    monkeypatch.setattr(controller_module, "save_settings", fail_uncommitted_full_draft_save)
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+
+    await controller.apply_providers(pending)
+
+    assert len(requests) == 1
+    assert requests[0].reason == settings_mutation.SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER
+    assert requests[0].values == {"llm.concurrency_limit": 3}
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_translation_provider_full_draft_save",
+        code="settings_save_failed",
+        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "translation_provider"},
+    )
+    assert [settings.managed_identity.verified_hardware_hash for settings in saved_settings] == [
+        None,
+        "pending-hardware-hash",
+    ]
+    assert controller.settings is not None
+    assert controller.settings.llm.concurrency_limit == 3
+    assert controller.settings.provider.llm == LLMProviderName.OPENROUTER
+    assert controller.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert controller.settings.managed_identity.verified_hardware_hash is None
+    assert controller.settings.managed_identity.verified_hardware_hash_salt_version is None
+    committed_signature = controller._build_llm_provider_signature(controller.settings)
+    pending_signature = controller._build_llm_provider_signature(pending)
+    assert controller._last_llm_provider_signature == committed_signature
+    assert controller._last_llm_provider_signature != pending_signature
+    logged_text = "\n".join(
+        message
+        for _level, message in (
+            controller._runtime_logging.basic_messages
+            + controller._runtime_logging.detailed_messages
+        )
+    )
+    assert raw_failure_text not in repr(result)
+    assert raw_failure_text not in logged_text
+
+
+@pytest.mark.asyncio
+async def test_order21_provider_only_mixed_full_draft_save_failure_preserves_retry_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.llm.concurrency_limit = 2
+    controller.hub = DummyHub(llm=object(), stt=object())
+    controller._sync_signature_caches(controller.settings)
+    pending = copy.deepcopy(controller.settings)
+    pending.llm.concurrency_limit = 3
+    pending.managed_identity.verified_hardware_hash = "pending-hardware-hash"
+    pending.managed_identity.verified_hardware_hash_salt_version = 9
+    requests: list[settings_mutation.SettingsMutationRequest] = []
+    saved_settings: list[AppSettings] = []
+    raw_failure_text = "order21 full draft save failed secret-token-must-not-leak"
+
+    original_mutate = settings_mutation.SettingsMutationService.mutate
+
+    async def capture_mutate(self, request):
+        requests.append(request)
+        return await original_mutate(self, request)
+
+    def fail_uncommitted_full_draft_save(_path, incoming: AppSettings) -> None:
+        saved_settings.append(copy.deepcopy(incoming))
+        if (
+            incoming.managed_identity.verified_hardware_hash
+            == pending.managed_identity.verified_hardware_hash
+        ):
+            raise RuntimeError(raw_failure_text)
+
+    async def unavailable_rebuild_llm_provider(self) -> None:
+        assert self.hub is not None
+        self.hub.llm = None
+
+    monkeypatch.setattr(settings_mutation.SettingsMutationService, "mutate", capture_mutate)
+    monkeypatch.setattr(controller_module, "save_settings", fail_uncommitted_full_draft_save)
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", unavailable_rebuild_llm_provider)
+
+    await controller.apply_providers(pending)
+
+    assert len(requests) == 1
+    assert requests[0].reason == settings_mutation.SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER
+    assert requests[0].values == {"llm.concurrency_limit": 3}
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_translation_provider_full_draft_save",
+        code="settings_save_failed",
+        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "translation_provider"},
+    )
+    assert [settings.managed_identity.verified_hardware_hash for settings in saved_settings] == [
+        None,
+        "pending-hardware-hash",
+    ]
+    assert controller.settings is not None
+    assert controller.settings.llm.concurrency_limit == 3
+    assert controller.settings.provider.llm == LLMProviderName.OPENROUTER
+    assert controller.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert controller.settings.managed_identity.verified_hardware_hash is None
+    assert controller.settings.managed_identity.verified_hardware_hash_salt_version is None
+    committed_signature = controller._build_llm_provider_signature(controller.settings)
+    pending_signature = controller._build_llm_provider_signature(pending)
+    assert controller._last_llm_provider_signature == ()
+    assert controller._last_llm_provider_signature != committed_signature
+    assert controller._last_llm_provider_signature != pending_signature
+    logged_text = "\n".join(
+        message
+        for _level, message in (
+            controller._runtime_logging.basic_messages
+            + controller._runtime_logging.detailed_messages
+        )
+    )
+    assert raw_failure_text not in repr(result)
+    assert raw_failure_text not in logged_text
+
+
+@pytest.mark.asyncio
+async def test_order21_provider_only_mixed_full_draft_runtime_unavailable_degrades_without_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.llm.concurrency_limit = 2
+    controller.hub = DummyHub(llm=object(), stt=object())
+    controller._sync_signature_caches(controller.settings)
+    pending = copy.deepcopy(controller.settings)
+    pending.llm.concurrency_limit = 3
+    pending.managed_identity.verified_hardware_hash = "pending-hardware-hash"
+    pending.managed_identity.verified_hardware_hash_salt_version = 9
+    saved_settings: list[AppSettings] = []
+
+    def record_saved_settings(_path, incoming: AppSettings) -> None:
+        saved_settings.append(copy.deepcopy(incoming))
+
+    async def conditionally_unavailable_rebuild_llm_provider(self) -> None:
+        assert self.settings is not None
+        assert self.hub is not None
+        if (
+            self.settings.managed_identity.verified_hardware_hash
+            == pending.managed_identity.verified_hardware_hash
+        ):
+            self.hub.llm = None
+        else:
+            self.hub.llm = object()
+
+    monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
+    monkeypatch.setattr(
+        GuiController,
+        "_rebuild_llm_provider",
+        conditionally_unavailable_rebuild_llm_provider,
+    )
+
+    await controller.apply_providers(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.diagnostics == messages.ErrorDiagnostics(
+        component="gui_controller",
+        operation="apply_translation_provider_runtime",
+        code="provider_runtime_apply_unavailable",
+        category=messages.DIAGNOSTIC_CATEGORY_LIFECYCLE,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields={"surface": "translation_provider"},
+    )
+    assert [settings.managed_identity.verified_hardware_hash for settings in saved_settings] == [
+        None,
+        "pending-hardware-hash",
+    ]
+    assert controller.settings is not None
+    assert controller.settings.llm.concurrency_limit == 3
+    assert controller.settings.managed_identity.verified_hardware_hash == "pending-hardware-hash"
+    assert controller.settings.managed_identity.verified_hardware_hash_salt_version == 9
+    assert controller.hub.llm is None
+
+
+@pytest.mark.asyncio
 async def test_provider_order21_order24_fallback_save_failure_restores_committed_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
