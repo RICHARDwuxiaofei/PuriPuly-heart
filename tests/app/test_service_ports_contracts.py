@@ -56,6 +56,8 @@ def test_app_service_port_modules_are_import_safe_protocol_modules() -> None:
         "puripuly_heart.app.ports.settings_repository",
         "puripuly_heart.app.ports.secret_store",
         "puripuly_heart.app.ports.broker_client",
+        "puripuly_heart.app.ports.discord_auth",
+        "puripuly_heart.app.ports.managed_identity",
         "puripuly_heart.app.ports.provider_verifier",
         "puripuly_heart.app.ports.runtime_apply",
     )
@@ -67,6 +69,8 @@ def test_app_service_port_modules_are_import_safe_protocol_modules() -> None:
         "puripuly_heart.app.ports.settings_repository": "SettingsRepositoryPort",
         "puripuly_heart.app.ports.secret_store": "SecretStorePort",
         "puripuly_heart.app.ports.broker_client": "BrokerClientPort",
+        "puripuly_heart.app.ports.discord_auth": "DiscordAuthPort",
+        "puripuly_heart.app.ports.managed_identity": "ManagedIdentityPort",
         "puripuly_heart.app.ports.provider_verifier": "ProviderVerifierPort",
         "puripuly_heart.app.ports.runtime_apply": "RuntimeApplyPort",
     }
@@ -161,6 +165,8 @@ def test_settings_value_dtos_deep_freeze_nested_payloads() -> None:
 def test_secret_broker_provider_and_runtime_ports_expose_service_result_seams() -> None:
     secret_store = importlib.import_module("puripuly_heart.app.ports.secret_store")
     broker_client = importlib.import_module("puripuly_heart.app.ports.broker_client")
+    discord_auth = importlib.import_module("puripuly_heart.app.ports.discord_auth")
+    managed_identity = importlib.import_module("puripuly_heart.app.ports.managed_identity")
     provider_verifier = importlib.import_module("puripuly_heart.app.ports.provider_verifier")
     runtime_apply = importlib.import_module("puripuly_heart.app.ports.runtime_apply")
 
@@ -176,6 +182,28 @@ def test_secret_broker_provider_and_runtime_ports_expose_service_result_seams() 
         broker_connection_id="conn-1",
         managed_secret_key="managed.openrouter.local_key",
         remote_key_revision="remote-r1",
+        message=None,
+        diagnostics=None,
+    )
+    discord_request = discord_auth.DiscordAuthRequest(
+        correlation_id="corr-1",
+        metadata={"flow": "managed_connection"},
+    )
+    discord_result = discord_auth.DiscordAuthResult(
+        succeeded=True,
+        discord_user_id="discord-user-1",
+        message=None,
+        diagnostics=None,
+    )
+    identity_request = managed_identity.ManagedIdentityPreflightRequest(
+        local_secret_key="openrouter_managed_api_key",
+        correlation_id="corr-1",
+        metadata={"flow": "managed_connection"},
+    )
+    identity_result = managed_identity.ManagedIdentityPreflightResult(
+        succeeded=True,
+        local_public_key="local-public-key-1",
+        local_identity_revision="identity-r1",
         message=None,
         diagnostics=None,
     )
@@ -204,6 +232,10 @@ def test_secret_broker_provider_and_runtime_ports_expose_service_result_seams() 
     for dto in (
         secret_result,
         broker_result,
+        discord_request,
+        discord_result,
+        identity_request,
+        identity_result,
         verification_request,
         verification_result,
         apply_request,
@@ -217,6 +249,10 @@ def test_secret_broker_provider_and_runtime_ports_expose_service_result_seams() 
         verification_result.evidence["verifier"] = "other"  # type: ignore[index]
     with pytest.raises(TypeError):
         apply_request.settings_values["provider"] = "qwen"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        discord_request.metadata["flow"] = "other"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        identity_request.metadata["flow"] = "other"  # type: ignore[index]
 
     request_hints = get_type_hints(provider_verifier.ProviderVerificationRequest)
     assert request_hints["secret_value"] is str
@@ -240,6 +276,8 @@ def test_secret_broker_provider_and_runtime_ports_expose_service_result_seams() 
             "restore_secret",
         ),
         broker_client.BrokerClientPort: ("issue_managed_connection",),
+        discord_auth.DiscordAuthPort: ("start_discord_auth",),
+        managed_identity.ManagedIdentityPort: ("preflight_managed_identity",),
         provider_verifier.ProviderVerifierPort: ("verify_provider_secret",),
         runtime_apply.RuntimeApplyPort: ("apply_runtime",),
     }.items():

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Protocol
 
@@ -19,10 +19,9 @@ def _freeze_fields(
 
 
 @dataclass(frozen=True, slots=True)
-class BrokerIssueRequest:
-    discord_user_id: str
-    local_public_key: str
-    local_identity_revision: str | None
+class ManagedIdentityPreflightRequest:
+    local_secret_key: str
+    correlation_id: str | None
     metadata: Mapping[str, DiagnosticFieldValue]
 
     def __post_init__(self) -> None:
@@ -30,24 +29,23 @@ class BrokerIssueRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class BrokerIssueResult:
+class ManagedIdentityPreflightResult:
     succeeded: bool
-    broker_connection_id: str | None
-    managed_secret_key: str | None = field(repr=False)
-    remote_key_revision: str | None
+    local_public_key: str | None
+    local_identity_revision: str | None
     message: UserMessageRef | None
     diagnostics: ErrorDiagnostics | None
 
 
-class BrokerClientPort(Protocol):
-    async def issue_managed_connection(
+class ManagedIdentityPort(Protocol):
+    async def preflight_managed_identity(
         self,
-        request: BrokerIssueRequest,
-    ) -> BrokerIssueResult: ...
+        request: ManagedIdentityPreflightRequest,
+    ) -> ManagedIdentityPreflightResult: ...
 
 
 __all__ = [
-    "BrokerClientPort",
-    "BrokerIssueRequest",
-    "BrokerIssueResult",
+    "ManagedIdentityPort",
+    "ManagedIdentityPreflightRequest",
+    "ManagedIdentityPreflightResult",
 ]
