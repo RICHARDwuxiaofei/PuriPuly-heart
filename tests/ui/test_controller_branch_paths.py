@@ -282,6 +282,7 @@ class DummyHub:
         self.clear_language_runtime_state_calls: list[str] = []
         self.clear_language_runtime_state_errors: dict[str, Exception] = {}
         self.ui_events: asyncio.Queue[object] = asyncio.Queue()
+        self.output_runtime = DummyOutputRuntime()
 
     def clear_context(self) -> None:
         self.clear_context_calls += 1
@@ -294,6 +295,7 @@ class DummyHub:
 
     async def stop(self) -> None:
         self.stop_calls += 1
+        await self.output_runtime.close()
 
     async def submit_text(self, text: str, *, source: str) -> None:
         self.submit_calls.append((text, source))
@@ -320,6 +322,31 @@ class DummyHub:
         if old_stt is not None and hasattr(old_stt, "close"):
             await old_stt.close()
         self.peer_stt = stt
+
+
+class DummyOutputRuntime:
+    def __init__(self) -> None:
+        self.started_bridges: list[object] = []
+        self.bridge_tasks: list[asyncio.Task[object]] = []
+        self.close_calls = 0
+
+    def start_ui_event_bridge(self, bridge: object) -> asyncio.Task[object]:
+        self.started_bridges.append(bridge)
+        task = asyncio.create_task(bridge.run())  # type: ignore[attr-defined]
+        self.bridge_tasks.append(task)
+        return task
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        for task in self.bridge_tasks:
+            if not task.done():
+                task.cancel()
+        if self.bridge_tasks:
+            await asyncio.gather(*self.bridge_tasks, return_exceptions=True)
+        for bridge in self.started_bridges:
+            close = getattr(bridge, "close", None)
+            if callable(close):
+                close()
 
 
 class FakeClipboardWatcher:
@@ -16389,6 +16416,8 @@ async def test_rebuild_pipeline_restarts_runtime_and_schedules_verify(
     assert ("new_hub_start", True) in events
     assert any(item[0] == "bridge_init" for item in events if isinstance(item, tuple))
     assert "bridge_run" in events
+    assert new_hub.output_runtime.started_bridges == [controller._ui_event_bridge]
+    assert controller._bridge_task in new_hub.output_runtime.bridge_tasks
     assert "verify_run" in events
 
 

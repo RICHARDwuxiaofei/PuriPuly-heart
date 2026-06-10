@@ -1101,8 +1101,8 @@ async def test_back_to_back_peer_parent_segments_keep_derived_output_boundaries(
         assert [event.payload.utterance_id for event in transcript_ui_events] == peer_turn_ids
         assert [event.utterance_id for event in translation_done_events] == peer_turn_ids
         assert [event.payload.utterance_id for event in translation_done_events] == peer_turn_ids
-        assert [event.utterance_id for event in osc_sent_events] == peer_turn_ids
-        assert [message.utterance_id for message in osc.messages] == peer_turn_ids
+        assert osc_sent_events == []
+        assert osc.messages == []
 
         exposed_output_ids = {
             event.utterance_id
@@ -1467,46 +1467,18 @@ async def test_peer_overlay_success_clears_latency_timeline() -> None:
 
 
 @pytest.mark.asyncio
-async def test_peer_overlay_translation_defers_bookkeeping_cleanup_until_chatbox_handoff(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_peer_overlay_translation_denies_chatbox_and_cleans_bookkeeping() -> None:
     utterance_id = uuid4()
+    osc = RecordingOscQueue()
     hub = ClientHub(
         stt=None,
         llm=SequencedTranslateLLMProvider(responses=["hello"], delay_s=0.0),
-        osc=RecordingOscQueue(),
+        osc=osc,
         overlay_sink=RecordingOverlaySink(),
         peer_translation_enabled=True,
         clock=FakeClock(_now=10.0),
     )
     hub.active_chatbox_channel = "peer"
-    saw_live_peer_state = False
-
-    async def fake_enqueue(
-        self, enqueue_utterance_id, *, transcript_text: str, translation_text: str | None
-    ):
-        nonlocal saw_live_peer_state
-        _ = (self, transcript_text, translation_text)
-        peer_turn_id = next(
-            event.utterance_id
-            for event in hub.overlay_sink.events
-            if event.type == "translation_final"
-        )
-        assert enqueue_utterance_id == peer_turn_id
-        assert enqueue_utterance_id != utterance_id
-        assert hub._peer_turn_parent_ids[peer_turn_id] == utterance_id
-        assert hub._peer_parent_turn_ids == {utterance_id: {peer_turn_id}}
-        assert hub._peer_completed_turn_ids == set()
-        assert hub._peer_parent_speech_end_times == {utterance_id: 10.0}
-        assert ("peer", utterance_id) in hub._latency_timelines
-        assert enqueue_utterance_id in hub.peer_runtime.utterance_start_times
-        assert enqueue_utterance_id in hub.peer_runtime.speech_ended_ids
-        saw_live_peer_state = True
-        hub.peer_runtime.utterance_start_times.pop(enqueue_utterance_id, None)
-        hub.peer_runtime.speech_ended_ids.discard(enqueue_utterance_id)
-        hub._finalize_latency_timeline(channel="peer", utterance_id=enqueue_utterance_id)
-
-    monkeypatch.setattr(ClientHub, "_enqueue_osc", fake_enqueue)
 
     await hub.handle_peer_vad_event(SpeechEnd(utterance_id))
     await hub._handle_stt_event(
@@ -1527,7 +1499,12 @@ async def test_peer_overlay_translation_defers_bookkeeping_cleanup_until_chatbox
     )
 
     assert results == [None]
-    assert saw_live_peer_state is True
+    assert osc.messages == []
+    decision = hub.output_runtime.routing_decisions[-1]
+    assert decision.decision == "denied"
+    assert decision.reason == "peer_chatbox_denied"
+    assert "안녕" not in repr(decision)
+    assert "hello" not in repr(decision)
     assert hub._latency_timelines == {}
     assert hub.peer_runtime.utterance_start_times == {}
     assert hub.peer_runtime.speech_ended_ids == set()
@@ -2047,11 +2024,8 @@ async def test_peer_overlay_events_arrive_before_translation_done_and_preserve_p
     assert [event.type for event in events] == [
         UIEventType.TRANSCRIPT_FINAL,
         UIEventType.TRANSLATION_DONE,
-        UIEventType.OSC_SENT,
     ]
     assert events[1].payload.text == "hello"
-    assert events[2].payload.text == "안녕 (hello)"
-    assert events[2].channel == "peer"
     translation_event_order = [event.type for event in sink.events]
     assert translation_event_order == [
         "translation_final",
@@ -2063,8 +2037,12 @@ async def test_peer_overlay_events_arrive_before_translation_done_and_preserve_p
         "overlay:translation_final",
         "overlay:utterance_closed",
         "ui:TRANSLATION_DONE",
-        "ui:OSC_SENT",
     ]
+    decision = hub.output_runtime.routing_decisions[-1]
+    assert decision.decision == "denied"
+    assert decision.reason == "peer_chatbox_denied"
+    assert "안녕" not in repr(decision)
+    assert "hello" not in repr(decision)
     assert hub.ui_events.empty()
 
 
@@ -2092,7 +2070,7 @@ async def test_self_osc_sent_channel_uses_utterance_runtime_when_peer_chatbox_ac
 
 
 @pytest.mark.asyncio
-async def test_peer_overlay_emit_failures_still_emit_translation_done_and_osc_sent() -> None:
+async def test_peer_overlay_emit_failures_still_emit_translation_done_and_deny_chatbox() -> None:
     class RecordingFailingOverlaySink:
         def __init__(self, order: list[str]) -> None:
             self.attempted_types: list[str] = []
@@ -2123,14 +2101,13 @@ async def test_peer_overlay_emit_failures_still_emit_translation_done_and_osc_se
     hub.ui_events.put = recording_put  # type: ignore[method-assign]
 
     utterance_id = await hub.translate_peer_text_for_test("안녕")
-    events = [await hub.ui_events.get() for _ in range(3)]
+    events = [await hub.ui_events.get() for _ in range(2)]
 
     assert call_order == [
         "ui:TRANSCRIPT_FINAL",
         "overlay:translation_final",
         "overlay:utterance_closed",
         "ui:TRANSLATION_DONE",
-        "ui:OSC_SENT",
     ]
     assert sink.attempted_types == [
         "translation_final",
@@ -2139,14 +2116,15 @@ async def test_peer_overlay_emit_failures_still_emit_translation_done_and_osc_se
     assert [event.type for event in events] == [
         UIEventType.TRANSCRIPT_FINAL,
         UIEventType.TRANSLATION_DONE,
-        UIEventType.OSC_SENT,
     ]
     assert events[1].utterance_id == utterance_id
     assert events[1].payload.text == "hello"
-    assert events[2].utterance_id == utterance_id
-    assert events[2].payload.text == "안녕 (hello)"
-    assert events[2].channel == "peer"
-    assert osc.messages[0].text == "안녕 (hello)"
+    assert osc.messages == []
+    decision = hub.output_runtime.routing_decisions[-1]
+    assert decision.decision == "denied"
+    assert decision.reason == "peer_chatbox_denied"
+    assert "안녕" not in repr(decision)
+    assert "hello" not in repr(decision)
     assert hub.last_error_source == "overlay_sink"
     assert hub.ui_events.empty()
 
@@ -2305,7 +2283,7 @@ async def test_peer_translation_failure_closes_line_as_incomplete() -> None:
 
 
 @pytest.mark.asyncio
-async def test_peer_translation_failure_falls_back_to_transcript_for_active_peer_chatbox() -> None:
+async def test_peer_translation_failure_hard_denies_active_peer_chatbox_fallback() -> None:
     sink = RecordingOverlaySink()
     osc = RecordingOscQueue()
     hub = ClientHub(
@@ -2319,7 +2297,7 @@ async def test_peer_translation_failure_falls_back_to_transcript_for_active_peer
     hub.active_chatbox_channel = "peer"
 
     utterance_id = await hub.translate_peer_text_for_test("안녕")
-    events = [await hub.ui_events.get() for _ in range(3)]
+    events = [await hub.ui_events.get() for _ in range(2)]
 
     assert [event.type for event in sink.events] == [
         "peer_transcript_final",
@@ -2328,14 +2306,41 @@ async def test_peer_translation_failure_falls_back_to_transcript_for_active_peer
     assert sink.events[-1].channel == "peer"
     assert sink.events[-1].utterance_id == utterance_id
     assert sink.events[-1].is_final is False
-    assert osc.messages[0].text == "안녕"
+    assert osc.messages == []
     assert [event.type for event in events] == [
         UIEventType.TRANSCRIPT_FINAL,
         UIEventType.ERROR,
-        UIEventType.OSC_SENT,
     ]
-    assert events[2].channel == "peer"
+    decision = hub.output_runtime.routing_decisions[-1]
+    assert decision.decision == "denied"
+    assert decision.reason == "peer_chatbox_denied"
+    assert "안녕" not in repr(decision)
     assert hub.ui_events.empty()
+
+
+@pytest.mark.asyncio
+async def test_legacy_peer_active_chatbox_route_is_hard_denied_without_user_text() -> None:
+    osc = RecordingOscQueue()
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=osc,
+        peer_translation_enabled=True,
+    )
+    hub.active_chatbox_channel = "peer"
+
+    utterance_id = await hub.handle_peer_transcript_final_for_test("secret peer line")
+    events = [hub.ui_events.get_nowait() for _ in range(hub.ui_events.qsize())]
+
+    assert osc.messages == []
+    assert not any(event.type == UIEventType.OSC_SENT for event in events)
+    decision = hub.output_runtime.routing_decisions[-1]
+    assert decision.decision == "denied"
+    assert decision.route == "self_chatbox"
+    assert decision.publication_id == str(utterance_id)
+    assert decision.publication_kind == "peer_subtitle"
+    assert decision.reason == "peer_chatbox_denied"
+    assert "secret peer line" not in repr(decision)
 
 
 @pytest.mark.asyncio

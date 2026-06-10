@@ -803,6 +803,106 @@ async def test_enqueue_osc_emits_payload_preview_only_in_detailed_runtime_logs()
 
 
 @pytest.mark.asyncio
+async def test_enqueue_osc_after_hub_stop_skips_without_user_text() -> None:
+    osc = RecordingOscQueue()
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=osc,
+        clock=FakeClock(),
+    )
+    utterance_id = uuid4()
+
+    await hub.start(auto_flush_osc=True)
+    await hub.stop()
+    await hub._enqueue_osc(
+        utterance_id,
+        transcript_text="closed secret transcript",
+        translation_text="closed secret translation",
+    )
+
+    assert osc.messages == []
+    assert hub.ui_events.empty()
+    decision = hub.output_runtime.routing_decisions[-1]
+    assert decision.decision == "skipped"
+    assert decision.reason == "output_runtime_closed"
+    assert "closed secret transcript" not in repr(decision)
+    assert "closed secret translation" not in repr(decision)
+
+
+@pytest.mark.asyncio
+async def test_stop_without_start_closes_output_runtime_ingress() -> None:
+    osc = RecordingOscQueue()
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=osc,
+        clock=FakeClock(),
+    )
+    utterance_id = uuid4()
+
+    await hub.stop()
+    await hub._enqueue_osc(
+        utterance_id,
+        transcript_text="never started secret transcript",
+        translation_text=None,
+    )
+
+    assert osc.messages == []
+    decision = hub.output_runtime.routing_decisions[-1]
+    assert decision.decision == "skipped"
+    assert decision.reason == "output_runtime_closed"
+    assert "never started secret transcript" not in repr(decision)
+
+
+@pytest.mark.asyncio
+async def test_restart_after_output_runtime_closed_failure_keeps_hub_not_running() -> None:
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+    )
+
+    await hub.start(auto_flush_osc=False)
+    await hub.stop()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await hub.start(auto_flush_osc=False)
+
+    assert hub._running is False
+
+
+@pytest.mark.asyncio
+async def test_restart_after_failed_output_runtime_close_keeps_hub_not_running() -> None:
+    class DropPendingFailsOnceOsc(RecordingOscQueue):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_next_drop = True
+
+        def drop_pending(self) -> None:
+            if self.fail_next_drop:
+                self.fail_next_drop = False
+                raise RuntimeError("drop pending failed")
+
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=DropPendingFailsOnceOsc(),
+        clock=FakeClock(),
+    )
+
+    await hub.start(auto_flush_osc=False)
+    with pytest.raises(RuntimeError, match="drop pending failed"):
+        await hub.stop()
+
+    with pytest.raises(RuntimeError, match="closing"):
+        await hub.start(auto_flush_osc=False)
+
+    assert hub._running is False
+
+
+@pytest.mark.asyncio
 async def test_handle_stt_event_routes_non_low_latency_events() -> None:
     runtime_logging, log_stream = _make_runtime_logging_capture()
     runtime_logging.set_mode(SessionLoggingMode.DETAILED)

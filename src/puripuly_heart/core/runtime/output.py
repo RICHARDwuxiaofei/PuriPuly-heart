@@ -1,0 +1,459 @@
+from __future__ import annotations
+
+import asyncio
+import inspect
+from collections.abc import Coroutine
+from dataclasses import dataclass, field
+from typing import Any, Literal, Protocol
+from uuid import UUID, uuid4
+
+from puripuly_heart.core.clock import Clock, SystemClock
+from puripuly_heart.core.output.models import (
+    OUTPUT_ROUTE_SELF_CHATBOX,
+    OUTPUT_ROUTE_SYSTEM_DISCLOSURE_CHATBOX,
+    OUTPUT_ROUTING_DECISION_DENIED,
+    OUTPUT_ROUTING_DECISION_PUBLISHED,
+    OUTPUT_ROUTING_DECISION_SKIPPED,
+    PUBLICATION_KIND_PEER_SUBTITLE,
+    PUBLICATION_KIND_SELF_UTTERANCE,
+    PUBLICATION_KIND_SYSTEM_DISCLOSURE,
+    OutputPublicationKind,
+    OutputRoute,
+    OutputRoutingDecision,
+    OutputRoutingDecisionStatus,
+)
+from puripuly_heart.core.overlay.sink import OverlayEventAdapter
+from puripuly_heart.domain.models import ChannelId, OSCMessage
+
+OutputRuntimeState = Literal["open", "closing", "closed"]
+
+
+class ChatboxQueue(Protocol):
+    def enqueue(self, message: OSCMessage) -> None: ...
+    def send_typing(self, is_typing: bool) -> None: ...
+    def process_due(self) -> None: ...
+
+
+class UIEventBridgeAdapter(Protocol):
+    async def run(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class OutputPublicationResult:
+    decision: OutputRoutingDecision
+    message: OSCMessage | None = None
+
+
+@dataclass(slots=True)
+class OutputRuntime:
+    chatbox: ChatboxQueue
+    clock: Clock = field(default_factory=SystemClock)
+    overlay_event_adapter: OverlayEventAdapter | None = None
+    flush_interval_s: float = 0.1
+    _state: OutputRuntimeState = "open"
+    _chatbox_flush_task: asyncio.Task[None] | None = None
+    _ui_event_bridge: UIEventBridgeAdapter | None = None
+    _ui_event_bridge_task: asyncio.Task[Any] | None = None
+    _chatbox_backlog_dropped: bool = False
+    _completed_task_failures: dict[asyncio.Task[Any], Exception] = field(default_factory=dict)
+    _tasks_being_collected: set[asyncio.Task[Any]] = field(default_factory=set)
+    _routing_decisions: list[OutputRoutingDecision] = field(default_factory=list)
+
+    resource_fields = (
+        "_osc_flush_task",
+        "ChatboxPaginator._pending_pages",
+        "ChatboxPaginator._pending_messages",
+        "overlay_event_adapter",
+        "UIEventBridge.run task",
+        "conversation adapter",
+    )
+
+    def __post_init__(self) -> None:
+        if self.overlay_event_adapter is None:
+            self.overlay_event_adapter = OverlayEventAdapter(clock=self.clock)
+
+    @property
+    def state(self) -> OutputRuntimeState:
+        return self._state
+
+    @property
+    def is_accepting_publications(self) -> bool:
+        return self._state == "open"
+
+    @property
+    def has_resources(self) -> bool:
+        return (
+            self._chatbox_flush_task is not None
+            or self._ui_event_bridge_task is not None
+            or self._ui_event_bridge is not None
+            or not self._chatbox_backlog_dropped
+            or bool(self._completed_task_failures)
+        )
+
+    @property
+    def chatbox_flush_task(self) -> asyncio.Task[None] | None:
+        return self._chatbox_flush_task
+
+    @property
+    def ui_event_bridge_task(self) -> asyncio.Task[Any] | None:
+        return self._ui_event_bridge_task
+
+    @property
+    def routing_decisions(self) -> tuple[OutputRoutingDecision, ...]:
+        return tuple(self._routing_decisions)
+
+    def lifecycle_owner_snapshot(self) -> dict[str, object]:
+        return {
+            "owner": "OutputRuntime",
+            "resource_fields": self.resource_fields,
+            "stop_ingress": "stop accepting output publications",
+            "shutdown_policy": (
+                "chatbox: drop pending pages/messages on close; "
+                "UI bridge: cancel task and close conversation adapter; "
+                "overlay adapter: reject publications after close"
+            ),
+            "late_callback_rule": (
+                "output after close returns denied/skipped observer decisions without user text"
+            ),
+        }
+
+    async def start(self, *, auto_flush_chatbox: bool = False) -> None:
+        if self._state == "closed":
+            raise RuntimeError("OutputRuntime is closed; construct a new runtime to restart")
+        if self._state == "closing":
+            raise RuntimeError("OutputRuntime is closing; cannot start")
+        self._state = "open"
+        self._collect_done_task_failure(self._chatbox_flush_task)
+        if auto_flush_chatbox and (
+            self._chatbox_flush_task is None or self._chatbox_flush_task.done()
+        ):
+            self._chatbox_flush_task = self._create_task(
+                self._run_chatbox_flush_loop(),
+                task_name="chatbox-flush",
+            )
+
+    def start_ui_event_bridge(self, bridge: UIEventBridgeAdapter) -> asyncio.Task[Any]:
+        if self._state != "open":
+            raise RuntimeError("OutputRuntime is not accepting UI event bridge work")
+        if self._ui_event_bridge_task is not None:
+            if not self._ui_event_bridge_task.done():
+                raise RuntimeError("OutputRuntime already owns a UI event bridge task")
+            self._collect_done_task_failure(self._ui_event_bridge_task)
+        self._ui_event_bridge = bridge
+        self._ui_event_bridge_task = self._create_task(
+            bridge.run(),
+            task_name="ui-event-bridge",
+        )
+        return self._ui_event_bridge_task
+
+    async def close(self) -> None:
+        if self._state == "closed" and not self.has_resources:
+            return
+
+        self._state = "closing"
+        failures: list[Exception] = []
+        await self._cancel_chatbox_flush_task(failures)
+        self._drop_chatbox_backlog(failures)
+        await self._cancel_ui_event_bridge_task(failures)
+        await self._close_ui_event_bridge_adapter(failures)
+        self._drain_completed_task_failures(failures)
+        if failures:
+            _raise_output_runtime_failures(failures)
+        self._state = "closed"
+
+    async def publish_chatbox(
+        self,
+        *,
+        publication_id: UUID,
+        channel: ChannelId,
+        transcript_text: str,
+        translation_text: str | None,
+        include_source: bool,
+        publication_kind: OutputPublicationKind | None = None,
+    ) -> OutputPublicationResult:
+        publication_kind = publication_kind or (
+            PUBLICATION_KIND_PEER_SUBTITLE if channel == "peer" else PUBLICATION_KIND_SELF_UTTERANCE
+        )
+        if self._state != "open":
+            return self._observe_result(
+                status=OUTPUT_ROUTING_DECISION_SKIPPED,
+                route=OUTPUT_ROUTE_SELF_CHATBOX,
+                publication_id=str(publication_id),
+                publication_kind=publication_kind,
+                reason=(
+                    "output_runtime_closed" if self._state == "closed" else "output_runtime_closing"
+                ),
+                metadata={"channel": channel, "state": self._state},
+            )
+        if channel == "peer":
+            return self._observe_result(
+                status=OUTPUT_ROUTING_DECISION_DENIED,
+                route=OUTPUT_ROUTE_SELF_CHATBOX,
+                publication_id=str(publication_id),
+                publication_kind=PUBLICATION_KIND_PEER_SUBTITLE,
+                reason="peer_chatbox_denied",
+                metadata={"channel": "peer", "attempted_route": OUTPUT_ROUTE_SELF_CHATBOX},
+            )
+
+        message = OSCMessage(
+            utterance_id=publication_id,
+            text=self._merge_chatbox_text(
+                transcript_text=transcript_text,
+                translation_text=translation_text,
+                include_source=include_source,
+            ),
+            created_at=self.clock.now(),
+        )
+        self.chatbox.enqueue(message)
+        self.chatbox.send_typing(False)
+        return self._observe_result(
+            status=OUTPUT_ROUTING_DECISION_PUBLISHED,
+            route=OUTPUT_ROUTE_SELF_CHATBOX,
+            publication_id=str(publication_id),
+            publication_kind=publication_kind,
+            reason=None,
+            metadata={"channel": channel},
+            message=message,
+        )
+
+    def publish_system_disclosure_chatbox(
+        self,
+        *,
+        text: str,
+        disclosure_id: UUID | None = None,
+    ) -> OutputPublicationResult:
+        disclosure_uuid = disclosure_id or uuid4()
+        if self._state != "open":
+            return self._observe_result(
+                status=OUTPUT_ROUTING_DECISION_SKIPPED,
+                route=OUTPUT_ROUTE_SYSTEM_DISCLOSURE_CHATBOX,
+                publication_id=str(disclosure_uuid),
+                publication_kind=PUBLICATION_KIND_SYSTEM_DISCLOSURE,
+                reason=(
+                    "output_runtime_closed" if self._state == "closed" else "output_runtime_closing"
+                ),
+                metadata={"channel": "system", "state": self._state},
+            )
+        message = OSCMessage(utterance_id=disclosure_uuid, text=text, created_at=self.clock.now())
+        self.chatbox.enqueue(message)
+        return self._observe_result(
+            status=OUTPUT_ROUTING_DECISION_PUBLISHED,
+            route=OUTPUT_ROUTE_SYSTEM_DISCLOSURE_CHATBOX,
+            publication_id=str(disclosure_uuid),
+            publication_kind=PUBLICATION_KIND_SYSTEM_DISCLOSURE,
+            reason=None,
+            metadata={"channel": "system"},
+            message=message,
+        )
+
+    def reject_if_closed(
+        self,
+        *,
+        route: OutputRoute,
+        publication_id: str,
+        publication_kind: OutputPublicationKind,
+        channel: ChannelId | str | None,
+    ) -> OutputRoutingDecision | None:
+        if self._state == "open":
+            return None
+        return self._observe_decision(
+            status=OUTPUT_ROUTING_DECISION_SKIPPED,
+            route=route,
+            publication_id=publication_id,
+            publication_kind=publication_kind,
+            reason="output_runtime_closed" if self._state == "closed" else "output_runtime_closing",
+            metadata={"channel": channel, "state": self._state},
+        )
+
+    async def _run_chatbox_flush_loop(self) -> None:
+        try:
+            while True:
+                self.chatbox.process_due()
+                await asyncio.sleep(self.flush_interval_s)
+        except asyncio.CancelledError:
+            raise
+
+    def _create_task(
+        self,
+        coroutine: Coroutine[Any, Any, Any],
+        *,
+        task_name: str,
+    ) -> asyncio.Task[Any]:
+        task = asyncio.create_task(coroutine, name=f"OutputRuntime:{task_name}")
+        task.add_done_callback(self._record_task_completion)
+        return task
+
+    async def _cancel_chatbox_flush_task(self, failures: list[Exception]) -> None:
+        task = self._chatbox_flush_task
+        if task is None:
+            return
+        await self._cancel_owned_task(task, failures)
+        self._chatbox_flush_task = None
+
+    async def _cancel_ui_event_bridge_task(self, failures: list[Exception]) -> None:
+        task = self._ui_event_bridge_task
+        if task is None:
+            return
+        await self._cancel_owned_task(task, failures)
+        self._ui_event_bridge_task = None
+
+    async def _close_ui_event_bridge_adapter(self, failures: list[Exception]) -> None:
+        bridge = self._ui_event_bridge
+        if bridge is None:
+            return
+        close = getattr(bridge, "close", None)
+        if not callable(close):
+            self._ui_event_bridge = None
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            failures.append(exc)
+            return
+        self._ui_event_bridge = None
+
+    def _drop_chatbox_backlog(self, failures: list[Exception]) -> None:
+        if self._chatbox_backlog_dropped:
+            return
+        drop_pending = getattr(self.chatbox, "drop_pending", None)
+        if not callable(drop_pending):
+            self._chatbox_backlog_dropped = True
+            return
+        try:
+            drop_pending()
+        except Exception as exc:
+            failures.append(exc)
+            return
+        self._chatbox_backlog_dropped = True
+
+    async def _cancel_owned_task(
+        self,
+        task: asyncio.Task[Any],
+        failures: list[Exception],
+    ) -> None:
+        stored_failure = self._completed_task_failures.pop(task, None)
+        if stored_failure is not None:
+            failures.append(stored_failure)
+            return
+
+        self._tasks_being_collected.add(task)
+        try:
+            if not task.done():
+                task.cancel()
+            results = await asyncio.gather(task, return_exceptions=True)
+        finally:
+            self._tasks_being_collected.discard(task)
+
+        stored_failure = self._completed_task_failures.pop(task, None)
+        if stored_failure is not None:
+            failures.append(stored_failure)
+            return
+        self._append_non_cancel_failures(results, failures)
+
+    def _record_task_completion(self, task: asyncio.Task[Any]) -> None:
+        if task in self._tasks_being_collected:
+            return
+        self._collect_done_task_failure(task)
+
+    def _collect_done_task_failure(self, task: asyncio.Task[Any] | None) -> None:
+        if task is None or not task.done() or task in self._completed_task_failures:
+            return
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            self._completed_task_failures[task] = exc
+
+    def _drain_completed_task_failures(self, failures: list[Exception]) -> None:
+        failures.extend(self._completed_task_failures.values())
+        self._completed_task_failures.clear()
+
+    @staticmethod
+    def _append_non_cancel_failures(
+        results: list[object],
+        failures: list[Exception],
+    ) -> None:
+        for result in results:
+            if isinstance(result, asyncio.CancelledError):
+                continue
+            if isinstance(result, Exception):
+                failures.append(result)
+
+    @staticmethod
+    def _merge_chatbox_text(
+        *,
+        transcript_text: str,
+        translation_text: str | None,
+        include_source: bool,
+    ) -> str:
+        if translation_text is None:
+            return transcript_text
+        if include_source:
+            return f"{transcript_text} ({translation_text})"
+        return translation_text
+
+    def _observe_result(
+        self,
+        *,
+        status: OutputRoutingDecisionStatus,
+        route: OutputRoute,
+        publication_id: str,
+        publication_kind: OutputPublicationKind,
+        reason: str | None,
+        metadata: dict[str, str | int | float | bool | None],
+        message: OSCMessage | None = None,
+    ) -> OutputPublicationResult:
+        return OutputPublicationResult(
+            decision=self._observe_decision(
+                status=status,
+                route=route,
+                publication_id=publication_id,
+                publication_kind=publication_kind,
+                reason=reason,
+                metadata=metadata,
+            ),
+            message=message,
+        )
+
+    def _observe_decision(
+        self,
+        *,
+        status: OutputRoutingDecisionStatus,
+        route: OutputRoute,
+        publication_id: str,
+        publication_kind: OutputPublicationKind,
+        reason: str | None,
+        metadata: dict[str, str | int | float | bool | None],
+    ) -> OutputRoutingDecision:
+        decision = OutputRoutingDecision(
+            decision=status,
+            route=route,
+            publication_id=publication_id,
+            publication_kind=publication_kind,
+            reason=reason,
+            metadata=metadata,
+        )
+        self._routing_decisions.append(decision)
+        return decision
+
+
+def _raise_output_runtime_failures(failures: list[Exception]) -> None:
+    if not failures:
+        return
+    if len(failures) == 1:
+        raise failures[0]
+    raise ExceptionGroup("OutputRuntime close failed", failures)
+
+
+__all__ = [
+    "ChatboxQueue",
+    "OutputPublicationResult",
+    "OutputRuntime",
+    "OutputRuntimeState",
+    "UIEventBridgeAdapter",
+]

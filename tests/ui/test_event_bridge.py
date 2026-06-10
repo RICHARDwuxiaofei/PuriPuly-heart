@@ -598,6 +598,39 @@ async def test_event_bridge_final_self_transcript_cache_is_bounded(monkeypatch) 
 
 
 @pytest.mark.asyncio
+async def test_event_bridge_close_clears_conversation_cache_and_rejects_late_records() -> None:
+    app = DummyApp()
+    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    utterance_id = uuid4()
+
+    await bridge._handle_event(
+        UIEvent(
+            type=UIEventType.TRANSCRIPT_FINAL,
+            payload=Transcript(utterance_id=utterance_id, text="cached secret", is_final=True),
+            source="Mic",
+        )
+    )
+    assert list(bridge._final_self_transcripts) == [str(utterance_id)]
+
+    bridge.close()
+    await bridge._handle_event(
+        UIEvent(
+            type=UIEventType.TRANSLATION_DONE,
+            payload=Translation(
+                utterance_id=utterance_id,
+                text="late translation",
+                source_text="late secret source",
+                channel="self",
+            ),
+            source="Mic",
+        )
+    )
+
+    assert bridge._final_self_transcripts == {}
+    assert app.view_logs.conversation_records == []
+
+
+@pytest.mark.asyncio
 async def test_event_bridge_appends_to_real_logs_view_conversation_text() -> None:
     app = DummyApp()
     app.view_logs = LogsView()

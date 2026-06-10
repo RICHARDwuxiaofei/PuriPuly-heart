@@ -30,7 +30,7 @@ LEGACY_TASK_CREATION_ALLOWLIST = Counter(
             "src/puripuly_heart/core/managed_openrouter_release.py",
             ASYNCIO_CREATE_TASK,
         ): 1,
-        ("src/puripuly_heart/core/orchestrator/hub.py", ASYNCIO_CREATE_TASK): 6,
+        ("src/puripuly_heart/core/orchestrator/hub.py", ASYNCIO_CREATE_TASK): 5,
         ("src/puripuly_heart/core/overlay/bridge.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/overlay/presenter.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/overlay/process.py", ASYNCIO_CREATE_TASK): 2,
@@ -38,7 +38,7 @@ LEGACY_TASK_CREATION_ALLOWLIST = Counter(
         ("src/puripuly_heart/providers/stt/soniox.py", ASYNCIO_CREATE_TASK): 3,
         ("src/puripuly_heart/ui/app.py", RUN_TASK): 14,
         ("src/puripuly_heart/ui/components/settings/api_key_field.py", RUN_TASK): 1,
-        ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 10,
+        ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 8,
         ("src/puripuly_heart/ui/desktop_overlay.py", ASYNCIO_CREATE_TASK): 11,
     }
 )
@@ -49,6 +49,7 @@ NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST = Counter(
         ("src/puripuly_heart/core/runtime/provider_handle.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/self_audio.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/overlay.py", ASYNCIO_CREATE_TASK): 1,
+        ("src/puripuly_heart/core/runtime/output.py", ASYNCIO_CREATE_TASK): 1,
     }
 )
 

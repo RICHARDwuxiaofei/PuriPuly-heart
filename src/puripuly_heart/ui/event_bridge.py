@@ -37,6 +37,7 @@ class UIEventBridge:
         self.event_queue = event_queue
         self.runtime_logging = runtime_logging
         self._running = False
+        self._closed = False
         self._primary_first_partial_emitted: set[str] = set()
         self._final_self_transcripts: OrderedDict[str, Transcript] = OrderedDict()
 
@@ -53,6 +54,8 @@ class UIEventBridge:
         return bool(getattr(hub, "translation_enabled", False))
 
     def _remember_final_self_transcript(self, transcript: Transcript) -> None:
+        if self._closed:
+            return
         if transcript.channel != "self" or not transcript.is_final:
             return
         key = str(transcript.utterance_id)
@@ -71,6 +74,8 @@ class UIEventBridge:
         return transcript.text.strip()
 
     def _append_conversation_record(self, translation: Translation, *, source: str) -> None:
+        if self._closed:
+            return
         if translation.channel != "self":
             return
         translated_text = translation.text.strip()
@@ -161,7 +166,7 @@ class UIEventBridge:
         self._running = True
         logger.info("UI Event Bridge started")
         try:
-            while self._running:
+            while self._running and not self._closed:
                 event = await self.event_queue.get()
                 try:
                     await self._handle_event(event)
@@ -172,8 +177,18 @@ class UIEventBridge:
         except asyncio.CancelledError:
             logger.info("UI Event Bridge cancelled")
             raise
+        finally:
+            self._running = False
+
+    def close(self) -> None:
+        self._closed = True
+        self._running = False
+        self._primary_first_partial_emitted.clear()
+        self._final_self_transcripts.clear()
 
     async def _handle_event(self, event: UIEvent) -> None:
+        if self._closed:
+            return
         if event.type == UIEventType.SESSION_STATE_CHANGED:
             state = event.payload
             state_name = getattr(state, "name", "")

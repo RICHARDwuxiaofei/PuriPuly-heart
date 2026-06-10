@@ -27,11 +27,17 @@ from puripuly_heart.core.orchestrator.channel_runtime import (
 )
 from puripuly_heart.core.orchestrator.context import ContextMode, ContextResolver
 from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
+from puripuly_heart.core.output.models import (
+    OUTPUT_ROUTE_SUBTITLE_OVERLAY,
+    PUBLICATION_KIND_PEER_SUBTITLE,
+    PUBLICATION_KIND_SELF_UTTERANCE,
+)
 from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
 from puripuly_heart.core.overlay.sink import (
     OverlayEventAdapter,
     OverlaySink,
 )
+from puripuly_heart.core.runtime.output import OutputPublicationResult, OutputRuntime
 from puripuly_heart.core.runtime.provider_handle import ProviderRuntimeHandle
 from puripuly_heart.core.runtime_logging import (
     SessionLoggingMode,
@@ -53,7 +59,6 @@ from puripuly_heart.domain.events import (
 )
 from puripuly_heart.domain.models import (
     ChannelId,
-    OSCMessage,
     Transcript,
     Translation,
     UtteranceBundle,
@@ -166,6 +171,7 @@ class ClientHub:
     _peer_parent_speech_end_times: dict[UUID, float] = field(default_factory=dict)
     context_resolver: ContextResolver = field(init=False)
     active_chatbox_channel: ChannelId = field(init=False, default="self")
+    output_runtime: OutputRuntime = field(init=False)
     overlay_event_adapter: OverlayEventAdapter = field(init=False)
     _last_logged_context_modes: dict[ChannelId, ContextMode | None] = field(
         init=False,
@@ -190,7 +196,9 @@ class ClientHub:
     _llm_provider_runtime: ProviderRuntimeHandle = field(init=False)
 
     def __post_init__(self) -> None:
-        self.overlay_event_adapter = OverlayEventAdapter(clock=self.clock)
+        self.output_runtime = OutputRuntime(chatbox=self.osc, clock=self.clock)
+        assert self.output_runtime.overlay_event_adapter is not None
+        self.overlay_event_adapter = self.output_runtime.overlay_event_adapter
         self.self_runtime = ChannelRuntime(
             channel="self",
             stt=self.stt,
@@ -252,6 +260,10 @@ class ClientHub:
                 overlay_event_adapter = object.__getattribute__(self, "overlay_event_adapter")
             except AttributeError:
                 overlay_event_adapter = None
+            try:
+                output_runtime = object.__getattribute__(self, "output_runtime")
+            except AttributeError:
+                output_runtime = None
             if resolver is not None:
                 if name == "clock":
                     resolver.clock = value  # type: ignore[assignment]
@@ -265,6 +277,15 @@ class ClientHub:
                     resolver.integrated_max_entries = value  # type: ignore[assignment]
             if name == "clock" and overlay_event_adapter is not None:
                 overlay_event_adapter.clock = value  # type: ignore[assignment]
+            if name == "clock" and output_runtime is not None:
+                output_runtime.clock = value  # type: ignore[assignment]
+        if name == "osc":
+            try:
+                output_runtime = object.__getattribute__(self, "output_runtime")
+            except AttributeError:
+                output_runtime = None
+            if output_runtime is not None:
+                output_runtime.chatbox = value  # type: ignore[assignment]
         if name in {"stt", "peer_stt", "llm"}:
             self._attach_provider_assignment(name, value)
         runtime_field = _SELF_RUNTIME_FIELDS.get(name)
@@ -747,34 +768,45 @@ class ClientHub:
     async def start(self, *, auto_flush_osc: bool = False) -> None:
         if self._running:
             return
+        try:
+            await self.output_runtime.start(auto_flush_chatbox=auto_flush_osc)
+        except Exception:
+            self._running = False
+            raise
         self._running = True
+        self._osc_flush_task = self.output_runtime.chatbox_flush_task
         await self._self_stt_provider_runtime.start()
         await self._peer_stt_provider_runtime.start()
         self._sync_provider_runtime_aliases()
-        if auto_flush_osc:
-            self._osc_flush_task = asyncio.create_task(self._run_osc_flush_loop())
 
     async def stop(self) -> None:
         if (
             not self._running
             and not self._provider_runtime_handles_have_resources()
-            and self._osc_flush_task is None
+            and not self.output_runtime.has_resources
+            and self.output_runtime.state == "closed"
         ):
             return
         was_running = self._running
         self._running = False
+        cleanup_failures: list[Exception] = []
 
-        if self._osc_flush_task:
-            self._osc_flush_task.cancel()
-            await asyncio.gather(self._osc_flush_task, return_exceptions=True)
-            self._osc_flush_task = None
+        try:
+            await self.output_runtime.close()
+        except Exception as exc:
+            cleanup_failures.append(exc)
+        self._osc_flush_task = self.output_runtime.chatbox_flush_task
 
         if was_running:
             await self._stop_stt_event_loop()
             await self.reset_overlay_preview()
             await self._reset_stt_runtime_state()
 
-        await self._close_provider_runtime_handles()
+        try:
+            await self._close_provider_runtime_handles()
+        except Exception as exc:
+            cleanup_failures.append(exc)
+        _raise_output_provider_runtime_close_failures(cleanup_failures)
 
     async def replace_stt_provider(self, stt: STTProvider | None) -> None:
         await self._self_stt_provider_runtime.stop_ingress()
@@ -1615,6 +1647,20 @@ class ClientHub:
 
     async def _emit_overlay_event(self, event: object) -> None:
         if self.overlay_sink is None:
+            return
+        channel = getattr(event, "channel", None)
+        publication_kind = (
+            PUBLICATION_KIND_PEER_SUBTITLE if channel == "peer" else PUBLICATION_KIND_SELF_UTTERANCE
+        )
+        decision = self.output_runtime.reject_if_closed(
+            route=OUTPUT_ROUTE_SUBTITLE_OVERLAY,
+            publication_id=str(
+                getattr(event, "utterance_id", None) or getattr(event, "event_id", "overlay")
+            ),
+            publication_kind=publication_kind,
+            channel=channel,
+        )
+        if decision is not None:
             return
         detailed_mode = (
             self.runtime_logging is not None
@@ -3141,16 +3187,32 @@ class ClientHub:
         *,
         transcript_text: str,
         translation_text: str | None,
-    ) -> None:
-        if translation_text is None:
-            merged = transcript_text
-        elif self.chatbox_include_source:
-            merged = f"{transcript_text} ({translation_text})"
-        else:
-            merged = translation_text
-
-        msg = OSCMessage(utterance_id=utterance_id, text=merged, created_at=self.clock.now())
+    ) -> OutputPublicationResult:
         runtime = self._runtime_for_utterance(utterance_id)
+        result = await self.output_runtime.publish_chatbox(
+            publication_id=utterance_id,
+            channel=runtime.channel,
+            transcript_text=transcript_text,
+            translation_text=translation_text,
+            include_source=self.chatbox_include_source,
+        )
+
+        if result.decision.decision != "published":
+            self._emit_detailed(
+                "[Hub] OSC enqueue skipped: channel=%s route=%s reason=%s",
+                runtime.channel,
+                result.decision.route,
+                result.decision.reason,
+                fallback_level=logging.INFO,
+            )
+            runtime.utterance_start_times.pop(utterance_id, None)
+            runtime.speech_ended_ids.discard(utterance_id)
+            self._clear_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
+            return result
+
+        msg = result.message
+        assert msg is not None
+        merged = msg.text
 
         self._emit_detailed(
             "[Hub] OSC enqueue preview: channel=%s text=%r",
@@ -3168,11 +3230,6 @@ class ClientHub:
         runtime.utterance_start_times.pop(utterance_id, None)
         runtime.speech_ended_ids.discard(utterance_id)
 
-        self.osc.enqueue(msg)
-
-        # Stop typing indicator after message is sent
-        self.osc.send_typing(False)
-
         await self.ui_events.put(
             UIEvent(
                 type=UIEventType.OSC_SENT,
@@ -3183,15 +3240,15 @@ class ClientHub:
             )
         )
         self._clear_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
+        return result
 
     def enqueue_peer_translation_disclosure(self, text: str) -> None:
-        msg = OSCMessage(utterance_id=uuid4(), text=text, created_at=self.clock.now())
         self._emit_detailed(
             "[Hub] OSC disclosure enqueue: channel=peer text_len=%s",
             len(text),
             fallback_level=logging.INFO,
         )
-        self.osc.enqueue(msg)
+        self.output_runtime.publish_system_disclosure_chatbox(text=text)
 
     async def _run_osc_flush_loop(self) -> None:
         try:
@@ -3208,3 +3265,11 @@ def _raise_provider_runtime_close_failures(failures: list[Exception]) -> None:
     if len(failures) == 1:
         raise failures[0]
     raise ExceptionGroup("ClientHub provider close failed", failures)
+
+
+def _raise_output_provider_runtime_close_failures(failures: list[Exception]) -> None:
+    if not failures:
+        return
+    if len(failures) == 1:
+        raise failures[0]
+    raise ExceptionGroup("ClientHub output/provider close failed", failures)

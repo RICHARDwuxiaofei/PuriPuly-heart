@@ -73,6 +73,20 @@ class ChatboxPaginator:
                 f"[Basic][OSC] typing status=failed error={exc}", level=logging.WARNING
             )
 
+    def drop_pending(self) -> None:
+        """Drop queued chatbox pages/messages during output runtime shutdown."""
+        assert self._pending_pages is not None
+        assert self._pending_messages is not None
+        dropped_pages = len(self._pending_pages)
+        dropped_messages = len(self._pending_messages)
+        self._pending_pages.clear()
+        self._pending_messages.clear()
+        self._next_page_at = 0.0
+        self._emit_basic(
+            "[Basic][OSC] chatbox backlog dropped on output shutdown "
+            f"pages={dropped_pages} messages={dropped_messages}"
+        )
+
     def _is_paginating(self) -> bool:
         return bool(self._pending_pages)
 

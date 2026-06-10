@@ -1283,9 +1283,13 @@ class GuiController:
             event_queue=self.hub.ui_events,
             runtime_logging=runtime_logging,
         )
-        self._ui_event_bridge = bridge
-        self._bridge_task = asyncio.create_task(bridge.run())
+        self._start_ui_event_bridge_task(bridge)
         await self._sync_clipboard_watcher()
+
+    def _start_ui_event_bridge_task(self, bridge: UIEventBridge) -> None:
+        assert self.hub is not None
+        self._ui_event_bridge = bridge
+        self._bridge_task = self.hub.output_runtime.start_ui_event_bridge(bridge)
 
     def _get_alibaba_verified_key(self) -> str:
         """Get the api_key_verified field name based on Qwen region."""
@@ -3486,13 +3490,10 @@ class GuiController:
         await self._shutdown_overlay_runtime(preserve_failure_reason=True)
         await self._close_peer_runtime_for_release(cleanup_failures)
 
-        if self._bridge_task:
-            self._bridge_task.cancel()
-            await asyncio.gather(self._bridge_task, return_exceptions=True)
-            self._bridge_task = None
-        self._ui_event_bridge = None
-
         await self._stop_hub_for_release(cleanup_failures)
+        if self.hub is None:
+            self._bridge_task = None
+            self._ui_event_bridge = None
 
         if self.sender is not None:
             with contextlib.suppress(Exception):
@@ -6529,10 +6530,6 @@ class GuiController:
         _ = rebuild_stt
         cleanup_failures: list[Exception] = []
         restore_stt_enabled = self._stt_desired
-        if self._bridge_task:
-            self._bridge_task.cancel()
-            await asyncio.gather(self._bridge_task, return_exceptions=True)
-            self._bridge_task = None
 
         await self._close_peer_runtime_for_release(cleanup_failures)
 
@@ -6542,6 +6539,9 @@ class GuiController:
             cleanup_failures.append(exc)
         await self._configure_vrc_mic_receiver(enabled=False)
         await self._stop_hub_for_release(cleanup_failures)
+        if self.hub is None:
+            self._bridge_task = None
+            self._ui_event_bridge = None
         if self.sender is not None:
             with contextlib.suppress(Exception):
                 self.sender.close()
@@ -6579,7 +6579,7 @@ class GuiController:
             event_queue=self.hub.ui_events,
             runtime_logging=self.runtime_logging,
         )
-        self._bridge_task = asyncio.create_task(bridge.run())
+        self._start_ui_event_bridge_task(bridge)
 
         if self.overlay_state == "connected" and presenter is not None:
             await self._refresh_overlay_runtime_dependencies()
