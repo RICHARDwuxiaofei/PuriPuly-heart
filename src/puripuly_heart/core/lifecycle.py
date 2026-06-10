@@ -4,7 +4,7 @@ import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, Final, Literal, TypeAlias, TypeVar
 
 from puripuly_heart.core.messages import (
     CONTENT_POLICY_METADATA_ONLY,
@@ -19,6 +19,39 @@ _TaskResultT = TypeVar("_TaskResultT")
 _DIAGNOSTIC_FIELD_VALUE_MAX_LENGTH = 128
 
 CloseCallback = Callable[[], Awaitable[None] | None]
+LifecycleShutdownPhase: TypeAlias = Literal[
+    "freeze_ingress",
+    "stop_external_producers",
+    "run_owner_specific_drain_cancel_policies",
+    "close_providers_and_output_adapters",
+    "emit_final_shutdown_diagnostics",
+    "flush_and_close_logging_diagnostics",
+]
+ShutdownCallback = Callable[[], Awaitable[None] | None]
+
+SHUTDOWN_PHASE_FREEZE_INGRESS: Final[LifecycleShutdownPhase] = "freeze_ingress"
+SHUTDOWN_PHASE_STOP_EXTERNAL_PRODUCERS: Final[LifecycleShutdownPhase] = "stop_external_producers"
+SHUTDOWN_PHASE_OWNER_DRAIN_CANCEL: Final[LifecycleShutdownPhase] = (
+    "run_owner_specific_drain_cancel_policies"
+)
+SHUTDOWN_PHASE_CLOSE_PROVIDERS_OUTPUT_ADAPTERS: Final[LifecycleShutdownPhase] = (
+    "close_providers_and_output_adapters"
+)
+SHUTDOWN_PHASE_FINAL_DIAGNOSTICS: Final[LifecycleShutdownPhase] = "emit_final_shutdown_diagnostics"
+SHUTDOWN_PHASE_CLOSE_LOGGING_DIAGNOSTICS: Final[LifecycleShutdownPhase] = (
+    "flush_and_close_logging_diagnostics"
+)
+LIFECYCLE_SHUTDOWN_PHASE_ORDER: Final[tuple[LifecycleShutdownPhase, ...]] = (
+    SHUTDOWN_PHASE_FREEZE_INGRESS,
+    SHUTDOWN_PHASE_STOP_EXTERNAL_PRODUCERS,
+    SHUTDOWN_PHASE_OWNER_DRAIN_CANCEL,
+    SHUTDOWN_PHASE_CLOSE_PROVIDERS_OUTPUT_ADAPTERS,
+    SHUTDOWN_PHASE_FINAL_DIAGNOSTICS,
+    SHUTDOWN_PHASE_CLOSE_LOGGING_DIAGNOSTICS,
+)
+_LIFECYCLE_SHUTDOWN_PHASES: Final[frozenset[LifecycleShutdownPhase]] = frozenset(
+    LIFECYCLE_SHUTDOWN_PHASE_ORDER
+)
 
 
 class LifecycleScopeClosedError(RuntimeError):
@@ -45,6 +78,75 @@ class LifecycleDiagnosticsUnavailableError(RuntimeError):
 class _RegisteredCloseCallback:
     name: str
     callback: CloseCallback
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleShutdownCallback:
+    """Named owner callback registered for one lifecycle shutdown phase."""
+
+    phase: LifecycleShutdownPhase
+    owner_name: str
+    callback_name: str
+    callback: ShutdownCallback
+
+
+class LifecycleShutdownCoordinator:
+    """Runs lifecycle owner callbacks through the phased shutdown DAG."""
+
+    def __init__(self, *, diagnostics_sink: DiagnosticsSink | None = None) -> None:
+        self._diagnostics_sink = diagnostics_sink
+        self._callbacks: list[LifecycleShutdownCallback] = []
+        self._pending_diagnostics: list[DiagnosticEvent] = []
+
+    def register_callback(
+        self,
+        *,
+        phase: LifecycleShutdownPhase,
+        owner_name: str,
+        callback_name: str,
+        callback: ShutdownCallback,
+    ) -> None:
+        if phase not in _LIFECYCLE_SHUTDOWN_PHASES:
+            raise ValueError(f"Unknown lifecycle shutdown phase: {phase!r}")
+        self._callbacks.append(
+            LifecycleShutdownCallback(
+                phase=phase,
+                owner_name=owner_name,
+                callback_name=callback_name,
+                callback=callback,
+            )
+        )
+
+    async def run(self) -> None:
+        for phase in LIFECYCLE_SHUTDOWN_PHASE_ORDER:
+            for callback in tuple(self._callbacks):
+                if callback.phase != phase:
+                    continue
+                await self._run_callback(callback)
+
+        if self._pending_diagnostics:
+            diagnostics = tuple(self._pending_diagnostics)
+            self._pending_diagnostics.clear()
+            raise LifecycleDiagnosticsUnavailableError("shutdown", diagnostics)
+
+    async def _run_callback(self, callback: LifecycleShutdownCallback) -> None:
+        try:
+            result = callback.callback()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            await self._record_callback_exception(callback, exc)
+
+    async def _record_callback_exception(
+        self,
+        callback: LifecycleShutdownCallback,
+        exception: Exception,
+    ) -> None:
+        event = _shutdown_diagnostic_event(callback=callback, exception=exception)
+        if self._diagnostics_sink is None:
+            self._pending_diagnostics.append(event)
+            return
+        await self._diagnostics_sink.emit_diagnostic(event)
 
 
 class LifecycleScope:
@@ -256,6 +358,39 @@ class LifecycleScope:
         )
 
 
+def _shutdown_diagnostic_event(
+    *,
+    callback: LifecycleShutdownCallback,
+    exception: Exception,
+) -> DiagnosticEvent:
+    fields = {
+        "phase": _safe_field_value(callback.phase),
+        "owner_name": _safe_field_value(callback.owner_name),
+        "callback_name": _safe_field_value(callback.callback_name),
+        "exception_class": _safe_field_value(type(exception).__name__),
+    }
+    diagnostics = ErrorDiagnostics(
+        component="lifecycle.shutdown",
+        operation=callback.phase,
+        code="lifecycle_shutdown_exception",
+        category=DIAGNOSTIC_CATEGORY_LIFECYCLE,
+        visibility=DIAGNOSTIC_VISIBILITY_DETAILED,
+        content_policy=CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=None,
+        fields=fields,
+    )
+    return DiagnosticEvent(
+        category=DIAGNOSTIC_CATEGORY_LIFECYCLE,
+        severity=SEVERITY_ERROR,
+        visibility=DIAGNOSTIC_VISIBILITY_DETAILED,
+        content_policy=CONTENT_POLICY_METADATA_ONLY,
+        correlation_id=None,
+        diagnostics=diagnostics,
+        fields=fields,
+    )
+
+
 def _safe_field_value(value: str) -> str:
     if len(value) <= _DIAGNOSTIC_FIELD_VALUE_MAX_LENGTH:
         return value
@@ -264,8 +399,19 @@ def _safe_field_value(value: str) -> str:
 
 __all__ = [
     "CloseCallback",
+    "LIFECYCLE_SHUTDOWN_PHASE_ORDER",
     "LifecycleDiagnosticsUnavailableError",
     "LifecycleScope",
     "LifecycleScopeClosedError",
+    "LifecycleShutdownCallback",
+    "LifecycleShutdownCoordinator",
+    "LifecycleShutdownPhase",
     "LifecycleTaskNameInUseError",
+    "SHUTDOWN_PHASE_CLOSE_LOGGING_DIAGNOSTICS",
+    "SHUTDOWN_PHASE_CLOSE_PROVIDERS_OUTPUT_ADAPTERS",
+    "SHUTDOWN_PHASE_FINAL_DIAGNOSTICS",
+    "SHUTDOWN_PHASE_FREEZE_INGRESS",
+    "SHUTDOWN_PHASE_OWNER_DRAIN_CANCEL",
+    "SHUTDOWN_PHASE_STOP_EXTERNAL_PRODUCERS",
+    "ShutdownCallback",
 ]
