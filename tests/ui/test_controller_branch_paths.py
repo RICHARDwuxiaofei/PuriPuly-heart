@@ -3858,6 +3858,63 @@ async def test_rebuild_pipeline_rebinds_overlay_presenter_to_new_hub(
 
 
 @pytest.mark.asyncio
+async def test_rebuild_pipeline_keeps_preserved_presenter_detached_when_overlay_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.overlay_state = "failed"
+
+    presenter = OverlayPresenter(
+        calibration=controller.overlay_calibration.copy(),
+        clock=controller.clock,
+    )
+    old_hub = DummyHub(llm=object(), stt=object())
+    old_hub.overlay_sink = presenter
+    controller.hub = old_hub
+    controller._overlay_presenter = presenter
+    runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
+    runtime.attach_presenter(presenter)
+    controller._overlay_runtime = runtime
+    await runtime.close(
+        preserve_presenter_state=True,
+        hub=old_hub,
+        emit_shutdown=False,
+    )
+    assert runtime.is_closed is True
+    assert old_hub.overlay_sink is None
+
+    new_hub = DummyHub(llm=object(), stt=object())
+
+    class FakeUIEventBridge:
+        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
+            self.app = app
+            self.event_queue = event_queue
+
+        async def run(self) -> None:
+            return None
+
+    async def fake_init_pipeline(self: GuiController) -> None:
+        self.hub = new_hub
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, *, enabled: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(controller_module, "UIEventBridge", FakeUIEventBridge)
+    monkeypatch.setattr(GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
+
+    await controller._rebuild_pipeline(rebuild_stt=True)
+
+    assert getattr(new_hub, "overlay_sink", None) is None
+
+
+@pytest.mark.asyncio
 async def test_rebuild_pipeline_refreshes_overlay_dependencies_without_overlay_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4449,6 +4506,389 @@ async def test_overlay_toggle_starts_and_stops_overlay_runtime(
     assert controller.hub.reset_overlay_preview_calls == 1
     assert bridge.stopped is True
     assert manager.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_overlay_start_task_is_owned_by_overlay_runtime_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
+
+    _patch_overlay_runtime(monkeypatch)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    runtime = controller._overlay_runtime  # noqa: SLF001 - order35 ownership assertion
+    assert isinstance(runtime, OverlayRuntimeHandle)
+    assert runtime.start_task is controller._overlay_start_task
+    assert runtime.start_task is not None
+    assert runtime.start_task.get_name() == "OverlayRuntimeHandle:start"
+
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    assert runtime.process_manager is controller._overlay_manager
+    assert runtime.bridge is controller._overlay_bridge
+    assert runtime.presenter is controller._overlay_presenter
+    assert runtime.monitor_task is controller._overlay_monitor_task
+
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_overlay_shutdown_stops_bridge_while_bridge_start_is_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BlockingStartOverlayBridge(FakeOverlayBridge):
+        instances: list["BlockingStartOverlayBridge"] = []
+
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.start_entered = asyncio.Event()
+            self.start_released = asyncio.Event()
+            self.start_cancelled = False
+
+        async def start(self) -> None:
+            await super().start()
+            self.start_entered.set()
+            try:
+                await self.start_released.wait()
+            except asyncio.CancelledError:
+                self.start_cancelled = True
+                raise
+
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(controller_module, "OverlayBridge", BlockingStartOverlayBridge)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(BlockingStartOverlayBridge.instances) == 1)
+    bridge = BlockingStartOverlayBridge.instances[0]
+    await _wait_until(lambda: bridge.start_entered.is_set())
+
+    await controller.set_overlay_enabled(False)
+
+    assert bridge.start_cancelled is True
+    assert bridge.stopped is True
+    assert controller.overlay_state == "off"
+
+
+@pytest.mark.asyncio
+async def test_closing_desktop_overlay_runtime_rejects_direct_bridge_commands() -> None:
+    from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
+
+    class BlockingShutdownOverlayBridge(FakeOverlayBridge):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.shutdown_entered = asyncio.Event()
+            self.shutdown_released = asyncio.Event()
+
+        async def broadcast_shutdown(self) -> None:
+            await super().broadcast_shutdown()
+            self.shutdown_entered.set()
+            await self.shutdown_released.wait()
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.tasks: list[object] = []
+
+        def run_task(self, coro_fn) -> None:
+            self.tasks.append(coro_fn)
+
+    page = FakePage()
+    controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
+    controller.settings = AppSettings()
+    controller.settings.ui.overlay_enabled = True
+    controller.settings.overlay.target = OVERLAY_TARGET_DESKTOP
+    controller._active_overlay_target = OVERLAY_TARGET_DESKTOP
+    controller.overlay_state = "connected"
+    controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
+
+    bridge = BlockingShutdownOverlayBridge(session_token="token")
+    runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
+    runtime.attach_bridge(bridge)
+    controller._overlay_runtime = runtime
+    controller._overlay_bridge = bridge
+
+    close_task = asyncio.create_task(
+        runtime.close(
+            preserve_presenter_state=False,
+            hub=controller.hub,
+            emit_shutdown=True,
+        )
+    )
+    await _wait_until(lambda: bridge.shutdown_entered.is_set())
+
+    try:
+        assert runtime.is_closing is True
+        assert controller._overlay_bridge is bridge
+
+        sent = await controller._broadcast_desktop_runtime_control(
+            {"command": "set_interaction_mode", "mode": "edit"}
+        )
+
+        assert sent is False
+        assert bridge.desktop_runtime_control_payloads == []
+        assert (
+            controller._desktop_runtime_is_running_for_settings_update(controller.settings) is False
+        )
+
+        await controller._emit_overlay_runtime_logging_mode_update()
+
+        assert bridge.runtime_control_messages == []
+
+        controller._schedule_overlay_runtime_logging_mode_update()
+
+        assert page.tasks == []
+    finally:
+        bridge.shutdown_released.set()
+        await close_task
+
+
+@pytest.mark.asyncio
+async def test_closing_overlay_runtime_rejects_direct_presenter_commands() -> None:
+    from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
+
+    class BlockingShutdownPresenter:
+        def __init__(self) -> None:
+            self.shutdown_entered = asyncio.Event()
+            self.shutdown_released = asyncio.Event()
+            self.calibration_updates: list[OverlayCalibration] = []
+            self.display_preferences: list[dict[str, bool]] = []
+
+        async def broadcast_shutdown(self) -> None:
+            self.shutdown_entered.set()
+            await self.shutdown_released.wait()
+
+        async def update_calibration(self, calibration: OverlayCalibration) -> None:
+            self.calibration_updates.append(calibration)
+
+        async def update_display_preferences(
+            self,
+            *,
+            show_translation: bool,
+            show_peer_original: bool,
+        ) -> None:
+            self.display_preferences.append(
+                {
+                    "show_translation": show_translation,
+                    "show_peer_original": show_peer_original,
+                }
+            )
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.tasks: list[object] = []
+
+        def run_task(self, coro_fn) -> None:
+            self.tasks.append(coro_fn)
+
+    page = FakePage()
+    controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
+    controller.settings = AppSettings()
+    controller.overlay_state = "connected"
+    controller._last_vrc_mic_sync_enabled = controller.settings.osc.vrc_mic_intercept
+    presenter = BlockingShutdownPresenter()
+    runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
+    runtime.attach_presenter(presenter)
+    controller._overlay_runtime = runtime
+    controller._overlay_presenter = presenter  # type: ignore[assignment]
+
+    close_task = asyncio.create_task(
+        runtime.close(
+            preserve_presenter_state=True,
+            hub=None,
+            emit_shutdown=True,
+        )
+    )
+    await _wait_until(lambda: presenter.shutdown_entered.is_set())
+
+    try:
+        assert runtime.is_closing is True
+        assert controller._overlay_presenter is presenter
+
+        controller._schedule_overlay_calibration_emit()
+
+        assert page.tasks == []
+
+        await controller._emit_overlay_calibration_update()
+
+        assert presenter.calibration_updates == []
+
+        pending = copy.deepcopy(controller.settings)
+        pending.overlay.show_translation = not pending.overlay.show_translation
+
+        await controller._apply_settings_direct(
+            pending,
+            persist=False,
+            reload_settings_view=False,
+        )
+
+        assert presenter.display_preferences == []
+    finally:
+        presenter.shutdown_released.set()
+        await close_task
+
+
+@pytest.mark.asyncio
+async def test_overlay_teardown_close_failure_falls_back_to_basic_runtime_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
+
+    class FailingStopManager:
+        async def stop(self) -> None:
+            raise RuntimeError("raw cleanup failure details must stay detailed-only")
+
+    detailed_calls: list[tuple[str, int, BaseException | None]] = []
+    basic_calls: list[tuple[str, int]] = []
+    controller = _make_controller(app=SimpleNamespace())
+    controller.hub = DummyHub()
+    runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
+    runtime.attach_process_manager(FailingStopManager())
+    controller._overlay_runtime = runtime
+
+    def fake_log_detailed(
+        self: GuiController,
+        message: str,
+        *,
+        level: int = logging.INFO,
+        exception: BaseException | None = None,
+    ) -> bool:
+        assert self is controller
+        detailed_calls.append((message, level, exception))
+        return False
+
+    def fake_log_basic(
+        self: GuiController,
+        message: str,
+        *,
+        level: int = logging.INFO,
+    ) -> None:
+        assert self is controller
+        basic_calls.append((message, level))
+
+    monkeypatch.setattr(GuiController, "log_detailed", fake_log_detailed)
+    monkeypatch.setattr(GuiController, "log_basic", fake_log_basic)
+
+    await controller._teardown_overlay_runtime(preserve_presenter_state=True)
+
+    warning = "[Overlay] Overlay runtime close reported cleanup failure"
+    assert len(detailed_calls) == 1
+    assert detailed_calls[0][:2] == (warning, logging.WARNING)
+    assert isinstance(detailed_calls[0][2], RuntimeError)
+    assert basic_calls == [(warning, logging.WARNING)]
+    assert "RuntimeError" not in basic_calls[0][0]
+    assert "raw cleanup failure" not in basic_calls[0][0]
+
+
+@pytest.mark.asyncio
+async def test_overlay_shutdown_keeps_failed_state_when_cleanup_fails_with_resources() -> None:
+    from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
+
+    class FailingStopManager:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+            self.state = "connected"
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            raise RuntimeError("manager still needs retry")
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+    controller.overlay_state = "connected"
+    controller.failure_reason = "runtime_crashed"
+    manager = FailingStopManager()
+    runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
+    runtime.attach_process_manager(manager)
+    controller._overlay_runtime = runtime
+
+    await controller._shutdown_overlay_runtime(preserve_failure_reason=False)
+
+    assert manager.stop_calls == 1
+    assert controller.overlay_state == "failed"
+    assert controller.failure_reason == "unknown"
+    assert controller._overlay_runtime is runtime
+    assert runtime.process_manager is manager
+    assert controller._overlay_manager is manager
+
+
+@pytest.mark.asyncio
+async def test_overlay_restart_aborts_when_preserve_teardown_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
+
+    class FailingStopManager:
+        async def stop(self) -> None:
+            raise RuntimeError("manager still needs retry")
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+    controller.overlay_state = "failed"
+    manager = FailingStopManager()
+    runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
+    runtime.attach_process_manager(manager)
+    controller._overlay_runtime = runtime
+
+    def fail_new_runtime(self: GuiController) -> OverlayRuntimeHandle:
+        assert self is controller
+        raise AssertionError("restart created a new runtime after failed teardown")
+
+    monkeypatch.setattr(GuiController, "_new_overlay_runtime_handle", fail_new_runtime)
+
+    await controller._begin_overlay_start()
+
+    assert controller._overlay_runtime is runtime
+    assert runtime.process_manager is manager
+    assert controller._overlay_manager is manager
+    assert controller._overlay_start_task is None
+    assert controller.overlay_state == "failed"
+
+
+@pytest.mark.asyncio
+async def test_stale_desktop_renderer_event_is_ignored_after_overlay_instance_change() -> None:
+    from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = OVERLAY_TARGET_DESKTOP
+    controller._active_overlay_target = OVERLAY_TARGET_DESKTOP
+    controller._overlay_bridge = FakeOverlayBridge(session_token="token")
+    controller._overlay_runtime = OverlayRuntimeHandle(overlay_instance_id="overlay-new")
+
+    await controller._handle_desktop_renderer_event(
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "x": 111,
+                "y": 222,
+                "width": 1152,
+                "height": 288,
+            },
+        },
+        overlay_instance_id="overlay-old",
+    )
+
+    assert controller._pending_desktop_bounds is None
+    assert controller._desktop_bounds_persist_task is None
 
 
 @pytest.mark.asyncio
@@ -6645,7 +7085,7 @@ async def test_overlay_restart_reuses_presenter_scene_for_new_bridge(
     await controller._teardown_overlay_runtime(preserve_presenter_state=True)
 
     assert controller._overlay_presenter is presenter
-    assert controller.hub.overlay_sink is presenter
+    assert controller.hub.overlay_sink is None
 
     controller.overlay_state = "failed"
     await controller._begin_overlay_start()
@@ -6653,6 +7093,53 @@ async def test_overlay_restart_reuses_presenter_scene_for_new_bridge(
 
     assert FakeOverlayBridge.instances[1].initial_snapshot == saved_snapshot
     assert controller._overlay_presenter is presenter
+
+
+@pytest.mark.asyncio
+async def test_preserved_overlay_presenter_detaches_from_hub_ingress_until_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    FakeOverlayProcessManager.instances[0].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    presenter = controller._overlay_presenter
+    assert presenter is not None
+
+    await presenter.emit(
+        SelfTranscriptFinal(
+            event_id="self-final",
+            seq=1,
+            utterance_id=uuid4(),
+            channel="self",
+            created_at=10.0,
+            text="preserve without stale ingress",
+            source_language="ko",
+            target_language="en",
+            is_final=True,
+        )
+    )
+    saved_snapshot = presenter.snapshot()
+
+    await controller._teardown_overlay_runtime(preserve_presenter_state=True)
+
+    assert controller._overlay_presenter is presenter
+    assert controller.hub.overlay_sink is None
+
+    controller.overlay_state = "failed"
+    await controller._begin_overlay_start()
+    await _wait_until(lambda: len(FakeOverlayBridge.instances) == 2)
+
+    assert controller._overlay_presenter is presenter
+    assert FakeOverlayBridge.instances[1].initial_snapshot == saved_snapshot
 
 
 @pytest.mark.asyncio

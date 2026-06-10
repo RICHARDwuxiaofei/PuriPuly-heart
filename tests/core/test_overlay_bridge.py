@@ -95,6 +95,72 @@ class _RecordingSendConnection:
 
 
 @pytest.mark.asyncio
+async def test_overlay_bridge_stop_preserves_authenticated_connection_when_close_fails() -> None:
+    class FailingOnceCloseConnection:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise RuntimeError("connection close failed")
+
+    bridge = OverlayBridge(session_token="expected-token")
+    connection = FailingOnceCloseConnection()
+    bridge._authenticated_connections.add(connection)
+
+    with pytest.raises(RuntimeError, match="connection close failed"):
+        await bridge.stop()
+
+    assert connection in bridge._authenticated_connections
+
+    await bridge.stop()
+
+    assert connection.close_calls == 2
+    assert connection not in bridge._authenticated_connections
+
+
+@pytest.mark.asyncio
+async def test_overlay_bridge_stop_preserves_server_when_wait_closed_fails() -> None:
+    class FailingOnceServer:
+        def __init__(self) -> None:
+            self.close_calls = 0
+            self.wait_closed_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+        async def wait_closed(self) -> None:
+            self.wait_closed_calls += 1
+            if self.wait_closed_calls == 1:
+                raise RuntimeError("server close failed")
+
+    bridge = OverlayBridge(session_token="expected-token")
+    server = FailingOnceServer()
+    bridge._server = server
+    bridge.url = "ws://127.0.0.1:9999"
+    bridge._token_consumed = True
+    await bridge.messages.put({"type": "pending"})
+
+    with pytest.raises(RuntimeError, match="server close failed"):
+        await bridge.stop()
+
+    assert bridge._server is server
+    assert bridge.url == "ws://127.0.0.1:9999"
+    assert bridge._token_consumed is True
+    assert bridge.messages.qsize() == 1
+
+    await bridge.stop()
+
+    assert server.close_calls == 2
+    assert server.wait_closed_calls == 2
+    assert bridge._server is None
+    assert bridge.url == ""
+    assert bridge._token_consumed is False
+    assert bridge.messages.empty()
+
+
+@pytest.mark.asyncio
 async def test_overlay_bridge_requires_session_token() -> None:
     bridge = OverlayBridge(session_token="expected-token")
     await bridge.start()

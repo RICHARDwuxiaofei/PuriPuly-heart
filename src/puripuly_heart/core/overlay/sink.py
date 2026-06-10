@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, ClassVar, Literal, Protocol
+from typing import Any, Awaitable, Callable, ClassVar, Literal, Protocol
 from uuid import UUID, uuid4
 
 from puripuly_heart.core.clock import Clock, SystemClock
@@ -163,6 +164,7 @@ class OverlayStreamCoalescer:
     interval_ms: int = 300
     _pending_event: OverlayEventUnion | None = None
     _flush_task: asyncio.Task[None] | None = None
+    task_factory: Any | None = None
 
     async def push(
         self,
@@ -171,7 +173,10 @@ class OverlayStreamCoalescer:
     ) -> None:
         self._pending_event = event
         if self._flush_task is None or self._flush_task.done():
-            self._flush_task = asyncio.create_task(self._delayed_flush(emit))
+            self._flush_task = self._create_task(
+                self._delayed_flush(emit),
+                task_name="overlay-stream-coalescer-flush",
+            )
 
     async def flush(
         self,
@@ -213,6 +218,16 @@ class OverlayStreamCoalescer:
         pending = self._pending_event
         self._pending_event = None
         return pending
+
+    def _create_task(
+        self,
+        coroutine: Coroutine[Any, Any, Any],
+        *,
+        task_name: str,
+    ) -> asyncio.Task[Any]:
+        if self.task_factory is not None:
+            return self.task_factory(coroutine, task_name=task_name)
+        return asyncio.create_task(coroutine, name=f"OverlayStreamCoalescer:{task_name}")
 
 
 @dataclass(slots=True)

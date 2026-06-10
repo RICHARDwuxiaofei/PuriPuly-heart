@@ -87,6 +87,44 @@ class FakeOverlayManagedProcess(OverlayManagedProcess):
         asyncio.create_task(runner())
 
 
+@pytest.mark.asyncio
+async def test_asyncio_overlay_process_terminate_escalates_to_kill_after_grace() -> None:
+    class HangingProcess:
+        stdout = None
+        stderr = None
+        returncode = None
+
+        def __init__(self) -> None:
+            self.terminate_calls = 0
+            self.kill_calls = 0
+            self._wait_future: asyncio.Future[int | None] = (
+                asyncio.get_running_loop().create_future()
+            )
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+            self.returncode = -9
+            if not self._wait_future.done():
+                self._wait_future.set_result(self.returncode)
+
+        async def wait(self) -> int | None:
+            return await self._wait_future
+
+    process = HangingProcess()
+    managed = process_module._AsyncioOverlayProcess(
+        process=process,
+        terminate_grace_s=0.0,
+    )
+
+    await managed.terminate()
+
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+
+
 @dataclass(slots=True)
 class FakeProcessRunner:
     ready_event_delay_ms: int | None = None
@@ -253,6 +291,66 @@ def _patch_vendored_openvr_bundle(
         ),
         raising=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_overlay_process_manager_stop_preserves_process_when_terminate_fails() -> None:
+    class FailingOnceTerminateProcess:
+        def __init__(self) -> None:
+            self.terminate_calls = 0
+
+        async def next_event(self) -> dict[str, object]:
+            raise AssertionError("next_event should not be called")
+
+        async def wait(self) -> int | None:
+            return None
+
+        async def terminate(self) -> None:
+            self.terminate_calls += 1
+            if self.terminate_calls == 1:
+                raise RuntimeError("terminate failed")
+
+        def set_logging_mode(self, mode: str) -> None:
+            _ = mode
+
+    manager = OverlayProcessManager()
+    process = FailingOnceTerminateProcess()
+    manager._process = process
+
+    with pytest.raises(RuntimeError, match="terminate failed"):
+        await manager.stop()
+
+    assert manager._process is process
+
+    await manager.stop()
+
+    assert process.terminate_calls == 2
+    assert manager._process is None
+
+
+def test_overlay_process_manager_cleanup_manifest_preserves_path_when_unlink_fails() -> None:
+    class FailingOnceManifestPath:
+        def __init__(self) -> None:
+            self.unlink_calls = 0
+
+        def unlink(self) -> None:
+            self.unlink_calls += 1
+            if self.unlink_calls == 1:
+                raise PermissionError("manifest locked")
+
+    manager = OverlayProcessManager()
+    manifest_path = FailingOnceManifestPath()
+    manager._manifest_path = manifest_path
+
+    with pytest.raises(PermissionError, match="manifest locked"):
+        manager._cleanup_manifest()
+
+    assert manager._manifest_path is manifest_path
+
+    manager._cleanup_manifest()
+
+    assert manifest_path.unlink_calls == 2
+    assert manager._manifest_path is None
 
 
 @pytest.mark.asyncio

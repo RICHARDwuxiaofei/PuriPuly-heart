@@ -8,6 +8,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = REPO_ROOT / "src" / "puripuly_heart"
 
 ASYNCIO_CREATE_TASK = "asyncio.create_task"
+ASYNCIO_ENSURE_FUTURE = "asyncio.ensure_future"
 RUN_TASK = ".run_task"
 
 LIFECYCLE_OWNER_PRIMITIVES = frozenset(
@@ -31,13 +32,13 @@ LEGACY_TASK_CREATION_ALLOWLIST = Counter(
         ): 1,
         ("src/puripuly_heart/core/orchestrator/hub.py", ASYNCIO_CREATE_TASK): 6,
         ("src/puripuly_heart/core/overlay/bridge.py", ASYNCIO_CREATE_TASK): 1,
-        ("src/puripuly_heart/core/overlay/presenter.py", ASYNCIO_CREATE_TASK): 3,
-        ("src/puripuly_heart/core/overlay/process.py", ASYNCIO_CREATE_TASK): 11,
+        ("src/puripuly_heart/core/overlay/presenter.py", ASYNCIO_CREATE_TASK): 1,
+        ("src/puripuly_heart/core/overlay/process.py", ASYNCIO_CREATE_TASK): 2,
         ("src/puripuly_heart/core/overlay/sink.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/providers/stt/soniox.py", ASYNCIO_CREATE_TASK): 3,
         ("src/puripuly_heart/ui/app.py", RUN_TASK): 14,
         ("src/puripuly_heart/ui/components/settings/api_key_field.py", RUN_TASK): 1,
-        ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 13,
+        ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 10,
         ("src/puripuly_heart/ui/desktop_overlay.py", ASYNCIO_CREATE_TASK): 11,
     }
 )
@@ -47,6 +48,7 @@ NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST = Counter(
         ("src/puripuly_heart/core/runtime/peer_channel.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/provider_handle.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/self_audio.py", ASYNCIO_CREATE_TASK): 1,
+        ("src/puripuly_heart/core/runtime/overlay.py", ASYNCIO_CREATE_TASK): 1,
     }
 )
 
@@ -59,6 +61,15 @@ def _is_asyncio_create_task_call(node: ast.Call) -> bool:
     return (
         isinstance(node.func, ast.Attribute)
         and node.func.attr == "create_task"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "asyncio"
+    )
+
+
+def _is_asyncio_ensure_future_call(node: ast.Call) -> bool:
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == "ensure_future"
         and isinstance(node.func.value, ast.Name)
         and node.func.value.id == "asyncio"
     )
@@ -81,6 +92,8 @@ def _task_creation_counts() -> Counter[tuple[str, str]]:
                 continue
             if _is_asyncio_create_task_call(node):
                 counts[(relative_path, ASYNCIO_CREATE_TASK)] += 1
+            elif _is_asyncio_ensure_future_call(node):
+                counts[(relative_path, ASYNCIO_ENSURE_FUTURE)] += 1
             elif _is_run_task_call(node):
                 counts[(relative_path, RUN_TASK)] += 1
     return counts

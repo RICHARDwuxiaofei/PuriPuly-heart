@@ -5,7 +5,7 @@ import contextlib
 import json
 import logging
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Coroutine, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,6 +31,7 @@ class OverlayBridge:
     diagnostics: OverlayDiagnosticsRecorder | None = None
     runtime_logging_mode: str | None = None
     desktop_runtime_controls_enabled: bool = False
+    task_factory: Any | None = None
 
     url: str = field(init=False, default="")
     messages: asyncio.Queue[dict[str, Any]] = field(
@@ -76,7 +77,10 @@ class OverlayBridge:
         socket = self._server.sockets[0]
         bound_host, bound_port = socket.getsockname()[:2]
         self.url = f"ws://{bound_host}:{bound_port}"
-        self._heartbeat_task = asyncio.create_task(self._run_heartbeat_loop())
+        self._heartbeat_task = self._create_task(
+            self._run_heartbeat_loop(),
+            task_name="bridge-heartbeat",
+        )
 
     async def stop(self) -> None:
         heartbeat_task = self._heartbeat_task
@@ -86,15 +90,16 @@ class OverlayBridge:
             await asyncio.gather(heartbeat_task, return_exceptions=True)
 
         connections = list(self._authenticated_connections)
-        self._authenticated_connections.clear()
         for connection in connections:
             await connection.close()
+            self._authenticated_connections.discard(connection)
 
         server = self._server
-        self._server = None
         if server is not None:
             server.close()
             await server.wait_closed()
+            if self._server is server:
+                self._server = None
         self._drain_messages()
         self._token_consumed = False
         self.url = ""
@@ -237,6 +242,16 @@ class OverlayBridge:
                 await self._broadcast_json({"type": "heartbeat"})
         except asyncio.CancelledError:
             raise
+
+    def _create_task(
+        self,
+        coroutine: Coroutine[Any, Any, Any],
+        *,
+        task_name: str,
+    ) -> asyncio.Task[Any]:
+        if self.task_factory is not None:
+            return self.task_factory(coroutine, task_name=task_name)
+        return asyncio.create_task(coroutine, name=f"OverlayBridge:{task_name}")
 
     async def _broadcast_json(self, payload: dict[str, Any]) -> None:
         if not self._authenticated_connections:

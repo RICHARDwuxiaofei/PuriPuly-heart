@@ -10,9 +10,10 @@ import secrets
 import shutil
 import sys
 import tempfile
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import uuid4
 
 from puripuly_heart import __version__
@@ -76,6 +77,8 @@ class OverlayProcessRunner(Protocol):
 class _AsyncioOverlayProcess:
     process: asyncio.subprocess.Process
     overlay_instance_id: str | None = None
+    task_factory: Any | None = None
+    terminate_grace_s: float = 1.0
     _events: asyncio.Queue[dict[str, object]] = field(default_factory=asyncio.Queue)
     _reader_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     _diagnostics: OverlayDiagnosticsRecorder | None = None
@@ -109,12 +112,46 @@ class _AsyncioOverlayProcess:
         if self.process.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 self.process.terminate()
+        await self._wait_for_returncode_during_terminate_grace()
+        if self.process.returncode is None:
+            kill = getattr(self.process, "kill", None)
+            if callable(kill):
+                with contextlib.suppress(ProcessLookupError):
+                    kill()
         await self.wait()
+
+    async def _wait_for_returncode_during_terminate_grace(self) -> None:
+        grace_s = max(0.0, self.terminate_grace_s)
+        if grace_s <= 0.0:
+            return
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + grace_s
+        while self.process.returncode is None:
+            remaining_s = deadline - loop.time()
+            if remaining_s <= 0.0:
+                return
+            await asyncio.sleep(min(remaining_s, 0.05))
 
     def _start_reader(self, stream: asyncio.StreamReader | None, stream_name: str) -> None:
         if stream is None:
             return
-        self._reader_tasks.append(asyncio.create_task(self._read_stream(stream, stream_name)))
+        self._reader_tasks.append(
+            self._create_task(
+                self._read_stream(stream, stream_name),
+                task_name=f"process-read-{stream_name}",
+            )
+        )
+
+    def _create_task(
+        self,
+        coroutine: Coroutine[Any, Any, Any],
+        *,
+        task_name: str,
+    ) -> asyncio.Task[Any]:
+        if self.task_factory is not None:
+            return self.task_factory(coroutine, task_name=task_name)
+        return asyncio.create_task(coroutine, name=f"OverlayProcess:{task_name}")
 
     async def _read_stream(self, stream: asyncio.StreamReader, stream_name: str) -> None:
         try:
@@ -179,6 +216,7 @@ class _AsyncioOverlayProcess:
 @dataclass(slots=True)
 class DefaultOverlayProcessRunner:
     executable_path: Path | None = None
+    task_factory: Any | None = None
 
     def prepare(self, manifest: OverlayLaunchManifest) -> Path:
         _ = manifest
@@ -214,7 +252,7 @@ class DefaultOverlayProcessRunner:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        return _AsyncioOverlayProcess(process=process)
+        return _AsyncioOverlayProcess(process=process, task_factory=self.task_factory)
 
     @classmethod
     def default_executable_candidates(
@@ -372,6 +410,7 @@ class DesktopFletOverlayRunner:
     python_executable: Path | None = None
     app_executable: Path | None = None
     module_name: str = "puripuly_heart.ui.desktop_overlay"
+    task_factory: Any | None = None
 
     def prepare(self, manifest: OverlayLaunchManifest) -> Path:
         _ = manifest
@@ -398,7 +437,7 @@ class DesktopFletOverlayRunner:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        return _AsyncioOverlayProcess(process=process)
+        return _AsyncioOverlayProcess(process=process, task_factory=self.task_factory)
 
     def _is_frozen(self) -> bool:
         if self.frozen is not None:
@@ -426,6 +465,7 @@ class OverlayProcessManager:
     overlay_instance_id: str = field(default_factory=lambda: f"overlay-{uuid4()}")
     diagnostics_dir: Path = field(default_factory=default_overlay_diagnostics_dir)
     diagnostics: OverlayDiagnosticsRecorder | None = None
+    task_factory: Any | None = None
 
     state: str = field(init=False, default="off")
     failure_reason: str | None = field(init=False, default=None)
@@ -508,9 +548,10 @@ class OverlayProcessManager:
             await asyncio.gather(monitor_task, return_exceptions=True)
 
         process = self._process
-        self._process = None
         if process is not None:
             await process.terminate()
+            if self._process is process:
+                self._process = None
 
         self._cleanup_manifest()
         self.state = "off"
@@ -547,10 +588,19 @@ class OverlayProcessManager:
             await self._fail("unknown")
             return
 
-        event_task = asyncio.create_task(self._process.next_event())
+        event_task = self._create_task(
+            self._process.next_event(),
+            task_name="startup-next-event",
+        )
         bridge_task = self._create_bridge_event_task()
-        exit_task = asyncio.create_task(self._process.wait())
-        timeout_task = asyncio.create_task(asyncio.sleep(self.startup_timeout_ms / 1000.0))
+        exit_task = self._create_task(
+            self._process.wait(),
+            task_name="startup-process-wait",
+        )
+        timeout_task = self._create_task(
+            asyncio.sleep(self.startup_timeout_ms / 1000.0),
+            task_name="startup-timeout",
+        )
 
         try:
             while True:
@@ -572,14 +622,18 @@ class OverlayProcessManager:
                         self._last_transition = "overlay_ready"
                         handoff_exit_task = exit_task
                         exit_task = None
-                        self._monitor_task = asyncio.create_task(
-                            self._monitor_connected_process(exit_task=handoff_exit_task)
+                        self._monitor_task = self._create_task(
+                            self._monitor_connected_process(exit_task=handoff_exit_task),
+                            task_name="connected-process-monitor",
                         )
                         await asyncio.sleep(0)
                         return
                     if outcome == "failed":
                         return
-                    event_task = asyncio.create_task(self._process.next_event())
+                    event_task = self._create_task(
+                        self._process.next_event(),
+                        task_name="startup-next-event",
+                    )
 
                 if bridge_task is not None and bridge_task in done:
                     outcome = await self._handle_lifecycle_event(
@@ -591,8 +645,9 @@ class OverlayProcessManager:
                         self._last_transition = "bridge_ready"
                         handoff_exit_task = exit_task
                         exit_task = None
-                        self._monitor_task = asyncio.create_task(
-                            self._monitor_connected_process(exit_task=handoff_exit_task)
+                        self._monitor_task = self._create_task(
+                            self._monitor_connected_process(exit_task=handoff_exit_task),
+                            task_name="connected-process-monitor",
                         )
                         await asyncio.sleep(0)
                         return
@@ -630,10 +685,16 @@ class OverlayProcessManager:
         process = self._process
         if process is None:
             return
-        event_task = asyncio.create_task(process.next_event())
+        event_task = self._create_task(
+            process.next_event(),
+            task_name="connected-next-event",
+        )
         bridge_task = self._create_bridge_event_task()
         if exit_task is None:
-            exit_task = asyncio.create_task(process.wait())
+            exit_task = self._create_task(
+                process.wait(),
+                task_name="connected-process-wait",
+            )
         try:
             while True:
                 pending_tasks: set[asyncio.Task[object]] = {exit_task}
@@ -651,7 +712,10 @@ class OverlayProcessManager:
                         == "failed"
                     ):
                         return
-                    event_task = asyncio.create_task(process.next_event())
+                    event_task = self._create_task(
+                        process.next_event(),
+                        task_name="connected-next-event",
+                    )
 
                 if bridge_task is not None and bridge_task in done:
                     if (
@@ -683,7 +747,20 @@ class OverlayProcessManager:
     def _create_bridge_event_task(self) -> asyncio.Task[dict[str, object]] | None:
         if self.bridge_messages is None:
             return None
-        return asyncio.create_task(self.bridge_messages.get())
+        return self._create_task(
+            self.bridge_messages.get(),
+            task_name="bridge-message",
+        )
+
+    def _create_task(
+        self,
+        coroutine: Coroutine[Any, Any, Any],
+        *,
+        task_name: str,
+    ) -> asyncio.Task[Any]:
+        if self.task_factory is not None:
+            return self.task_factory(coroutine, task_name=task_name)
+        return asyncio.create_task(coroutine, name=f"OverlayProcessManager:{task_name}")
 
     async def _handle_lifecycle_event(
         self,
@@ -912,20 +989,26 @@ class OverlayProcessManager:
             self._failure_dumped = True
 
         process = self._process
-        self._process = None
         if terminate_process and process is not None:
             await process.terminate()
+            if self._process is process:
+                self._process = None
+        elif not terminate_process:
+            self._process = None
 
         if cleanup_manifest:
             self._cleanup_manifest()
 
     def _cleanup_manifest(self) -> None:
         manifest_path = self._manifest_path
-        self._manifest_path = None
         if manifest_path is None:
             return
-        with contextlib.suppress(FileNotFoundError):
+        try:
             manifest_path.unlink()
+        except FileNotFoundError:
+            pass
+        if self._manifest_path is manifest_path:
+            self._manifest_path = None
 
     def _attach_process_diagnostics(self, process: OverlayManagedProcess) -> None:
         attach = getattr(process, "attach_diagnostics", None)

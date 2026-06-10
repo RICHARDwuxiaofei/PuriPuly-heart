@@ -4,9 +4,9 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
@@ -78,6 +78,7 @@ class OverlayPresenter(OverlaySink):
     show_peer_original: bool = True
     peer_presentation_refresh_burst: bool = True
     self_presentation_refresh_burst: bool = True
+    task_factory: Any | None = None
 
     _terminal_registry: OrderedDict[tuple[str, UUID], int] = field(
         init=False,
@@ -413,7 +414,7 @@ class OverlayPresenter(OverlaySink):
     async def clear_for_runtime_detach(self) -> None:
         await self._cancel_peer_presentation_refresh_burst_task_and_wait()
         await self._cancel_self_presentation_refresh_burst_task_and_wait(reason="runtime_detach")
-        self._cancel_all_expiration_tasks()
+        await self._cancel_all_expiration_tasks_and_wait()
         self._clear_entries_for_reason("scene_reset")
         self._terminal_registry.clear()
         self._scene_terminal_keys.clear()
@@ -508,6 +509,9 @@ class OverlayPresenter(OverlaySink):
         if self.bridge is None:
             return
         await self.bridge.broadcast_shutdown()
+
+    async def close(self) -> None:
+        await self.clear_for_runtime_detach()
 
     def _apply_event(self, event: OverlayEventUnion) -> bool:
         now = self.clock.now()
@@ -933,8 +937,9 @@ class OverlayPresenter(OverlaySink):
             return
         entry.expiration_revision += 1
         self._record_deadline(entry)
-        self._expiration_tasks[key] = asyncio.create_task(
-            self._expire_entry_after_ttl(key, entry.expiration_revision)
+        self._expiration_tasks[key] = self._create_task(
+            self._expire_entry_after_ttl(key, entry.expiration_revision),
+            task_name=f"presenter-expiration:{key[0]}:{key[1]}",
         )
 
     async def _expire_entry_after_ttl(
@@ -1100,6 +1105,25 @@ class OverlayPresenter(OverlaySink):
                 task.cancel()
         self._expiration_tasks.clear()
 
+    async def _cancel_all_expiration_tasks_and_wait(self) -> None:
+        tasks = tuple(self._expiration_tasks.values())
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        self._expiration_tasks.clear()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _create_task(
+        self,
+        coroutine: Coroutine[Any, Any, Any],
+        *,
+        task_name: str,
+    ) -> asyncio.Task[Any]:
+        if self.task_factory is not None:
+            return self.task_factory(coroutine, task_name=task_name)
+        return asyncio.create_task(coroutine, name=f"OverlayPresenter:{task_name}")
+
     def _self_presentation_refresh_key_for_event(
         self,
         event: OverlayEventUnion,
@@ -1203,8 +1227,9 @@ class OverlayPresenter(OverlaySink):
         self._cancel_peer_presentation_refresh_burst_task()
         if needs_clean_publish:
             await self._publish_if_changed()
-        self._peer_presentation_refresh_burst_task = asyncio.create_task(
-            self._run_peer_presentation_refresh_burst(key)
+        self._peer_presentation_refresh_burst_task = self._create_task(
+            self._run_peer_presentation_refresh_burst(key),
+            task_name="presenter-peer-refresh-burst",
         )
 
     async def _start_self_presentation_refresh_burst_for_event(
@@ -1321,7 +1346,10 @@ class OverlayPresenter(OverlaySink):
         self,
         key: tuple[str, UUID],
     ) -> asyncio.Task[None]:
-        task = asyncio.create_task(self._run_self_presentation_refresh_burst(key))
+        task = self._create_task(
+            self._run_self_presentation_refresh_burst(key),
+            task_name="presenter-self-refresh-burst",
+        )
 
         def record_unstarted_cancel_end(completed_task: asyncio.Task[None]) -> None:
             self._record_unstarted_self_presentation_refresh_cancel_end(
