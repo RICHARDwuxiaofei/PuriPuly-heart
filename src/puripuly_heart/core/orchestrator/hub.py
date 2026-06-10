@@ -6,7 +6,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID, uuid4
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,7 @@ from puripuly_heart.core.overlay.sink import (
     OverlayEventAdapter,
     OverlaySink,
 )
+from puripuly_heart.core.runtime.provider_handle import ProviderRuntimeHandle
 from puripuly_heart.core.runtime_logging import (
     SessionLoggingMode,
     SessionRuntimeLoggingService,
@@ -99,6 +100,10 @@ class _LatencyTimeline:
     stage_times: dict[str, float] = field(default_factory=dict)
     emitted_trace_points: set[str] = field(default_factory=set)
     basic_summary_emitted: bool = False
+
+
+class _StaleProviderCompletion(Exception):
+    """Internal signal for provider calls completed by a replaced provider handle."""
 
 
 @dataclass(slots=True)
@@ -180,6 +185,9 @@ class ClientHub:
         init=False,
         default_factory=dict,
     )
+    _self_stt_provider_runtime: ProviderRuntimeHandle = field(init=False)
+    _peer_stt_provider_runtime: ProviderRuntimeHandle = field(init=False)
+    _llm_provider_runtime: ProviderRuntimeHandle = field(init=False)
 
     def __post_init__(self) -> None:
         self.overlay_event_adapter = OverlayEventAdapter(clock=self.clock)
@@ -197,6 +205,25 @@ class ClientHub:
             alias_target=self,
         )
         self.peer_runtime = ChannelRuntime(channel="peer", stt=self.peer_stt)
+        self._self_stt_provider_runtime = ProviderRuntimeHandle(
+            name="self_stt",
+            provider=self.stt,
+            event_handler=self._handle_stt_event,
+            exception_handler=self._handle_stt_event_loop_exception,
+            state_changed=self._sync_provider_runtime_aliases,
+        )
+        self._peer_stt_provider_runtime = ProviderRuntimeHandle(
+            name="peer_stt",
+            provider=self.peer_stt,
+            event_handler=self._handle_stt_event,
+            exception_handler=self._handle_stt_event_loop_exception,
+            state_changed=self._sync_provider_runtime_aliases,
+        )
+        self._llm_provider_runtime = ProviderRuntimeHandle(
+            name="llm",
+            provider=self.llm,
+            state_changed=self._sync_provider_runtime_aliases,
+        )
         self.context_resolver = ContextResolver(
             clock=self.clock,
             local_time_window_s=self.context_time_window_s,
@@ -205,6 +232,7 @@ class ClientHub:
             integrated_max_entries=self.integrated_context_max_entries,
         )
         warm_prompt_cache()
+        self._sync_provider_runtime_aliases()
         self._sync_self_runtime_aliases()
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -237,6 +265,8 @@ class ClientHub:
                     resolver.integrated_max_entries = value  # type: ignore[assignment]
             if name == "clock" and overlay_event_adapter is not None:
                 overlay_event_adapter.clock = value  # type: ignore[assignment]
+        if name in {"stt", "peer_stt", "llm"}:
+            self._attach_provider_assignment(name, value)
         runtime_field = _SELF_RUNTIME_FIELDS.get(name)
         if runtime_field is None:
             return
@@ -245,6 +275,40 @@ class ClientHub:
         except AttributeError:
             return
         object.__setattr__(runtime, runtime_field, value)
+
+    @property
+    def provider_runtime_handles(self) -> dict[str, ProviderRuntimeHandle]:
+        return {
+            "self_stt": self._self_stt_provider_runtime,
+            "peer_stt": self._peer_stt_provider_runtime,
+            "llm": self._llm_provider_runtime,
+        }
+
+    def _attach_provider_assignment(self, name: str, value: object) -> None:
+        try:
+            if name == "stt":
+                handle = object.__getattribute__(self, "_self_stt_provider_runtime")
+            elif name == "peer_stt":
+                handle = object.__getattribute__(self, "_peer_stt_provider_runtime")
+            else:
+                handle = object.__getattribute__(self, "_llm_provider_runtime")
+        except AttributeError:
+            return
+        if handle.provider is not value:
+            handle.attach_provider_reference(value)
+
+    def _sync_provider_runtime_aliases(self, _handle: ProviderRuntimeHandle | None = None) -> None:
+        object.__setattr__(self, "stt", self._self_stt_provider_runtime.provider)
+        object.__setattr__(self, "peer_stt", self._peer_stt_provider_runtime.provider)
+        object.__setattr__(self, "llm", self._llm_provider_runtime.provider)
+        object.__setattr__(self, "_stt_task", self._self_stt_provider_runtime.event_task)
+        object.__setattr__(self, "_peer_stt_task", self._peer_stt_provider_runtime.event_task)
+        if hasattr(self, "self_runtime"):
+            self.self_runtime.stt = self.stt
+            self.self_runtime.stt_task = self._stt_task
+        if hasattr(self, "peer_runtime"):
+            self.peer_runtime.stt = self.peer_stt
+            self.peer_runtime.stt_task = self._peer_stt_task
 
     def _sync_self_runtime_aliases(self) -> None:
         self._stt_task = self.self_runtime.stt_task
@@ -684,16 +748,20 @@ class ClientHub:
         if self._running:
             return
         self._running = True
-        if self.stt is not None:
-            self._stt_task = asyncio.create_task(self._run_stt_event_loop(self.stt))
-        if self.peer_stt is not None:
-            self._peer_stt_task = asyncio.create_task(self._run_stt_event_loop(self.peer_stt))
+        await self._self_stt_provider_runtime.start()
+        await self._peer_stt_provider_runtime.start()
+        self._sync_provider_runtime_aliases()
         if auto_flush_osc:
             self._osc_flush_task = asyncio.create_task(self._run_osc_flush_loop())
 
     async def stop(self) -> None:
-        if not self._running:
+        if (
+            not self._running
+            and not self._provider_runtime_handles_have_resources()
+            and self._osc_flush_task is None
+        ):
             return
+        was_running = self._running
         self._running = False
 
         if self._osc_flush_task:
@@ -701,48 +769,64 @@ class ClientHub:
             await asyncio.gather(self._osc_flush_task, return_exceptions=True)
             self._osc_flush_task = None
 
-        await self._stop_stt_event_loop()
-        await self.reset_overlay_preview()
-        await self._reset_stt_runtime_state()
+        if was_running:
+            await self._stop_stt_event_loop()
+            await self.reset_overlay_preview()
+            await self._reset_stt_runtime_state()
 
-        if self.stt is not None:
-            await self.stt.close()
-        if self.peer_stt is not None:
-            await self.peer_stt.close()
-
-        if self.llm is not None:
-            await self.llm.close()
+        await self._close_provider_runtime_handles()
 
     async def replace_stt_provider(self, stt: STTProvider | None) -> None:
-        old_stt = self.stt
-        await self._stop_stt_task("_stt_task")
+        await self._self_stt_provider_runtime.stop_ingress()
         await self.reset_overlay_preview()
         await self.self_runtime.reset_runtime_state()
         self._clear_latency_state(channel="self")
         self._sync_self_runtime_aliases()
+        await self._self_stt_provider_runtime.replace_provider(stt, start=self._running)
+        self._sync_provider_runtime_aliases()
 
-        if old_stt is not None:
-            await old_stt.close()
-
-        self.stt = stt
-        self.self_runtime.stt = stt
-        if self._running and self.stt is not None:
-            self._stt_task = asyncio.create_task(self._run_stt_event_loop(self.stt))
-
-    async def replace_peer_stt_provider(self, stt: STTProvider | None) -> None:
-        old_stt = self.peer_stt
-        await self._stop_stt_task("_peer_stt_task")
+    async def replace_peer_stt_provider(
+        self,
+        stt: STTProvider | None,
+        *,
+        start: bool | None = None,
+    ) -> None:
+        await self._peer_stt_provider_runtime.stop_ingress()
         await self.peer_runtime.reset_runtime_state()
         self._clear_peer_logical_turn_state()
         self._clear_latency_state(channel="peer")
+        await self._peer_stt_provider_runtime.replace_provider(
+            stt,
+            start=self._running if start is None else start,
+        )
+        self._sync_provider_runtime_aliases()
 
-        if old_stt is not None:
-            await old_stt.close()
+    async def start_peer_stt_provider_ingress(self, stt: STTProvider) -> None:
+        if not self._running:
+            return
+        await self._peer_stt_provider_runtime.start_if_provider(stt)
+        self._sync_provider_runtime_aliases()
 
-        self.peer_stt = stt
-        self.peer_runtime.stt = stt
-        if self._running and self.peer_stt is not None:
-            self._peer_stt_task = asyncio.create_task(self._run_stt_event_loop(self.peer_stt))
+    async def replace_llm_provider(self, llm: LLMProvider | None) -> None:
+        await self._llm_provider_runtime.replace_provider(llm, start=False)
+        self._sync_provider_runtime_aliases()
+
+    async def drain_self_stt_for_toggle_off(self) -> None:
+        await self._self_stt_provider_runtime.drain_for_toggle_off()
+        self._sync_provider_runtime_aliases()
+
+    def _provider_runtime_handles_have_resources(self) -> bool:
+        return any(handle.has_resources for handle in self.provider_runtime_handles.values())
+
+    async def _close_provider_runtime_handles(self) -> None:
+        failures: list[Exception] = []
+        for handle in self.provider_runtime_handles.values():
+            try:
+                await handle.close()
+            except Exception as exc:
+                failures.append(exc)
+        self._sync_provider_runtime_aliases()
+        _raise_provider_runtime_close_failures(failures)
 
     def mark_promo_eligible(self) -> None:
         """Mark that user clicked STT button. Next STREAMING state will send promo."""
@@ -953,11 +1037,27 @@ class ClientHub:
             )
             raise
 
+    async def _handle_stt_event_loop_exception(self, exc: Exception) -> None:
+        self._emit_exception_summary(
+            "[Hub] STT event loop crashed: %s",
+            exc,
+            level=logging.ERROR,
+        )
+
     async def _stop_stt_event_loop(self) -> None:
-        await self._stop_stt_task("_stt_task")
-        await self._stop_stt_task("_peer_stt_task")
+        await self._self_stt_provider_runtime.stop_ingress()
+        await self._peer_stt_provider_runtime.stop_ingress()
+        self._sync_provider_runtime_aliases()
 
     async def _stop_stt_task(self, attr_name: str) -> None:
+        if attr_name == "_stt_task":
+            await self._self_stt_provider_runtime.stop_ingress()
+            self._sync_provider_runtime_aliases()
+            return
+        if attr_name == "_peer_stt_task":
+            await self._peer_stt_provider_runtime.stop_ingress()
+            self._sync_provider_runtime_aliases()
+            return
         task = getattr(self, attr_name)
         if task is None:
             return
@@ -1958,7 +2058,11 @@ class ClientHub:
         ) or bool(buffer.spec_latency_stage_times)
         if not had_spec_state:
             return False
-        if buffer.spec_task is not None and not buffer.spec_task.done():
+        if (
+            buffer.spec_task is not None
+            and not buffer.spec_task.done()
+            and buffer.spec_task is not asyncio.current_task()
+        ):
             buffer.spec_task.cancel()
             self._emit_metric(
                 "[Metric] spec_cancel id=%s reason=%s",
@@ -2322,7 +2426,11 @@ class ClientHub:
                 )
             )
 
-        if buffer.spec_task is not None and not buffer.spec_task.done():
+        if (
+            buffer.spec_task is not None
+            and not buffer.spec_task.done()
+            and buffer.spec_task is not asyncio.current_task()
+        ):
             buffer.spec_task.cancel()
 
         if buffer.last_end_time is not None:
@@ -2455,6 +2563,9 @@ class ClientHub:
             translation = await self._translate_text(merge_id, text, record_latency=False)
         except asyncio.CancelledError:
             return
+        except _StaleProviderCompletion:
+            await self._handle_stale_spec_translation(merge_id, text, attempt)
+            return
         except Exception as exc:
             self._log_translation_failure(
                 stage="spec",
@@ -2493,6 +2604,22 @@ class ClientHub:
         )
         await self._sync_overlay_active_self(buffer, created_at=translation.created_at)
         await self._try_commit_after_spec(buffer, reason="spec_done", allow_fallback=False)
+
+    async def _handle_stale_spec_translation(
+        self,
+        merge_id: UUID,
+        text: str,
+        attempt: int,
+    ) -> None:
+        buffer = self._merge_buffer
+        if buffer is None or buffer.merge_id != merge_id:
+            return
+        if buffer.spec_text != text or buffer.spec_attempts != attempt:
+            return
+        self._clear_spec_latency_state(buffer)
+        buffer.spec_translation = None
+        buffer.spec_done_at = self.clock.now()
+        await self._try_commit_after_spec(buffer, reason="spec_stale", allow_fallback=True)
 
     async def _try_commit_after_spec(
         self, buffer: _MergeBuffer, *, reason: str, allow_fallback: bool
@@ -2594,6 +2721,23 @@ class ClientHub:
             return self.translation_enabled and self.peer_translation_enabled
         return self.translation_enabled
 
+    def _capture_llm_provider_request(self) -> tuple[LLMProvider, int] | None:
+        provider, generation = self._llm_provider_runtime.current_provider_generation()
+        if provider is None:
+            return None
+        return cast(LLMProvider, provider), generation
+
+    def _raise_if_stale_llm_provider_request(
+        self,
+        provider: LLMProvider,
+        generation: int,
+    ) -> None:
+        if not self._llm_provider_runtime.is_current_provider_generation(
+            provider=provider,
+            generation=generation,
+        ):
+            raise _StaleProviderCompletion
+
     def _prepare_llm_request(
         self,
         text: str,
@@ -2671,8 +2815,10 @@ class ClientHub:
         runtime: ChannelRuntime | None = None,
         record_latency: bool = True,
     ) -> Translation:
-        if self.llm is None:
+        llm_request = self._capture_llm_provider_request()
+        if llm_request is None:
             raise RuntimeError("LLM is not configured")
+        llm, llm_generation = llm_request
 
         runtime = runtime or self.self_runtime
         formatted_prompt, context_str, _ = self._prepare_llm_request(
@@ -2687,14 +2833,19 @@ class ClientHub:
             )
         request_source_language = self._source_language_for(runtime)
         request_target_language = self._target_language_for(runtime)
-        translation = await self.llm.translate(
-            utterance_id=utterance_id,
-            text=text,
-            system_prompt=formatted_prompt,
-            source_language=request_source_language,
-            target_language=request_target_language,
-            context=context_str,
-        )
+        try:
+            translation = await llm.translate(
+                utterance_id=utterance_id,
+                text=text,
+                system_prompt=formatted_prompt,
+                source_language=request_source_language,
+                target_language=request_target_language,
+                context=context_str,
+            )
+        except Exception:
+            self._raise_if_stale_llm_provider_request(llm, llm_generation)
+            raise
+        self._raise_if_stale_llm_provider_request(llm, llm_generation)
         if record_latency:
             self._record_latency_stage(
                 channel=runtime.channel,
@@ -2728,6 +2879,33 @@ class ClientHub:
         runtime.translation_tasks[utterance_id] = task
         task.add_done_callback(lambda _t: runtime.translation_tasks.pop(utterance_id, None))
 
+    async def _cleanup_dropped_translation(
+        self,
+        utterance_id: UUID,
+        text: str,
+        *,
+        runtime: ChannelRuntime,
+    ) -> None:
+        if runtime.channel == "peer":
+            await self._finalize_peer_source_only(
+                Transcript(
+                    utterance_id=utterance_id,
+                    text=text,
+                    is_final=True,
+                    created_at=self.clock.now(),
+                    channel="peer",
+                ),
+                close_is_final=False,
+                finalize_latency=True,
+            )
+            return
+        await self._emit_overlay_utterance_closed(
+            utterance_id=utterance_id,
+            channel=runtime.channel,
+            is_final=False,
+            finalize_latency=True,
+        )
+
     async def _translate_and_enqueue(
         self,
         utterance_id: UUID,
@@ -2735,8 +2913,10 @@ class ClientHub:
         *,
         runtime: ChannelRuntime | None = None,
     ) -> None:
-        if self.llm is None:
+        llm_request = self._capture_llm_provider_request()
+        if llm_request is None:
             return
+        llm, llm_generation = llm_request
         runtime = runtime or self.self_runtime
         applied_mode: ContextMode | None = None
         peer_overlay_active = runtime.channel == "peer" and self.overlay_sink is not None
@@ -2760,14 +2940,19 @@ class ClientHub:
 
             request_source_language = self._source_language_for(runtime)
             request_target_language = self._target_language_for(runtime)
-            raw_translation = await self.llm.translate(
-                utterance_id=utterance_id,
-                text=text,
-                system_prompt=formatted_prompt,
-                source_language=request_source_language,
-                target_language=request_target_language,
-                context=context_str,
-            )
+            try:
+                raw_translation = await llm.translate(
+                    utterance_id=utterance_id,
+                    text=text,
+                    system_prompt=formatted_prompt,
+                    source_language=request_source_language,
+                    target_language=request_target_language,
+                    context=context_str,
+                )
+            except Exception:
+                self._raise_if_stale_llm_provider_request(llm, llm_generation)
+                raise
+            self._raise_if_stale_llm_provider_request(llm, llm_generation)
             translation = self._normalize_translation(
                 raw_translation,
                 runtime=runtime,
@@ -2803,6 +2988,9 @@ class ClientHub:
             else:
                 self._finalize_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
             raise
+        except _StaleProviderCompletion:
+            await self._cleanup_dropped_translation(utterance_id, text, runtime=runtime)
+            return
         except Exception as exc:
             self._log_translation_failure(stage="final", runtime=runtime, exc=exc)
             fallback_to_chatbox = self.fallback_transcript_only and self._should_publish_to_chatbox(
@@ -3012,3 +3200,11 @@ class ClientHub:
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
             raise
+
+
+def _raise_provider_runtime_close_failures(failures: list[Exception]) -> None:
+    if not failures:
+        return
+    if len(failures) == 1:
+        raise failures[0]
+    raise ExceptionGroup("ClientHub provider close failed", failures)

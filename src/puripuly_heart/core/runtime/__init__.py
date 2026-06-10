@@ -1,9 +1,14 @@
-from puripuly_heart.core.runtime.peer_channel import (
-    PeerChannelRuntime,
-    PeerChannelRuntimeState,
-    PeerRuntimeConfig,
-    SpeechChannelRuntime,
-)
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from puripuly_heart.core.runtime.peer_channel import (
+        PeerChannelRuntime,
+        PeerChannelRuntimeState,
+        PeerRuntimeConfig,
+        SpeechChannelRuntime,
+    )
 
 __all__ = [
     "PeerChannelRuntime",
@@ -11,3 +16,11 @@ __all__ = [
     "PeerRuntimeConfig",
     "SpeechChannelRuntime",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name in __all__:
+        from puripuly_heart.core.runtime import peer_channel
+
+        return getattr(peer_channel, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

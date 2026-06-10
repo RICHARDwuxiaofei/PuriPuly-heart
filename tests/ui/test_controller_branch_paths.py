@@ -3691,6 +3691,84 @@ async def test_rebuild_pipeline_closes_previous_peer_runtime_before_replacement(
 
 
 @pytest.mark.asyncio
+async def test_rebuild_pipeline_preserves_hub_when_hub_stop_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    old_hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    stop_failure = RuntimeError("hub stop failed")
+
+    async def failing_stop() -> None:
+        old_hub.stop_calls += 1
+        raise stop_failure
+
+    async def fake_init_pipeline(self: GuiController) -> None:
+        self.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+
+    old_hub.stop = failing_stop  # type: ignore[method-assign]
+    controller.hub = old_hub
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, enabled: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
+
+    with pytest.raises(RuntimeError, match="hub stop failed"):
+        await controller._rebuild_pipeline(rebuild_stt=True)
+
+    assert controller.hub is old_hub
+    assert old_hub.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_rebuild_pipeline_aggregates_self_disable_and_hub_stop_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    old_hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    self_failure = RuntimeError("self mic close failed")
+    hub_failure = RuntimeError("hub stop failed")
+    vrc_disable_calls: list[bool] = []
+
+    async def failing_set_stt_enabled(self: GuiController, value: bool) -> None:
+        assert value is False
+        raise self_failure
+
+    async def fake_configure_vrc(self: GuiController, *, enabled: bool) -> None:
+        vrc_disable_calls.append(enabled)
+
+    async def failing_stop() -> None:
+        old_hub.stop_calls += 1
+        raise hub_failure
+
+    old_hub.stop = failing_stop  # type: ignore[method-assign]
+    controller.hub = old_hub
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", failing_set_stt_enabled)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        fake_configure_vrc,
+    )
+
+    with pytest.raises(ExceptionGroup) as excinfo:
+        await controller._rebuild_pipeline(rebuild_stt=True)
+
+    assert {str(exc) for exc in excinfo.value.exceptions} == {
+        "self mic close failed",
+        "hub stop failed",
+    }
+    assert vrc_disable_calls == [False]
+    assert old_hub.stop_calls == 1
+    assert controller.hub is old_hub
+
+
+@pytest.mark.asyncio
 async def test_rebuild_pipeline_local_llm_without_runtime_does_not_show_api_key_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6995,6 +7073,76 @@ async def test_stop_closes_peer_runtime_without_replacing_self_stt(
 
 
 @pytest.mark.asyncio
+async def test_stop_preserves_peer_runtime_when_close_fails_and_stops_hub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+
+    class FailingPeerRuntime(DummyPeerRuntime):
+        async def close(self) -> None:
+            raise RuntimeError("peer runtime close failed")
+
+    peer_runtime = FailingPeerRuntime()
+    controller.hub = hub
+    controller._peer_runtime = peer_runtime
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, enabled: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_shutdown_overlay_runtime",
+        lambda self, preserve_failure_reason: asyncio.sleep(0),
+    )
+
+    with pytest.raises(RuntimeError, match="peer runtime close failed"):
+        await controller.stop()
+
+    assert controller._peer_runtime is peer_runtime
+    assert hub.stop_calls == 1
+    assert controller.hub is None
+
+
+@pytest.mark.asyncio
+async def test_stop_preserves_hub_when_hub_stop_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+
+    async def failing_stop() -> None:
+        hub.stop_calls += 1
+        raise RuntimeError("hub stop failed")
+
+    hub.stop = failing_stop  # type: ignore[method-assign]
+    controller.hub = hub
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, enabled: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_shutdown_overlay_runtime",
+        lambda self, preserve_failure_reason: asyncio.sleep(0),
+    )
+
+    with pytest.raises(RuntimeError, match="hub stop failed"):
+        await controller.stop()
+
+    assert controller.hub is hub
+    assert hub.stop_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_stop_closes_runtime_logging_service(monkeypatch: pytest.MonkeyPatch) -> None:
     controller = _make_controller(app=SimpleNamespace())
     events: list[str] = []
@@ -8184,6 +8332,60 @@ async def test_controller_stop_cancels_active_microphone_test(
 
     assert capture_cancelled == ["cancelled"]
     assert controller._microphone_test_task is None
+
+
+@pytest.mark.asyncio
+async def test_start_mic_loop_registers_named_self_audio_runtime_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    controller.settings.audio.input_device = "Compat Mic"
+    controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy()
+
+    class FakeSource:
+        async def close(self) -> None:
+            return None
+
+    async def fake_run_mic_loop(self) -> None:
+        _ = self
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(controller_module, "ensure_silero_vad_onnx", lambda: Path("vad.onnx"))
+    monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", lambda **kwargs: 7)
+    monkeypatch.setattr(
+        controller_module,
+        "determine_self_mic_capture_channels",
+        lambda *, device_idx, internal_channels: _self_mic_decision(
+            device_idx=device_idx,
+            preferred_channels=1,
+        ),
+    )
+    monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", lambda *a, **k: FakeSource())
+    monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
+
+    await controller._start_mic_loop()
+    owner = getattr(controller, "_self_audio_runtime", None)
+
+    assert owner is not None
+    snapshot = owner.lifecycle_owner_snapshot()
+    assert snapshot["owner"] == "SelfAudioRuntime"
+    assert snapshot["resource_fields"] == (
+        "_audio_source",
+        "_vad",
+        "_loop_task",
+        "_generation",
+        "_last_close_exception",
+    )
+    assert controller._mic_task is owner.loop_task
+    assert controller._audio_source is owner.audio_source
+    assert "toggle-off drains STT separately" in snapshot["toggle_off_policy"]
+
+    await controller._stop_mic_loop()
 
 
 @pytest.mark.asyncio

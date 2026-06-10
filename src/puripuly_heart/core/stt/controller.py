@@ -87,6 +87,7 @@ class ManagedSTTProvider:
     _diagnostic_peak: float = 0.0
     _diagnostic_zero_count: int = 0
     _stt_fault_logged_for_utterance: bool = False
+    _backend_closed: bool = False
 
     def __post_init__(self) -> None:
         if self.channel not in ("self", "peer"):
@@ -202,6 +203,27 @@ class ManagedSTTProvider:
 
         self._session_started_at = None
         await self._set_state(STTSessionState.DISCONNECTED)
+
+    async def close_backend(self) -> None:
+        """Close active STT session and backend-level resources once.
+
+        ``close()`` is the toggle-off/session drain policy and intentionally leaves
+        backend-level caches usable for a later toggle-on. Runtime owner shutdown
+        and provider replacement call this method to propagate close to providers
+        that expose backend-level resources.
+        """
+
+        await self.close()
+        if self._backend_closed:
+            return
+        backend_close = getattr(self.backend, "close", None)
+        if not callable(backend_close):
+            self._backend_closed = True
+            return
+        result = backend_close()
+        if inspect.isawaitable(result):
+            await result
+        self._backend_closed = True
 
     async def handle_vad_event(self, event: VadEvent) -> None:
         if isinstance(event, SpeechStart):

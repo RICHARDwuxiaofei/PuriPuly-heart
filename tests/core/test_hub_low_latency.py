@@ -13,6 +13,12 @@ from puripuly_heart.core.orchestrator.hub import ClientHub, _MergeBuffer
 from puripuly_heart.core.overlay.state import ActiveSelfOverlayMetadata
 from puripuly_heart.core.runtime_logging import SessionLoggingMode
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
+from puripuly_heart.domain.events import (
+    STTFinalEvent,
+    STTSessionState,
+    STTSessionStateEvent,
+    UIEventType,
+)
 from puripuly_heart.domain.models import Transcript, Translation
 from tests.core.test_hub_branch_coverage import (
     _make_runtime_logging_capture,
@@ -65,6 +71,89 @@ class FakeLLMProvider:
 
     async def close(self) -> None:
         pass
+
+
+@dataclass
+class ClosingLLMProvider(FakeLLMProvider):
+    close_calls: int = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+@dataclass
+class BlockingLLMProvider(FakeLLMProvider):
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+    close_calls: int = 0
+
+    async def translate(
+        self,
+        *,
+        utterance_id,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ):
+        self.calls.append(
+            {
+                "utterance_id": utterance_id,
+                "text": text,
+                "context": context,
+            }
+        )
+        self.started.set()
+        await self.release.wait()
+        return Translation(utterance_id=utterance_id, text=self.response_text)
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+@dataclass
+class QueueingSTTProvider:
+    channel: str = "self"
+    closed: bool = False
+    handled: list[object] = field(default_factory=list)
+    queue: asyncio.Queue[object | None] = field(default_factory=asyncio.Queue)
+
+    async def handle_vad_event(self, event: object) -> None:
+        self.handled.append(event)
+
+    async def close(self) -> None:
+        self.closed = True
+        await self.queue.put(None)
+
+    async def emit(self, event: object) -> None:
+        await self.queue.put(event)
+
+    async def events(self):
+        while True:
+            item = await self.queue.get()
+            if item is None:
+                return
+            yield item
+
+
+class PersistentQueueingSTTProvider(QueueingSTTProvider):
+    async def close(self) -> None:
+        self.closed = True
+
+
+@dataclass
+class FlakyCloseSTTProvider(QueueingSTTProvider):
+    close_failures: int = 1
+    close_label: str = "stt"
+    close_calls: int = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        if self.close_failures > 0:
+            self.close_failures -= 1
+            raise RuntimeError(f"{self.close_label} close failed")
+        await super().close()
 
 
 @dataclass
@@ -203,6 +292,316 @@ def samples(value: float, n: int = 512) -> np.ndarray:
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_hub_exposes_named_provider_runtime_handles_and_shutdown_policies() -> None:
+    stt = QueueingSTTProvider(channel="self")
+    peer_stt = QueueingSTTProvider(channel="peer")
+    llm = ClosingLLMProvider(response_text="translated", delay_s=0.0)
+    hub = ClientHub(stt=stt, peer_stt=peer_stt, llm=llm, osc=FakeOscQueue())
+
+    handles = getattr(hub, "provider_runtime_handles", None)
+
+    assert handles is not None
+    assert set(handles) >= {"self_stt", "peer_stt", "llm"}
+    assert handles["self_stt"].owner_name == "ProviderRuntimeHandle:self_stt"
+    assert handles["self_stt"].resource_fields == (
+        "provider",
+        "event_task",
+        "generation",
+    )
+    assert "STT toggle-off drains" in handles["self_stt"].toggle_off_policy
+    assert "await provider.close" in handles["llm"].shutdown_policy
+
+    await hub.start(auto_flush_osc=False)
+    assert hub._stt_task is handles["self_stt"].event_task
+    assert hub._peer_stt_task is handles["peer_stt"].event_task
+
+    await hub.stop()
+    await hub.stop()
+
+    assert stt.closed is True
+    assert peer_stt.closed is True
+    assert llm.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_attempts_all_provider_closes_and_retries_failed_handles() -> None:
+    self_stt = FlakyCloseSTTProvider(
+        channel="self",
+        close_failures=1,
+        close_label="self provider",
+    )
+    peer_stt = FlakyCloseSTTProvider(
+        channel="peer",
+        close_failures=1,
+        close_label="peer provider",
+    )
+    llm = ClosingLLMProvider(response_text="translated", delay_s=0.0)
+    hub = ClientHub(stt=self_stt, peer_stt=peer_stt, llm=llm, osc=FakeOscQueue())
+
+    await hub.start(auto_flush_osc=False)
+
+    with pytest.raises(ExceptionGroup) as excinfo:
+        await hub.stop()
+
+    failure_messages = {str(exc) for exc in excinfo.value.exceptions}
+    assert failure_messages == {
+        "self provider close failed",
+        "peer provider close failed",
+    }
+    assert self_stt.close_calls == 1
+    assert peer_stt.close_calls == 1
+    assert llm.close_calls == 1
+    assert hub.stt is self_stt
+    assert hub.peer_stt is peer_stt
+    assert hub.llm is None
+
+    await hub.stop()
+
+    assert self_stt.close_calls == 2
+    assert peer_stt.close_calls == 2
+    assert self_stt.closed is True
+    assert peer_stt.closed is True
+    assert hub.stt is None
+    assert hub.peer_stt is None
+    assert hub.llm is None
+
+
+@pytest.mark.asyncio
+async def test_replaced_peer_provider_late_final_cannot_mutate_or_enqueue_chatbox() -> None:
+    old_peer = QueueingSTTProvider(channel="peer")
+    new_peer = QueueingSTTProvider(channel="peer")
+    osc = FakeOscQueue()
+    hub = ClientHub(stt=None, peer_stt=old_peer, llm=None, osc=osc)
+    hub.active_chatbox_channel = "peer"
+
+    assert getattr(hub, "provider_runtime_handles", None) is not None
+
+    await hub.start(auto_flush_osc=False)
+    await hub.replace_peer_stt_provider(new_peer)
+    stale_utterance_id = uuid4()
+    await old_peer.emit(
+        STTFinalEvent(
+            stale_utterance_id,
+            Transcript(
+                utterance_id=stale_utterance_id,
+                text="stale peer final",
+                is_final=True,
+                created_at=0.0,
+                channel="peer",
+            ),
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert hub.peer_runtime.utterances == {}
+    assert osc.messages == []
+
+    await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_replaced_llm_provider_late_final_cleans_peer_runtime_without_output() -> None:
+    old_llm = BlockingLLMProvider(response_text="stale translation", delay_s=0.0)
+    new_llm = FakeLLMProvider(response_text="current translation", delay_s=0.0)
+    osc = FakeOscQueue()
+    overlay_sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=old_llm,
+        osc=osc,
+        overlay_sink=overlay_sink,
+        peer_translation_enabled=True,
+    )
+    hub.active_chatbox_channel = "peer"
+    utterance_id = uuid4()
+    parent_utterance_id = uuid4()
+    hub._peer_parent_speech_end_times[parent_utterance_id] = 12.0
+    hub._register_peer_logical_turn(
+        parent_utterance_id=parent_utterance_id,
+        peer_turn_id=utterance_id,
+    )
+
+    translate_task = asyncio.create_task(
+        hub._translate_and_enqueue(utterance_id, "peer hello", runtime=hub.peer_runtime)
+    )
+    await asyncio.wait_for(old_llm.started.wait(), timeout=1.0)
+
+    await hub.replace_llm_provider(new_llm)
+    assert old_llm.close_calls == 1
+
+    old_llm.release.set()
+    await asyncio.wait_for(translate_task, timeout=1.0)
+
+    assert utterance_id not in hub.peer_runtime.utterances
+    assert hub.ui_events.empty()
+    assert osc.messages == []
+    assert [getattr(event, "type", None) for event in overlay_sink.events] == [
+        "peer_transcript_final",
+        "utterance_closed",
+    ]
+    assert not any(
+        getattr(event, "type", None) == "translation_final" for event in overlay_sink.events
+    )
+    assert not any(
+        getattr(event, "text", "") == "stale translation" for event in overlay_sink.events
+    )
+    assert utterance_id not in hub.peer_runtime.utterance_start_times
+    assert utterance_id not in hub.peer_runtime.speech_ended_ids
+    assert utterance_id not in hub._peer_turn_parent_ids
+    assert parent_utterance_id not in hub._peer_parent_turn_ids
+    assert parent_utterance_id not in hub._peer_parent_speech_end_times
+    assert ("peer", utterance_id) not in hub._latency_timelines
+
+    await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_replaced_llm_provider_late_spec_completion_cannot_update_low_latency_state() -> None:
+    old_llm = BlockingLLMProvider(response_text="stale speculative translation", delay_s=0.0)
+    new_llm = FakeLLMProvider(response_text="current translation", delay_s=0.0)
+    osc = FakeOscQueue()
+    overlay_sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=old_llm,
+        osc=osc,
+        overlay_sink=overlay_sink,
+        low_latency_mode=True,
+        low_latency_finalize_wait_ms=0,
+        low_latency_awaiting_vad_timeout_s=0,
+    )
+
+    await hub._handle_low_latency_final(
+        Transcript(
+            utterance_id=uuid4(),
+            text="hello live",
+            is_final=True,
+            created_at=0.0,
+        )
+    )
+    buffer = hub._merge_buffer
+    assert buffer is not None
+    spec_task = buffer.spec_task
+    assert spec_task is not None
+    await asyncio.wait_for(old_llm.started.wait(), timeout=1.0)
+
+    await hub.replace_llm_provider(new_llm)
+    assert old_llm.close_calls == 1
+
+    old_llm.release.set()
+    await asyncio.wait_for(spec_task, timeout=1.0)
+
+    assert buffer.spec_translation is None
+    assert osc.messages == []
+    assert not any(
+        getattr(event, "secondary_text", "") == "stale speculative translation"
+        for event in overlay_sink.events
+    )
+    assert hub.ui_events.empty()
+
+    await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_replaced_llm_provider_late_spec_completion_falls_back_without_hanging_commit() -> (
+    None
+):
+    old_llm = BlockingLLMProvider(response_text="stale speculative translation", delay_s=0.0)
+    new_llm = FakeLLMProvider(response_text="current fallback translation", delay_s=0.0)
+    osc = FakeOscQueue()
+    overlay_sink = RecordingOverlaySink()
+    clock = FakeClock(initial_time=10.0)
+    hub = ClientHub(
+        stt=None,
+        llm=old_llm,
+        osc=osc,
+        overlay_sink=overlay_sink,
+        clock=clock,
+        low_latency_mode=True,
+        low_latency_finalize_wait_ms=0,
+        low_latency_awaiting_vad_timeout_s=0,
+    )
+    utterance_id = uuid4()
+    await hub.handle_vad_event(SpeechEnd(utterance_id))
+
+    await hub._handle_low_latency_final(
+        Transcript(
+            utterance_id=utterance_id,
+            text="hello live",
+            is_final=True,
+            created_at=clock.now(),
+        )
+    )
+    buffer = hub._merge_buffer
+    assert buffer is not None
+    spec_task = buffer.spec_task
+    assert spec_task is not None
+    await asyncio.wait_for(old_llm.started.wait(), timeout=1.0)
+
+    await hub.replace_llm_provider(new_llm)
+    assert old_llm.close_calls == 1
+
+    old_llm.release.set()
+    await asyncio.wait_for(spec_task, timeout=1.0)
+
+    assert hub._merge_buffer is None
+    assert buffer.spec_translation is None
+    assert buffer.spec_latency_stage_times == {}
+    assert new_llm.calls and new_llm.calls[-1]["text"] == "hello live"
+    assert osc.messages
+    assert "current fallback translation" in osc.messages[-1].text
+
+    ui_events = []
+    while not hub.ui_events.empty():
+        ui_events.append(await hub.ui_events.get())
+    assert not any(event.type == UIEventType.ERROR for event in ui_events)
+    translation_events = [
+        event for event in ui_events if event.type == UIEventType.TRANSLATION_DONE
+    ]
+    assert len(translation_events) == 1
+    assert translation_events[0].payload.text == "current fallback translation"
+    assert not any(
+        getattr(event, "secondary_text", "") == "stale speculative translation"
+        or getattr(event, "text", "") == "stale speculative translation"
+        for event in overlay_sink.events
+    )
+
+    await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_self_stt_toggle_off_keeps_event_ingress_for_later_reenable_events() -> None:
+    stt = PersistentQueueingSTTProvider(channel="self")
+    hub = ClientHub(stt=stt, peer_stt=None, llm=None, osc=FakeOscQueue())
+
+    await hub.start(auto_flush_osc=False)
+    try:
+        handle = hub.provider_runtime_handles["self_stt"]
+        event_task = handle.event_task
+        assert event_task is not None
+
+        await hub.drain_self_stt_for_toggle_off()
+
+        assert stt.closed is True
+        assert handle.event_task is event_task
+        assert handle.event_task is not None and not handle.event_task.done()
+
+        await stt.emit(
+            STTSessionStateEvent(
+                STTSessionState.STREAMING,
+                channel="self",
+            )
+        )
+        ui_event = await asyncio.wait_for(hub.ui_events.get(), timeout=1.0)
+
+        assert ui_event.type == UIEventType.SESSION_STATE_CHANGED
+        assert ui_event.payload == STTSessionState.STREAMING
+        assert ui_event.channel == "self"
+    finally:
+        await hub.stop()
 
 
 class TestSpeechEndedTracking:

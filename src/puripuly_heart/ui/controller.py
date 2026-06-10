@@ -162,6 +162,7 @@ from puripuly_heart.core.overlay.process import (
     OverlayProcessRunner,
 )
 from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
+from puripuly_heart.core.runtime.self_audio import SelfAudioRuntime
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.controller import (
     FinalTranscriptSuppressedNotification,
@@ -329,6 +330,14 @@ def _callable_accepts_keyword(callable_obj: object, keyword: str) -> bool:
     return keyword in parameters or any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
+
+
+def _raise_lifecycle_cleanup_failures(message: str, failures: list[Exception]) -> None:
+    if not failures:
+        return
+    if len(failures) == 1:
+        raise failures[0]
+    raise ExceptionGroup(message, failures)
 
 
 def _github_star_prompt_utc_now() -> datetime:
@@ -930,6 +939,7 @@ class GuiController:
     sender: VrchatOscUdpSender | None = None
     osc: ChatboxPaginator | None = None
     hub: ClientHub | None = None
+    _self_audio_runtime: SelfAudioRuntime | None = field(init=False, default=None)
     _peer_runtime: PeerChannelRuntime | None = None
     receiver: VrcOscReceiver | None = None
     vrc_mic_state: VrcMicState | None = None
@@ -1178,6 +1188,17 @@ class GuiController:
         if callable(refresh_contract):
             with contextlib.suppress(Exception):
                 refresh_contract()
+
+    async def _drain_self_stt_for_toggle_off(self) -> None:
+        if self.hub is None:
+            return
+        drain = getattr(self.hub, "drain_self_stt_for_toggle_off", None)
+        if callable(drain):
+            await drain()
+            return
+        stt = getattr(self.hub, "stt", None)
+        if stt is not None:
+            await stt.close()
 
     async def _refresh_overlay_runtime_dependencies(self) -> None:
         if self.settings is None or self.hub is None:
@@ -3273,18 +3294,43 @@ class GuiController:
             ),
         )
 
+    async def _close_peer_runtime_for_release(self, failures: list[Exception]) -> None:
+        peer_runtime = self._peer_runtime
+        if peer_runtime is None:
+            return
+        try:
+            await peer_runtime.close()
+        except Exception as exc:
+            failures.append(exc)
+            return
+        if self._peer_runtime is peer_runtime:
+            self._peer_runtime = None
+
+    async def _stop_hub_for_release(self, failures: list[Exception]) -> None:
+        hub = self.hub
+        if hub is None:
+            return
+        try:
+            await hub.stop()
+        except Exception as exc:
+            failures.append(exc)
+            return
+        if self.hub is hub:
+            self.hub = None
+
     async def stop(self) -> None:
+        cleanup_failures: list[Exception] = []
         await self._drain_github_star_prompt_translation_success_task()
         await self._stop_clipboard_watcher()
         await self._cancel_local_stt_download()
         await self.stop_microphone_test()
-        await self.set_stt_enabled(False)
+        try:
+            await self.set_stt_enabled(False)
+        except Exception as exc:
+            cleanup_failures.append(exc)
         await self._configure_vrc_mic_receiver(enabled=False)
         await self._shutdown_overlay_runtime(preserve_failure_reason=True)
-        if self._peer_runtime is not None:
-            with contextlib.suppress(Exception):
-                await self._peer_runtime.close()
-            self._peer_runtime = None
+        await self._close_peer_runtime_for_release(cleanup_failures)
 
         if self._bridge_task:
             self._bridge_task.cancel()
@@ -3292,10 +3338,7 @@ class GuiController:
             self._bridge_task = None
         self._ui_event_bridge = None
 
-        if self.hub is not None:
-            with contextlib.suppress(Exception):
-                await self.hub.stop()
-            self.hub = None
+        await self._stop_hub_for_release(cleanup_failures)
 
         if self.sender is not None:
             with contextlib.suppress(Exception):
@@ -3307,6 +3350,10 @@ class GuiController:
             with contextlib.suppress(Exception):
                 self._runtime_logging.close()
             self._runtime_logging = None
+        _raise_lifecycle_cleanup_failures(
+            "GUI controller stop cleanup failed",
+            cleanup_failures,
+        )
 
     async def set_overlay_enabled(self, enabled: bool) -> None:
         if self.settings is None:
@@ -4331,7 +4378,7 @@ class GuiController:
                     await self._stop_mic_loop()
                     if self.hub is not None:
                         with contextlib.suppress(Exception):
-                            await self.hub.stt.close()
+                            await self._drain_self_stt_for_toggle_off()
                 else:
                     if self.hub is None:
                         self.log_detailed(
@@ -4342,7 +4389,7 @@ class GuiController:
                     if restart:
                         await self._stop_mic_loop()
                         with contextlib.suppress(Exception):
-                            await self.hub.stt.close()
+                            await self._drain_self_stt_for_toggle_off()
                     if not await self._ensure_local_stt_ready():
                         break
                     await self._start_mic_loop()
@@ -5944,12 +5991,15 @@ class GuiController:
         if self.hub is None or self.settings is None:
             return
 
-        # Close existing LLM provider
-        previous_llm = self.hub.llm
-        self.hub.llm = None
-        if previous_llm is not None:
-            with contextlib.suppress(Exception):
-                await previous_llm.close()
+        replace_llm_provider = getattr(self.hub, "replace_llm_provider", None)
+        if callable(replace_llm_provider):
+            await replace_llm_provider(None)
+        else:
+            previous_llm = self.hub.llm
+            self.hub.llm = None
+            if previous_llm is not None:
+                with contextlib.suppress(Exception):
+                    await previous_llm.close()
 
         # Create new LLM provider with current settings
         llm = None
@@ -5969,8 +6019,12 @@ class GuiController:
         except Exception:
             pass
 
-        # Update hub's LLM provider
-        self.hub.llm = llm
+        # Update hub's named LLM provider owner when available; lightweight UI
+        # test doubles keep the legacy direct field surface.
+        if callable(replace_llm_provider):
+            await replace_llm_provider(llm)
+        else:
+            self.hub.llm = llm
 
         # Update dashboard status
         dash = getattr(self.app, "view_dashboard", None)
@@ -6262,29 +6316,30 @@ class GuiController:
             f"[Settings] Rebuilding pipeline detail: rebuild_stt={rebuild_stt} overlay_state={self.overlay_state}"
         )
         _ = rebuild_stt
+        cleanup_failures: list[Exception] = []
         restore_stt_enabled = self._stt_desired
         if self._bridge_task:
             self._bridge_task.cancel()
             await asyncio.gather(self._bridge_task, return_exceptions=True)
             self._bridge_task = None
 
-        peer_runtime = self._peer_runtime
-        if peer_runtime is not None:
-            with contextlib.suppress(Exception):
-                await peer_runtime.close()
-            self._peer_runtime = None
+        await self._close_peer_runtime_for_release(cleanup_failures)
 
-        await self.set_stt_enabled(False)
+        try:
+            await self.set_stt_enabled(False)
+        except Exception as exc:
+            cleanup_failures.append(exc)
         await self._configure_vrc_mic_receiver(enabled=False)
-        if self.hub is not None:
-            with contextlib.suppress(Exception):
-                await self.hub.stop()
+        await self._stop_hub_for_release(cleanup_failures)
         if self.sender is not None:
             with contextlib.suppress(Exception):
                 self.sender.close()
         self.sender = None
         self.osc = None
-        self.hub = None
+        _raise_lifecycle_cleanup_failures(
+            "GUI controller pipeline rebuild cleanup failed",
+            cleanup_failures,
+        )
         await self._init_pipeline()
         assert self.hub is not None
         presenter = self._overlay_presenter
@@ -6928,15 +6983,49 @@ class GuiController:
             )
             await self._set_microphone_test_meter_level(0.0, meter_callback)
 
+    def _get_self_audio_runtime(self) -> SelfAudioRuntime:
+        if self._self_audio_runtime is None:
+            self._self_audio_runtime = SelfAudioRuntime(
+                state_changed=self._sync_self_audio_runtime_aliases,
+            )
+        return self._self_audio_runtime
+
+    def _sync_self_audio_runtime_aliases(self, runtime: SelfAudioRuntime | None = None) -> None:
+        owner = runtime or self._self_audio_runtime
+        if owner is None:
+            return
+        self._mic_task = owner.loop_task
+        self._audio_source = owner.audio_source  # type: ignore[assignment]
+        self._vad = owner.vad  # type: ignore[assignment]
+        self._last_mic_loop_close_exception = owner.last_close_exception
+
+    def _adopt_self_audio_legacy_aliases(self) -> SelfAudioRuntime:
+        owner = self._get_self_audio_runtime()
+        if (
+            owner.loop_task is not self._mic_task
+            or owner.audio_source is not self._audio_source
+            or owner.vad is not self._vad
+            or owner.last_close_exception is not self._last_mic_loop_close_exception
+        ):
+            owner.adopt_legacy_state(
+                task=self._mic_task,
+                source=self._audio_source,
+                vad=self._vad,
+                last_close_exception=self._last_mic_loop_close_exception,
+            )
+        return owner
+
     async def _start_mic_loop(self) -> None:
         assert self.settings is not None
         assert self.hub is not None
+        self_audio_runtime = self._adopt_self_audio_legacy_aliases()
 
         if self._mic_task is not None:
             return
 
         if self._audio_source is not None or self._last_mic_loop_close_exception is not None:
-            await self._stop_mic_loop()
+            with contextlib.suppress(Exception):
+                await self._stop_mic_loop()
             if self._audio_source is not None or self._last_mic_loop_close_exception is not None:
                 self.log_detailed(
                     "[STT] Skipping microphone start while previous microphone source close is pending",
@@ -7194,25 +7283,21 @@ class GuiController:
 
             self._vad = vad
             self._audio_source = self._wrap_diagnostic_audio_source(source, channel_label="self")
-            self._mic_task = asyncio.create_task(self._run_mic_loop())
+            self_audio_runtime.start(
+                source=self._audio_source,
+                vad=vad,
+                run_loop=self._run_mic_loop,
+            )
+            self._sync_self_audio_runtime_aliases(self_audio_runtime)
 
     async def _stop_mic_loop(self) -> None:
-        if self._mic_task is not None:
-            self._mic_task.cancel()
-            await asyncio.gather(self._mic_task, return_exceptions=True)
-            self._mic_task = None
-
-        if self._audio_source is not None:
-            try:
-                await self._audio_source.close()
-            except Exception as exc:
-                self._last_mic_loop_close_exception = exc
-            else:
-                self._last_mic_loop_close_exception = None
-                self._audio_source = None
-        self._vad = None
-        if self.vrc_mic_audio_gate is not None:
-            self.vrc_mic_audio_gate.reset()
+        self_audio_runtime = self._adopt_self_audio_legacy_aliases()
+        try:
+            await self_audio_runtime.stop()
+        finally:
+            self._sync_self_audio_runtime_aliases(self_audio_runtime)
+            if self.vrc_mic_audio_gate is not None:
+                self.vrc_mic_audio_gate.reset()
 
     async def _run_mic_loop(self) -> None:
         assert self.hub is not None
@@ -7222,10 +7307,13 @@ class GuiController:
         from puripuly_heart.app.headless_mic import run_audio_vad_loop
 
         try:
+            sink: object = _HubVadSink(hub=self.hub)
+            if self._self_audio_runtime is not None:
+                sink = self._self_audio_runtime.guard_vad_sink(sink)
             await run_audio_vad_loop(
                 source=self._audio_source,
                 vad=self._vad,
-                sink=_HubVadSink(hub=self.hub),
+                sink=sink,
                 target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,  # type: ignore[union-attr]
                 audio_gate=self.vrc_mic_audio_gate,
                 channel_label="self",

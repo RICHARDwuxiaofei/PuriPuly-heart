@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import pytest
@@ -58,6 +59,146 @@ def _patch_headless_mic_startup(
     monkeypatch.setattr(headless_mic, "SoundDeviceAudioSource", source_factory)
     monkeypatch.setattr(headless_mic, "run_audio_vad_loop", fake_run_audio_vad_loop)
     monkeypatch.setattr(headless_mic, "resolve_sounddevice_input_device", resolve_device)
+
+
+@pytest.mark.asyncio
+async def test_headless_mic_runner_uses_named_self_audio_runtime_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    settings = AppSettings()
+    settings.osc.vrc_mic_intercept = False
+    config_path = tmp_path / "settings.json"
+    vad_path = tmp_path / "vad.onnx"
+    vad_path.write_text("dummy", encoding="utf-8")
+    owners: list[object] = []
+
+    class FakeSource:
+        async def close(self):
+            return None
+
+    class FakeSelfAudioRuntime:
+        def __init__(self, *args, **kwargs):
+            _ = args, kwargs
+            self.started = False
+            self.closed = False
+            self.guarded = False
+            self.loop_task = None
+            owners.append(self)
+
+        def start(self, *, source, vad, run_loop):
+            _ = source, vad
+            self.started = True
+            self.loop_task = asyncio.create_task(run_loop())
+
+        def guard_vad_sink(self, sink):
+            self.guarded = True
+            return sink
+
+        async def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(headless_mic, "SelfAudioRuntime", FakeSelfAudioRuntime, raising=False)
+    _patch_headless_mic_startup(
+        monkeypatch,
+        vad_path,
+        resolve_device=lambda *a, **k: None,
+        source_factory=lambda *a, **k: FakeSource(),
+    )
+
+    runner = headless_mic.HeadlessMicRunner(
+        settings=settings,
+        config_path=config_path,
+        vad_model_path=vad_path,
+        use_llm=True,
+    )
+    result = await runner.run()
+
+    assert result == 0
+    assert len(owners) == 1
+    owner = owners[0]
+    assert owner.started is True
+    assert owner.guarded is True
+    assert owner.closed is True
+
+
+@pytest.mark.asyncio
+async def test_headless_mic_runner_closes_self_source_when_peer_setup_raises_before_self_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    settings = AppSettings()
+    settings.osc.vrc_mic_intercept = False
+    settings.ui.peer_translation_enabled = True
+    config_path = tmp_path / "settings.json"
+    vad_path = tmp_path / "vad.onnx"
+    vad_path.write_text("dummy", encoding="utf-8")
+    owners: list[object] = []
+
+    class FakeSource:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def close(self):
+            self.close_calls += 1
+
+    source = FakeSource()
+
+    class FakeSelfAudioRuntime:
+        def __init__(self, *args, **kwargs):
+            _ = args, kwargs
+            self.source = None
+            self.loop_task = None
+            self.started = False
+            owners.append(self)
+
+        def start(self, *, source, vad, run_loop):
+            _ = vad, run_loop
+            self.source = source
+            self.started = True
+
+        def guard_vad_sink(self, sink):
+            return sink
+
+        async def close(self):
+            if self.source is not None:
+                await self.source.close()
+                self.source = None
+
+    class FailingPeerRuntime:
+        def __init__(self, *args, **kwargs):
+            _ = args, kwargs
+            self.loop_task = None
+
+        async def apply_policy(self, *, config, desired_active):
+            _ = config, desired_active
+            raise RuntimeError("peer setup failed")
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(headless_mic, "SelfAudioRuntime", FakeSelfAudioRuntime, raising=False)
+    monkeypatch.setattr(headless_mic, "PeerChannelRuntime", FailingPeerRuntime)
+    _patch_headless_mic_startup(
+        monkeypatch,
+        vad_path,
+        resolve_device=lambda *a, **k: None,
+        source_factory=lambda *a, **k: source,
+    )
+
+    runner = headless_mic.HeadlessMicRunner(
+        settings=settings,
+        config_path=config_path,
+        vad_model_path=vad_path,
+        use_llm=True,
+    )
+
+    with pytest.raises(RuntimeError, match="peer setup failed"):
+        await runner.run()
+
+    assert len(owners) == 1
+    assert owners[0].started is True
+    assert source.close_calls == 1
 
 
 @pytest.mark.asyncio
@@ -559,12 +700,19 @@ async def test_headless_mic_runner_starts_peer_desktop_loop_when_peer_translatio
         def __init__(self, *args, **kwargs):
             created_hub.update(kwargs)
             self.peer_stt = kwargs.get("peer_stt")
+            self.peer_translation_enabled = kwargs.get("peer_translation_enabled")
+            self.replace_peer_stt_calls = []
+            created_hub["instance"] = self
 
         async def start(self, *args, **kwargs):
             return None
 
         async def stop(self):
             return None
+
+        async def replace_peer_stt_provider(self, peer_stt):
+            self.replace_peer_stt_calls.append(peer_stt)
+            self.peer_stt = peer_stt
 
     class FakeSource:
         async def close(self):
@@ -612,11 +760,16 @@ async def test_headless_mic_runner_starts_peer_desktop_loop_when_peer_translatio
     result = await runner.run()
 
     assert result == 0
-    assert created_hub["peer_stt"] is not None
-    assert created_hub["peer_translation_enabled"] is True
-    assert created_hub["integrated_context_enabled"] is True
+    hub = created_hub["instance"]
+    assert any(peer_stt is not None for peer_stt in hub.replace_peer_stt_calls)
+    assert hub.peer_translation_enabled is True
     assert len(run_calls) == 2
-    assert {call["sink"].channel for call in run_calls} == {"self", "peer"}
+    peer_sinks = [
+        call["sink"] for call in run_calls if call["sink"].__class__.__name__ == "_PeerHubVadSink"
+    ]
+    assert len(peer_sinks) == 1
+    assert hasattr(peer_sinks[0], "runtime")
+    assert not any(getattr(call["sink"], "channel", None) == "peer" for call in run_calls)
 
 
 @pytest.mark.asyncio
@@ -646,6 +799,9 @@ async def test_headless_mic_runner_isolates_peer_loop_runtime_failures(
         async def stop(self):
             return None
 
+        async def replace_peer_stt_provider(self, peer_stt):
+            self.peer_stt = peer_stt
+
     class FakeSource:
         async def close(self):
             return None
@@ -654,7 +810,8 @@ async def test_headless_mic_runner_isolates_peer_loop_runtime_failures(
         pass
 
     async def fake_run_audio_vad_loop(*_args, **kwargs):
-        if kwargs["sink"].channel == "peer":
+        sink = kwargs["sink"]
+        if sink.__class__.__name__ == "_PeerHubVadSink" or getattr(sink, "channel", None) == "peer":
             raise RuntimeError("peer loop boom")
         return None
 
@@ -699,6 +856,153 @@ async def test_headless_mic_runner_isolates_peer_loop_runtime_failures(
 
 
 @pytest.mark.asyncio
+async def test_headless_mic_runner_logs_peer_runtime_startup_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = AppSettings()
+    settings.ui.peer_translation_enabled = True
+    settings.desktop_audio.output_device = "Headphones (Loopback)"
+    config_path = tmp_path / "settings.json"
+    vad_path = tmp_path / "vad.onnx"
+    vad_path.write_text("dummy", encoding="utf-8")
+
+    class FakeSender:
+        def close(self):
+            return None
+
+    class FakeHub:
+        def __init__(self, *args, **kwargs):
+            self.peer_stt = kwargs.get("peer_stt")
+
+        async def start(self, *args, **kwargs):
+            return None
+
+        async def stop(self):
+            return None
+
+        async def replace_peer_stt_provider(self, peer_stt):
+            self.peer_stt = peer_stt
+
+    class FakeSource:
+        async def close(self):
+            return None
+
+    async def fake_run_audio_vad_loop(*_args, **_kwargs):
+        return None
+
+    def failing_desktop_source(*_args, **_kwargs):
+        raise RuntimeError("loopback unavailable")
+
+    monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
+    monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
+    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
+    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
+    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
+    monkeypatch.setattr(headless_mic, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend")
+    monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
+    monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "ClientHub", FakeHub)
+    monkeypatch.setattr(headless_mic, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "SoundDeviceAudioSource", lambda *a, **k: FakeSource())
+    monkeypatch.setattr(headless_mic, "DesktopLoopbackAudioSource", failing_desktop_source)
+    monkeypatch.setattr(headless_mic, "run_audio_vad_loop", fake_run_audio_vad_loop)
+    monkeypatch.setattr(headless_mic, "resolve_sounddevice_input_device", lambda *a, **k: None)
+
+    runner = headless_mic.HeadlessMicRunner(
+        settings=settings,
+        config_path=config_path,
+        vad_model_path=vad_path,
+        use_llm=True,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="puripuly_heart.app.headless_mic"):
+        result = await runner.run()
+
+    assert result == 0
+    assert any("Desktop peer loop unavailable" in message for message in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_headless_mic_runner_surfaces_peer_runtime_close_failure_after_hub_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    settings = AppSettings()
+    settings.osc.vrc_mic_intercept = False
+    settings.ui.peer_translation_enabled = True
+    config_path = tmp_path / "settings.json"
+    vad_path = tmp_path / "vad.onnx"
+    vad_path.write_text("dummy", encoding="utf-8")
+    events: list[str] = []
+
+    class FakeSender:
+        def close(self):
+            events.append("sender_close")
+
+    class FakeHub:
+        def __init__(self, *args, **kwargs):
+            self.peer_stt = kwargs.get("peer_stt")
+
+        async def start(self, *args, **kwargs):
+            events.append("hub_start")
+
+        async def stop(self):
+            events.append("hub_stop")
+
+    class FakeSource:
+        async def close(self):
+            return None
+
+    class FailingClosePeerRuntime:
+        def __init__(self, *args, **kwargs):
+            _ = args, kwargs
+            self.loop_task = None
+
+        async def apply_policy(self, *, config, desired_active):
+            _ = config, desired_active
+            events.append("peer_apply")
+
+        async def close(self):
+            events.append("peer_close")
+            raise RuntimeError("peer runtime close failed")
+
+    async def fake_run_audio_vad_loop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
+    monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
+    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
+    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
+    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
+    monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
+    monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "ClientHub", FakeHub)
+    monkeypatch.setattr(headless_mic, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "SoundDeviceAudioSource", lambda *a, **k: FakeSource())
+    monkeypatch.setattr(headless_mic, "PeerChannelRuntime", FailingClosePeerRuntime)
+    monkeypatch.setattr(headless_mic, "run_audio_vad_loop", fake_run_audio_vad_loop)
+    monkeypatch.setattr(headless_mic, "resolve_sounddevice_input_device", lambda *a, **k: None)
+
+    runner = headless_mic.HeadlessMicRunner(
+        settings=settings,
+        config_path=config_path,
+        vad_model_path=vad_path,
+        use_llm=True,
+    )
+
+    with pytest.raises(RuntimeError, match="peer runtime close failed"):
+        await runner.run()
+
+    assert events[-3:] == ["peer_close", "hub_stop", "sender_close"]
+
+
+@pytest.mark.asyncio
 async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -730,6 +1034,9 @@ async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
 
         async def stop(self):
             return None
+
+        async def replace_peer_stt_provider(self, peer_stt):
+            self.peer_stt = peer_stt
 
     class FakeSource:
         async def close(self):
@@ -842,12 +1149,18 @@ async def test_headless_runner_uses_selected_peer_provider_configuration(
         def __init__(self, *args, **kwargs):
             created_hub.update(kwargs)
             self.peer_stt = kwargs.get("peer_stt")
+            self.replace_peer_stt_calls = []
+            created_hub["instance"] = self
 
         async def start(self, *args, **kwargs):
             return None
 
         async def stop(self):
             return None
+
+        async def replace_peer_stt_provider(self, peer_stt):
+            self.replace_peer_stt_calls.append(peer_stt)
+            self.peer_stt = peer_stt
 
     class FakeSender:
         def close(self):
@@ -892,9 +1205,14 @@ async def test_headless_runner_uses_selected_peer_provider_configuration(
     assert peer_settings.peer_soniox_stt.endpoint == "wss://peer-soniox.example/realtime"
     assert peer_settings.peer_soniox_stt.keepalive_interval_s == 8.0
     assert peer_settings.peer_soniox_stt.trailing_silence_ms == 300
-    assert isinstance(created_hub["peer_stt"], FakeManagedSTTProvider)
     assert isinstance(created_hub["stt"], FakeManagedSTTProvider)
     assert created_hub["stt"].kwargs["stt_provider_name"] == settings.provider.stt
-    assert created_hub["peer_stt"].backend is peer_backend
-    assert created_hub["peer_stt"].channel == "peer"
-    assert created_hub["peer_stt"].kwargs["stt_provider_name"] == STTProviderName.SONIOX
+    peer_stt = next(
+        peer_stt
+        for peer_stt in created_hub["instance"].replace_peer_stt_calls
+        if peer_stt is not None
+    )
+    assert isinstance(peer_stt, FakeManagedSTTProvider)
+    assert peer_stt.backend is peer_backend
+    assert peer_stt.channel == "peer"
+    assert peer_stt.kwargs["stt_provider_name"] == STTProviderName.SONIOX

@@ -140,6 +140,15 @@ class FakeBackend:
         return s
 
 
+class ClosableFakeBackend(FakeBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
 @dataclass(slots=True)
 class Float32Session:
     audio_f32: list[np.ndarray]
@@ -376,6 +385,29 @@ async def test_stt_controller_connects_on_speech_start():
     assert first.state == STTSessionState.STREAMING
 
     await stt.close()
+
+
+async def test_stt_provider_close_backend_closes_session_and_backend_once() -> None:
+    backend = ClosableFakeBackend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        reset_deadline_s=90.0,
+        finalize_grace_s=0.0,
+    )
+    uid = uuid4()
+    await stt.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+    assert len(backend.sessions) == 1
+
+    close_backend = getattr(stt, "close_backend", None)
+
+    assert callable(close_backend)
+    await close_backend()
+    await close_backend()
+
+    assert backend.sessions[0].calls[-1] == "close"
+    assert backend.close_calls == 1
+    assert stt.state == STTSessionState.DISCONNECTED
 
 
 async def test_stt_controller_prefers_float32_session_audio_path() -> None:

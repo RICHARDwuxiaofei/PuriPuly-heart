@@ -24,22 +24,29 @@ LEGACY_TASK_CREATION_ALLOWLIST = Counter(
             "src/puripuly_heart/core/local_stt_runtime_installer.py",
             ASYNCIO_CREATE_TASK,
         ): 1,
+        ("src/puripuly_heart/core/stt/controller.py", ASYNCIO_CREATE_TASK): 6,
         (
             "src/puripuly_heart/core/managed_openrouter_release.py",
             ASYNCIO_CREATE_TASK,
         ): 1,
-        ("src/puripuly_heart/core/orchestrator/hub.py", ASYNCIO_CREATE_TASK): 10,
+        ("src/puripuly_heart/core/orchestrator/hub.py", ASYNCIO_CREATE_TASK): 6,
         ("src/puripuly_heart/core/overlay/bridge.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/overlay/presenter.py", ASYNCIO_CREATE_TASK): 3,
         ("src/puripuly_heart/core/overlay/process.py", ASYNCIO_CREATE_TASK): 11,
         ("src/puripuly_heart/core/overlay/sink.py", ASYNCIO_CREATE_TASK): 1,
-        ("src/puripuly_heart/core/runtime/peer_channel.py", ASYNCIO_CREATE_TASK): 1,
-        ("src/puripuly_heart/core/stt/controller.py", ASYNCIO_CREATE_TASK): 6,
         ("src/puripuly_heart/providers/stt/soniox.py", ASYNCIO_CREATE_TASK): 3,
         ("src/puripuly_heart/ui/app.py", RUN_TASK): 14,
         ("src/puripuly_heart/ui/components/settings/api_key_field.py", RUN_TASK): 1,
-        ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 14,
+        ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 13,
         ("src/puripuly_heart/ui/desktop_overlay.py", ASYNCIO_CREATE_TASK): 11,
+    }
+)
+
+NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST = Counter(
+    {
+        ("src/puripuly_heart/core/runtime/peer_channel.py", ASYNCIO_CREATE_TASK): 1,
+        ("src/puripuly_heart/core/runtime/provider_handle.py", ASYNCIO_CREATE_TASK): 1,
+        ("src/puripuly_heart/core/runtime/self_audio.py", ASYNCIO_CREATE_TASK): 1,
     }
 )
 
@@ -85,8 +92,9 @@ def test_lifecycle_scope_file_is_the_allowed_task_owner_primitive() -> None:
 
 def test_no_new_unmanaged_task_creation_outside_lifecycle_allowlist() -> None:
     actual = _task_creation_counts()
-    unexpected = actual - LEGACY_TASK_CREATION_ALLOWLIST
-    stale = LEGACY_TASK_CREATION_ALLOWLIST - actual
+    expected = LEGACY_TASK_CREATION_ALLOWLIST + NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST
+    unexpected = actual - expected
+    stale = expected - actual
 
     assert not unexpected and not stale, (
         "Unmanaged background task inventory changed. New async work must go "
@@ -95,3 +103,13 @@ def test_no_new_unmanaged_task_creation_outside_lifecycle_allowlist() -> None:
         f"Unexpected occurrences: {dict(unexpected)}\n"
         f"Stale allowlist entries: {dict(stale)}"
     )
+
+
+def test_order34_named_owner_allowlist_does_not_claim_stt_controller_legacy_tasks() -> None:
+    stt_controller_tasks = (
+        "src/puripuly_heart/core/stt/controller.py",
+        ASYNCIO_CREATE_TASK,
+    )
+
+    assert stt_controller_tasks in LEGACY_TASK_CREATION_ALLOWLIST
+    assert stt_controller_tasks not in NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST
