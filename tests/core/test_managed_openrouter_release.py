@@ -41,6 +41,7 @@ from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
     load_managed_openrouter_user_identifier,
 )
+from puripuly_heart.core.runtime import OAuthRuntime
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
 from puripuly_heart.domain.models import Translation
 
@@ -179,6 +180,13 @@ class ClosableFakeManagedReleaseClient(FakeManagedReleaseClient):
         self.close_calls += 1
 
 
+@dataclass
+class FailingCloseManagedReleaseClient(ClosableFakeManagedReleaseClient):
+    async def close(self) -> None:
+        self.close_calls += 1
+        raise RuntimeError("client close failed")
+
+
 class FailingManagedKeySecretStore(InMemorySecretStore):
     def __init__(self, *, fail_on_key: str = OPENROUTER_MANAGED_API_KEY_SECRET) -> None:
         super().__init__()
@@ -202,6 +210,7 @@ def _make_service(
     discord_oauth_listener_factory: Any | None = None,
     discord_oauth_callback_runner: Any | None = None,
     on_discord_callback_received: Any | None = None,
+    oauth_runtime: OAuthRuntime | None = None,
 ) -> tuple[ManagedOpenRouterReleaseService, AppSettings, InMemorySecretStore]:
     resolved_settings = settings or AppSettings()
     resolved_settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
@@ -236,6 +245,8 @@ def _make_service(
         service_kwargs["discord_oauth_callback_runner"] = discord_oauth_callback_runner
     if on_discord_callback_received is not None:
         service_kwargs["on_discord_callback_received"] = on_discord_callback_received
+    if oauth_runtime is not None:
+        service_kwargs["oauth_runtime"] = oauth_runtime
     service = ManagedOpenRouterReleaseService(**service_kwargs)
     return service, resolved_settings, resolved_secrets
 
@@ -308,6 +319,7 @@ def _make_discord_service(
     persist_calls: list[tuple[str | None, str | None]] | None = None,
     raw_hardware_fingerprint_provider: Any | None = None,
     on_discord_callback_received: Any | None = None,
+    oauth_runtime: OAuthRuntime | None = None,
 ) -> tuple[
     ManagedOpenRouterReleaseService,
     AppSettings,
@@ -331,8 +343,34 @@ def _make_discord_service(
         discord_oauth_listener_factory=resolved_harness.bind_listener,
         discord_oauth_callback_runner=resolved_harness.run_callback_flow,
         on_discord_callback_received=on_discord_callback_received,
+        oauth_runtime=oauth_runtime,
     )
     return service, resolved_settings, resolved_secrets, resolved_client, resolved_harness
+
+
+class RecordingOAuthRuntime(OAuthRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started_task_names: list[str] = []
+        self.attached_listener_names: list[str] = []
+
+    def create_auth_task(self, coro, *, task_name: str):  # type: ignore[no-untyped-def]
+        self.started_task_names.append(task_name)
+        return super().create_auth_task(coro, task_name=task_name)
+
+    def attach_loopback_listener(self, listener, *, listener_name: str):  # type: ignore[no-untyped-def]
+        self.attached_listener_names.append(listener_name)
+        super().attach_loopback_listener(listener, listener_name=listener_name)
+
+
+class FailingCloseOAuthRuntime(OAuthRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        raise RuntimeError("oauth close failed")
 
 
 def _expected_hardware_hash(*, fingerprint_salt: str, raw_hardware_fingerprint: str) -> str:
@@ -368,6 +406,20 @@ async def test_prepare_for_translation_short_circuits_when_managed_key_exists() 
     assert result.local_key_available is True
     assert result.pending_issue is False
     assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_for_translation_uses_oauth_runtime_for_shared_auth_task() -> None:
+    oauth_runtime = RecordingOAuthRuntime()
+    service, _settings, _secrets, _client, _harness = _make_discord_service(
+        oauth_runtime=oauth_runtime,
+    )
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert oauth_runtime.started_task_names == ["managed-openrouter-prepare"]
+    assert oauth_runtime.attached_listener_names == ["discord-loopback"]
 
 
 @pytest.mark.asyncio
@@ -1399,6 +1451,95 @@ async def test_close_closes_underlying_client_transport_when_available() -> None
     await service.close()
 
     assert client.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_close_continues_status_and_client_cleanup_when_oauth_close_fails() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.managed_identity.referral_id = "8H3J4N"
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(
+        settings,
+        secrets,
+        persist_settings=lambda _updated: None,
+    )
+    status_gate = asyncio.Event()
+    status_started = asyncio.Event()
+    client = ClosableFakeManagedReleaseClient(
+        trial_status_result=ManagedOpenRouterTrialStatusSuccess(referral_id="7KQ9M2"),
+        trial_status_gate=status_gate,
+        trial_status_started=status_started,
+    )
+    oauth_runtime = FailingCloseOAuthRuntime()
+    persist_calls: list[tuple[str | None, str | None]] = []
+    service, settings, _secrets = _make_service(
+        client=client,
+        settings=settings,
+        secrets=secrets,
+        persist_calls=persist_calls,
+        oauth_runtime=oauth_runtime,
+    )
+    refresh_task = asyncio.create_task(service.refresh_owned_referral_id_from_status())
+    try:
+        await asyncio.wait_for(status_started.wait(), timeout=1.0)
+
+        with pytest.raises(RuntimeError, match="oauth close failed"):
+            await service.close()
+
+        assert oauth_runtime.close_calls == 1
+        assert client.close_calls == 1
+        assert refresh_task.done()
+        assert refresh_task.cancelled()
+        assert settings.managed_identity.referral_id == "8H3J4N"
+        assert persist_calls == []
+    finally:
+        status_gate.set()
+        if not refresh_task.done():
+            refresh_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await refresh_task
+
+
+@pytest.mark.asyncio
+async def test_close_aggregates_oauth_status_and_client_cleanup_failures() -> None:
+    client = FailingCloseManagedReleaseClient()
+    oauth_runtime = FailingCloseOAuthRuntime()
+    service, _, _ = _make_service(
+        client=client,
+        oauth_runtime=oauth_runtime,
+    )
+    status_started = asyncio.Event()
+
+    async def failing_status_task() -> None:
+        status_started.set()
+        try:
+            await asyncio.sleep(999)
+        except asyncio.CancelledError as exc:
+            raise RuntimeError("status cleanup failed") from exc
+
+    status_task = asyncio.create_task(failing_status_task())
+    service._status_refresh_tasks.add(status_task)
+    try:
+        await asyncio.wait_for(status_started.wait(), timeout=1.0)
+
+        with pytest.raises(ExceptionGroup) as exc_info:
+            await service.close()
+
+        messages = sorted(str(exc) for exc in exc_info.value.exceptions)
+        assert messages == [
+            "client close failed",
+            "oauth close failed",
+            "status cleanup failed",
+        ]
+        assert oauth_runtime.close_calls == 1
+        assert client.close_calls == 1
+        assert status_task.done()
+    finally:
+        if not status_task.done():
+            status_task.cancel()
+            with contextlib.suppress(Exception):
+                await status_task
 
 
 @pytest.mark.asyncio

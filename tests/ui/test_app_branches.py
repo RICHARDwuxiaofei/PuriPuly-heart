@@ -25,6 +25,7 @@ from puripuly_heart.config.settings import (
     TranslationSettings,
 )
 from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
+from puripuly_heart.core.runtime import OAuthRuntime
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.app import TranslatorApp, _check_and_notify_update
 
@@ -1386,6 +1387,100 @@ async def test_start_discord_managed_auth_uses_run_task_and_success_enables_tran
     assert snackbar_calls == [(app_module.t("discord_auth.success"), app_module.COLOR_SUCCESS)]
     assert enable_calls == [True]
     assert dashboard_translation_calls == [True]
+
+
+def test_start_discord_managed_auth_registers_page_task_with_oauth_runtime() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._discord_managed_auth_dialog = SimpleNamespace(referral_id="", set_waiting=lambda: None)
+    app._show_snackbar = lambda *_args, **_kwargs: None
+    app.view_dashboard = SimpleNamespace(set_translation_enabled=lambda _enabled: None)
+    app.controller = SimpleNamespace(
+        hub=SimpleNamespace(llm=object(), translation_enabled=False),
+        start_discord_managed_auth_from_dialog=lambda **_kwargs: False,
+        set_translation_enabled=lambda _enabled: None,
+    )
+    app._oauth_runtime = OAuthRuntime()
+
+    app._start_discord_managed_auth()
+
+    assert app._oauth_runtime.external_task_names == ("discord-managed-auth-dialog",)
+    assert len(app.page.tasks) == 1
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_skips_controller_start_for_stale_generation() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._discord_managed_auth_dialog = SimpleNamespace(referral_id="", set_waiting=lambda: None)
+    app._oauth_runtime = OAuthRuntime()
+    start_calls: list[str] = []
+
+    async def fake_start_discord_managed_auth_from_dialog(**_kwargs) -> bool:
+        start_calls.append("start")
+        return False
+
+    app.controller = SimpleNamespace(
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+    )
+
+    app._start_discord_managed_auth()
+    app._discord_managed_auth_generation += 1
+    await app.page.tasks[0]()
+
+    assert start_calls == []
+
+
+@pytest.mark.asyncio
+async def test_close_oauth_runtime_blocks_late_discord_auth_ui_mutation() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(referral_id="", close_calls=0, set_waiting=lambda: None)
+    dialog.close = lambda: setattr(dialog, "close_calls", dialog.close_calls + 1)
+    app._discord_managed_auth_dialog = dialog
+    app._oauth_runtime = OAuthRuntime()
+    app._discord_managed_auth_generation = 0
+    app._discord_managed_auth_cancelled = False
+    app._discord_managed_auth_task_handle = None
+    snackbar_calls: list[tuple[str, object]] = []
+    dashboard_translation_calls: list[bool] = []
+    start_entered = asyncio.Event()
+    release_start = asyncio.Event()
+    hub = SimpleNamespace(llm=object(), translation_enabled=True)
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
+    )
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+
+    async def fake_start_discord_managed_auth_from_dialog(**_kwargs) -> bool:
+        start_entered.set()
+        await release_start.wait()
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        hub.translation_enabled = enabled
+        return True
+
+    app.controller = SimpleNamespace(
+        hub=hub,
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+    auth_task = asyncio.create_task(app.page.tasks[0]())
+    await start_entered.wait()
+
+    await app.close_oauth_runtime()
+    release_start.set()
+    await auth_task
+
+    assert app._oauth_runtime.is_closed is True
+    assert app._discord_managed_auth_cancelled is True
+    assert app._discord_managed_auth_task_handle is None
+    assert snackbar_calls == []
+    assert dashboard_translation_calls == []
+    assert dialog.close_calls == 0
 
 
 @pytest.mark.asyncio

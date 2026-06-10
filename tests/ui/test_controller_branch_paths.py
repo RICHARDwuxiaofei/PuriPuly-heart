@@ -7685,6 +7685,33 @@ async def test_stop_closes_runtime_logging_service(monkeypatch: pytest.MonkeyPat
     assert controller._runtime_logging is None
 
 
+@pytest.mark.asyncio
+async def test_stop_closes_app_owned_oauth_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+
+    class FakeApp:
+        async def close_oauth_runtime(self) -> None:
+            events.append("app_oauth_close")
+
+    controller = _make_controller(app=FakeApp())
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, enabled: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_shutdown_overlay_runtime",
+        lambda self, preserve_failure_reason: asyncio.sleep(0),
+    )
+
+    await controller.stop()
+
+    assert events == ["app_oauth_close"]
+
+
 def test_log_error_fallback_does_not_append_duplicate_ui_line(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from puripuly_heart.core.runtime.clipboard import ClipboardRuntime
+    from puripuly_heart.core.runtime.oauth import OAuthRuntime
     from puripuly_heart.core.runtime.output import OutputRuntime
     from puripuly_heart.core.runtime.peer_channel import (
         PeerChannelRuntime,
@@ -15,6 +17,8 @@ __all__ = [
     "PeerChannelRuntime",
     "PeerChannelRuntimeState",
     "PeerRuntimeConfig",
+    "ClipboardRuntime",
+    "OAuthRuntime",
     "OutputRuntime",
     "SpeechChannelRuntime",
 ]
@@ -22,6 +26,14 @@ __all__ = [
 
 def __getattr__(name: str) -> object:
     if name in __all__:
+        if name == "ClipboardRuntime":
+            from puripuly_heart.core.runtime import clipboard
+
+            return getattr(clipboard, name)
+        if name == "OAuthRuntime":
+            from puripuly_heart.core.runtime import oauth
+
+            return getattr(oauth, name)
         if name == "OutputRuntime":
             from puripuly_heart.core.runtime import output
 

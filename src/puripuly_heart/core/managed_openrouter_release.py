@@ -41,6 +41,7 @@ from puripuly_heart.core.openrouter_credentials import (
     resolve_openrouter_credentials,
 )
 from puripuly_heart.core.openrouter_handoff import store_managed_entitlement_snapshot
+from puripuly_heart.core.runtime.oauth import OAuthRuntime
 from puripuly_heart.core.storage.secrets import SecretStore
 from puripuly_heart.domain.models import Translation
 
@@ -63,6 +64,35 @@ def _default_signed_at() -> str:
 
 def _default_monotonic_ms() -> int:
     return int(time.monotonic() * 1000)
+
+
+def _managed_release_auth_task_name(attr_name: str) -> str:
+    if attr_name == "_prepare_task":
+        return "managed-openrouter-prepare"
+    if attr_name == "_issue_task":
+        return "managed-openrouter-issue"
+    return f"managed-openrouter-{attr_name.strip('_').replace('_', '-')}"
+
+
+def _record_close_task_result(
+    failures: list[BaseException],
+    result: object,
+) -> None:
+    if isinstance(result, asyncio.CancelledError):
+        return
+    if isinstance(result, BaseException):
+        failures.append(result)
+
+
+def _raise_close_failures(message: str, failures: list[BaseException]) -> None:
+    if not failures:
+        return
+    if len(failures) == 1:
+        raise failures[0]
+    exception_failures = [failure for failure in failures if isinstance(failure, Exception)]
+    if len(exception_failures) == len(failures):
+        raise ExceptionGroup(message, exception_failures)
+    raise BaseExceptionGroup(message, failures)
 
 
 class ManagedOpenRouterReleaseBehavior(str, Enum):
@@ -330,6 +360,7 @@ class ManagedOpenRouterReleaseService:
     discord_oauth_listener_factory: DiscordOAuthListenerFactory = bind_first_available
     discord_oauth_callback_runner: DiscordOAuthCallbackRunner = run_discord_oauth_callback_flow
     on_discord_callback_received: Callable[[], None] | None = None
+    oauth_runtime: OAuthRuntime = field(default_factory=OAuthRuntime)
     _prepare_task: asyncio.Task[ManagedOpenRouterReleaseResult] | None = field(
         init=False,
         default=None,
@@ -366,7 +397,10 @@ class ManagedOpenRouterReleaseService:
         attr_name: str,
         coro: Awaitable[ManagedOpenRouterReleaseResult],
     ) -> asyncio.Task[ManagedOpenRouterReleaseResult]:
-        task = asyncio.create_task(coro)
+        task = self.oauth_runtime.create_auth_task(
+            coro,
+            task_name=_managed_release_auth_task_name(attr_name),
+        )
         setattr(self, attr_name, task)
 
         def _clear(finished_task: asyncio.Task[ManagedOpenRouterReleaseResult]) -> None:
@@ -598,6 +632,10 @@ class ManagedOpenRouterReleaseService:
         try:
             try:
                 listener = self.discord_oauth_listener_factory()
+                self.oauth_runtime.attach_loopback_listener(
+                    listener,
+                    listener_name="discord-loopback",
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -679,7 +717,10 @@ class ManagedOpenRouterReleaseService:
             return self._persist_managed_issue_success(issue_response)
         finally:
             if listener is not None:
-                listener.close()
+                await self.oauth_runtime.close_loopback_listener(
+                    listener,
+                    listener_name="discord-loopback",
+                )
 
     def _notify_discord_callback_received(self) -> None:
         if self.on_discord_callback_received is None:
@@ -979,29 +1020,40 @@ class ManagedOpenRouterReleaseService:
 
     async def close(self) -> None:
         self._closed = True
-        prepare_task = self._prepare_task
-        issue_task = self._issue_task
         status_refresh_tasks = tuple(self._status_refresh_tasks)
         self._prepare_task = None
         self._issue_task = None
         self._status_refresh_tasks.clear()
 
+        failures: list[BaseException] = []
+        try:
+            await self.oauth_runtime.close()
+        except Exception as exc:
+            failures.append(exc)
+
         current_task = asyncio.current_task()
         active_tasks = [
             task
-            for task in (prepare_task, issue_task, *status_refresh_tasks)
+            for task in status_refresh_tasks
             if task is not None and not task.done() and task is not current_task
         ]
         for task in active_tasks:
             task.cancel()
         if active_tasks:
-            await asyncio.gather(*active_tasks, return_exceptions=True)
+            results = await asyncio.gather(*active_tasks, return_exceptions=True)
+            for result in results:
+                _record_close_task_result(failures, result)
 
         close_client = getattr(self.client, "close", None)
         if callable(close_client):
-            close_result = close_client()
-            if inspect.isawaitable(close_result):
-                await close_result
+            try:
+                close_result = close_client()
+                if inspect.isawaitable(close_result):
+                    await close_result
+            except Exception as exc:
+                failures.append(exc)
+
+        _raise_close_failures("ManagedOpenRouterReleaseService close failed", failures)
 
 
 class ManagedOpenRouterDelegateFactory(Protocol):

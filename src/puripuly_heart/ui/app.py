@@ -28,6 +28,7 @@ from puripuly_heart.core.discord_oauth_loopback import (
 )
 from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
+from puripuly_heart.core.runtime.oauth import OAuthRuntime
 from puripuly_heart.core.updater import check_for_update
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
 from puripuly_heart.ui.components.debug_preview_panel import DebugPreviewPanel
@@ -128,6 +129,7 @@ class TranslatorApp:
         self.debug_ui_preview = bool(debug_ui_preview)
         self.debug_preview_panel: DebugPreviewPanel | None = None
         self._openrouter_pkce_request_active = False
+        self._oauth_runtime = OAuthRuntime()
         self._discord_managed_auth_generation = 0
         self._discord_managed_auth_cancelled = False
         self._discord_managed_auth_task_handle = None
@@ -1090,6 +1092,13 @@ class TranslatorApp:
         if callable(close):
             close()
 
+    def _get_oauth_runtime(self) -> OAuthRuntime:
+        runtime = getattr(self, "_oauth_runtime", None)
+        if runtime is None:
+            runtime = OAuthRuntime()
+            self._oauth_runtime = runtime
+        return runtime
+
     def show_discord_managed_auth_dialog(self, preview: bool = False) -> None:
         if not preview:
             self._mark_launch_high_priority_feedback_shown("auth_required")
@@ -1146,9 +1155,12 @@ class TranslatorApp:
         return generation
 
     def _is_current_discord_managed_auth_generation(self, generation: int) -> bool:
+        runtime = getattr(self, "_oauth_runtime", None)
+        runtime_open = runtime is None or not runtime.is_closed
         return bool(
             generation == getattr(self, "_discord_managed_auth_generation", None)
             and not getattr(self, "_discord_managed_auth_cancelled", False)
+            and runtime_open
         )
 
     def _translation_enable_succeeded(self, controller: object, result: object) -> bool:
@@ -1176,6 +1188,8 @@ class TranslatorApp:
             controller = getattr(self, "controller", None)
             start_auth = getattr(controller, "start_discord_managed_auth_from_dialog", None)
             if not callable(start_auth):
+                return
+            if not self._is_current_discord_managed_auth_generation(generation):
                 return
 
             def _mark_callback_received() -> None:
@@ -1211,8 +1225,32 @@ class TranslatorApp:
             self._set_dashboard_translation_visual_state(True)
             if self._is_current_discord_managed_auth_generation(generation):
                 self._discord_managed_auth_task_handle = None
+                self._get_oauth_runtime().clear_external_task(
+                    "discord-managed-auth-dialog",
+                )
 
-        self._discord_managed_auth_task_handle = self.page.run_task(_task)
+        self._discord_managed_auth_task_handle = self._get_oauth_runtime().start_external_task(
+            task_runner=self.page.run_task,
+            task_factory=_task,
+            task_name="discord-managed-auth-dialog",
+            generation=generation,
+        )
+
+    async def close_oauth_runtime(self) -> None:
+        self._discord_managed_auth_cancelled = True
+        self._discord_managed_auth_generation = (
+            int(getattr(self, "_discord_managed_auth_generation", 0)) + 1
+        )
+        task_handle = getattr(self, "_discord_managed_auth_task_handle", None)
+        self._discord_managed_auth_task_handle = None
+        runtime = getattr(self, "_oauth_runtime", None)
+        if runtime is None:
+            return
+        runtime.cancel_external_task(
+            task_handle,
+            task_name="discord-managed-auth-dialog",
+        )
+        await runtime.close()
 
     def mark_discord_managed_auth_callback_received(self, generation: int | None = None) -> None:
         if generation is not None and not self._is_current_discord_managed_auth_generation(
@@ -1234,6 +1272,12 @@ class TranslatorApp:
     def _cancel_discord_managed_auth(self) -> None:
         self._discord_managed_auth_cancelled = True
         task_handle = getattr(self, "_discord_managed_auth_task_handle", None)
+        runtime = getattr(self, "_oauth_runtime", None)
+        if runtime is not None:
+            runtime.cancel_external_task(
+                task_handle,
+                task_name="discord-managed-auth-dialog",
+            )
         cancel = getattr(task_handle, "cancel", None)
         if callable(cancel):
             with contextlib.suppress(Exception):

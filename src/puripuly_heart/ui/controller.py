@@ -161,6 +161,8 @@ from puripuly_heart.core.overlay.process import (
     OverlayProcessManager,
     OverlayProcessRunner,
 )
+from puripuly_heart.core.runtime.clipboard import ClipboardRuntime
+from puripuly_heart.core.runtime.oauth import OAuthRuntime
 from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
 from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
 from puripuly_heart.core.runtime.self_audio import SelfAudioRuntime
@@ -936,6 +938,7 @@ class GuiController:
     clock: SystemClock = SystemClock()
     _managed_openrouter_release_service: ManagedOpenRouterReleaseService | None = None
     _openrouter_pkce_client: OpenRouterPKCEClient | None = None
+    _oauth_runtime: OAuthRuntime | None = field(init=False, default=None)
 
     sender: VrchatOscUdpSender | None = None
     osc: ChatboxPaginator | None = None
@@ -999,6 +1002,7 @@ class GuiController:
     )
     _vrc_receiver_lock: asyncio.Lock | None = None
     _ui_event_bridge: UIEventBridge | None = None
+    _clipboard_runtime: ClipboardRuntime | None = field(init=False, default=None)
     _clipboard_watcher: ClipboardWatcherRuntime | None = field(init=False, default=None)
     _clipboard_loop: asyncio.AbstractEventLoop | None = field(init=False, default=None)
     _clipboard_watcher_lock: asyncio.Lock | None = field(init=False, default=None)
@@ -3479,7 +3483,9 @@ class GuiController:
     async def stop(self) -> None:
         cleanup_failures: list[Exception] = []
         await self._drain_github_star_prompt_translation_success_task()
-        await self._stop_clipboard_watcher()
+        await self._close_clipboard_runtime()
+        await self._close_app_oauth_runtime_for_release(cleanup_failures)
+        await self._close_oauth_runtime()
         await self._cancel_local_stt_download()
         await self.stop_microphone_test()
         try:
@@ -4622,6 +4628,29 @@ class GuiController:
             self._clipboard_watcher_lock = asyncio.Lock()
         return self._clipboard_watcher_lock
 
+    def _get_clipboard_runtime(self) -> ClipboardRuntime:
+        if self._clipboard_runtime is None:
+            self._clipboard_runtime = ClipboardRuntime(
+                watcher_factory=create_clipboard_watcher,
+                submit_handler=self._submit_clipboard_text,
+                state_changed=self._sync_clipboard_runtime_aliases,
+            )
+            if self._clipboard_watcher is not None:
+                self._clipboard_runtime.adopt_legacy_state(
+                    watcher=self._clipboard_watcher,
+                    loop=self._clipboard_loop,
+                )
+        return self._clipboard_runtime
+
+    def _sync_clipboard_runtime_aliases(self, runtime: ClipboardRuntime | None = None) -> None:
+        runtime = runtime or self._clipboard_runtime
+        if runtime is None:
+            self._clipboard_watcher = None
+            self._clipboard_loop = None
+            return
+        self._clipboard_watcher = runtime.watcher  # type: ignore[assignment]
+        self._clipboard_loop = runtime.loop
+
     async def _sync_clipboard_watcher(self) -> None:
         strict_runtime_errors = self._strict_runtime_errors_for_clipboard_watcher
         enabled = bool(
@@ -4631,49 +4660,57 @@ class GuiController:
             await self._stop_clipboard_watcher()
             return
         async with self._get_clipboard_watcher_lock():
-            if self._clipboard_watcher is not None:
-                return
-
-            self._clipboard_loop = asyncio.get_running_loop()
-            watcher = create_clipboard_watcher(self._on_clipboard_text_from_thread)
             try:
-                await asyncio.to_thread(watcher.start)
+                await self._get_clipboard_runtime().sync(
+                    enabled=True,
+                    strict_runtime_errors=strict_runtime_errors,
+                )
             except Exception:
-                self._clipboard_loop = None
-                with contextlib.suppress(Exception):
-                    await asyncio.to_thread(watcher.stop)
+                self._sync_clipboard_runtime_aliases()
                 self._log_error("Clipboard watcher failed to start")
                 if strict_runtime_errors:
                     raise
-                return
-            self._clipboard_watcher = watcher
 
     async def _stop_clipboard_watcher(self) -> None:
         async with self._get_clipboard_watcher_lock():
-            watcher = self._clipboard_watcher
-            self._clipboard_watcher = None
-            self._clipboard_loop = None
-            if watcher is None:
+            runtime = self._clipboard_runtime
+            if runtime is None and self._clipboard_watcher is not None:
+                runtime = self._get_clipboard_runtime()
+            if runtime is None:
+                self._sync_clipboard_runtime_aliases(None)
                 return
             try:
-                await asyncio.to_thread(watcher.stop)
+                await runtime.stop(
+                    strict_runtime_errors=self._strict_runtime_errors_for_clipboard_watcher,
+                )
             except Exception:
                 self._log_error("Clipboard watcher failed to stop")
                 if self._strict_runtime_errors_for_clipboard_watcher:
                     raise
+            finally:
+                self._sync_clipboard_runtime_aliases(runtime)
+
+    async def _close_clipboard_runtime(self) -> None:
+        async with self._get_clipboard_watcher_lock():
+            runtime = self._clipboard_runtime
+            if runtime is None:
+                self._sync_clipboard_runtime_aliases(None)
+                return
+            try:
+                await runtime.close()
+            except Exception:
+                self._log_error("Clipboard runtime failed to close")
+                if self._strict_runtime_errors_for_clipboard_watcher:
+                    raise
+            finally:
+                self._sync_clipboard_runtime_aliases(runtime)
 
     def _on_clipboard_text_from_thread(self, text: str) -> None:
-        trimmed = text.strip()
-        if not trimmed or len(trimmed) > 300:
-            return
-        loop = self._clipboard_loop
-        if loop is None or loop.is_closed():
-            return
-        loop.call_soon_threadsafe(self._schedule_clipboard_submit, trimmed)
+        self._get_clipboard_runtime().on_text_from_thread(text)
 
     def _schedule_clipboard_submit(self, text: str) -> None:
         try:
-            asyncio.create_task(self._submit_clipboard_text(text))
+            self._get_clipboard_runtime().submit_from_loop(text)
         except RuntimeError as exc:
             self._log_error(f"Clipboard submit scheduling failed: {exc}")
 
@@ -6748,6 +6785,28 @@ class GuiController:
             on_discord_callback_received=self._on_discord_managed_auth_callback_received,
         )
 
+    def _get_oauth_runtime(self) -> OAuthRuntime:
+        if self._oauth_runtime is None:
+            self._oauth_runtime = OAuthRuntime()
+        return self._oauth_runtime
+
+    async def _close_oauth_runtime(self) -> None:
+        runtime = self._oauth_runtime
+        if runtime is None:
+            return
+        await runtime.close()
+
+    async def _close_app_oauth_runtime_for_release(self, failures: list[Exception]) -> None:
+        close_oauth_runtime = getattr(self.app, "close_oauth_runtime", None)
+        if not callable(close_oauth_runtime):
+            return
+        try:
+            result = close_oauth_runtime()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            failures.append(exc)
+
     def _on_discord_managed_auth_callback_received(self) -> None:
         hook = self._discord_managed_auth_callback_received_hook
         if callable(hook):
@@ -7587,6 +7646,11 @@ class GuiController:
         return OpenRouterPKCEClient(callback_origin="http://localhost:3000")
 
     def reopen_openrouter_pkce_authorization_url(self) -> bool:
+        if (
+            self._oauth_runtime is not None
+            and self._oauth_runtime.reopen_openrouter_pkce_authorization_url()
+        ):
+            return True
         if self._openrouter_pkce_client is None:
             return False
         return self._openrouter_pkce_client.reopen_authorization_url()
@@ -7613,7 +7677,7 @@ class GuiController:
             pkce_client = self._create_openrouter_pkce_client()
             self._openrouter_pkce_client = pkce_client
             try:
-                result = await pkce_client.run_desktop_flow()
+                result = await self._get_oauth_runtime().run_openrouter_pkce_flow(pkce_client)
             finally:
                 self._openrouter_pkce_client = None
         except Exception as exc:
