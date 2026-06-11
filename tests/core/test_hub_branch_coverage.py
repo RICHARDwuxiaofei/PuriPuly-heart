@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from puripuly_heart.core.clock import FakeClock
+from puripuly_heart.core.diagnostic_validation import DIAGNOSTIC_REDACTION_MARKER
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseDiagnostics,
     ManagedOpenRouterUserFacingError,
@@ -1139,7 +1140,7 @@ async def test_run_stt_event_loop_without_runtime_logging_preserves_traceback(ca
         await hub._run_stt_event_loop(RaisingEventSTT())
 
     assert "[Hub] STT event loop crashed: loop boom" in caplog.messages
-    assert any(record.exc_info is not None for record in caplog.records)
+    assert any(record.levelno == logging.ERROR for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -1229,8 +1230,11 @@ async def test_emit_overlay_event_routes_traceback_to_detailed_runtime_logs() ->
         )
 
         assert "[Hub] Overlay sink emit failed: overlay down" in detailed_messages
-        assert any("Traceback (most recent call last):" in message for message in detailed_messages)
-        assert any("RuntimeError: overlay down" in message for message in detailed_messages)
+        assert DIAGNOSTIC_REDACTION_MARKER in detailed_messages
+        assert not any(
+            "Traceback (most recent call last):" in message for message in detailed_messages
+        )
+        assert not any("RuntimeError: overlay down" in message for message in detailed_messages)
     finally:
         basic_runtime_logging.close()
         detailed_runtime_logging.close()

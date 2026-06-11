@@ -2058,6 +2058,7 @@ class GuiController:
     ) -> None:
         runtime = self._github_star_prompt_runtime
         if runtime is None:
+            await self._drain_github_star_prompt_translation_success_task()
             return
         try:
             await runtime.close()

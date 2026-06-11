@@ -182,8 +182,7 @@ async def test_stt_promo_respects_interval():
     initial_count = sender.sent.count("PuriPuly ON!")
     assert initial_count == 1
 
-    # 세션 종료 후 4분 후 버튼 다시 클릭 (5분 미만)
-    await hub.stop()
+    # STT provider replacement keeps the hub/output runtime alive while preserving promo state.
     clock.advance(240.0)
 
     stt2 = ManagedSTTProvider(
@@ -192,8 +191,7 @@ async def test_stt_promo_respects_interval():
         clock=clock,
         reset_deadline_s=90.0,
     )
-    hub.stt = stt2
-    await hub.start(auto_flush_osc=False)
+    await hub.replace_stt_provider(stt2)
 
     # 두 번째 버튼 클릭 (5분 내)
     hub.mark_promo_eligible()
@@ -229,8 +227,7 @@ async def test_stt_promo_sends_after_interval():
 
     assert sender.sent.count("PuriPuly ON!") == 1
 
-    # 5분 후 버튼 다시 클릭
-    await hub.stop()
+    # STT provider replacement keeps the hub/output runtime alive while preserving promo state.
     clock.advance(301.0)
 
     stt2 = ManagedSTTProvider(
@@ -239,8 +236,7 @@ async def test_stt_promo_sends_after_interval():
         clock=clock,
         reset_deadline_s=90.0,
     )
-    hub.stt = stt2
-    await hub.start(auto_flush_osc=False)
+    await hub.replace_stt_provider(stt2)
 
     # 두 번째 버튼 클릭 (5분 후)
     hub.mark_promo_eligible()
