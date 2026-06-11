@@ -211,12 +211,19 @@ class DummyLogsView:
 
 class RuntimeLoggingSpy:
     def __init__(
-        self, *, detailed_enabled: bool = True, basic_error: Exception | None = None
+        self,
+        *,
+        detailed_enabled: bool = True,
+        basic_error: Exception | None = None,
+        close_error: Exception | None = None,
     ) -> None:
         self.mode = SessionLoggingMode.DETAILED if detailed_enabled else SessionLoggingMode.BASIC
         self.basic_messages: list[tuple[int, str]] = []
         self.detailed_messages: list[tuple[int, str]] = []
+        self.shutdown_failure_summaries: list[tuple[str, ...]] = []
+        self.close_calls = 0
         self.basic_error = basic_error
+        self.close_error = close_error
 
     def emit_basic(self, message: str, *, level: int = logging.INFO) -> None:
         if self.basic_error is not None:
@@ -246,6 +253,14 @@ class RuntimeLoggingSpy:
     def set_mode(self, mode) -> None:
         normalized = SessionLoggingMode(mode)
         self.mode = normalized
+
+    def close_after_producers_stop(self, *, cleanup_failures=()) -> None:
+        self.close_calls += 1
+        self.shutdown_failure_summaries.append(
+            tuple(type(failure).__name__ for failure in cleanup_failures)
+        )
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class DummyHub:
@@ -7715,7 +7730,11 @@ async def test_stop_closes_runtime_logging_service(monkeypatch: pytest.MonkeyPat
     events: list[str] = []
 
     class FakeRuntimeLogging:
-        def close(self) -> None:
+        def close_after_producers_stop(self, *, cleanup_failures=()) -> None:
+            events.append(
+                "runtime_logging_summary:"
+                + ",".join(type(failure).__name__ for failure in cleanup_failures)
+            )
             events.append("runtime_logging_close")
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
@@ -7734,8 +7753,149 @@ async def test_stop_closes_runtime_logging_service(monkeypatch: pytest.MonkeyPat
 
     await controller.stop()
 
-    assert events == ["runtime_logging_close"]
-    assert controller._runtime_logging is None
+    assert events == ["runtime_logging_summary:", "runtime_logging_close"]
+    assert controller._runtime_logging is not None
+
+
+@pytest.mark.asyncio
+async def test_stop_emits_shutdown_summary_after_hub_failure_before_logging_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    events: list[str] = []
+    hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+
+    async def failing_stop() -> None:
+        hub.stop_calls += 1
+        events.append("hub_stop")
+        raise RuntimeError("hub stop failed with raw detail")
+
+    class FakeRuntimeLogging:
+        def close_after_producers_stop(self, *, cleanup_failures=()) -> None:
+            events.append(
+                "runtime_logging_summary:"
+                + ",".join(type(failure).__name__ for failure in cleanup_failures)
+            )
+            events.append("runtime_logging_close")
+
+    hub.stop = failing_stop  # type: ignore[method-assign]
+    controller.hub = hub
+    controller._runtime_logging = FakeRuntimeLogging()
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, enabled: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_shutdown_overlay_runtime",
+        lambda self, preserve_failure_reason: asyncio.sleep(0),
+    )
+
+    with pytest.raises(RuntimeError, match="hub stop failed"):
+        await controller.stop()
+
+    assert events == [
+        "hub_stop",
+        "runtime_logging_summary:RuntimeError",
+        "runtime_logging_close",
+    ]
+    assert controller._runtime_logging is not None
+
+
+@pytest.mark.asyncio
+async def test_log_basic_after_stop_uses_closed_logging_owner_without_recreation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    runtime_logging = RuntimeLoggingSpy()
+    controller._runtime_logging = runtime_logging
+    new_service_creations: list[str] = []
+
+    def create_new_runtime_logging(*_args, **_kwargs):
+        new_service_creations.append("created")
+        return RuntimeLoggingSpy()
+
+    monkeypatch.setattr(
+        controller_module,
+        "SessionRuntimeLoggingService",
+        create_new_runtime_logging,
+    )
+    monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, enabled: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_shutdown_overlay_runtime",
+        lambda self, preserve_failure_reason: asyncio.sleep(0),
+    )
+
+    await controller.stop()
+    stopped_runtime_logging = controller._runtime_logging
+    controller.log_basic("late after stop")
+
+    assert controller._runtime_logging is stopped_runtime_logging
+    assert runtime_logging.basic_messages[-1] == (logging.INFO, "late after stop")
+    assert new_service_creations == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_logging_close_failure_is_aggregated_not_suppressed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    events: list[str] = []
+
+    async def failing_stop() -> None:
+        hub.stop_calls += 1
+        events.append("hub_stop")
+        raise RuntimeError("hub stop failed")
+
+    class FakeRuntimeLogging:
+        def close_after_producers_stop(self, *, cleanup_failures=()) -> None:
+            events.append(
+                "runtime_logging_summary:"
+                + ",".join(type(failure).__name__ for failure in cleanup_failures)
+            )
+            events.append("runtime_logging_close")
+            raise OSError("runtime logging close failed")
+
+    hub.stop = failing_stop  # type: ignore[method-assign]
+    controller.hub = hub
+    controller._runtime_logging = FakeRuntimeLogging()
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, enabled: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_shutdown_overlay_runtime",
+        lambda self, preserve_failure_reason: asyncio.sleep(0),
+    )
+
+    with pytest.raises(ExceptionGroup) as exc_info:
+        await controller.stop()
+
+    assert [type(failure).__name__ for failure in exc_info.value.exceptions] == [
+        "RuntimeError",
+        "OSError",
+    ]
+    assert events == [
+        "hub_stop",
+        "runtime_logging_summary:RuntimeError",
+        "runtime_logging_close",
+    ]
 
 
 @pytest.mark.asyncio

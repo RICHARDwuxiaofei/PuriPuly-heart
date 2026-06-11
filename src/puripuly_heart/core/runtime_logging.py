@@ -293,6 +293,7 @@ class SessionRuntimeLoggingService:
         self._ui_handler: logging.Handler | None = None
         self._session_handlers: list[logging.Handler] = []
         self._mode = SessionLoggingMode.BASIC
+        self._closed = False
 
         file_output_handler = (
             getattr(self._sinks, "file_queue_handler", None) or self._sinks.file_handler
@@ -316,6 +317,8 @@ class SessionRuntimeLoggingService:
         self._mode = SessionLoggingMode(mode)
 
     def attach_realtime_sink(self, sink: RealtimeLogSink) -> None:
+        if self._closed:
+            return
         if self._realtime_sink is sink:
             return
 
@@ -330,20 +333,38 @@ class SessionRuntimeLoggingService:
         _ensure_handler(self._session_logger, handler)
 
     def detach_realtime_sink(self) -> None:
+        self._detach_realtime_sink(suppress_errors=True)
+
+    def _detach_realtime_sink(self, *, suppress_errors: bool) -> None:
+        failures: list[Exception] = []
         if self._ui_handler is not None:
-            with contextlib.suppress(Exception):
+            try:
                 self._root_logger.removeHandler(self._ui_handler)
-            with contextlib.suppress(Exception):
+            except Exception as exc:
+                if not suppress_errors:
+                    failures.append(exc)
+            try:
                 self._session_logger.removeHandler(self._ui_handler)
-            with contextlib.suppress(Exception):
+            except Exception as exc:
+                if not suppress_errors:
+                    failures.append(exc)
+            try:
                 self._ui_handler.close()
+            except Exception as exc:
+                if not suppress_errors:
+                    failures.append(exc)
         self._realtime_sink = None
         self._ui_handler = None
+        _raise_close_failures("Runtime logging realtime sink close failed", failures)
 
     def emit_basic(self, message: str, *, level: int = logging.INFO) -> None:
+        if self._closed:
+            return
         self._session_logger.log(level, message)
 
     def emit_detailed(self, message: str, *, level: int = logging.INFO) -> bool:
+        if self._closed:
+            return False
         if self._mode is not SessionLoggingMode.DETAILED:
             return False
         self._session_logger.log(level, message)
@@ -355,12 +376,16 @@ class SessionRuntimeLoggingService:
         *,
         level: int = logging.INFO,
     ) -> bool:
+        if self._closed:
+            return False
         if self._mode is not SessionLoggingMode.DETAILED:
             return False
         self._session_logger.log(level, build_message())
         return True
 
     def emit_persisted(self, message: str, *, level: int = logging.INFO) -> None:
+        if self._closed:
+            return
         record = self._session_logger.makeRecord(
             self._session_logger.name,
             level,
@@ -376,13 +401,32 @@ class SessionRuntimeLoggingService:
             self._sinks.file_handler.flush()
 
     def close(self) -> None:
-        self.detach_realtime_sink()
+        self._close(force_owned_sinks=False)
+
+    def close_terminal_owner(self) -> None:
+        self._close(force_owned_sinks=True)
+
+    def _close(self, *, force_owned_sinks: bool) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        failures: list[Exception] = []
+        try:
+            self._detach_realtime_sink(suppress_errors=False)
+        except Exception as exc:
+            failures.append(exc)
         for handler in self._session_handlers:
-            with contextlib.suppress(Exception):
+            try:
                 self._session_logger.removeHandler(handler)
+            except Exception as exc:
+                failures.append(exc)
         self._session_handlers.clear()
         if self._owns_sinks:
-            self._sinks.close()
+            try:
+                self._sinks.close(force=force_owned_sinks)
+            except Exception as exc:
+                failures.append(exc)
+        _raise_close_failures("Runtime logging session close failed", failures)
 
 
 def _ensure_handler(logger: logging.Logger, handler: logging.Handler) -> bool:
@@ -423,11 +467,25 @@ def _find_main_file_handler(logger: logging.Logger, *, log_file: Path) -> loggin
     return None
 
 
+def _raise_close_failures(message: str, failures: list[Exception]) -> None:
+    if not failures:
+        return
+    if len(failures) == 1:
+        raise failures[0]
+    raise ExceptionGroup(message, failures)
+
+
 def _close_file_handler(file_handler: logging.Handler) -> None:
-    with contextlib.suppress(Exception):
+    failures: list[Exception] = []
+    try:
         file_handler.flush()
-    with contextlib.suppress(Exception):
+    except Exception as exc:
+        failures.append(exc)
+    try:
         file_handler.close()
+    except Exception as exc:
+        failures.append(exc)
+    _raise_close_failures("Runtime logging file handler close failed", failures)
 
 
 def _main_file_queue_for_handler(
@@ -456,19 +514,28 @@ def _join_pending_file_queue(sinks: RuntimeLoggingSinks) -> None:
 
 
 def _close_main_file_queue_handler(logger: logging.Logger, handler: logging.Handler) -> None:
-    with contextlib.suppress(Exception):
+    failures: list[Exception] = []
+    try:
         logger.removeHandler(handler)
+    except Exception as exc:
+        failures.append(exc)
     setattr(handler, _QUEUE_HANDLER_CLOSED_ATTR, True)
     setattr(handler, _QUEUE_HANDLER_REFCOUNT_ATTR, 0)
 
     listener = getattr(handler, _QUEUE_HANDLER_LISTENER_ATTR, None)
     if isinstance(listener, QueueListener):
-        with contextlib.suppress(Exception):
+        try:
             listener.stop()
+        except Exception as exc:
+            failures.append(exc)
 
     file_handler = getattr(handler, _QUEUE_HANDLER_FILE_HANDLER_ATTR, None)
     if isinstance(file_handler, logging.Handler):
-        _close_file_handler(file_handler)
+        try:
+            _close_file_handler(file_handler)
+        except Exception as exc:
+            failures.append(exc)
+    _raise_close_failures("Runtime logging queue handler close failed", failures)
 
 
 def _release_main_file_queue_handler(

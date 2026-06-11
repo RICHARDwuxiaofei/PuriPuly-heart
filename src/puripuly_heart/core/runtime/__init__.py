@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from puripuly_heart.core.runtime.clipboard import ClipboardRuntime
     from puripuly_heart.core.runtime.github_star_prompt import GithubStarPromptRuntime
     from puripuly_heart.core.runtime.local_stt_download import LocalSTTDownloadRuntime
+    from puripuly_heart.core.runtime.logging import RuntimeLoggingCloseError, RuntimeLoggingService
     from puripuly_heart.core.runtime.mic_test import MicTestRuntime
     from puripuly_heart.core.runtime.oauth import OAuthRuntime
     from puripuly_heart.core.runtime.output import OutputRuntime
@@ -28,6 +29,8 @@ __all__ = [
     "OAuthRuntime",
     "OscReceiverRuntime",
     "OutputRuntime",
+    "RuntimeLoggingCloseError",
+    "RuntimeLoggingService",
     "SpeechChannelRuntime",
     "VrcMicReceiverRuntime",
 ]
@@ -47,6 +50,10 @@ def __getattr__(name: str) -> object:
             from puripuly_heart.core.runtime import local_stt_download
 
             return getattr(local_stt_download, name)
+        if name in {"RuntimeLoggingCloseError", "RuntimeLoggingService"}:
+            from puripuly_heart.core.runtime import logging as runtime_logging
+
+            return getattr(runtime_logging, name)
         if name == "MicTestRuntime":
             from puripuly_heart.core.runtime import mic_test
 

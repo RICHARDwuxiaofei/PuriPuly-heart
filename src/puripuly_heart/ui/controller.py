@@ -164,6 +164,7 @@ from puripuly_heart.core.overlay.process import (
 from puripuly_heart.core.runtime.clipboard import ClipboardRuntime
 from puripuly_heart.core.runtime.github_star_prompt import GithubStarPromptRuntime
 from puripuly_heart.core.runtime.local_stt_download import LocalSTTDownloadRuntime
+from puripuly_heart.core.runtime.logging import RuntimeLoggingService
 from puripuly_heart.core.runtime.mic_test import MicTestRuntime
 from puripuly_heart.core.runtime.oauth import OAuthRuntime
 from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
@@ -1119,7 +1120,7 @@ class GuiController:
         default=None,
         repr=False,
     )
-    _runtime_logging: SessionRuntimeLoggingService | None = field(init=False, default=None)
+    _runtime_logging: RuntimeLoggingService | None = field(init=False, default=None)
     _local_qwen_hallucination_detection_count: int = field(init=False, default=0)
     _local_qwen_hallucination_modal_shown: bool = field(init=False, default=False)
 
@@ -3622,9 +3623,12 @@ class GuiController:
         self.osc = None
         await self._replace_managed_openrouter_release_service(None)
         if self._runtime_logging is not None:
-            with contextlib.suppress(Exception):
-                self._runtime_logging.close()
-            self._runtime_logging = None
+            try:
+                self._runtime_logging.close_after_producers_stop(
+                    cleanup_failures=tuple(cleanup_failures)
+                )
+            except Exception as exc:
+                cleanup_failures.append(exc)
         _raise_lifecycle_cleanup_failures(
             "GUI controller stop cleanup failed",
             cleanup_failures,
@@ -8152,9 +8156,14 @@ class GuiController:
         )
 
     @property
-    def runtime_logging(self) -> SessionRuntimeLoggingService:
+    def runtime_logging(self) -> RuntimeLoggingService:
         if self._runtime_logging is None:
-            self._runtime_logging = SessionRuntimeLoggingService(ui_handler_factory=FletLogHandler)
+            self._runtime_logging = RuntimeLoggingService(
+                session_factory=lambda: SessionRuntimeLoggingService(
+                    ui_handler_factory=FletLogHandler
+                ),
+                fallback_logger=logger,
+            )
         logs_view = getattr(self.app, "view_logs", None)
         if logs_view is not None:
             self._runtime_logging.attach_realtime_sink(logs_view)
