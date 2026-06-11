@@ -12,6 +12,7 @@ import httpx
 from puripuly_heart.config.settings import OpenRouterProviderRouting, OpenRouterRoutingMode
 from puripuly_heart.core.error_messages import format_error_report_for_log, provider_failure_report
 from puripuly_heart.core.openrouter_credentials import normalize_managed_openrouter_user_identifier
+from puripuly_heart.core.openrouter_metadata import OpenRouterKeyMetadata
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.models import Translation
 from puripuly_heart.providers.llm.messages import build_translation_user_message
@@ -174,13 +175,6 @@ class OpenRouterClient(Protocol):
     ) -> str: ...
 
     async def close(self) -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class OpenRouterKeyMetadata:
-    limit_usd: float | None
-    remaining_usd: float | None
-    usage_usd: float | None
 
 
 def _optional_number(value: object) -> float | None:

@@ -1896,7 +1896,7 @@ async def test_set_translation_enabled_keeps_managed_translation_disabled_on_ret
     ]
     assert (
         logging.ERROR,
-        "[ManagedAuth] operation=issue code=trial_unavailable class=retryable subcode=broker_backoff retry_after_ms=5000 message=broker is temporarily unavailable",
+        "[ManagedAuth] operation=issue code=trial_unavailable class=retryable subcode=broker_backoff retry_after_ms=5000 message=<redacted>",
     ) in controller._runtime_logging.basic_messages
     assert settings_view.managed_trial_usage_state == {
         "visible": True,

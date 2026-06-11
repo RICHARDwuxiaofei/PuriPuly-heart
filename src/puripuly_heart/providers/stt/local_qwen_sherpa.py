@@ -18,6 +18,7 @@ from puripuly_heart.core.local_qwen_runtime import (
     ensure_local_qwen_windows_runtime,
 )
 from puripuly_heart.core.local_stt_assets import (
+    LocalQwenSherpaLoadError,
     validate_local_stt_runtime_ready,
 )
 from puripuly_heart.core.stt.backend import (
@@ -33,10 +34,6 @@ DEFAULT_SHERPA_NUM_THREADS = 3
 LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ = 16000
 _KNOWN_HALLUCINATION_LOG_REDACTION = "<known-local-qwen-hallucination>"
 logger = logging.getLogger(__name__)
-
-
-class LocalQwenSherpaLoadError(RuntimeError):
-    """Raised when the local sherpa recognizer cannot be initialized."""
 
 
 class LocalQwenSherpaInferenceError(RuntimeError):

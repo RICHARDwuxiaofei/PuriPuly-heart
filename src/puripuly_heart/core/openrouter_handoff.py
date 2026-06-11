@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from puripuly_heart.config.settings import AppSettings
-from puripuly_heart.providers.llm.openrouter import OpenRouterKeyMetadata
+from puripuly_heart.core.openrouter_metadata import OpenRouterKeyMetadata
 
 MANAGED_EFFECTIVE_EXHAUSTION_USD = 0.0007
 

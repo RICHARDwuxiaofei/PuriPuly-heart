@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
+from puripuly_heart.app.ports.provider_verifier import ProviderVerifierPort
 from puripuly_heart.config.llm_profiles import openrouter_alias_for_fields
 from puripuly_heart.config.resolved import (
     CREDENTIAL_SOURCE_MANAGED,
@@ -1152,3 +1153,9 @@ def create_peer_stt_backend_from_resolved_config(
         secrets=secrets,
         diagnostics_enabled=diagnostics_enabled,
     )
+
+
+def create_provider_verifier() -> ProviderVerifierPort:
+    from puripuly_heart.app.adapters.provider_verifier import ProviderVerifierAdapter
+
+    return ProviderVerifierAdapter()

@@ -46,6 +46,7 @@ from puripuly_heart.app.wiring import (
     create_llm_provider,
     create_peer_stt_backend,
     create_peer_stt_backend_from_resolved_config,
+    create_provider_verifier,
     create_secret_store,
     create_stt_backend,
     resolve_overlay_config,
@@ -97,6 +98,7 @@ from puripuly_heart.core.clock import SystemClock
 from puripuly_heart.core.hardware_fingerprint import get_raw_hardware_fingerprint
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.local_stt_assets import (
+    LocalQwenSherpaLoadError,
     LocalSTTInstallState,
     LocalSTTManifestInvalidError,
     LocalSTTModelMissingError,
@@ -143,6 +145,7 @@ from puripuly_heart.core.openrouter_handoff import (
     mark_founder_letter_shown,
     should_auto_show_founder_letter,
 )
+from puripuly_heart.core.openrouter_metadata import OpenRouterKeyMetadata
 from puripuly_heart.core.openrouter_pkce import OpenRouterPKCEClient
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
@@ -181,14 +184,6 @@ from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
 from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
-from puripuly_heart.providers.llm.deepseek import DeepSeekLLMProvider
-from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
-from puripuly_heart.providers.llm.openrouter import OpenRouterKeyMetadata, OpenRouterLLMProvider
-from puripuly_heart.providers.llm.qwen import QwenLLMProvider
-from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
-from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
-from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaLoadError
-from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 from puripuly_heart.ui.event_bridge import UIEventBridge
 from puripuly_heart.ui.i18n import get_locale, set_locale, t
 from puripuly_heart.ui.overlay_peer_contract import (
@@ -928,12 +923,39 @@ class _HubVadSink:
         await self.hub.handle_vad_event(event)
 
 
+class _ControllerProviderVerifier(Protocol):
+    async def verify_api_key(
+        self,
+        provider: str,
+        api_key: str,
+        *,
+        model: str | None = None,
+        base_url: str | None = None,
+        low_latency: bool = False,
+    ) -> bool: ...
+
+    async def verify_qwen_llm_api_key(
+        self,
+        api_key: str,
+        *,
+        base_url: str,
+        model: str | None,
+        low_latency: bool,
+    ) -> bool: ...
+
+    async def fetch_openrouter_key_metadata(
+        self,
+        api_key: str,
+    ) -> OpenRouterKeyMetadata | None: ...
+
+
 @dataclass(slots=True)
 class GuiController:
     page: ft.Page
     app: object
     config_path: Path
     settings_mutation_service: SettingsMutationService | None = None
+    provider_verifier: _ControllerProviderVerifier | None = None
 
     settings: AppSettings | None = None
     last_settings_mutation_result: TransactionResult | None = field(
@@ -2445,7 +2467,9 @@ class GuiController:
         api_key = resolution.api_key if resolution is not None else None
         if api_key:
             self._set_managed_trial_pending_auth(False)
-            usage_metadata = await OpenRouterLLMProvider.fetch_key_metadata(api_key)
+            usage_metadata = await self._get_provider_verifier().fetch_openrouter_key_metadata(
+                api_key
+            )
 
         self._managed_trial_usage_metadata = usage_metadata
         self._managed_trial_usage_metadata_entitlement_ref = entitlement_ref
@@ -4274,9 +4298,12 @@ class GuiController:
             llm = self.hub.llm
             if isinstance(llm, SemaphoreLLMProvider):
                 llm = llm.inner
-            if isinstance(llm, (GeminiLLMProvider, QwenLLMProvider, AsyncQwenLLMProvider)):
+            warmup = getattr(llm, "warmup", None)
+            if callable(warmup):
                 with contextlib.suppress(Exception):
-                    await llm.warmup()
+                    result = warmup()
+                    if inspect.isawaitable(result):
+                        await result
         return bool(self.hub.translation_enabled)
 
     async def set_stt_enabled(self, enabled: bool) -> None:
@@ -5860,15 +5887,19 @@ class GuiController:
 
         try:
             success = False
+            verifier = self._get_provider_verifier()
             if provider == "google":
-                success = await GeminiLLMProvider.verify_api_key(
+                success = await verifier.verify_api_key(
+                    provider,
                     key,
-                    model=self.settings.gemini.llm_model.value,
+                    model=(
+                        self.settings.gemini.llm_model.value if self.settings is not None else None
+                    ),
                 )
             elif provider == "openrouter":
-                success = await OpenRouterLLMProvider.verify_api_key(key)
+                success = await verifier.verify_api_key(provider, key)
             elif provider == "deepseek":
-                success = await DeepSeekLLMProvider.verify_api_key(key)
+                success = await verifier.verify_api_key(provider, key)
             elif provider == "alibaba_beijing":
                 return await self._verify_qwen_key_with_model_fallback(
                     key,
@@ -5880,9 +5911,9 @@ class GuiController:
                     base_url="https://dashscope-intl.aliyuncs.com/api/v1",
                 )
             elif provider == "deepgram":
-                success = await DeepgramRealtimeSTTBackend.verify_api_key(key)
+                success = await verifier.verify_api_key(provider, key)
             elif provider == "soniox":
-                success = await SonioxRealtimeSTTBackend.verify_api_key(key)
+                success = await verifier.verify_api_key(provider, key)
             else:
                 return False, f"Unknown provider: {provider}"
 
@@ -6426,6 +6457,11 @@ class GuiController:
         path.parent.mkdir(parents=True, exist_ok=True)
         save_settings(path, settings)
         return settings
+
+    def _get_provider_verifier(self) -> _ControllerProviderVerifier:
+        if self.provider_verifier is None:
+            self.provider_verifier = create_provider_verifier()
+        return self.provider_verifier
 
     async def _rebuild_llm_provider(self) -> None:
         """Rebuild only the LLM provider without tearing down the entire pipeline."""
@@ -8052,7 +8088,10 @@ class GuiController:
             return False
 
         try:
-            if not await OpenRouterLLMProvider.verify_api_key(result.api_key):
+            if not await self._get_provider_verifier().verify_api_key(
+                "openrouter",
+                result.api_key,
+            ):
                 raise RuntimeError("OpenRouter PKCE key verification failed")
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
             previous_api_key = secrets.get(OPENROUTER_BYOK_API_KEY_SECRET)
@@ -8387,17 +8426,11 @@ class GuiController:
         if self.settings is None:
             return False
         runtime_model = model or self.settings.qwen.llm_model.value
-        if self.settings.stt.low_latency_mode:
-            async_base_url = base_url.replace("/api/v1", "/compatible-mode/v1")
-            return await AsyncQwenLLMProvider.verify_api_key(
-                api_key,
-                base_url=async_base_url,
-                model=runtime_model,
-            )
-        return await QwenLLMProvider.verify_api_key(
+        return await self._get_provider_verifier().verify_qwen_llm_api_key(
             api_key,
             base_url=base_url,
             model=runtime_model,
+            low_latency=self.settings.stt.low_latency_mode,
         )
 
     async def _verify_and_update_status(self) -> None:
@@ -8466,7 +8499,8 @@ class GuiController:
                 key = ""
                 if provider_name == "gemini":
                     key = secrets.get("google_api_key") or "" if secrets is not None else ""
-                    llm_valid = await GeminiLLMProvider.verify_api_key(
+                    llm_valid = await self._get_provider_verifier().verify_api_key(
+                        "google",
                         key,
                         model=self.settings.gemini.llm_model.value,
                     )
@@ -8488,14 +8522,22 @@ class GuiController:
                             if resolution is not None and resolution.api_key
                             else ""
                         )
-                        llm_valid = bool(key) and await OpenRouterLLMProvider.verify_api_key(key)
+                        llm_valid = bool(
+                            key
+                        ) and await self._get_provider_verifier().verify_api_key(
+                            "openrouter",
+                            key,
+                        )
                 elif provider_name == LLMProviderName.DEEPSEEK:
                     key = (
                         (secrets.get("deepseek_api_key") if secrets is not None else None)
                         or os.getenv("DEEPSEEK_API_KEY")
                         or ""
                     )
-                    llm_valid = bool(key) and await DeepSeekLLMProvider.verify_api_key(key)
+                    llm_valid = bool(key) and await self._get_provider_verifier().verify_api_key(
+                        "deepseek",
+                        key,
+                    )
                 elif provider_name == "qwen":
                     llm_valid = await _verify_alibaba_selected()
                 elif provider_name == LLMProviderName.LOCAL_LLM:
@@ -8531,12 +8573,18 @@ class GuiController:
 
                 if provider_name == STTProviderName.DEEPGRAM:
                     key = secrets.get("deepgram_api_key") or "" if secrets is not None else ""
-                    stt_valid = await DeepgramRealtimeSTTBackend.verify_api_key(key)
+                    stt_valid = await self._get_provider_verifier().verify_api_key(
+                        "deepgram",
+                        key,
+                    )
                 elif provider_name == STTProviderName.QWEN_ASR:
                     stt_valid = await _verify_alibaba_any_model()
                 elif provider_name == STTProviderName.SONIOX:
                     key = secrets.get("soniox_api_key") or "" if secrets is not None else ""
-                    stt_valid = await SonioxRealtimeSTTBackend.verify_api_key(key)
+                    stt_valid = await self._get_provider_verifier().verify_api_key(
+                        "soniox",
+                        key,
+                    )
                 else:
                     stt_valid = True
             except Exception:

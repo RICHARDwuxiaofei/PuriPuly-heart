@@ -461,70 +461,6 @@ KNOWN_ALLOWED_VIOLATIONS: frozenset[ImportViolation] = frozenset(
         ),
         ImportViolation(
             rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.providers.llm.deepseek",
-            importer_layer="UI adapters/renderers",
-            imported_layer="providers",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.providers.llm.gemini",
-            importer_layer="UI adapters/renderers",
-            imported_layer="providers",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.providers.llm.openrouter",
-            importer_layer="UI adapters/renderers",
-            imported_layer="providers",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.providers.llm.qwen",
-            importer_layer="UI adapters/renderers",
-            imported_layer="providers",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.providers.llm.qwen_async",
-            importer_layer="UI adapters/renderers",
-            imported_layer="providers",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.providers.stt.deepgram",
-            importer_layer="UI adapters/renderers",
-            imported_layer="providers",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.providers.stt.local_qwen_sherpa",
-            importer_layer="UI adapters/renderers",
-            imported_layer="providers",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.providers.stt.soniox",
-            importer_layer="UI adapters/renderers",
-            imported_layer="providers",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
             importer="src/puripuly_heart/ui/desktop_overlay.py",
             imported="puripuly_heart.config.settings",
             importer_layer="UI adapters/renderers",
@@ -792,6 +728,24 @@ def test_internal_source_imports_canonical_overlay_calibration_not_ui_facade() -
         offenders.add(_relative_repo_path(importer_path))
 
     assert offenders == set()
+
+
+def test_ui_controller_uses_adapter_seam_instead_of_concrete_provider_imports() -> None:
+    controller_path = SOURCE_PACKAGE_ROOT / "ui" / "controller.py"
+    imported_modules = set(
+        _imported_modules(
+            "puripuly_heart.ui.controller",
+            controller_path,
+            _internal_module_names(),
+        )
+    )
+
+    assert not {
+        imported_module
+        for imported_module in imported_modules
+        if imported_module == "puripuly_heart.providers"
+        or imported_module.startswith("puripuly_heart.providers.")
+    }
 
 
 def test_current_concrete_osc_imports_are_adapter_boundary_violations() -> None:

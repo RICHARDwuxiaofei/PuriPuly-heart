@@ -28,6 +28,10 @@ class LocalSTTManifestInvalidError(LocalSTTAssetError):
     """Raised when the installed local STT manifest or files are invalid."""
 
 
+class LocalQwenSherpaLoadError(RuntimeError):
+    """Raised when the local sherpa recognizer cannot be initialized."""
+
+
 @dataclass(frozen=True, slots=True)
 class LocalSTTAssetSource:
     name: str
