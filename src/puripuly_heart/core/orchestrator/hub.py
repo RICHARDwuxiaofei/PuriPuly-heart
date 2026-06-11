@@ -1222,6 +1222,7 @@ class ClientHub:
         )
         if is_final:
             if runtime.channel == "peer":
+                deny_peer_chatbox_attempt = self._should_deny_peer_chatbox_attempt(runtime)
                 peer_terminal_work_will_follow = self._peer_terminal_work_will_follow(runtime)
                 if self._overlay_translation_will_follow(runtime):
                     await self._ensure_translation(transcript)
@@ -1231,6 +1232,10 @@ class ClientHub:
                         close_is_final=True,
                         finalize_latency=not peer_terminal_work_will_follow,
                     )
+                    if deny_peer_chatbox_attempt:
+                        await self._deny_peer_chatbox_attempt(transcript.utterance_id)
+                elif deny_peer_chatbox_attempt:
+                    await self._deny_peer_chatbox_attempt(transcript.utterance_id)
                 elif not peer_terminal_work_will_follow:
                     self._finalize_latency_timeline(
                         channel=transcript.channel,
@@ -1270,24 +1275,21 @@ class ClientHub:
             utterance_id=transcript.utterance_id,
             stage="stt_final",
         )
+        deny_peer_chatbox_attempt = self._should_deny_peer_chatbox_attempt(runtime)
         if self.llm is None or not self._translation_enabled_for_runtime(runtime):
             self._log_translation_skipped(
                 stage="final",
                 runtime=runtime,
-                publish_chatbox=self._should_publish_to_chatbox(runtime),
+                publish_chatbox=False,
             )
             await self._finalize_peer_source_only(
                 transcript,
                 close_is_final=True,
-                finalize_latency=not self._should_publish_to_chatbox(runtime),
+                finalize_latency=not deny_peer_chatbox_attempt,
                 preserve_parent_speech_end_time=True,
             )
-            if self._should_publish_to_chatbox(runtime):
-                await self._enqueue_osc(
-                    transcript.utterance_id,
-                    transcript_text=transcript.text,
-                    translation_text=None,
-                )
+            if deny_peer_chatbox_attempt:
+                await self._deny_peer_chatbox_attempt(transcript.utterance_id)
             return
         await self._ensure_translation(transcript)
 
@@ -1377,7 +1379,7 @@ class ClientHub:
         if runtime.channel != "peer":
             return False
         return (self.llm is not None and self._translation_enabled_for_runtime(runtime)) or (
-            self._should_publish_to_chatbox(runtime)
+            self._should_deny_peer_chatbox_attempt(runtime)
         )
 
     @staticmethod
@@ -2760,7 +2762,10 @@ class ClientHub:
         return self.peer_runtime if runtime is self.self_runtime else self.self_runtime
 
     def _should_publish_to_chatbox(self, runtime: ChannelRuntime) -> bool:
-        return runtime.channel == self.active_chatbox_channel
+        return runtime.channel == "self"
+
+    def _should_deny_peer_chatbox_attempt(self, runtime: ChannelRuntime) -> bool:
+        return runtime.channel == "peer" and self.active_chatbox_channel == "peer"
 
     def _translation_enabled_for_runtime(self, runtime: ChannelRuntime) -> bool:
         if runtime.channel == "peer":
@@ -2944,6 +2949,8 @@ class ClientHub:
                 close_is_final=False,
                 finalize_latency=True,
             )
+            if self._should_deny_peer_chatbox_attempt(runtime):
+                await self._deny_peer_chatbox_attempt(utterance_id)
             return
         await self._emit_overlay_utterance_closed(
             utterance_id=utterance_id,
@@ -3031,6 +3038,8 @@ class ClientHub:
                     close_is_final=False,
                     finalize_latency=True,
                 )
+                if self._should_deny_peer_chatbox_attempt(runtime):
+                    await self._deny_peer_chatbox_attempt(utterance_id)
             else:
                 self._finalize_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
             raise
@@ -3039,9 +3048,11 @@ class ClientHub:
             return
         except Exception as exc:
             self._log_translation_failure(stage="final", runtime=runtime, exc=exc)
+            deny_peer_chatbox_attempt = self._should_deny_peer_chatbox_attempt(runtime)
             fallback_to_chatbox = self.fallback_transcript_only and self._should_publish_to_chatbox(
                 runtime
             )
+            denied_fallback_to_chatbox = self.fallback_transcript_only and deny_peer_chatbox_attempt
             payload: object = exc if isinstance(exc, ManagedOpenRouterUserFacingError) else str(exc)
             await self.ui_events.put(
                 UIEvent(
@@ -3072,7 +3083,7 @@ class ClientHub:
                         channel="peer",
                     ),
                     close_is_final=False,
-                    finalize_latency=not fallback_to_chatbox,
+                    finalize_latency=not denied_fallback_to_chatbox,
                 )
             if fallback_to_chatbox:
                 await self._enqueue_osc(
@@ -3080,11 +3091,14 @@ class ClientHub:
                     transcript_text=text,
                     translation_text=None,
                 )
+            elif deny_peer_chatbox_attempt:
+                await self._deny_peer_chatbox_attempt(utterance_id)
             elif runtime.channel != "peer":
                 self._finalize_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
             return
 
         publish_to_chatbox = self._should_publish_to_chatbox(runtime)
+        deny_peer_chatbox_attempt = self._should_deny_peer_chatbox_attempt(runtime)
         bundle = self.get_or_create_bundle(utterance_id, channel=runtime.channel)
         bundle.with_translation(translation)
         self._emit_translation_ready_for_output(
@@ -3101,7 +3115,7 @@ class ClientHub:
                 utterance_id=utterance_id,
                 channel=runtime.channel,
                 is_final=True,
-                finalize_latency=not publish_to_chatbox,
+                finalize_latency=not (publish_to_chatbox or deny_peer_chatbox_attempt),
             )
         await self.ui_events.put(
             UIEvent(
@@ -3128,6 +3142,8 @@ class ClientHub:
                 transcript_text=text,
                 translation_text=translation.text,
             )
+        elif deny_peer_chatbox_attempt:
+            await self._deny_peer_chatbox_attempt(utterance_id)
         else:
             self._finalize_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
         if runtime.channel == "peer":
@@ -3240,6 +3256,26 @@ class ClientHub:
             )
         )
         self._clear_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
+        return result
+
+    async def _deny_peer_chatbox_attempt(self, utterance_id: UUID) -> OutputPublicationResult:
+        result = await self.output_runtime.publish_chatbox(
+            publication_id=utterance_id,
+            channel="peer",
+            transcript_text="",
+            translation_text=None,
+            include_source=False,
+        )
+        self._emit_detailed(
+            "[Hub] OSC enqueue skipped: channel=%s route=%s reason=%s",
+            "peer",
+            result.decision.route,
+            result.decision.reason,
+            fallback_level=logging.INFO,
+        )
+        self.peer_runtime.utterance_start_times.pop(utterance_id, None)
+        self.peer_runtime.speech_ended_ids.discard(utterance_id)
+        self._clear_latency_timeline(channel="peer", utterance_id=utterance_id)
         return result
 
     def enqueue_peer_translation_disclosure(self, text: str) -> None:

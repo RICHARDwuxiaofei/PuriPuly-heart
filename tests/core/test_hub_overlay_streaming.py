@@ -2070,6 +2070,42 @@ async def test_self_osc_sent_channel_uses_utterance_runtime_when_peer_chatbox_ac
 
 
 @pytest.mark.asyncio
+async def test_self_stt_final_uses_self_chatbox_when_legacy_peer_chatbox_active() -> None:
+    osc = RecordingOscQueue()
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=osc,
+    )
+    hub.active_chatbox_channel = "peer"
+    utterance_id = uuid4()
+
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=utterance_id,
+            transcript=Transcript(
+                utterance_id=utterance_id,
+                text="self final",
+                is_final=True,
+                created_at=10.0,
+                channel="self",
+            ),
+        )
+    )
+    events = [hub.ui_events.get_nowait() for _ in range(hub.ui_events.qsize())]
+
+    assert [event.type for event in events] == [
+        UIEventType.TRANSCRIPT_FINAL,
+        UIEventType.OSC_SENT,
+    ]
+    assert events[1].utterance_id == utterance_id
+    assert events[1].payload.text == "self final"
+    assert events[1].channel == "self"
+    assert [message.text for message in osc.messages] == ["self final"]
+    assert hub.ui_events.empty()
+
+
+@pytest.mark.asyncio
 async def test_peer_overlay_emit_failures_still_emit_translation_done_and_deny_chatbox() -> None:
     class RecordingFailingOverlaySink:
         def __init__(self, order: list[str]) -> None:
@@ -2319,6 +2355,35 @@ async def test_peer_translation_failure_hard_denies_active_peer_chatbox_fallback
 
 
 @pytest.mark.asyncio
+async def test_peer_translation_failure_hard_denies_active_peer_chatbox_without_fallback() -> None:
+    sink = RecordingOverlaySink()
+    osc = RecordingOscQueue()
+    hub = ClientHub(
+        stt=None,
+        llm=ImmediateFailingTranslateLLMProvider(error=RuntimeError("provider raw detail")),
+        osc=osc,
+        overlay_sink=sink,
+        peer_translation_enabled=True,
+        fallback_transcript_only=False,
+    )
+    hub.active_chatbox_channel = "peer"
+
+    utterance_id = await hub.translate_peer_text_for_test("peer failure text")
+    events = [hub.ui_events.get_nowait() for _ in range(hub.ui_events.qsize())]
+
+    assert osc.messages == []
+    assert not any(event.type == UIEventType.OSC_SENT for event in events)
+    decision = hub.output_runtime.routing_decisions[-1]
+    assert decision.decision == "denied"
+    assert decision.route == "self_chatbox"
+    assert decision.publication_id == str(utterance_id)
+    assert decision.publication_kind == "peer_subtitle"
+    assert decision.reason == "peer_chatbox_denied"
+    assert "peer failure text" not in repr(decision)
+    assert "provider raw detail" not in repr(decision)
+
+
+@pytest.mark.asyncio
 async def test_legacy_peer_active_chatbox_route_is_hard_denied_without_user_text() -> None:
     osc = RecordingOscQueue()
     hub = ClientHub(
@@ -2368,6 +2433,38 @@ async def test_peer_translation_cancellation_closes_line_as_incomplete() -> None
     assert sink.events[-1].utterance_id == utterance_id
     assert sink.events[-1].is_final is False
     assert hub._latency_timelines == {}
+
+
+@pytest.mark.asyncio
+async def test_peer_translation_cancellation_hard_denies_active_peer_chatbox_without_user_text() -> (
+    None
+):
+    sink = RecordingOverlaySink()
+    osc = RecordingOscQueue()
+    llm = BlockingTranslateLLMProvider()
+    hub = ClientHub(
+        stt=None,
+        llm=llm,
+        osc=osc,
+        overlay_sink=sink,
+        peer_translation_enabled=True,
+    )
+    hub.active_chatbox_channel = "peer"
+
+    utterance_id = await hub.handle_peer_transcript_final_for_test(text="secret cancel line")
+    await asyncio.wait_for(llm.started.wait(), timeout=0.5)
+    await hub.peer_runtime.reset_runtime_state()
+    events = [hub.ui_events.get_nowait() for _ in range(hub.ui_events.qsize())]
+
+    assert osc.messages == []
+    assert not any(event.type == UIEventType.OSC_SENT for event in events)
+    decision = hub.output_runtime.routing_decisions[-1]
+    assert decision.decision == "denied"
+    assert decision.route == "self_chatbox"
+    assert decision.publication_id == str(utterance_id)
+    assert decision.publication_kind == "peer_subtitle"
+    assert decision.reason == "peer_chatbox_denied"
+    assert "secret cancel line" not in repr(decision)
 
 
 @pytest.mark.asyncio
