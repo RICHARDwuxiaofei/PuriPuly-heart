@@ -13,6 +13,7 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.core import messages
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseDiagnostics,
     ManagedOpenRouterUserFacingError,
@@ -22,7 +23,7 @@ from puripuly_heart.domain.events import STTSessionState, UIEvent, UIEventType
 from puripuly_heart.domain.models import OSCMessage, Transcript, Translation
 from puripuly_heart.ui import event_bridge as event_bridge_module
 from puripuly_heart.ui.event_bridge import UIEventBridge
-from puripuly_heart.ui.i18n import t
+from puripuly_heart.ui.i18n import get_locale, set_locale, t
 from puripuly_heart.ui.views import logs as logs_view_module
 from puripuly_heart.ui.views.logs import FletLogHandler, LogsView
 
@@ -889,6 +890,100 @@ async def test_event_bridge_error_destination_is_separable_from_dashboard_displa
 
 
 @pytest.mark.asyncio
+async def test_event_bridge_localizes_user_error_report_without_diagnostic_leak() -> None:
+    previous_locale = get_locale()
+    set_locale("en")
+    try:
+        raw_detail = "upstream response body token=provider-secret-123"
+        app = DummyApp()
+        runtime_logging = RuntimeLoggingCapture()
+        bridge = UIEventBridge(
+            app=app,
+            event_queue=asyncio.Queue(),
+            runtime_logging=runtime_logging,
+        )
+        report = messages.UserErrorReport(
+            message=messages.UserMessageRef(
+                key="provider.failure",
+                params={
+                    "category": messages.DIAGNOSTIC_CATEGORY_NETWORK,
+                    "operation": "translate",
+                    "provider": "openrouter",
+                },
+                severity=messages.SEVERITY_ERROR,
+            ),
+            diagnostics=messages.ErrorDiagnostics(
+                component="provider.llm",
+                operation="translate",
+                code="provider.network",
+                category=messages.DIAGNOSTIC_CATEGORY_NETWORK,
+                visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+                content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+                status_code=None,
+                retry_after_ms=None,
+                fields={"raw_exception": raw_detail, "provider": "openrouter"},
+            ),
+        )
+
+        await bridge._handle_event(UIEvent(type=UIEventType.ERROR, payload=report))
+
+        expected = t(
+            "provider.failure",
+            category=messages.DIAGNOSTIC_CATEGORY_NETWORK,
+            operation="translate",
+            provider="openrouter",
+        )
+        assert app.view_dashboard.display_calls[-1] == (expected, None, True)
+        assert runtime_logging.basic_messages == [(logging.ERROR, expected)]
+        rendered = repr(app.view_dashboard.display_calls) + repr(runtime_logging.basic_messages)
+        assert raw_detail not in rendered
+        assert "provider-secret-123" not in rendered
+        assert "provider.network" not in rendered
+        assert "provider.failure (category=" not in rendered
+    finally:
+        set_locale(previous_locale)
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_localizes_direct_message_ref_payload() -> None:
+    previous_locale = get_locale()
+    set_locale("en")
+    try:
+        app = DummyApp()
+        runtime_logging = RuntimeLoggingCapture()
+        bridge = UIEventBridge(
+            app=app,
+            event_queue=asyncio.Queue(),
+            runtime_logging=runtime_logging,
+        )
+        message = messages.UserMessageRef(
+            key="stt.failure",
+            params={
+                "category": messages.DIAGNOSTIC_CATEGORY_TIMEOUT,
+                "operation": "open_session",
+                "provider": "soniox",
+            },
+            severity=messages.SEVERITY_ERROR,
+        )
+
+        await bridge._handle_event(UIEvent(type=UIEventType.ERROR, payload=message))
+
+        expected = t(
+            "stt.failure",
+            category=messages.DIAGNOSTIC_CATEGORY_TIMEOUT,
+            operation="open_session",
+            provider="soniox",
+        )
+        assert app.view_dashboard.display_calls[-1] == (expected, None, True)
+        assert runtime_logging.basic_messages == [(logging.ERROR, expected)]
+        rendered = repr(app.view_dashboard.display_calls) + repr(runtime_logging.basic_messages)
+        assert "UserMessageRef(" not in rendered
+        assert "stt.failure" not in rendered
+    finally:
+        set_locale(previous_locale)
+
+
+@pytest.mark.asyncio
 async def test_event_bridge_passes_dashboard_translation_visual_commit_metadata_to_dashboard() -> (
     None
 ):
@@ -1298,34 +1393,85 @@ async def test_event_bridge_error_with_broken_runtime_logging_uses_standard_logg
 
 
 @pytest.mark.asyncio
+async def test_event_bridge_routes_managed_message_report_to_snackbar_without_dashboard_clobber() -> (
+    None
+):
+    previous_locale = get_locale()
+    set_locale("en")
+    try:
+        app = DummyApp()
+        app.controller.managed_auth_pending = True
+        bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+        payload = messages.UserErrorReport(
+            message=messages.UserMessageRef(
+                key="managed_release.retry_after_ms",
+                params={"retry_after_ms": 9000},
+                severity=messages.SEVERITY_ERROR,
+            ),
+            diagnostics=messages.ErrorDiagnostics(
+                component="provider.llm",
+                operation="translate",
+                code="provider.unknown",
+                category=messages.DIAGNOSTIC_CATEGORY_UNKNOWN,
+                visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+                content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+                status_code=None,
+                retry_after_ms=9000,
+                fields={
+                    "exception_type": "ManagedOpenRouterUserFacingError",
+                    "managed_operation": "issue",
+                    "managed_code": "trial_unavailable",
+                    "managed_error_class": "retryable",
+                    "managed_subcode": "broker_backoff",
+                },
+            ),
+        )
+
+        await bridge._handle_event(
+            UIEvent(type=UIEventType.ERROR, payload=payload, runtime_log_handled=True)
+        )
+
+        expected = t("managed_release.retry_after_ms", retry_after_ms=9000)
+        assert app.snackbar_calls == [(expected, ft.Colors.ORANGE_700)]
+        assert app.clear_managed_auth_pending_calls == 1
+        assert app.view_dashboard.display_calls == []
+    finally:
+        set_locale(previous_locale)
+
+
+@pytest.mark.asyncio
 async def test_event_bridge_routes_managed_auth_error_to_snackbar_without_dashboard_clobber() -> (
     None
 ):
-    app = DummyApp()
-    app.controller.managed_auth_pending = True
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
-    payload = ManagedOpenRouterUserFacingError(
-        message_key="managed_release.retry_after_ms",
-        message_kwargs={"retry_after_ms": 9000},
-        diagnostics=ManagedOpenRouterReleaseDiagnostics(
-            operation="issue",
-            code="trial_unavailable",
-            error_class="retryable",
-            subcode="broker_backoff",
-            retry_after_ms=9000,
-            message="broker is temporarily unavailable",
-        ),
-    )
+    previous_locale = get_locale()
+    set_locale("en")
+    try:
+        app = DummyApp()
+        app.controller.managed_auth_pending = True
+        bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+        payload = ManagedOpenRouterUserFacingError(
+            message_key="managed_release.retry_after_ms",
+            message_kwargs={"retry_after_ms": 9000},
+            diagnostics=ManagedOpenRouterReleaseDiagnostics(
+                operation="issue",
+                code="trial_unavailable",
+                error_class="retryable",
+                subcode="broker_backoff",
+                retry_after_ms=9000,
+                message="broker is temporarily unavailable",
+            ),
+        )
 
-    await bridge._handle_event(
-        UIEvent(type=UIEventType.ERROR, payload=payload, runtime_log_handled=True)
-    )
+        await bridge._handle_event(
+            UIEvent(type=UIEventType.ERROR, payload=payload, runtime_log_handled=True)
+        )
 
-    assert app.snackbar_calls == [
-        (str(payload), ft.Colors.ORANGE_700),
-    ]
-    assert app.clear_managed_auth_pending_calls == 1
-    assert app.view_dashboard.display_calls == []
+        expected = t("managed_release.retry_after_ms", retry_after_ms=9000)
+        assert app.snackbar_calls == [(expected, ft.Colors.ORANGE_700)]
+        assert app.clear_managed_auth_pending_calls == 1
+        assert app.view_dashboard.display_calls == []
+    finally:
+        set_locale(previous_locale)
 
 
 @pytest.mark.asyncio

@@ -5,15 +5,17 @@ import contextlib
 import json
 import logging
 from collections import OrderedDict
+from collections.abc import Mapping
 from typing import Protocol
 
 import flet as ft
 
 from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterUserFacingError
+from puripuly_heart.core.messages import UserErrorReport, UserMessageRef
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.domain.events import STTSessionState, UIEvent, UIEventType
 from puripuly_heart.domain.models import OSCMessage, Transcript, Translation
-from puripuly_heart.ui.i18n import t
+from puripuly_heart.ui.i18n import localize_user_message_ref, t
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +235,7 @@ class AppErrorEventDestination:
         event: UIEvent,
     ) -> bool:
         self._emit_runtime_error_log(text, runtime_log_handled=event.runtime_log_handled)
-        if isinstance(payload, ManagedOpenRouterUserFacingError):
+        if _is_managed_openrouter_error_payload(payload):
             self._clear_managed_auth_pending_state()
             if self._show_managed_auth_snackbar(text):
                 return False
@@ -280,6 +282,40 @@ class AppErrorEventDestination:
             and "400" in msg_lower
             and stt_state in (STTSessionState.DRAINING, STTSessionState.DISCONNECTED)
         )
+
+
+def _localized_error_event_text(payload: object | None) -> str:
+    if isinstance(payload, ManagedOpenRouterUserFacingError):
+        return t(payload.message_key, **_safe_i18n_params(payload.message_kwargs))
+    if isinstance(payload, UserErrorReport):
+        return localize_user_message_ref(payload.message)
+    if isinstance(payload, UserMessageRef):
+        return localize_user_message_ref(payload)
+    return str(payload) if payload is not None else t("error.unknown")
+
+
+def _safe_i18n_params(params: Mapping[str, object]) -> dict[str, object]:
+    safe_params: dict[str, object] = {}
+    for key, value in params.items():
+        if not isinstance(key, str) or len(key) > 64:
+            continue
+        if value is None or isinstance(value, str | int | float | bool):
+            safe_params[key] = value
+    return safe_params
+
+
+def _is_managed_openrouter_error_payload(payload: object | None) -> bool:
+    if isinstance(payload, ManagedOpenRouterUserFacingError):
+        return True
+    if isinstance(payload, UserErrorReport):
+        return _is_managed_openrouter_message(payload.message)
+    if isinstance(payload, UserMessageRef):
+        return _is_managed_openrouter_message(payload)
+    return False
+
+
+def _is_managed_openrouter_message(message: UserMessageRef) -> bool:
+    return message.key.startswith("managed_release.")
 
 
 class UIEventBridge:
@@ -558,7 +594,7 @@ class UIEventBridge:
 
         if event.type == UIEventType.ERROR:
             payload = event.payload
-            text = str(payload) if payload is not None else t("error.unknown")
+            text = _localized_error_event_text(payload)
             if self.error_destination.publish_error(text, payload=payload, event=event):
                 self.dashboard_destination.publish_error(text)
             return

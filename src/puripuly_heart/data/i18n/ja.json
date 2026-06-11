@@ -19,6 +19,8 @@
   "display.stopping": "停止中...",
   "display.disconnected": "Zzz...",
   "display.input_hint": "メッセージを入力してください",
+  "provider.failure": "翻訳サービスでエラーが発生しました（{category}）。もう一度お試しください。",
+  "stt.failure": "音声認識でエラーが発生しました（{category}）。もう一度お試しください。",
   "settings.subtab.api": "API",
   "settings.subtab.general": "一般",
   "settings.subtab.prompt": "プロンプト",

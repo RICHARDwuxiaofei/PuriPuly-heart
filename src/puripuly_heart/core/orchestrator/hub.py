@@ -5,6 +5,7 @@ import logging
 import sys
 import time
 import traceback
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Protocol, cast
 from uuid import UUID, uuid4
@@ -23,7 +24,12 @@ from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterUserFacingError,
 )
-from puripuly_heart.core.messages import UserErrorReport, UserMessageRef
+from puripuly_heart.core.messages import (
+    SEVERITY_ERROR,
+    SafeMessageParam,
+    UserErrorReport,
+    UserMessageRef,
+)
 from puripuly_heart.core.orchestrator.channel_runtime import (
     ChannelRuntime,
     ContextEntry,
@@ -58,6 +64,7 @@ from puripuly_heart.domain.events import (
     STTPartialEvent,
     STTSessionState,
     STTSessionStateEvent,
+    UIErrorPayload,
     UIEvent,
     UIEventType,
 )
@@ -113,6 +120,16 @@ class _LatencyTimeline:
 
 class _StaleProviderCompletion(Exception):
     """Internal signal for provider calls completed by a replaced provider handle."""
+
+
+def _safe_user_message_params(params: Mapping[str, object]) -> dict[str, SafeMessageParam]:
+    safe_params: dict[str, SafeMessageParam] = {}
+    for key, value in params.items():
+        if not isinstance(key, str) or len(key) > 64:
+            continue
+        if value is None or isinstance(value, str | int | float | bool):
+            safe_params[key] = value
+    return safe_params
 
 
 @dataclass(slots=True)
@@ -827,7 +844,20 @@ class ClientHub:
         return report
 
     @staticmethod
-    def _stt_error_event_payload(event: STTErrorEvent) -> object | None:
+    def _translation_error_payload(exc: Exception, report: UserErrorReport) -> UserErrorReport:
+        if not isinstance(exc, ManagedOpenRouterUserFacingError):
+            return report
+        return UserErrorReport(
+            message=UserMessageRef(
+                key=exc.message_key,
+                params=_safe_user_message_params(exc.message_kwargs),
+                severity=SEVERITY_ERROR,
+            ),
+            diagnostics=report.diagnostics,
+        )
+
+    @staticmethod
+    def _stt_error_event_payload(event: STTErrorEvent) -> UIErrorPayload | None:
         if isinstance(event.message, UserMessageRef) and event.diagnostics is not None:
             return UserErrorReport(message=event.message, diagnostics=event.diagnostics)
         return event.message
@@ -3117,7 +3147,7 @@ class ClientHub:
                 runtime
             )
             denied_fallback_to_chatbox = self.fallback_transcript_only and deny_peer_chatbox_attempt
-            payload: object = exc if isinstance(exc, ManagedOpenRouterUserFacingError) else report
+            payload = self._translation_error_payload(exc, report)
             await self.ui_events.put(
                 UIEvent(
                     type=UIEventType.ERROR,

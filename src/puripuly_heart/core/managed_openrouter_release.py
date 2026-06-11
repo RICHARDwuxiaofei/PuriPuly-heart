@@ -1067,12 +1067,50 @@ class ManagedOpenRouterUserFacingError(RuntimeError):
     diagnostics: ManagedOpenRouterReleaseDiagnostics | None = None
 
     def __str__(self) -> str:
-        from puripuly_heart.ui.i18n import t
+        parts = [
+            "ManagedOpenRouterUserFacingError",
+            f"message_key={_safe_diagnostic_label(self.message_key) or 'unknown'}",
+        ]
+        for key, value in sorted(self.message_kwargs.items()):
+            safe_key = _safe_diagnostic_label(key)
+            if not safe_key:
+                continue
+            if isinstance(value, str):
+                continue
+            safe_value = _safe_diagnostic_scalar(value)
+            if safe_value is not None:
+                parts.append(f"{safe_key}={safe_value}")
 
-        try:
-            return t(self.message_key, **dict(self.message_kwargs))
-        except Exception:
-            return self.message_key
+        diagnostics = self.diagnostics
+        if diagnostics is not None:
+            for name in ("operation", "code", "error_class", "subcode", "retry_after_ms"):
+                safe_value = _safe_diagnostic_scalar(getattr(diagnostics, name, None))
+                if safe_value is not None:
+                    parts.append(f"{name}={safe_value}")
+        return " ".join(parts)
+
+
+def _safe_diagnostic_label(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) > 64:
+        return None
+    if not all(char.isalnum() or char in "._:-" for char in text):
+        return None
+    return text
+
+
+def _safe_diagnostic_scalar(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(value) if value == value and value not in (float("inf"), float("-inf")) else None
+    return _safe_diagnostic_label(value)
 
 
 @dataclass(slots=True)

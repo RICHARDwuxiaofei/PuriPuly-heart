@@ -35,6 +35,11 @@ GITHUB_STAR_SNACKBAR_KEYS = (
 )
 OVERLAY_STEAMVR_NOT_RUNNING_KEY = "settings.overlay.failure.steamvr_not_running"
 SETTINGS_MUTATION_MESSAGE_KEYS = ("settings.mutation.runtime_apply_failed",)
+MESSAGE_ERROR_BOUNDARY_KEYS = (
+    "provider.failure",
+    "stt.failure",
+    "settings.mutation.runtime_apply_failed",
+)
 
 EXPECTED_GITHUB_STAR_SNACKBAR_KO_COPY = {
     "github_star.snackbar.message": "PuriPuly가 도움이 됐다면 GitHub에서 Star를 눌러주세요! 큰 힘이 되어요!",
@@ -246,6 +251,19 @@ def test_settings_mutation_message_keys_are_localized_for_all_supported_locales(
         missing = sorted(set(SETTINGS_MUTATION_MESSAGE_KEYS) - set(bundle))
         assert missing == [], locale
         for key in SETTINGS_MUTATION_MESSAGE_KEYS:
+            assert bundle[key].strip()
+            assert bundle[key] != key
+
+
+def test_message_error_boundary_keys_are_localized_for_all_supported_locales() -> None:
+    bundles = _load_bundles()
+    supported_locales = set(available_locales())
+
+    assert set(bundles) == supported_locales
+    for locale, bundle in bundles.items():
+        missing = sorted(set(MESSAGE_ERROR_BOUNDARY_KEYS) - set(bundle))
+        assert missing == [], locale
+        for key in MESSAGE_ERROR_BOUNDARY_KEYS:
             assert bundle[key].strip()
             assert bundle[key] != key
 

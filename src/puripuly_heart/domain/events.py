@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import TypeAlias
 from uuid import UUID
 
-from puripuly_heart.core.messages import ErrorDiagnostics, UserMessageRef
+from puripuly_heart.core.messages import ErrorDiagnostics, UserErrorReport, UserMessageRef
 
 from .models import ChannelId, Transcript
 
@@ -83,6 +84,7 @@ class STTSessionStateEvent:
 
 
 STTEvent = STTPartialEvent | STTFinalEvent | STTErrorEvent | STTSessionStateEvent
+UIErrorPayload: TypeAlias = UserMessageRef | UserErrorReport | str
 
 
 class UIEventType(str, Enum):

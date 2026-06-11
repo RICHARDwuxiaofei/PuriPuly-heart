@@ -14,6 +14,7 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseDiagnostics,
     ManagedOpenRouterUserFacingError,
 )
+from puripuly_heart.core.messages import UserErrorReport
 from puripuly_heart.core.orchestrator.hub import ClientHub, ContextEntry, _MergeBuffer
 from puripuly_heart.core.overlay.state import ActiveSelfOverlayMetadata
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
@@ -1019,7 +1020,17 @@ async def test_translate_and_enqueue_logs_managed_auth_diagnostics() -> None:
         events = [await hub.ui_events.get() for _ in range(2)]
         assert [event.type for event in events] == [UIEventType.ERROR, UIEventType.OSC_SENT]
         assert events[0].runtime_log_handled is True
-        assert isinstance(events[0].payload, ManagedOpenRouterUserFacingError)
+        payload = events[0].payload
+        assert isinstance(payload, UserErrorReport)
+        assert payload.message.key == "managed_release.retry_after_ms"
+        assert dict(payload.message.params) == {"retry_after_ms": 9000}
+        assert payload.diagnostics.code == "provider.service_unavailable"
+        assert payload.diagnostics.fields["exception_type"] == "ManagedOpenRouterUserFacingError"
+        assert payload.diagnostics.fields["managed_operation"] == "issue"
+        assert payload.diagnostics.fields["managed_code"] == "trial_unavailable"
+        assert payload.diagnostics.fields["managed_error_class"] == "retryable"
+        assert payload.diagnostics.fields["managed_subcode"] == "broker_backoff"
+        assert "broker is temporarily unavailable" not in repr(payload)
         messages = _runtime_log_messages(log_stream)
         assert any(
             "managed_operation=issue managed_code=trial_unavailable "

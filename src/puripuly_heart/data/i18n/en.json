@@ -19,6 +19,8 @@
   "display.stopping": "Stopping...",
   "display.disconnected": "Zzz...",
   "display.input_hint": "Type message to send",
+  "provider.failure": "Translation provider error ({category}). Please try again.",
+  "stt.failure": "Speech recognition error ({category}). Please try again.",
   "settings.subtab.api": "API",
   "settings.subtab.general": "General",
   "settings.subtab.prompt": "Prompt",

@@ -6,6 +6,7 @@ from importlib import resources
 from typing import Any
 
 from puripuly_heart.core.language import get_language_info
+from puripuly_heart.core.messages import UserMessageRef
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,10 @@ def t_for_locale(
                 params,
             )
     return value
+
+
+def localize_user_message_ref(message: UserMessageRef) -> str:
+    return t(message.key, **dict(message.params))
 
 
 def language_name(code: str) -> str:

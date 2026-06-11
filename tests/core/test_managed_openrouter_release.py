@@ -4,7 +4,9 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import sys
 import threading
+import types
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -253,6 +255,43 @@ def _make_service(
 
 def _make_fingerprint_salt() -> ManagedOpenRouterFingerprintSalt:
     return ManagedOpenRouterFingerprintSalt(version=7, salt="fingerprint-salt-test")
+
+
+def test_user_facing_error_str_is_diagnostic_safe_without_ui_i18n(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    i18n_calls: list[tuple[str, dict[str, object]]] = []
+    fake_i18n = types.ModuleType("puripuly_heart.ui.i18n")
+
+    def fake_t(key: str, **params: object) -> str:
+        i18n_calls.append((key, dict(params)))
+        return "localized broker raw payload token=provider-secret-123"
+
+    fake_i18n.t = fake_t  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.i18n", fake_i18n)
+    error = ManagedOpenRouterUserFacingError(
+        message_key="managed_release.retry_after_ms",
+        message_kwargs={"retry_after_ms": 9000, "detail": "provider-secret-123"},
+        diagnostics=ManagedOpenRouterReleaseDiagnostics(
+            operation="issue",
+            code="trial_unavailable",
+            error_class="retryable",
+            subcode="broker_backoff",
+            retry_after_ms=9000,
+            message="broker raw payload token=provider-secret-123",
+        ),
+    )
+
+    rendered = str(error)
+
+    assert i18n_calls == []
+    assert "managed_release.retry_after_ms" in rendered
+    assert "retry_after_ms=9000" in rendered
+    assert "operation=issue" in rendered
+    assert "trial_unavailable" in rendered
+    assert "broker raw payload" not in rendered
+    assert "provider-secret-123" not in rendered
+    assert "localized" not in rendered
 
 
 @dataclass
