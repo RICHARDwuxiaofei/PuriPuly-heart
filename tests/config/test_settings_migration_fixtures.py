@@ -116,7 +116,47 @@ def test_vnext_schema_persisted_leaves_are_classified_from_current_settings() ->
         if _claims_vnext_schema_destination(classification.destination, classification.status)
     }
 
-    assert sorted(vnext_leaf_paths - classified_vnext_destinations) == []
+    assert (
+        sorted(
+            vnext_leaf_paths
+            - classified_vnext_destinations
+            - fixtures.VNEXT_NATIVE_PERSISTED_LEAF_PATHS
+        )
+        == []
+    )
+
+
+def test_vnext_native_provider_verification_evidence_leaves_are_explicitly_excluded() -> None:
+    providers = {
+        "alibaba_beijing",
+        "alibaba_singapore",
+        "deepgram",
+        "deepseek",
+        "google",
+        "openrouter",
+        "soniox",
+    }
+    fields = {
+        "provider",
+        "secret_key",
+        "secret_revision",
+        "secret_fingerprint",
+        "verifier_context",
+        "verifier_evidence",
+    }
+    expected = frozenset(
+        f"state.provider_verification.{provider}.{field}"
+        for provider in providers
+        for field in fields
+    )
+    classified_vnext_destinations = {
+        classification.destination
+        for classification in V24_MIGRATION_CLASSIFICATION.values()
+        if _claims_vnext_schema_destination(classification.destination, classification.status)
+    }
+
+    assert fixtures.VNEXT_NATIVE_PERSISTED_LEAF_PATHS == expected
+    assert fixtures.VNEXT_NATIVE_PERSISTED_LEAF_PATHS.isdisjoint(classified_vnext_destinations)
 
 
 def test_serialized_field_paths_include_empty_non_dynamic_dicts() -> None:

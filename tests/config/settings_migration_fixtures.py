@@ -49,6 +49,26 @@ ADR_RESOLVED_CURRENT_DESTINATIONS = {
     "ui.integrated_context_bootstrapped": "state.integrated_context.bootstrapped",
 }
 DECISION_PENDING_CURRENT_DESTINATIONS: dict[str, str] = {}
+VNEXT_NATIVE_PERSISTED_LEAF_PATHS = frozenset(
+    f"state.provider_verification.{provider}.{field}"
+    for provider in (
+        "alibaba_beijing",
+        "alibaba_singapore",
+        "deepgram",
+        "deepseek",
+        "google",
+        "openrouter",
+        "soniox",
+    )
+    for field in (
+        "provider",
+        "secret_key",
+        "secret_revision",
+        "secret_fingerprint",
+        "verifier_context",
+        "verifier_evidence",
+    )
+)
 
 CURRENT_USER_INTENT_DESTINATIONS = {
     "audio.input_device": "intent.audio.input_device",

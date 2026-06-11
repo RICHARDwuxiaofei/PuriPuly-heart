@@ -61,6 +61,10 @@ def _compat() -> ModuleType:
     return _load_module("puripuly_heart.config.settings_vnext.compat")
 
 
+def _facade() -> ModuleType:
+    return _load_module("puripuly_heart.config.settings_vnext.facade")
+
+
 def _leaf_paths(value: object, prefix: str = "") -> set[str]:
     if isinstance(value, dict):
         paths: set[str] = set()
@@ -520,3 +524,20 @@ def test_public_settings_facade_keeps_legacy_imports_and_reads_vnext_dict() -> N
     assert legacy.settings_version == SETTINGS_SCHEMA_VERSION
     assert hasattr(settings_module, "load_vnext_settings")
     assert hasattr(settings_module, "save_settings_with_result")
+
+
+def test_public_settings_facade_load_save_functions_are_owned_by_vnext_facade() -> None:
+    settings_module = import_module("puripuly_heart.config.settings")
+    facade = _facade()
+
+    assert settings_module.FacadeSettingsLoadResult is facade.FacadeSettingsLoadResult
+    assert settings_module._FacadeSettingsLoadResult is facade.FacadeSettingsLoadResult
+    for name in (
+        "load_settings",
+        "load_settings_with_result",
+        "save_settings",
+        "save_settings_with_result",
+        "load_vnext_settings",
+        "save_vnext_settings",
+    ):
+        assert getattr(settings_module, name) is getattr(facade, name)

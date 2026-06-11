@@ -7,7 +7,6 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -33,7 +32,7 @@ from puripuly_heart.config.llm_profiles import (
     openrouter_alias_for_fields,
 )
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
-from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
+from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext  # noqa: F401
 
 SETTINGS_SCHEMA_VERSION = 24
 STT_INTERNAL_SAMPLE_RATE_HZ = 16000
@@ -3604,105 +3603,14 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     return settings
 
 
-@dataclass(frozen=True, slots=True)
-class FacadeSettingsLoadResult:
-    status: Any
-    settings: AppSettings | None = None
-    migrated: bool = False
-    backup_path: Path | None = None
-    error: Any | None = None
-
-    @property
-    def ok(self) -> bool:
-        status_value = getattr(self.status, "value", self.status)
-        return status_value == "success"
-
+from puripuly_heart.config.settings_vnext.facade import (  # noqa: E402,F401
+    FacadeSettingsLoadResult,
+    load_settings,
+    load_settings_with_result,
+    load_vnext_settings,
+    save_settings,
+    save_settings_with_result,
+    save_vnext_settings,
+)
 
 _FacadeSettingsLoadResult = FacadeSettingsLoadResult
-
-
-def load_settings(path: Path) -> AppSettings:
-    result = load_settings_with_result(path)
-    if result.settings is None:
-        raise RuntimeError(
-            result.error.message if result.error is not None else result.status.value
-        )
-    return result.settings
-
-
-def load_settings_with_result(path: Path):
-    from puripuly_heart.config.settings_vnext import compat as vnext_compat
-    from puripuly_heart.config.settings_vnext import migration as vnext_migration
-
-    result = vnext_compat.load_vnext_settings(path)
-    if result.settings is None:
-        return result
-    try:
-        legacy_settings = from_dict(vnext_migration.to_legacy_dict(result.settings))
-    except Exception as exc:
-        status = vnext_compat.SettingsPersistenceStatus.MIGRATION_FAILED
-        return _FacadeSettingsLoadResult(
-            status=status,
-            settings=None,
-            migrated=result.migrated,
-            backup_path=result.backup_path,
-            error=vnext_compat.SettingsPersistenceError(
-                status,
-                f"{type(exc).__name__}: {exc}",
-            ),
-        )
-    return _FacadeSettingsLoadResult(
-        status=result.status,
-        settings=legacy_settings,
-        migrated=result.migrated,
-        backup_path=result.backup_path,
-        error=result.error,
-    )
-
-
-def save_settings(path: Path, settings: AppSettings | AppSettingsVNext) -> None:
-    result = save_settings_with_result(path, settings)
-    if not result.ok:
-        raise RuntimeError(
-            result.error.message if result.error is not None else result.status.value
-        )
-
-
-def save_settings_with_result(path: Path, settings: AppSettings | AppSettingsVNext):
-    from puripuly_heart.config.settings_vnext import compat as vnext_compat
-    from puripuly_heart.config.settings_vnext import migration as vnext_migration
-
-    if isinstance(settings, AppSettingsVNext):
-        vnext_settings = settings
-    else:
-        settings.validate()
-        vnext_settings = vnext_migration.from_legacy_app_settings(
-            settings,
-            preserve_provider_verification=True,
-        )
-    return vnext_compat.save_vnext_settings(path, vnext_settings)
-
-
-def load_vnext_settings(path: Path, **kwargs: Any):
-    from puripuly_heart.config.settings_vnext.compat import load_vnext_settings as _load
-
-    return _load(path, **kwargs)
-
-
-def save_vnext_settings(path: Path, settings: AppSettingsVNext):
-    from puripuly_heart.config.settings_vnext.compat import save_vnext_settings as _save
-
-    return _save(path, settings)
-
-
-def _atomic_write_text(path: Path, content: str, *, encoding: str) -> None:
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    try:
-        tmp_path.write_text(content, encoding=encoding)
-        tmp_path.replace(path)
-    except Exception:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise

@@ -90,6 +90,7 @@ LAYER_RULES = (
             "puripuly_heart.config.settings_vnext.migration",
             "puripuly_heart.config.settings_vnext.serialization",
             "puripuly_heart.config.settings_vnext.compat",
+            "puripuly_heart.config.settings_vnext.facade",
         ),
         forbidden_layers=frozenset(
             {
@@ -741,6 +742,40 @@ def test_overlay_calibration_value_object_has_config_schema_ownership() -> None:
     }
 
     assert not (forbidden_imports & actual_imports)
+
+
+def test_settings_public_facade_delegates_persistence_helpers_to_vnext_facade() -> None:
+    assert (
+        _layer_for_module("puripuly_heart.config.settings_vnext.facade") == MIGRATION_SERIALIZATION
+    )
+
+    settings_path = SOURCE_PACKAGE_ROOT / "config" / "settings.py"
+    tree = ast.parse(settings_path.read_text(encoding="utf-8"))
+    delegated_names = {
+        "FacadeSettingsLoadResult",
+        "load_settings",
+        "load_settings_with_result",
+        "save_settings",
+        "save_settings_with_result",
+        "load_vnext_settings",
+        "save_vnext_settings",
+    }
+    helper_definitions = delegated_names | {"_atomic_write_text"}
+    definitions = {
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+    }
+    facade_imports = {
+        alias.name
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "puripuly_heart.config.settings_vnext.facade"
+        for alias in node.names
+    }
+
+    assert definitions.isdisjoint(helper_definitions)
+    assert delegated_names <= facade_imports
 
 
 def test_internal_source_imports_canonical_overlay_calibration_not_ui_facade() -> None:
