@@ -242,6 +242,94 @@ class RuntimeLoggingCapture:
         return True
 
 
+class RecordingDashboardDestination:
+    def __init__(self) -> None:
+        self.statuses: list[str] = []
+        self.transcripts: list[dict[str, object]] = []
+        self.translations: list[dict[str, object]] = []
+        self.errors: list[str] = []
+
+    def publish_status(self, status: str) -> None:
+        self.statuses.append(status)
+
+    def publish_transcript(self, text: str, **metadata: object) -> None:
+        self.transcripts.append({"text": text, **metadata})
+
+    def publish_translation(self, text: str, **metadata: object) -> None:
+        self.translations.append({"text": text, **metadata})
+
+    def publish_error(self, text: str) -> None:
+        self.errors.append(text)
+
+
+class RecordingHistoryDestination:
+    def __init__(self) -> None:
+        self.entries: list[dict[str, object]] = []
+
+    def append_entry(
+        self,
+        source: str,
+        text: str,
+        *,
+        translated: bool = False,
+        language_code: str | None = None,
+    ) -> None:
+        self.entries.append(
+            {
+                "source": source,
+                "text": text,
+                "translated": translated,
+                "language_code": language_code,
+            }
+        )
+
+
+class RecordingConversationDestination:
+    def __init__(self) -> None:
+        self.records: list[dict[str, object]] = []
+
+    def append_record(
+        self,
+        *,
+        source: str,
+        channel: str,
+        source_text: str,
+        translated_text: str,
+        origin_wall_clock_ms: int | None = None,
+    ) -> None:
+        self.records.append(
+            {
+                "source": source,
+                "channel": channel,
+                "source_text": source_text,
+                "translated_text": translated_text,
+                "origin_wall_clock_ms": origin_wall_clock_ms,
+            }
+        )
+
+
+class RecordingErrorDestination:
+    def __init__(self, *, show_dashboard_error: bool = True) -> None:
+        self.show_dashboard_error = show_dashboard_error
+        self.errors: list[dict[str, object]] = []
+
+    def publish_error(
+        self,
+        text: str,
+        *,
+        payload: object | None,
+        event: UIEvent,
+    ) -> bool:
+        self.errors.append(
+            {
+                "text": text,
+                "payload": payload,
+                "runtime_log_handled": event.runtime_log_handled,
+            }
+        )
+        return self.show_dashboard_error
+
+
 def assert_dashboard_translation_applied_marker(
     message: str,
     *,
@@ -701,6 +789,103 @@ async def test_event_bridge_logs_self_dashboard_translation_applied_detail_only(
         translation_target_language="en",
         text_len=len("translated self"),
     )
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_accepts_separable_dashboard_history_conversation_destinations() -> None:
+    app = DummyApp()
+    dashboard = RecordingDashboardDestination()
+    history = RecordingHistoryDestination()
+    conversation = RecordingConversationDestination()
+    bridge = UIEventBridge(
+        app=app,
+        event_queue=asyncio.Queue(),
+        dashboard_destination=dashboard,
+        history_destination=history,
+        conversation_destination=conversation,
+    )
+    utterance_id = uuid4()
+
+    await bridge._handle_event(
+        UIEvent(type=UIEventType.SESSION_STATE_CHANGED, payload=STTSessionState.STREAMING)
+    )
+    await bridge._handle_event(
+        UIEvent(
+            type=UIEventType.TRANSCRIPT_FINAL,
+            payload=Transcript(utterance_id=utterance_id, text="source text", is_final=True),
+            source="Mic",
+        )
+    )
+    await bridge._handle_event(
+        UIEvent(
+            type=UIEventType.TRANSLATION_DONE,
+            payload=Translation(
+                utterance_id=utterance_id,
+                text="translated text",
+                source_text="source text",
+                channel="self",
+                origin_wall_clock_ms=1712345678901,
+            ),
+            source="Mic",
+        )
+    )
+
+    assert dashboard.statuses == ["connected"]
+    assert dashboard.transcripts[-1]["text"] == "source text"
+    assert dashboard.translations[-1]["text"] == "translated text"
+    assert history.entries == [
+        {
+            "source": "Mic",
+            "text": "source text",
+            "translated": False,
+            "language_code": "ko",
+        },
+        {
+            "source": "Mic",
+            "text": "translated text",
+            "translated": True,
+            "language_code": "en",
+        },
+    ]
+    assert conversation.records == [
+        {
+            "source": "Mic",
+            "channel": "self",
+            "source_text": "source text",
+            "translated_text": "translated text",
+            "origin_wall_clock_ms": 1712345678901,
+        }
+    ]
+    assert app.view_dashboard.display_calls == []
+    assert app.history == []
+    assert app.view_logs.conversation_records == []
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_error_destination_is_separable_from_dashboard_display() -> None:
+    app = DummyApp()
+    dashboard = RecordingDashboardDestination()
+    error_destination = RecordingErrorDestination(show_dashboard_error=False)
+    bridge = UIEventBridge(
+        app=app,
+        event_queue=asyncio.Queue(),
+        dashboard_destination=dashboard,
+        error_destination=error_destination,
+    )
+
+    await bridge._handle_event(
+        UIEvent(type=UIEventType.ERROR, payload="separable failure", runtime_log_handled=True)
+    )
+
+    assert error_destination.errors == [
+        {
+            "text": "separable failure",
+            "payload": "separable failure",
+            "runtime_log_handled": True,
+        }
+    ]
+    assert dashboard.errors == []
+    assert app.view_dashboard.display_calls == []
 
 
 @pytest.mark.asyncio

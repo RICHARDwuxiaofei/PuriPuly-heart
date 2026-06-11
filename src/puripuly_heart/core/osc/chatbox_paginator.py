@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import logging
 import textwrap
+from collections.abc import Callable
 from dataclasses import dataclass
+from uuid import UUID
 
 from puripuly_heart.core.clock import Clock
 from puripuly_heart.core.osc.sender import OscSender
+from puripuly_heart.core.output.models import SelfUtterancePublication, SystemDisclosurePublication
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.models import OSCMessage
 
@@ -158,3 +161,36 @@ class ChatboxPaginator:
             self.runtime_logging.emit_detailed(message, level=level)
             return
         logger.debug(message)
+
+
+@dataclass(slots=True)
+class ChatboxPaginatorOutputAdapter:
+    paginator: ChatboxPaginator
+    render_system_disclosure: Callable[[SystemDisclosurePublication], str]
+    include_source: bool = True
+
+    async def publish_self_utterance(self, publication: SelfUtterancePublication) -> None:
+        message = OSCMessage(
+            utterance_id=UUID(publication.utterance_id),
+            text=self._merge_chatbox_text(publication),
+            created_at=self.paginator.clock.now(),
+        )
+        self.paginator.enqueue(message)
+        self.paginator.send_typing(False)
+
+    async def publish_system_disclosure(self, publication: SystemDisclosurePublication) -> None:
+        message = OSCMessage(
+            utterance_id=UUID(publication.disclosure_id),
+            text=self.render_system_disclosure(publication),
+            created_at=self.paginator.clock.now(),
+        )
+        self.paginator.enqueue(message)
+
+    def _merge_chatbox_text(self, publication: SelfUtterancePublication) -> str:
+        transcript_text = publication.transcript_text or ""
+        translation_text = publication.translation_text
+        if translation_text is None:
+            return transcript_text
+        if self.include_source and transcript_text:
+            return f"{transcript_text} ({translation_text})"
+        return translation_text

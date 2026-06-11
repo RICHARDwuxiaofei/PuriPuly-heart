@@ -11,6 +11,7 @@ from typing import Callable, Protocol
 from uuid import uuid4
 
 from puripuly_heart.config.paths import user_config_dir
+from puripuly_heart.core.output.models import OutputRoutingDecision
 
 MAIN_LOG_FILENAME = "puripuly_heart.log"
 MAIN_LOG_BACKUP_FILENAME = "puripuly_heart.backup.log"
@@ -383,6 +384,10 @@ class SessionRuntimeLoggingService:
         self._session_logger.log(level, build_message())
         return True
 
+    async def observe_output_routing(self, decision: OutputRoutingDecision) -> None:
+        with contextlib.suppress(Exception):
+            self.emit_detailed_lazy(lambda: _format_output_routing_decision(decision))
+
     def emit_persisted(self, message: str, *, level: int = logging.INFO) -> None:
         if self._closed:
             return
@@ -438,6 +443,19 @@ def _ensure_handler(logger: logging.Logger, handler: logging.Handler) -> bool:
 
 def _new_session_logger_name() -> str:
     return f"{_SESSION_LOGGER_NAME}.{uuid4()}"
+
+
+def _format_output_routing_decision(decision: OutputRoutingDecision) -> str:
+    metadata_keys = ",".join(sorted(str(key) for key in decision.metadata))
+    return (
+        "[Detailed][OutputRouter] routing_decision "
+        f"decision={decision.decision} "
+        f"route={decision.route} "
+        f"publication_id={decision.publication_id} "
+        f"publication_kind={decision.publication_kind} "
+        f"reason={decision.reason} "
+        f"metadata_keys={metadata_keys}"
+    )
 
 
 def _find_main_stream_handler(logger: logging.Logger) -> logging.Handler | None:

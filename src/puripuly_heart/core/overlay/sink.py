@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, ClassVar, Literal, Protocol
 from uuid import UUID, uuid4
 
 from puripuly_heart.core.clock import Clock, SystemClock
+from puripuly_heart.core.messages import DiagnosticFieldValue
+from puripuly_heart.core.output.models import PeerSubtitlePublication
 from puripuly_heart.domain.models import ChannelId, Transcript
 
 AppliedContextMode = Literal["local", "integrated"]
@@ -241,11 +243,24 @@ class OverlayEventAdapter:
         *,
         source_language: str,
         target_language: str,
+        created_at: float | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
     ) -> SelfTranscriptFinal | PeerTranscriptFinal:
         common = self._common_event_fields(
             utterance_id=transcript.utterance_id,
             channel=transcript.channel,
-            created_at=transcript.created_at,
+            created_at=created_at if created_at is not None else transcript.created_at,
+            update_id=update_id,
+            origin_wall_clock_ms=origin_wall_clock_ms,
+            session_scope=session_scope,
+            source_text_hash=source_text_hash,
+            source_text_len=source_text_len,
+            logical_turn_key=logical_turn_key,
         )
         event_cls = SelfTranscriptFinal if transcript.channel == "self" else PeerTranscriptFinal
         return event_cls(
@@ -455,3 +470,84 @@ class OverlayEventAdapter:
             "source_text_len": source_text_len,
             "logical_turn_key": logical_turn_key,
         }
+
+
+@dataclass(slots=True)
+class SubtitleOverlayOutputAdapter:
+    sink: OverlaySink
+    event_adapter: OverlayEventAdapter = field(default_factory=OverlayEventAdapter)
+    applied_context_mode: AppliedContextMode | None = None
+
+    async def publish_peer_subtitle(self, publication: PeerSubtitlePublication) -> None:
+        utterance_id = UUID(publication.utterance_id)
+        source_text = publication.transcript_text or ""
+        translation_text = publication.translation_text or ""
+        source_language = publication.source_language or ""
+        target_language = publication.target_language or ""
+        protocol_metadata = _overlay_protocol_metadata(publication.metadata)
+
+        if translation_text.strip():
+            await self.sink.emit(
+                self.event_adapter.translation_final(
+                    utterance_id=utterance_id,
+                    channel="peer",
+                    text=translation_text,
+                    source_text=source_text,
+                    source_language=source_language,
+                    target_language=target_language,
+                    applied_context_mode=self.applied_context_mode,
+                    **protocol_metadata,
+                )
+            )
+            return
+
+        await self.sink.emit(
+            self.event_adapter.transcript_final(
+                Transcript(
+                    utterance_id=utterance_id,
+                    text=source_text,
+                    is_final=publication.is_final,
+                    channel="peer",
+                ),
+                source_language=source_language,
+                target_language=target_language,
+                **protocol_metadata,
+            )
+        )
+
+
+def _overlay_protocol_metadata(
+    metadata: Mapping[str, DiagnosticFieldValue],
+) -> dict[str, str | int | float | None]:
+    return {
+        "created_at": _metadata_float(metadata, "created_at"),
+        "update_id": _metadata_str(metadata, "update_id"),
+        "origin_wall_clock_ms": _metadata_int(metadata, "origin_wall_clock_ms"),
+        "session_scope": _metadata_str(metadata, "session_scope"),
+        "source_text_hash": _metadata_str(metadata, "source_text_hash"),
+        "source_text_len": _metadata_int(metadata, "source_text_len"),
+        "logical_turn_key": _metadata_str(metadata, "logical_turn_key"),
+    }
+
+
+def _metadata_str(metadata: Mapping[str, DiagnosticFieldValue], key: str) -> str | None:
+    value = metadata.get(key)
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _metadata_int(metadata: Mapping[str, DiagnosticFieldValue], key: str) -> int | None:
+    value = metadata.get(key)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _metadata_float(metadata: Mapping[str, DiagnosticFieldValue], key: str) -> float | None:
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    return None

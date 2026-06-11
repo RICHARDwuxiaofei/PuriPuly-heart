@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 from collections import OrderedDict
+from typing import Protocol
 
 import flet as ft
 
@@ -25,6 +26,262 @@ def _short_visual_debug_token(value: object | None) -> str:
     return (normalized[:4] or "none").lower()
 
 
+class DashboardEventDestination(Protocol):
+    def publish_status(self, status: str) -> None: ...
+
+    def publish_transcript(
+        self,
+        text: str,
+        *,
+        language_code: str | None = None,
+        utterance_id: object | None = None,
+        channel: str | None = None,
+        source_text_len: int | None = None,
+        transcript_kind: str | None = None,
+        should_log: bool = False,
+        debug_prefix: str | None = None,
+    ) -> bool | None: ...
+
+    def publish_translation(
+        self,
+        text: str,
+        *,
+        language_code: str | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        utterance_id: object | None = None,
+        channel: str | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
+        debug_prefix: str | None = None,
+    ) -> bool | None: ...
+
+    def publish_error(self, text: str) -> None: ...
+
+
+class HistoryEventDestination(Protocol):
+    def append_entry(
+        self,
+        source: str,
+        text: str,
+        *,
+        translated: bool = False,
+        language_code: str | None = None,
+    ) -> None: ...
+
+
+class ConversationEventDestination(Protocol):
+    def append_record(
+        self,
+        *,
+        source: str,
+        channel: str,
+        source_text: str,
+        translated_text: str,
+        origin_wall_clock_ms: int | None = None,
+    ) -> None: ...
+
+
+class ErrorEventDestination(Protocol):
+    def publish_error(
+        self,
+        text: str,
+        *,
+        payload: object | None,
+        event: UIEvent,
+    ) -> bool: ...
+
+
+class AppDashboardEventDestination:
+    def __init__(self, app: object) -> None:
+        self._app = app
+
+    def _dashboard(self) -> object | None:
+        return getattr(self._app, "view_dashboard", None)
+
+    def publish_status(self, status: str) -> None:
+        dashboard = self._dashboard()
+        if dashboard is not None:
+            dashboard.set_status(status)
+
+    def publish_transcript(
+        self,
+        text: str,
+        *,
+        language_code: str | None = None,
+        utterance_id: object | None = None,
+        channel: str | None = None,
+        source_text_len: int | None = None,
+        transcript_kind: str | None = None,
+        should_log: bool = False,
+        debug_prefix: str | None = None,
+    ) -> bool:
+        dashboard = self._dashboard()
+        if dashboard is None:
+            return False
+        dashboard.set_display_text(
+            text,
+            language_code=language_code,
+            utterance_id=utterance_id,
+            channel=channel,
+            source_text_len=source_text_len,
+            transcript_kind=transcript_kind,
+            should_log=should_log,
+            debug_prefix=debug_prefix,
+        )
+        return True
+
+    def publish_translation(
+        self,
+        text: str,
+        *,
+        language_code: str | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        utterance_id: object | None = None,
+        channel: str | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
+        debug_prefix: str | None = None,
+    ) -> bool:
+        dashboard = self._dashboard()
+        if dashboard is None:
+            return False
+        dashboard.set_display_translation_text(
+            text,
+            language_code=language_code,
+            update_id=update_id,
+            origin_wall_clock_ms=origin_wall_clock_ms,
+            utterance_id=utterance_id,
+            channel=channel,
+            session_scope=session_scope,
+            source_text_hash=source_text_hash,
+            source_text_len=source_text_len,
+            logical_turn_key=logical_turn_key,
+            debug_prefix=debug_prefix,
+        )
+        return True
+
+    def publish_error(self, text: str) -> None:
+        dashboard = self._dashboard()
+        if dashboard is not None:
+            dashboard.set_display_text(text, is_error=True)
+
+
+class AppHistoryEventDestination:
+    def __init__(self, app: object) -> None:
+        self._app = app
+
+    def append_entry(
+        self,
+        source: str,
+        text: str,
+        *,
+        translated: bool = False,
+        language_code: str | None = None,
+    ) -> None:
+        add_history = getattr(self._app, "add_history_entry", None)
+        if callable(add_history):
+            add_history(source, text, translated=translated, language_code=language_code)
+
+
+class AppConversationEventDestination:
+    def __init__(self, app: object) -> None:
+        self._app = app
+
+    def append_record(
+        self,
+        *,
+        source: str,
+        channel: str,
+        source_text: str,
+        translated_text: str,
+        origin_wall_clock_ms: int | None = None,
+    ) -> None:
+        append_record = getattr(
+            getattr(self._app, "view_logs", None), "append_conversation_record", None
+        )
+        if callable(append_record):
+            append_record(
+                source=source,
+                channel=channel,
+                source_text=source_text,
+                translated_text=translated_text,
+                origin_wall_clock_ms=origin_wall_clock_ms,
+            )
+
+
+class AppErrorEventDestination:
+    def __init__(
+        self,
+        *,
+        app: object,
+        runtime_logging: SessionRuntimeLoggingService | None,
+    ) -> None:
+        self._app = app
+        self._runtime_logging = runtime_logging
+
+    def publish_error(
+        self,
+        text: str,
+        *,
+        payload: object | None,
+        event: UIEvent,
+    ) -> bool:
+        self._emit_runtime_error_log(text, runtime_log_handled=event.runtime_log_handled)
+        if isinstance(payload, ManagedOpenRouterUserFacingError):
+            self._clear_managed_auth_pending_state()
+            if self._show_managed_auth_snackbar(text):
+                return False
+        return self._should_display_dashboard_error(text)
+
+    def _emit_runtime_error_log(self, text: str, *, runtime_log_handled: bool) -> None:
+        try:
+            if self._runtime_logging is not None:
+                if not runtime_log_handled:
+                    self._runtime_logging.emit_basic(text, level=logging.ERROR)
+            else:
+                logger.error(text)
+        except Exception:
+            logger.error(text)
+
+    def _clear_managed_auth_pending_state(self) -> None:
+        controller = getattr(self._app, "controller", None)
+        clear_pending = (
+            getattr(controller, "clear_managed_auth_pending_state", None)
+            if controller is not None
+            else None
+        )
+        if callable(clear_pending):
+            with contextlib.suppress(Exception):
+                clear_pending()
+
+    def _show_managed_auth_snackbar(self, text: str) -> bool:
+        show_snackbar = getattr(self._app, "_show_snackbar", None)
+        if not callable(show_snackbar):
+            return False
+        with contextlib.suppress(Exception):
+            show_snackbar(text, ft.Colors.ORANGE_700)
+            return True
+        return False
+
+    def _should_display_dashboard_error(self, text: str) -> bool:
+        controller = getattr(self._app, "controller", None)
+        hub = getattr(controller, "hub", None)
+        stt = getattr(hub, "stt", None)
+        stt_state = getattr(stt, "state", None)
+        msg_lower = text.lower()
+        return not (
+            "soniox" in msg_lower
+            and "400" in msg_lower
+            and stt_state in (STTSessionState.DRAINING, STTSessionState.DISCONNECTED)
+        )
+
+
 class UIEventBridge:
     def __init__(
         self,
@@ -32,10 +289,23 @@ class UIEventBridge:
         app: object,
         event_queue: asyncio.Queue[UIEvent],
         runtime_logging: SessionRuntimeLoggingService | None = None,
+        dashboard_destination: DashboardEventDestination | None = None,
+        history_destination: HistoryEventDestination | None = None,
+        conversation_destination: ConversationEventDestination | None = None,
+        error_destination: ErrorEventDestination | None = None,
     ):
         self.app = app
         self.event_queue = event_queue
         self.runtime_logging = runtime_logging
+        self.dashboard_destination = dashboard_destination or AppDashboardEventDestination(app)
+        self.history_destination = history_destination or AppHistoryEventDestination(app)
+        self.conversation_destination = conversation_destination or AppConversationEventDestination(
+            app
+        )
+        self.error_destination = error_destination or AppErrorEventDestination(
+            app=app,
+            runtime_logging=runtime_logging,
+        )
         self._running = False
         self._closed = False
         self._primary_first_partial_emitted: set[str] = set()
@@ -84,13 +354,8 @@ class UIEventBridge:
         source_text = self._source_text_for_translation(translation)
         if not source_text:
             return
-        append_record = getattr(
-            getattr(self.app, "view_logs", None), "append_conversation_record", None
-        )
-        if not callable(append_record):
-            return
         try:
-            append_record(
+            self.conversation_destination.append_record(
                 source=source,
                 channel=translation.channel,
                 source_text=source_text,
@@ -200,9 +465,7 @@ class UIEventBridge:
                 status = "stopping"
             else:
                 status = "disconnected"
-            dash = getattr(self.app, "view_dashboard", None)
-            if dash is not None:
-                dash.set_status(status)
+            self.dashboard_destination.publish_status(status)
             return
 
         if event.type in (UIEventType.TRANSCRIPT_PARTIAL, UIEventType.TRANSCRIPT_FINAL):
@@ -224,27 +487,25 @@ class UIEventBridge:
                     self._primary_first_partial_emitted.add(utterance_key)
                 transcript_kind = "partial"
 
-            dash = getattr(self.app, "view_dashboard", None)
-            if dash is not None:
-                dash.set_display_text(
-                    transcript.text,
-                    language_code=source_lang,
-                    utterance_id=transcript.utterance_id,
+            self.dashboard_destination.publish_transcript(
+                transcript.text,
+                language_code=source_lang,
+                utterance_id=transcript.utterance_id,
+                channel=transcript.channel,
+                source_text_len=len(transcript.text),
+                transcript_kind=transcript_kind,
+                should_log=should_log,
+                debug_prefix=self._visual_debug_prefix(
                     channel=transcript.channel,
-                    source_text_len=len(transcript.text),
-                    transcript_kind=transcript_kind,
-                    should_log=should_log,
-                    debug_prefix=self._visual_debug_prefix(
-                        channel=transcript.channel,
-                        utterance_id=transcript.utterance_id,
-                    ),
-                )
+                    utterance_id=transcript.utterance_id,
+                ),
+            )
 
             if is_final:
                 self._remember_final_self_transcript(transcript)
-                add_history = getattr(self.app, "add_history_entry", None)
-                if add_history is not None:
-                    add_history(source, transcript.text, language_code=source_lang)
+                self.history_destination.append_entry(
+                    source, transcript.text, language_code=source_lang
+                )
             return
 
         if event.type == UIEventType.TRANSLATION_DONE:
@@ -253,34 +514,36 @@ class UIEventBridge:
                 return
             source = event.source or "Mic"
             _, target_lang = self._get_language_codes()
-            dash = getattr(self.app, "view_dashboard", None)
-            if dash is not None:
-                dash.set_display_translation_text(
-                    translation.text,
-                    language_code=target_lang,
-                    update_id=translation.update_id,
-                    origin_wall_clock_ms=translation.origin_wall_clock_ms,
-                    utterance_id=translation.utterance_id,
+            dashboard_published = self.dashboard_destination.publish_translation(
+                translation.text,
+                language_code=target_lang,
+                update_id=translation.update_id,
+                origin_wall_clock_ms=translation.origin_wall_clock_ms,
+                utterance_id=translation.utterance_id,
+                channel=translation.channel,
+                session_scope=translation.session_scope,
+                source_text_hash=translation.source_text_hash,
+                source_text_len=translation.source_text_len,
+                logical_turn_key=translation.logical_turn_key,
+                debug_prefix=self._visual_debug_prefix(
                     channel=translation.channel,
-                    session_scope=translation.session_scope,
-                    source_text_hash=translation.source_text_hash,
-                    source_text_len=translation.source_text_len,
-                    logical_turn_key=translation.logical_turn_key,
-                    debug_prefix=self._visual_debug_prefix(
-                        channel=translation.channel,
-                        utterance_id=translation.utterance_id,
-                        update_id=translation.update_id,
-                    ),
-                )
+                    utterance_id=translation.utterance_id,
+                    update_id=translation.update_id,
+                ),
+            )
+            if dashboard_published is not False:
                 self._emit_dashboard_translation_applied_detailed(
                     translation=translation,
                     source_label=source,
                     dashboard_target_language=target_lang,
                 )
             self._append_conversation_record(translation, source=source)
-            add_history = getattr(self.app, "add_history_entry", None)
-            if add_history is not None:
-                add_history(source, translation.text, translated=True, language_code=target_lang)
+            self.history_destination.append_entry(
+                source,
+                translation.text,
+                translated=True,
+                language_code=target_lang,
+            )
             self._schedule_github_star_prompt_translation_success(translation)
             return
 
@@ -290,49 +553,12 @@ class UIEventBridge:
                 return
             source_lang, target_lang = self._get_language_codes()
             lang_code = target_lang if self._translation_enabled() else source_lang
-            add_history = getattr(self.app, "add_history_entry", None)
-            if add_history is not None:
-                add_history("VRChat", msg.text, language_code=lang_code)
+            self.history_destination.append_entry("VRChat", msg.text, language_code=lang_code)
             return
 
         if event.type == UIEventType.ERROR:
             payload = event.payload
             text = str(payload) if payload is not None else t("error.unknown")
-            controller = getattr(self.app, "controller", None)
-            try:
-                if self.runtime_logging is not None:
-                    if not event.runtime_log_handled:
-                        self.runtime_logging.emit_basic(text, level=logging.ERROR)
-                else:
-                    logger.error(text)
-            except Exception:
-                logger.error(text)
-            if isinstance(payload, ManagedOpenRouterUserFacingError):
-                clear_pending = (
-                    getattr(controller, "clear_managed_auth_pending_state", None)
-                    if controller is not None
-                    else None
-                )
-                if callable(clear_pending):
-                    with contextlib.suppress(Exception):
-                        clear_pending()
-                show_snackbar = getattr(self.app, "_show_snackbar", None)
-                if callable(show_snackbar):
-                    with contextlib.suppress(Exception):
-                        show_snackbar(text, ft.Colors.ORANGE_700)
-                        return
-            dash = getattr(self.app, "view_dashboard", None)
-            if dash is not None:
-                msg_lower = text.lower()
-                controller = getattr(self.app, "controller", None)
-                hub = getattr(controller, "hub", None)
-                stt = getattr(hub, "stt", None)
-                stt_state = getattr(stt, "state", None)
-                if (
-                    "soniox" in msg_lower
-                    and "400" in msg_lower
-                    and stt_state in (STTSessionState.DRAINING, STTSessionState.DISCONNECTED)
-                ):
-                    return
-                dash.set_display_text(text, is_error=True)
+            if self.error_destination.publish_error(text, payload=payload, event=event):
+                self.dashboard_destination.publish_error(text)
             return

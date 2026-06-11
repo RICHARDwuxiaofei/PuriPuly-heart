@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from logging.handlers import QueueHandler, RotatingFileHandler
 from uuid import uuid4
 
+import pytest
+
+from puripuly_heart.core.output.models import OutputRoutingDecision
 from puripuly_heart.core.runtime_logging import (
     SessionLoggingMode,
     SessionRuntimeLoggingService,
@@ -410,5 +413,33 @@ def test_emit_detailed_lazy_checks_mode_before_formatting() -> None:
         assert runtime_logging.emit_detailed_lazy(builder) is True
         assert builder_calls == 1
         assert stream.getvalue().splitlines() == ["lazy detail"]
+    finally:
+        runtime_logging.close()
+
+
+@pytest.mark.asyncio
+async def test_session_runtime_logging_observes_output_routing_metadata_only() -> None:
+    runtime_logging, stream = _make_runtime_logging_capture()
+    runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+    decision = OutputRoutingDecision(
+        decision="denied",
+        route="self_chatbox",
+        publication_id="peer-utterance-1",
+        publication_kind="peer_subtitle",
+        reason="peer_chatbox_denied",
+        metadata={"channel": "peer", "unsafe": "secret peer transcript"},
+    )
+
+    try:
+        await runtime_logging.observe_output_routing(decision)
+
+        log_text = stream.getvalue()
+        assert "[Detailed][OutputRouter] routing_decision" in log_text
+        assert "decision=denied" in log_text
+        assert "route=self_chatbox" in log_text
+        assert "publication_kind=peer_subtitle" in log_text
+        assert "reason=peer_chatbox_denied" in log_text
+        assert "metadata_keys=channel,unsafe" in log_text
+        assert "secret peer transcript" not in log_text
     finally:
         runtime_logging.close()
