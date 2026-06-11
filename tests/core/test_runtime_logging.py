@@ -681,6 +681,53 @@ def test_session_runtime_logging_redacts_unsafe_text_assignment_keys_before_sink
         file_handler.close()
 
 
+def test_session_runtime_logging_redacts_token_assignment_variants_before_sinks(
+    tmp_path,
+) -> None:
+    root_logger = logging.getLogger(f"test.runtime_logging.token_variants.root.{uuid4()}")
+    root_logger.handlers.clear()
+    root_logger.propagate = False
+    session_logger = logging.getLogger(f"test.runtime_logging.token_variants.session.{uuid4()}")
+    session_logger.handlers.clear()
+    session_logger.propagate = False
+    stream = io.StringIO()
+    stream_handler = logging.StreamHandler(stream)
+    stream_handler.setFormatter(logging.Formatter("%(message)s"))
+    log_file = tmp_path / "token-variant-redaction.log"
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+    runtime_logging = SessionRuntimeLoggingService(
+        root_logger=root_logger,
+        session_logger=session_logger,
+        sinks=_SharedSinkBundle(
+            stream_handler=stream_handler,
+            file_handler=file_handler,
+            log_file=log_file,
+        ),
+    )
+    unsafe_text = (
+        "provider failed access_token=runtime-access-secret "
+        "refreshToken=runtime-refresh-secret "
+        "idToken=runtime-id-secret"
+    )
+
+    try:
+        runtime_logging.emit_basic(unsafe_text, level=logging.ERROR)
+        runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+        runtime_logging.emit_detailed(unsafe_text, level=logging.WARNING)
+        runtime_logging.emit_persisted(unsafe_text, level=logging.ERROR)
+        file_handler.flush()
+
+        combined = stream.getvalue() + log_file.read_text(encoding="utf-8")
+        assert "runtime-access-secret" not in combined
+        assert "runtime-refresh-secret" not in combined
+        assert "runtime-id-secret" not in combined
+        assert "[redacted]" in combined
+    finally:
+        runtime_logging.close()
+        file_handler.close()
+
+
 def test_configure_main_logging_reconfigures_after_close(tmp_path) -> None:
     root_logger = logging.getLogger(f"test.runtime_logging.queue.close_reconfigure.{uuid4()}")
     root_logger.handlers.clear()

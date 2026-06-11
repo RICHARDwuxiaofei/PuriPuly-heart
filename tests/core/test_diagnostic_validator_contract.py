@@ -173,6 +173,59 @@ def test_validator_rejects_known_secret_patterns_and_redactor_removes_them() -> 
     assert "sk-live-secret-token" not in rendered
 
 
+def test_validator_rejects_token_assignment_variants_inside_values() -> None:
+    validator = _validator()
+    unsafe = _diagnostics(
+        content_policy=messages.CONTENT_POLICY_REDACTED,
+        fields={
+            "provider": "openrouter",
+            "error": (
+                "request failed access_token=structured-access-secret "
+                "refreshToken=structured-refresh-secret "
+                "idToken=structured-id-secret"
+            ),
+        },
+    )
+
+    validation = validator.validate_diagnostics_for_sink(
+        unsafe,
+        validator.DIAGNOSTIC_SINK_DETAILED_LOGS,
+    )
+    assert validation.status == validator.DIAGNOSTIC_VALIDATION_STATUS_REJECTED
+    assert validator.DIAGNOSTIC_VALIDATION_REASON_SECRET_PATTERN in validation.reasons
+
+    redacted = validator.redact_diagnostics_for_sink(
+        unsafe,
+        validator.DIAGNOSTIC_SINK_DETAILED_LOGS,
+    )
+    assert redacted.status == validator.DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED
+    assert redacted.redacted is True
+    assert redacted.diagnostics is not None
+    rendered = repr(redacted.diagnostics.fields)
+    assert "structured-access-secret" not in rendered
+    assert "structured-refresh-secret" not in rendered
+    assert "structured-id-secret" not in rendered
+
+
+def test_text_redactor_removes_token_assignment_key_variants() -> None:
+    validator = _validator()
+    text = (
+        "provider failed access_token=text-access-secret "
+        "refreshToken=text-refresh-secret "
+        "idToken=text-id-secret"
+    )
+
+    result = validator.redact_text_for_sink(text, validator.DIAGNOSTIC_SINK_DETAILED_LOGS)
+
+    assert result.status == validator.DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED
+    assert result.redacted is True
+    assert result.text is not None
+    assert "text-access-secret" not in result.text
+    assert "text-refresh-secret" not in result.text
+    assert "text-id-secret" not in result.text
+    assert validator.DIAGNOSTIC_REDACTION_MARKER in result.text
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -215,7 +268,16 @@ def test_token_metric_field_names_do_not_weaken_auth_token_rejection() -> None:
     )
     assert safe_metrics.status == validator.DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED
 
-    for sensitive_key in ("token", "session_token", "access_token", "bearer_token"):
+    for sensitive_key in (
+        "token",
+        "session_token",
+        "access_token",
+        "bearer_token",
+        "accessToken",
+        "refreshToken",
+        "idToken",
+        "authToken",
+    ):
         rejected = validator.validate_diagnostics_for_sink(
             _diagnostics(fields={sensitive_key: "do-not-log"}),
             validator.DIAGNOSTIC_SINK_DETAILED_LOGS,

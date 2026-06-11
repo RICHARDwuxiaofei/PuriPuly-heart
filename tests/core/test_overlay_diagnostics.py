@@ -43,3 +43,28 @@ def test_overlay_failure_jsonl_redacts_child_output_and_summary_fields(tmp_path)
     assert "[broker-raw-message-redacted]" in raw_dump
     assert "[local-llm-extra-body-redacted]" in raw_dump
     assert "[redacted]" in raw_dump
+
+
+def test_overlay_failure_jsonl_redacts_token_assignment_variants(tmp_path) -> None:
+    recorder = OverlayDiagnosticsRecorder(
+        overlay_instance_id="overlay-token-variant-redaction-test",
+        diagnostics_dir=tmp_path,
+    )
+    recorder.record_child_line(
+        "stderr",
+        "provider failed access_token=jsonl-access-secret refreshToken=jsonl-refresh-secret",
+    )
+
+    path = recorder.dump_failure(
+        failure_reason="runtime_crashed",
+        id_token="jsonl-structured-id-secret",
+        summary="broker failed idToken=jsonl-id-secret authToken=jsonl-auth-secret",
+    )
+
+    raw_dump = path.read_text(encoding="utf-8")
+    assert "jsonl-access-secret" not in raw_dump
+    assert "jsonl-refresh-secret" not in raw_dump
+    assert "jsonl-structured-id-secret" not in raw_dump
+    assert "jsonl-id-secret" not in raw_dump
+    assert "jsonl-auth-secret" not in raw_dump
+    assert "[redacted]" in raw_dump

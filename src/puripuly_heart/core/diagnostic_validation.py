@@ -212,6 +212,7 @@ _STACK_TRACE_PATTERNS: Final = (
 _PRIVATE_KEY_BLOCK_TEXT_RE: Final = re.compile(
     r"(?is)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"
 )
+_CAMEL_CASE_BOUNDARY_RE: Final = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 _SECRET_ASSIGNMENT_TEXT_RE: Final = re.compile(
     r"(?i)\b(api[_-]?key|authorization|password|private[_-]?key|secret|session[_-]?token|token)\b[\"']?\s*[:=]\s*[\"']?(?:Bearer\s+[A-Za-z0-9._~+\-/]{8,}|[^\s\"',;}]+)"
 )
@@ -235,6 +236,7 @@ def _raw_text_key_pattern(key: str) -> str:
 _PROVIDER_RESPONSE_BODY_TEXT_RE: Final = _raw_text_key_assignment_re(_PROVIDER_RESPONSE_BODY_KEYS)
 _BROKER_RAW_MESSAGE_TEXT_RE: Final = _raw_text_key_assignment_re(_BROKER_RAW_MESSAGE_KEYS)
 _UNSAFE_TEXT_PAYLOAD_TEXT_RE: Final = _raw_text_key_assignment_re(_UNSAFE_TEXT_KEYS)
+_SENSITIVE_TOKEN_ASSIGNMENT_TEXT_RE: Final = _raw_text_key_assignment_re(_SENSITIVE_TOKEN_KEYS)
 _LOCAL_LLM_EXTRA_BODY_TEXT_RE: Final = re.compile(
     r"(?is)\b(?:local[_ -]?(?:llm|openai)[_ -]?extra[_ -]?body)\b\s*[=:]\s*"
 )
@@ -546,6 +548,11 @@ def _redact_text_payload(text: str) -> tuple[str, bool]:
         _UNSAFE_TEXT_PAYLOAD_TEXT_RE,
         DIAGNOSTIC_REDACTION_MARKER,
     )
+    redacted = _redact_raw_assignment_values(
+        redacted,
+        _SENSITIVE_TOKEN_ASSIGNMENT_TEXT_RE,
+        DIAGNOSTIC_REDACTION_MARKER,
+    )
     redacted = re.sub(
         r"(?is)\n?Traceback \(most recent call last\):.*",
         DIAGNOSTIC_REDACTION_MARKER,
@@ -577,7 +584,9 @@ def _text_content_reasons(text: str) -> tuple[DiagnosticValidationReason, ...]:
         reasons.append(DIAGNOSTIC_VALIDATION_REASON_SENSITIVE_LOCAL_LLM_EXTRA_BODY)
     if _UNSAFE_TEXT_PAYLOAD_TEXT_RE.search(text):
         reasons.append(DIAGNOSTIC_VALIDATION_REASON_UNSAFE_TEXT_PAYLOAD)
-    if any(pattern.search(text) for pattern in _SECRET_VALUE_PATTERNS):
+    if _SENSITIVE_TOKEN_ASSIGNMENT_TEXT_RE.search(text) or any(
+        pattern.search(text) for pattern in _SECRET_VALUE_PATTERNS
+    ):
         reasons.append(DIAGNOSTIC_VALIDATION_REASON_SECRET_PATTERN)
     if any(pattern.search(text) for pattern in _STACK_TRACE_PATTERNS):
         reasons.append(DIAGNOSTIC_VALIDATION_REASON_UNSAFE_TEXT_PAYLOAD)
@@ -689,7 +698,7 @@ def _max_depth(value: object) -> int:
 
 
 def _normalized_key(key: str) -> str:
-    return key.lower().replace("-", "_").replace(" ", "_")
+    return _CAMEL_CASE_BOUNDARY_RE.sub("_", key).lower().replace("-", "_").replace(" ", "_")
 
 
 def _key_segments(key: str) -> frozenset[str]:
@@ -798,8 +807,9 @@ def _contains_unredacted_secret_pattern(key: str, value: object) -> bool:
         return False
     if _is_sensitive_key(key):
         return True
-    return isinstance(value, str) and any(
-        pattern.search(value) for pattern in _SECRET_VALUE_PATTERNS
+    return isinstance(value, str) and (
+        bool(_SENSITIVE_TOKEN_ASSIGNMENT_TEXT_RE.search(value))
+        or any(pattern.search(value) for pattern in _SECRET_VALUE_PATTERNS)
     )
 
 
