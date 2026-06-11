@@ -19,6 +19,7 @@ from puripuly_heart.core.audio.diagnostics import AudioFaultProfile, normalize_a
 from puripuly_heart.core.audio.format import float32_to_pcm16le_bytes
 from puripuly_heart.core.audio.ring_buffer import RingBufferF32
 from puripuly_heart.core.clock import Clock, SystemClock
+from puripuly_heart.core.error_messages import format_error_report_for_log, stt_failure_report
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.backend import (
     STTBackend,
@@ -114,6 +115,11 @@ class ManagedSTTProvider:
 
         capacity_samples = int(self.sample_rate_hz * (self.bridging_ms / 1000.0))
         self._audio_ring = RingBufferF32(capacity_samples=capacity_samples)
+
+    def _provider_label(self) -> str:
+        if self.stt_provider_name is None:
+            return "stt"
+        return self.stt_provider_name.value
 
     @property
     def state(self) -> STTSessionState:
@@ -411,11 +417,18 @@ class ManagedSTTProvider:
                 session = await self.backend.open_session()
             except Exception as exc:
                 last_exc = exc
+                attempt_report = stt_failure_report(
+                    exc,
+                    provider=self._provider_label(),
+                    operation="open_session",
+                    channel=self.channel,
+                    attempts=attempt,
+                )
                 self._emit_detailed(
                     "[STT] Failed to open session (attempt %s/%s): %s",
                     attempt,
                     self.connect_attempts,
-                    exc,
+                    format_error_report_for_log(attempt_report),
                     level=logging.WARNING,
                     fallback_level=logging.WARNING,
                 )
@@ -446,18 +459,25 @@ class ManagedSTTProvider:
                 )
                 return True
 
-        reason = str(last_exc) if last_exc is not None else "unknown error"
+        report = stt_failure_report(
+            last_exc,
+            provider=self._provider_label(),
+            operation="open_session",
+            channel=self.channel,
+            attempts=self.connect_attempts,
+        )
         self._emit_basic(
             "[STT] Failed to open session after %s attempts: %s",
             self.connect_attempts,
-            reason,
+            format_error_report_for_log(report),
             level=logging.ERROR,
             fallback_level=logging.ERROR,
         )
         await self._set_state(STTSessionState.DISCONNECTED)
         await self._events.put(
             STTErrorEvent(
-                f"Failed to open STT session after {self.connect_attempts} attempts: {reason}",
+                message=report.message,
+                diagnostics=report.diagnostics,
                 channel=self.channel,
                 runtime_log_handled=True,
             )
@@ -525,8 +545,15 @@ class ManagedSTTProvider:
         try:
             new_session = await self.backend.open_session()
         except Exception as e:
+            report = stt_failure_report(
+                e,
+                provider=self._provider_label(),
+                operation="reconnect",
+                channel=self.channel,
+            )
             self._emit_basic(
-                f"[STT] Reconnect failed; closing until next speech: {e}",
+                "[STT] Reconnect failed; closing until next speech: %s",
+                format_error_report_for_log(report),
                 level=logging.ERROR,
                 fallback_level=logging.ERROR,
             )
@@ -777,15 +804,22 @@ class ManagedSTTProvider:
         with contextlib.suppress(Exception):
             await session.close()
 
+        report = stt_failure_report(
+            exc,
+            provider=self._provider_label(),
+            operation="stream",
+            channel=self.channel,
+        )
         self._emit_basic(
             "[STT] Session failed: %s",
-            exc,
+            format_error_report_for_log(report),
             level=logging.ERROR,
             fallback_level=logging.ERROR,
         )
         await self._events.put(
             STTErrorEvent(
-                f"STT session error: {exc}",
+                message=report.message,
+                diagnostics=report.diagnostics,
                 channel=self.channel,
                 runtime_log_handled=True,
             )

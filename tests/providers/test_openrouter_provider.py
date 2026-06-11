@@ -432,8 +432,9 @@ async def test_httpx_openrouter_client_logs_basic_translate_failure_without_runt
 
     assert caplog.messages == [
         "[Basic][LLM] OpenRouter request [translate][context=no] ko -> en: 'hello'",
-        "[Basic][LLM] OpenRouter request failed [translate]: status=429 message=quota exceeded",
+        "[Basic][LLM] OpenRouter request failed [translate]: category=quota code=provider.quota status=429",
     ]
+    assert "quota exceeded" not in "\n".join(caplog.messages)
 
 
 @pytest.mark.asyncio
@@ -516,8 +517,9 @@ async def test_httpx_openrouter_client_runtime_logging_logs_basic_translate_fail
             logging.INFO,
         ),
         (
-            "[Basic][LLM] OpenRouter request failed [translate]: status=429 message=quota exceeded",
+            "[Basic][LLM] OpenRouter request failed [translate]: category=quota code=provider.quota status=429",
             logging.ERROR,
         ),
     ]
+    assert "quota exceeded" not in repr(runtime_logging.basic_messages)
     assert caplog.messages == []

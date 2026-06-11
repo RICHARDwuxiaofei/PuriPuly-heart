@@ -385,9 +385,10 @@ async def test_qwen_client_logs_basic_request_failure_for_qwen35(
             )
 
     assert (
-        "[Basic][LLM] Qwen request failed [translate]: status=429 message=quota exceeded"
+        "[Basic][LLM] Qwen request failed [translate]: category=quota code=provider.quota status=429"
         in caplog.messages
     )
+    assert "quota exceeded" not in "\n".join(caplog.messages)
 
 
 @pytest.mark.asyncio
@@ -493,8 +494,9 @@ async def test_qwen_client_uses_runtime_logging_for_failure_breadcrumbs_for_qwen
     assert runtime_logging.basic_messages == [
         ("[Basic][LLM] Qwen request [translate][context=no] ko -> en: 'hello'", logging.INFO),
         (
-            "[Basic][LLM] Qwen request failed [translate]: status=429 message=quota exceeded",
+            "[Basic][LLM] Qwen request failed [translate]: category=quota code=provider.quota status=429",
             logging.ERROR,
         ),
     ]
+    assert "quota exceeded" not in repr(runtime_logging.basic_messages)
     assert caplog.messages == []

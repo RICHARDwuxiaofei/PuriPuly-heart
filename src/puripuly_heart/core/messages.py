@@ -180,6 +180,16 @@ class ErrorDiagnostics:
 
 
 @dataclass(frozen=True, slots=True)
+class UserErrorReport:
+    message: UserMessageRef
+    diagnostics: ErrorDiagnostics
+
+    def __str__(self) -> str:
+        code = self.diagnostics.code or "unknown"
+        return f"{self.message.key} (category={self.diagnostics.category}, code={code})"
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeApplyResult:
     status: RuntimeApplyStatus
     message: UserMessageRef | None
@@ -250,4 +260,5 @@ __all__ = [
     "SafeMessageParam",
     "Severity",
     "UserMessageRef",
+    "UserErrorReport",
 ]

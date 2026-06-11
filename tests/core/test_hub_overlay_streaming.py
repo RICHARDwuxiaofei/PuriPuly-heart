@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 import numpy as np
 import pytest
 
+from puripuly_heart.core import messages
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.orchestrator import hub as hub_module
@@ -1875,6 +1876,38 @@ async def test_peer_translation_failure_finalizes_source_only_turn_and_emits_err
         UIEventType.ERROR,
     ]
     assert ui_events[1].channel == "peer"
+
+
+@pytest.mark.asyncio
+async def test_translation_provider_failure_uses_message_ref_and_safe_runtime_log() -> None:
+    raw_detail = "provider raw detail token=translation-secret-789"
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    hub = ClientHub(
+        stt=None,
+        llm=ImmediateFailingTranslateLLMProvider(RuntimeError(raw_detail)),
+        osc=RecordingOscQueue(),
+        runtime_logging=runtime_logging,
+    )
+
+    try:
+        await hub.submit_text("source text", source="You")
+        await asyncio.gather(*hub.self_runtime.translation_tasks.values(), return_exceptions=True)
+
+        ui_events = [hub.ui_events.get_nowait() for _ in range(hub.ui_events.qsize())]
+        error_event = next(event for event in ui_events if event.type == UIEventType.ERROR)
+        error_report_type = getattr(messages, "UserErrorReport", None)
+        assert error_report_type is not None, "UserErrorReport DTO is missing"
+        assert isinstance(error_event.payload, error_report_type)
+        assert error_event.payload.message.key == "provider.failure"
+        assert error_event.payload.diagnostics.category == messages.DIAGNOSTIC_CATEGORY_UNKNOWN
+        assert raw_detail not in repr(error_event.payload)
+
+        runtime_log = "\n".join(_runtime_log_messages(log_stream))
+        assert raw_detail not in runtime_log
+        assert "category=unknown" in runtime_log
+        assert "code=provider.unknown" in runtime_log
+    finally:
+        runtime_logging.close()
 
 
 @pytest.mark.asyncio

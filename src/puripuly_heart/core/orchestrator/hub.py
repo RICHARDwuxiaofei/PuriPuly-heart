@@ -13,13 +13,17 @@ logger = logging.getLogger(__name__)
 
 from puripuly_heart.config.prompts import render_translation_prompt_template, warm_prompt_cache
 from puripuly_heart.core.clock import Clock, SystemClock
+from puripuly_heart.core.error_messages import (
+    format_error_report_for_log,
+    provider_failure_report,
+    stt_failure_report,
+)
 from puripuly_heart.core.language import get_llm_language_name
 from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.managed_openrouter_release import (
-    ManagedOpenRouterReleaseDiagnostics,
     ManagedOpenRouterUserFacingError,
-    format_managed_openrouter_diagnostics,
 )
+from puripuly_heart.core.messages import UserErrorReport, UserMessageRef
 from puripuly_heart.core.orchestrator.channel_runtime import (
     ChannelRuntime,
     ContextEntry,
@@ -217,14 +221,20 @@ class ClientHub:
             name="self_stt",
             provider=self.stt,
             event_handler=self._handle_stt_event,
-            exception_handler=self._handle_stt_event_loop_exception,
+            exception_handler=lambda exc: self._handle_stt_event_loop_exception(
+                exc,
+                channel="self",
+            ),
             state_changed=self._sync_provider_runtime_aliases,
         )
         self._peer_stt_provider_runtime = ProviderRuntimeHandle(
             name="peer_stt",
             provider=self.peer_stt,
             event_handler=self._handle_stt_event,
-            exception_handler=self._handle_stt_event_loop_exception,
+            exception_handler=lambda exc: self._handle_stt_event_loop_exception(
+                exc,
+                channel="peer",
+            ),
             state_changed=self._sync_provider_runtime_aliases,
         )
         self._llm_provider_runtime = ProviderRuntimeHandle(
@@ -709,6 +719,64 @@ class ClientHub:
             return
         logger.exception(formatted)
 
+    def _emit_stt_event_loop_failure(
+        self,
+        exc: Exception,
+        *,
+        provider: STTProvider | None = None,
+        channel: ChannelId = "self",
+    ) -> None:
+        if self.runtime_logging is None:
+            self._emit_exception_summary(
+                "[Hub] STT event loop crashed: %s",
+                exc,
+                level=logging.ERROR,
+            )
+            return
+
+        provider_label, channel_label = self._stt_failure_context(
+            provider,
+            default_channel=channel,
+        )
+        report = stt_failure_report(
+            exc,
+            provider=provider_label,
+            operation="event_loop",
+            channel=channel_label,
+        )
+        self.runtime_logging.emit_basic(
+            self._format_log_message(
+                "[Hub] STT event loop crashed: %s",
+                format_error_report_for_log(report),
+            ),
+            level=logging.ERROR,
+        )
+
+    @staticmethod
+    def _stt_failure_context(
+        provider: STTProvider | None,
+        *,
+        default_channel: ChannelId,
+    ) -> tuple[str, ChannelId]:
+        provider_label = "stt"
+        channel = default_channel
+
+        if provider is None:
+            return provider_label, channel
+
+        provider_name = getattr(provider, "stt_provider_name", None)
+        provider_name_value = getattr(provider_name, "value", None)
+        if isinstance(provider_name_value, str) and provider_name_value.strip():
+            provider_label = provider_name_value
+        elif isinstance(provider_name, str) and provider_name.strip():
+            provider_label = provider_name
+
+        provider_channel = getattr(provider, "channel", None)
+        if provider_channel in ("self", "peer"):
+            channel = cast(ChannelId, provider_channel)
+
+        return provider_label, channel
+
     def _translation_skip_reason(self, runtime: ChannelRuntime) -> str:
         if self.llm is None:
             return "llm unavailable"
@@ -741,29 +809,28 @@ class ClientHub:
         runtime: ChannelRuntime,
         exc: Exception,
         detailed: bool = False,
-    ) -> None:
+    ) -> UserErrorReport:
         emit = self._emit_detailed if detailed else self._emit_basic
-        message = str(exc)
-        diagnostics = self._managed_openrouter_diagnostics(exc)
-        diagnostics_text = format_managed_openrouter_diagnostics(diagnostics)
-        if diagnostics_text:
-            message = f"{message} [{diagnostics_text}]"
+        report = provider_failure_report(
+            exc,
+            provider="llm",
+            operation="translate",
+        )
         emit(
             "[Hub] Translation failed (stage=%s, channel=%s): %s",
             stage,
             runtime.channel,
-            message,
+            format_error_report_for_log(report),
             level=logging.ERROR,
             fallback_level=logging.ERROR,
         )
+        return report
 
-    def _managed_openrouter_diagnostics(
-        self, exc: Exception
-    ) -> ManagedOpenRouterReleaseDiagnostics | None:
-        diagnostics = getattr(exc, "diagnostics", None)
-        if isinstance(diagnostics, ManagedOpenRouterReleaseDiagnostics):
-            return diagnostics
-        return None
+    @staticmethod
+    def _stt_error_event_payload(event: STTErrorEvent) -> object | None:
+        if isinstance(event.message, UserMessageRef) and event.diagnostics is not None:
+            return UserErrorReport(message=event.message, diagnostics=event.diagnostics)
+        return event.message
 
     async def start(self, *, auto_flush_osc: bool = False) -> None:
         if self._running:
@@ -1062,19 +1129,16 @@ class ClientHub:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._emit_exception_summary(
-                "[Hub] STT event loop crashed: %s",
-                exc,
-                level=logging.ERROR,
-            )
+            self._emit_stt_event_loop_failure(exc, provider=provider)
             raise
 
-    async def _handle_stt_event_loop_exception(self, exc: Exception) -> None:
-        self._emit_exception_summary(
-            "[Hub] STT event loop crashed: %s",
-            exc,
-            level=logging.ERROR,
-        )
+    async def _handle_stt_event_loop_exception(
+        self,
+        exc: Exception,
+        *,
+        channel: ChannelId = "self",
+    ) -> None:
+        self._emit_stt_event_loop_failure(exc, channel=channel)
 
     async def _stop_stt_event_loop(self) -> None:
         await self._self_stt_provider_runtime.stop_ingress()
@@ -1126,7 +1190,7 @@ class ClientHub:
             await self.ui_events.put(
                 UIEvent(
                     type=UIEventType.ERROR,
-                    payload=event.message,
+                    payload=self._stt_error_event_payload(event),
                     source="Peer" if event.channel == "peer" else "Mic",
                     channel=event.channel,
                     runtime_log_handled=event.runtime_log_handled,
@@ -3047,13 +3111,13 @@ class ClientHub:
             await self._cleanup_dropped_translation(utterance_id, text, runtime=runtime)
             return
         except Exception as exc:
-            self._log_translation_failure(stage="final", runtime=runtime, exc=exc)
+            report = self._log_translation_failure(stage="final", runtime=runtime, exc=exc)
             deny_peer_chatbox_attempt = self._should_deny_peer_chatbox_attempt(runtime)
             fallback_to_chatbox = self.fallback_transcript_only and self._should_publish_to_chatbox(
                 runtime
             )
             denied_fallback_to_chatbox = self.fallback_transcript_only and deny_peer_chatbox_attempt
-            payload: object = exc if isinstance(exc, ManagedOpenRouterUserFacingError) else str(exc)
+            payload: object = exc if isinstance(exc, ManagedOpenRouterUserFacingError) else report
             await self.ui_events.put(
                 UIEvent(
                     type=UIEventType.ERROR,

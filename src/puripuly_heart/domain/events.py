@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import Enum
 from uuid import UUID
 
+from puripuly_heart.core.messages import ErrorDiagnostics, UserMessageRef
+
 from .models import ChannelId, Transcript
 
 
@@ -58,10 +60,11 @@ class STTFinalEvent:
 
 @dataclass(frozen=True, slots=True)
 class STTErrorEvent:
-    message: str
+    message: str | UserMessageRef | None = None
     utterance_id: UUID | None = None
     channel: ChannelId = "self"
     runtime_log_handled: bool = False
+    diagnostics: ErrorDiagnostics | None = None
     type: STTEventType = STTEventType.ERROR
 
     def __post_init__(self) -> None:

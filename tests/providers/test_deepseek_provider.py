@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -208,6 +209,38 @@ async def test_httpx_deepseek_client_translate_raises_on_length_finish_reason(
             source_language="ko",
             target_language="en",
         )
+
+
+@pytest.mark.asyncio
+async def test_httpx_deepseek_client_logs_safe_request_failure(
+    monkeypatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    raw_detail = "upstream unavailable token=deepseek-secret-123"
+    fake_client = FakeAsyncClient(
+        response_status=503,
+        response_data={"error": {"message": raw_detail}},
+    )
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+
+    client = HttpxDeepSeekClient(api_key="k", model="m", base_url="https://example")
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.deepseek"):
+        with pytest.raises(RuntimeError, match="upstream unavailable"):
+            await client.translate(
+                text="hello",
+                system_prompt="SYSTEM",
+                source_language="ko",
+                target_language="en",
+            )
+
+    assert (
+        "[Basic][LLM] DeepSeek request failed [translate]: "
+        "category=service_unavailable code=provider.service_unavailable status=503"
+        in caplog.messages
+    )
+    assert raw_detail not in "\n".join(caplog.messages)
+    assert "deepseek-secret-123" not in "\n".join(caplog.messages)
 
 
 @pytest.mark.asyncio

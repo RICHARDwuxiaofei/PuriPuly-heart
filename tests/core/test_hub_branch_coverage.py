@@ -983,9 +983,10 @@ async def test_translate_and_enqueue_emits_error_and_fallback_transcript() -> No
         assert events[0].runtime_log_handled is True
         assert hub.osc.messages[0].text == "hello"
         assert (
-            "[Hub] Translation failed (stage=final, channel=self): llm failed"
-            in _runtime_log_messages(log_stream)
+            "[Hub] Translation failed (stage=final, channel=self): "
+            "category=unknown code=provider.unknown" in _runtime_log_messages(log_stream)
         )
+        assert "llm failed" not in "\n".join(_runtime_log_messages(log_stream))
     finally:
         runtime_logging.close()
 
@@ -1021,10 +1022,12 @@ async def test_translate_and_enqueue_logs_managed_auth_diagnostics() -> None:
         assert isinstance(events[0].payload, ManagedOpenRouterUserFacingError)
         messages = _runtime_log_messages(log_stream)
         assert any(
-            "operation=issue code=trial_unavailable class=retryable subcode=broker_backoff retry_after_ms=9000"
+            "managed_operation=issue managed_code=trial_unavailable "
+            "managed_error_class=retryable managed_subcode=broker_backoff retry_after_ms=9000"
             in message
             for message in messages
         )
+        assert "broker is temporarily unavailable" not in "\n".join(messages)
     finally:
         runtime_logging.close()
 
@@ -1085,13 +1088,16 @@ async def test_run_spec_translation_logs_spec_failure_only_in_detailed_mode() ->
         await detailed_hub._run_spec_translation(detailed_buffer.merge_id, "hello", 1)
 
         assert not any(
-            "[Hub] Translation failed (stage=spec, channel=self): llm failed" in message
+            "[Hub] Translation failed (stage=spec, channel=self): "
+            "category=unknown code=provider.unknown" in message
             for message in _runtime_log_messages(basic_stream)
         )
         assert any(
-            "[Hub] Translation failed (stage=spec, channel=self): llm failed" in message
+            "[Hub] Translation failed (stage=spec, channel=self): "
+            "category=unknown code=provider.unknown" in message
             for message in _runtime_log_messages(detailed_stream)
         )
+        assert "llm failed" not in "\n".join(_runtime_log_messages(detailed_stream))
     finally:
         basic_runtime_logging.close()
         detailed_runtime_logging.close()
@@ -1123,6 +1129,57 @@ async def test_run_stt_event_loop_without_runtime_logging_preserves_traceback(ca
 
     assert "[Hub] STT event loop crashed: loop boom" in caplog.messages
     assert any(record.exc_info is not None for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_run_stt_event_loop_with_runtime_logging_uses_safe_stt_report() -> None:
+    raw_detail = "stt event loop socket failed token=hub-stt-secret-123"
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+        runtime_logging=runtime_logging,
+    )
+
+    try:
+        with pytest.raises(ConnectionError):
+            await hub._run_stt_event_loop(RaisingEventSTT(ConnectionError(raw_detail)))
+
+        runtime_log = "\n".join(_runtime_log_messages(log_stream))
+        assert "[Hub] STT event loop crashed: category=network code=stt.network" in runtime_log
+        assert raw_detail not in runtime_log
+        assert "hub-stt-secret-123" not in runtime_log
+        assert "Traceback (most recent call last):" not in runtime_log
+    finally:
+        runtime_logging.close()
+
+
+@pytest.mark.asyncio
+async def test_handle_stt_event_loop_exception_with_runtime_logging_uses_safe_stt_report() -> None:
+    raw_detail = "stt owner task socket failed token=hub-stt-secret-456"
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+        runtime_logging=runtime_logging,
+    )
+
+    try:
+        await hub._handle_stt_event_loop_exception(ConnectionError(raw_detail))
+
+        runtime_log = "\n".join(_runtime_log_messages(log_stream))
+        assert "[Hub] STT event loop crashed: category=network code=stt.network" in runtime_log
+        assert raw_detail not in runtime_log
+        assert "hub-stt-secret-456" not in runtime_log
+        assert "Traceback (most recent call last):" not in runtime_log
+    finally:
+        runtime_logging.close()
 
 
 @pytest.mark.asyncio

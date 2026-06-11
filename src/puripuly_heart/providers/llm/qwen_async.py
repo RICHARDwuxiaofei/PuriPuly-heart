@@ -9,6 +9,7 @@ from uuid import UUID
 
 import httpx
 
+from puripuly_heart.core.error_messages import format_error_report_for_log, provider_failure_report
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.models import Translation
 from puripuly_heart.providers.llm.messages import build_translation_user_message
@@ -56,10 +57,14 @@ def _log_basic_request_failure(
     status: int,
     message: str,
 ) -> None:
-    rendered = "[Basic][LLM] Qwen request failed [%s]: status=%s message=%s" % (
+    report = provider_failure_report(
+        RuntimeError(f"status={status} message={message}"),
+        provider="qwen",
+        operation=operation,
+    )
+    rendered = "[Basic][LLM] Qwen request failed [%s]: %s" % (
         operation,
-        status,
-        message,
+        format_error_report_for_log(report),
     )
     if runtime_logging is not None:
         runtime_logging.emit_basic(rendered, level=logging.ERROR)

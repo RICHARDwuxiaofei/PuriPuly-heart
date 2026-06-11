@@ -11,12 +11,14 @@ import pytest
 
 import puripuly_heart.core.stt.controller as stt_controller_module
 from puripuly_heart.config.settings import STTProviderName
+from puripuly_heart.core import messages
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.vad.gating import SpeechEnd, SpeechStart
 from puripuly_heart.domain.events import (
+    STTErrorEvent,
     STTFinalEvent,
     STTPartialEvent,
     STTSessionState,
@@ -297,6 +299,14 @@ class FailingBackend:
 
     async def open_session(self):
         return FailingSession(self.error)
+
+
+@dataclass(slots=True)
+class FailingOpenBackend:
+    error: Exception
+
+    async def open_session(self):
+        raise self.error
 
 
 @dataclass(slots=True)
@@ -956,6 +966,58 @@ async def test_stt_controller_reconnect_fallback_on_failure():
     await stt.close()
 
 
+async def test_stt_controller_reconnect_failure_uses_safe_runtime_log() -> None:
+    raw_detail = "socket reconnect failed token=stt-reconnect-secret-456"
+
+    class FailingReconnectBackend:
+        def __init__(self) -> None:
+            self.sessions = []
+            self.call_count = 0
+
+        async def open_session(self):
+            self.call_count += 1
+            if self.call_count == 1:
+                session = FakeSession()
+                self.sessions.append(session)
+                return session
+            raise ConnectionError(raw_detail)
+
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    stt = ManagedSTTProvider(
+        backend=FailingReconnectBackend(),
+        sample_rate_hz=16000,
+        reset_deadline_s=0.1,
+        reconnect_window_s=0.5,
+        drain_timeout_s=0.05,
+        finalize_grace_s=0.0,
+        connect_attempts=1,
+        stt_provider_name=STTProviderName.SONIOX,
+        runtime_logging=runtime_logging,
+    )
+
+    try:
+        stream = stt.events()
+        utterance_id = uuid4()
+        await stt.handle_vad_event(
+            SpeechStart(utterance_id, pre_roll=samples(0.0), chunk=samples(1.0))
+        )
+        await _next_state(stream, STTSessionState.STREAMING)
+        await stt.handle_vad_event(SpeechEnd(utterance_id))
+
+        await asyncio.sleep(0.15)
+
+        runtime_log = "\n".join(_runtime_log_messages(log_stream))
+        assert raw_detail not in runtime_log
+        assert "stt-reconnect-secret-456" not in runtime_log
+        assert (
+            "[STT] Reconnect failed; closing until next speech: "
+            "category=network code=stt.network"
+        ) in runtime_log
+    finally:
+        await stt.close()
+        runtime_logging.close()
+
+
 async def test_stt_controller_summarizes_retry_connect_in_basic_runtime_logs() -> None:
     class RetryOnceBackend:
         def __init__(self) -> None:
@@ -987,6 +1049,48 @@ async def test_stt_controller_summarizes_retry_connect_in_basic_runtime_logs() -
         assert "[STT] Session connected after 1 retry" in messages
         assert not any("Opening new session" in message for message in messages)
         assert not any("Retrying session in" in message for message in messages)
+    finally:
+        await stt.close()
+        runtime_logging.close()
+
+
+async def test_managed_stt_provider_open_failure_uses_message_ref_and_safe_runtime_log() -> None:
+    raw_detail = "microphone socket failed token=stt-secret-789"
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+    stt = ManagedSTTProvider(
+        backend=FailingOpenBackend(ConnectionError(raw_detail)),
+        sample_rate_hz=16000,
+        stt_provider_name=STTProviderName.SONIOX,
+        connect_attempts=1,
+        runtime_logging=runtime_logging,
+    )
+
+    try:
+        stream = stt.events()
+        await stt.handle_vad_event(SpeechStart(uuid4(), pre_roll=samples(0.0), chunk=samples(1.0)))
+        error_event = None
+        for _ in range(5):
+            event = await _next_event(stream)
+            if isinstance(event, STTErrorEvent):
+                error_event = event
+                break
+        assert error_event is not None
+
+        error_report_type = getattr(messages, "UserErrorReport", None)
+        assert error_report_type is not None, "UserErrorReport DTO is missing"
+        assert isinstance(error_event.message, messages.UserMessageRef)
+        assert error_event.message.key == "stt.failure"
+        assert error_event.diagnostics is not None
+        assert error_event.diagnostics.category == messages.DIAGNOSTIC_CATEGORY_NETWORK
+        assert error_event.diagnostics.fields["provider"] == "soniox"
+        assert raw_detail not in repr(error_event.message)
+        assert raw_detail not in repr(error_event.diagnostics)
+
+        runtime_log = "\n".join(_runtime_log_messages(log_stream))
+        assert raw_detail not in runtime_log
+        assert "category=network" in runtime_log
+        assert "code=stt.network" in runtime_log
     finally:
         await stt.close()
         runtime_logging.close()
