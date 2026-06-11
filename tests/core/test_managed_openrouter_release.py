@@ -36,6 +36,7 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterUserFacingError,
     TalkTogetherPassStatus,
     UnavailableManagedOpenRouterReleaseClient,
+    format_managed_openrouter_diagnostics,
 )
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_MANAGED_API_KEY_SECRET,
@@ -255,6 +256,27 @@ def _make_service(
 
 def _make_fingerprint_salt() -> ManagedOpenRouterFingerprintSalt:
     return ManagedOpenRouterFingerprintSalt(version=7, salt="fingerprint-salt-test")
+
+
+def test_format_managed_openrouter_diagnostics_redacts_raw_message() -> None:
+    diagnostics = ManagedOpenRouterReleaseDiagnostics(
+        operation="issue",
+        code="trial_unavailable",
+        error_class="retryable",
+        subcode="broker_backoff",
+        retry_after_ms=9000,
+        message="raw broker eligibility message token=broker-secret-123",
+    )
+
+    rendered = format_managed_openrouter_diagnostics(diagnostics)
+
+    assert (
+        rendered == "operation=issue code=trial_unavailable class=retryable "
+        "subcode=broker_backoff retry_after_ms=9000 message=<redacted>"
+    )
+    assert "raw broker eligibility message" not in rendered
+    assert "broker-secret-123" not in rendered
+    assert "token=" not in rendered
 
 
 def test_user_facing_error_str_is_diagnostic_safe_without_ui_i18n(

@@ -118,18 +118,18 @@ def format_managed_openrouter_diagnostics(
     if diagnostics is None:
         return ""
     parts: list[str] = []
-    if diagnostics.operation is not None:
-        parts.append(f"operation={diagnostics.operation}")
-    if diagnostics.code is not None:
-        parts.append(f"code={diagnostics.code}")
-    if diagnostics.error_class is not None:
-        parts.append(f"class={diagnostics.error_class}")
-    if diagnostics.subcode is not None:
-        parts.append(f"subcode={diagnostics.subcode}")
-    if diagnostics.retry_after_ms is not None:
-        parts.append(f"retry_after_ms={diagnostics.retry_after_ms}")
+    for attr_name, rendered_name in (
+        ("operation", "operation"),
+        ("code", "code"),
+        ("error_class", "class"),
+        ("subcode", "subcode"),
+        ("retry_after_ms", "retry_after_ms"),
+    ):
+        safe_value = _safe_diagnostic_scalar(getattr(diagnostics, attr_name))
+        if safe_value is not None:
+            parts.append(f"{rendered_name}={safe_value}")
     if diagnostics.message is not None:
-        parts.append(f"message={diagnostics.message}")
+        parts.append("message=<redacted>")
     return " ".join(parts)
 
 
