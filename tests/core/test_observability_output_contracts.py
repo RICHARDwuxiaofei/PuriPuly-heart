@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import importlib
 import inspect
+import math
 from dataclasses import FrozenInstanceError, fields, is_dataclass
 from pathlib import Path
 from typing import get_args, get_type_hints
@@ -126,6 +127,33 @@ def test_structured_observability_events_use_safe_message_contracts() -> None:
     assert hints["visibility"] == messages.DiagnosticVisibility
     assert hints["content_policy"] == messages.ContentPolicy
     assert hints["diagnostics"] == messages.ErrorDiagnostics | None
+
+
+def test_structured_observability_event_fields_are_json_safe_scalars() -> None:
+    observability = importlib.import_module("puripuly_heart.core.observability")
+
+    with pytest.raises(TypeError):
+        observability.DiagnosticEvent(
+            category=messages.DIAGNOSTIC_CATEGORY_UNKNOWN,
+            severity=messages.SEVERITY_WARNING,
+            visibility=messages.DIAGNOSTIC_VISIBILITY_DETAILED,
+            content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+            correlation_id="corr-json-safe-type",
+            diagnostics=None,
+            fields={"nested": {"not": "json-safe field scalar"}},
+        )
+
+    with pytest.raises(ValueError):
+        observability.RuntimeLogEvent(
+            category=messages.DIAGNOSTIC_CATEGORY_UNKNOWN,
+            severity=messages.SEVERITY_WARNING,
+            visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+            content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+            correlation_id="corr-json-safe-float",
+            message=None,
+            diagnostics=None,
+            fields={"elapsed_ms": math.inf},
+        )
 
 
 def test_output_contracts_separate_self_peer_system_and_observer_payloads() -> None:

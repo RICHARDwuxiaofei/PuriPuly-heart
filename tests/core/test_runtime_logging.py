@@ -4,12 +4,33 @@ import io
 import logging
 import re
 import time
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from logging.handlers import QueueHandler, RotatingFileHandler
 from uuid import uuid4
 
 import pytest
 
+from puripuly_heart.core.messages import (
+    CONTENT_POLICY_METADATA_ONLY,
+    CONTENT_POLICY_RAW_USER_TEXT_ALLOWED,
+    DIAGNOSTIC_CATEGORY_NETWORK,
+    DIAGNOSTIC_CATEGORY_UNKNOWN,
+    DIAGNOSTIC_VISIBILITY_BASIC,
+    DIAGNOSTIC_VISIBILITY_DETAILED,
+    DIAGNOSTIC_VISIBILITY_DIAGNOSTIC_ONLY,
+    SEVERITY_ERROR,
+    SEVERITY_INFO,
+    SEVERITY_WARNING,
+    ErrorDiagnostics,
+)
+from puripuly_heart.core.observability import (
+    ConversationRecord,
+    DiagnosticEvent,
+    PersistedDiagnosticRecord,
+    ProviderObservationEvent,
+    RuntimeLogEvent,
+)
 from puripuly_heart.core.output.models import OutputRoutingDecision
 from puripuly_heart.core.runtime_logging import (
     SessionLoggingMode,
@@ -23,6 +44,78 @@ class _SharedSinkBundle:
     stream_handler: logging.Handler
     file_handler: logging.Handler
     log_file: object
+
+
+class _ObservabilityRunner:
+    def __init__(self) -> None:
+        self.awaitables: list[Awaitable[None]] = []
+
+    def __call__(self, awaitable: Awaitable[None]) -> None:
+        self.awaitables.append(awaitable)
+
+    async def drain(self) -> None:
+        while self.awaitables:
+            await self.awaitables.pop(0)
+
+
+class _StructuredObservabilitySink:
+    def __init__(self) -> None:
+        self.runtime_events: list[RuntimeLogEvent] = []
+        self.diagnostic_events: list[DiagnosticEvent] = []
+        self.provider_events: list[ProviderObservationEvent] = []
+        self.conversation_records: list[ConversationRecord] = []
+        self.persisted_records: list[PersistedDiagnosticRecord] = []
+
+    async def emit_runtime_log(self, event: RuntimeLogEvent) -> None:
+        self.runtime_events.append(event)
+
+    async def emit_diagnostic(self, event: DiagnosticEvent) -> None:
+        self.diagnostic_events.append(event)
+
+    async def emit_provider_observation(self, event: ProviderObservationEvent) -> None:
+        self.provider_events.append(event)
+
+    async def record_conversation(self, record: ConversationRecord) -> None:
+        self.conversation_records.append(record)
+
+    async def persist_diagnostic(self, record: PersistedDiagnosticRecord) -> None:
+        self.persisted_records.append(record)
+
+
+class _SynchronousFailingRuntimeLogSink:
+    def emit_runtime_log(self, _event: RuntimeLogEvent) -> Awaitable[None]:
+        raise RuntimeError("synchronous runtime-log sink failure")
+
+
+class _CloseRaisingAwaitable:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def __await__(self):
+        if False:
+            yield None
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+        raise RuntimeError("awaitable close failure")
+
+
+class _CloseRaisingRuntimeLogSink:
+    def __init__(self) -> None:
+        self.awaitable = _CloseRaisingAwaitable()
+
+    def emit_runtime_log(self, _event: RuntimeLogEvent) -> Awaitable[None]:
+        return self.awaitable
+
+
+class _RaisingObservabilityRunner:
+    def __init__(self) -> None:
+        self.awaitables: list[Awaitable[None]] = []
+
+    def __call__(self, awaitable: Awaitable[None]) -> None:
+        self.awaitables.append(awaitable)
+        raise RuntimeError("observability runner failure")
 
 
 class _DelayingForwardingHandler(logging.Handler):
@@ -413,6 +506,206 @@ def test_emit_detailed_lazy_checks_mode_before_formatting() -> None:
         assert runtime_logging.emit_detailed_lazy(builder) is True
         assert builder_calls == 1
         assert stream.getvalue().splitlines() == ["lazy detail"]
+    finally:
+        runtime_logging.close()
+
+
+@pytest.mark.asyncio
+async def test_session_runtime_logging_emits_structured_events_without_changing_text() -> None:
+    stream = io.StringIO()
+    stream_handler = logging.StreamHandler(stream)
+    runner = _ObservabilityRunner()
+    sink = _StructuredObservabilitySink()
+    runtime_logging = SessionRuntimeLoggingService(
+        root_logger=logging.getLogger(f"test.runtime_logging.structured.root.{uuid4()}"),
+        session_logger=logging.getLogger(f"test.runtime_logging.structured.session.{uuid4()}"),
+        sinks=_SharedSinkBundle(
+            stream_handler=stream_handler,
+            file_handler=logging.NullHandler(),
+            log_file="runtime.log",
+        ),
+        runtime_log_sink=sink,
+        diagnostics_sink=sink,
+        persisted_diagnostic_store=sink,
+        observability_runner=runner,
+    )
+
+    try:
+        runtime_logging.emit_basic("legacy basic text", level=logging.WARNING)
+        assert runtime_logging.emit_detailed("hidden detailed text") is False
+        runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+        assert runtime_logging.emit_detailed("legacy detailed text", level=logging.ERROR) is True
+        runtime_logging.emit_persisted("legacy persisted text", level=logging.ERROR)
+        await runner.drain()
+
+        assert stream.getvalue().splitlines() == [
+            "legacy basic text",
+            "legacy detailed text",
+        ]
+        assert [event.visibility for event in sink.runtime_events] == [
+            DIAGNOSTIC_VISIBILITY_BASIC,
+            DIAGNOSTIC_VISIBILITY_DETAILED,
+        ]
+        assert [event.severity for event in sink.runtime_events] == [
+            SEVERITY_WARNING,
+            SEVERITY_ERROR,
+        ]
+        for event in sink.runtime_events:
+            assert event.category == DIAGNOSTIC_CATEGORY_UNKNOWN
+            assert event.content_policy == CONTENT_POLICY_METADATA_ONLY
+            assert isinstance(event.correlation_id, str)
+            assert event.message is None
+            assert event.diagnostics is None
+            assert event.fields["renderer"] == "legacy_text"
+            field_text = repr(dict(event.fields))
+            assert "legacy basic text" not in field_text
+            assert "legacy detailed text" not in field_text
+
+        assert [event.visibility for event in sink.diagnostic_events] == [
+            DIAGNOSTIC_VISIBILITY_BASIC,
+            DIAGNOSTIC_VISIBILITY_DETAILED,
+        ]
+        persisted = sink.persisted_records[-1]
+        assert persisted.storage_key == "runtime.log"
+        assert persisted.diagnostic.severity == SEVERITY_ERROR
+        assert persisted.diagnostic.visibility == DIAGNOSTIC_VISIBILITY_DIAGNOSTIC_ONLY
+        assert persisted.diagnostic.content_policy == CONTENT_POLICY_METADATA_ONLY
+        assert "legacy persisted text" not in repr(dict(persisted.diagnostic.fields))
+    finally:
+        runtime_logging.close()
+
+
+@pytest.mark.asyncio
+async def test_session_runtime_logging_dispatches_provider_and_conversation_events() -> None:
+    runner = _ObservabilityRunner()
+    sink = _StructuredObservabilitySink()
+    runtime_logging, _stream = _make_runtime_logging_capture()
+    runtime_logging.configure_structured_observability(
+        provider_observation_sink=sink,
+        conversation_record_sink=sink,
+        observability_runner=runner,
+    )
+    diagnostics = ErrorDiagnostics(
+        component="provider.openrouter",
+        operation="translate",
+        code="provider.network",
+        category=DIAGNOSTIC_CATEGORY_NETWORK,
+        visibility=DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy=CONTENT_POLICY_METADATA_ONLY,
+        status_code=503,
+        retry_after_ms=None,
+        fields={"status_code": 503},
+    )
+
+    try:
+        runtime_logging.observe_provider_operation(
+            provider="openrouter",
+            operation="translate",
+            outcome="failure",
+            severity=SEVERITY_ERROR,
+            diagnostics=diagnostics,
+            fields={"status_code": 503},
+        )
+        runtime_logging.record_conversation_observation(
+            utterance_id="utt-1",
+            speaker_channel="self",
+            transcript_text="hello",
+            translation_text="bonjour",
+            source_language="en",
+            target_language="fr",
+            metadata={"transcript_len": 5, "translation_len": 7},
+        )
+        await runner.drain()
+
+        provider_event = sink.provider_events[-1]
+        assert provider_event.provider == "openrouter"
+        assert provider_event.operation == "translate"
+        assert provider_event.outcome == "failure"
+        assert provider_event.category == DIAGNOSTIC_CATEGORY_NETWORK
+        assert provider_event.severity == SEVERITY_ERROR
+        assert provider_event.visibility == DIAGNOSTIC_VISIBILITY_BASIC
+        assert provider_event.content_policy == CONTENT_POLICY_METADATA_ONLY
+        assert isinstance(provider_event.correlation_id, str)
+        assert provider_event.diagnostics is diagnostics
+        assert dict(provider_event.fields) == {"status_code": 503}
+
+        conversation = sink.conversation_records[-1]
+        assert conversation.utterance_id == "utt-1"
+        assert conversation.speaker_channel == "self"
+        assert conversation.transcript_text == "hello"
+        assert conversation.translation_text == "bonjour"
+        assert conversation.category == DIAGNOSTIC_CATEGORY_UNKNOWN
+        assert conversation.severity == SEVERITY_INFO
+        assert conversation.visibility == DIAGNOSTIC_VISIBILITY_BASIC
+        assert conversation.content_policy == CONTENT_POLICY_RAW_USER_TEXT_ALLOWED
+        assert isinstance(conversation.correlation_id, str)
+        assert dict(conversation.metadata) == {"transcript_len": 5, "translation_len": 7}
+    finally:
+        runtime_logging.close()
+
+
+def test_session_runtime_logging_ignores_provider_and_conversation_after_close() -> None:
+    runner = _ObservabilityRunner()
+    sink = _StructuredObservabilitySink()
+    runtime_logging, _stream = _make_runtime_logging_capture()
+    runtime_logging.configure_structured_observability(
+        provider_observation_sink=sink,
+        conversation_record_sink=sink,
+        observability_runner=runner,
+    )
+    runtime_logging.close()
+
+    runtime_logging.observe_provider_operation(
+        provider="openrouter",
+        operation="translate",
+        outcome="success",
+    )
+    runtime_logging.record_conversation_observation(
+        utterance_id="utt-after-close",
+        speaker_channel="self",
+        transcript_text="hello",
+        translation_text=None,
+        source_language="en",
+        target_language=None,
+    )
+
+    assert runner.awaitables == []
+    assert sink.provider_events == []
+    assert sink.conversation_records == []
+
+
+def test_session_runtime_logging_preserves_text_when_observability_construction_fails() -> None:
+    runner = _ObservabilityRunner()
+    runtime_logging, stream = _make_runtime_logging_capture()
+    runtime_logging.configure_structured_observability(
+        runtime_log_sink=_SynchronousFailingRuntimeLogSink(),
+        observability_runner=runner,
+    )
+
+    try:
+        runtime_logging.emit_basic("legacy text survives construction failure")
+
+        assert stream.getvalue().splitlines() == ["legacy text survives construction failure"]
+        assert runner.awaitables == []
+    finally:
+        runtime_logging.close()
+
+
+def test_session_runtime_logging_preserves_text_when_observability_cleanup_fails() -> None:
+    runner = _RaisingObservabilityRunner()
+    sink = _CloseRaisingRuntimeLogSink()
+    runtime_logging, stream = _make_runtime_logging_capture()
+    runtime_logging.configure_structured_observability(
+        runtime_log_sink=sink,
+        observability_runner=runner,
+    )
+
+    try:
+        runtime_logging.emit_basic("legacy text survives cleanup failure")
+
+        assert stream.getvalue().splitlines() == ["legacy text survives cleanup failure"]
+        assert runner.awaitables == [sink.awaitable]
+        assert sink.awaitable.closed is True
     finally:
         runtime_logging.close()
 

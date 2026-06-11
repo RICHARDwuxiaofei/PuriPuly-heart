@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import queue
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
@@ -11,6 +12,37 @@ from typing import Callable, Protocol
 from uuid import uuid4
 
 from puripuly_heart.config.paths import user_config_dir
+from puripuly_heart.core.messages import (
+    CONTENT_POLICY_METADATA_ONLY,
+    CONTENT_POLICY_RAW_USER_TEXT_ALLOWED,
+    DIAGNOSTIC_CATEGORY_UNKNOWN,
+    DIAGNOSTIC_VISIBILITY_BASIC,
+    DIAGNOSTIC_VISIBILITY_DETAILED,
+    DIAGNOSTIC_VISIBILITY_DIAGNOSTIC_ONLY,
+    SEVERITY_ERROR,
+    SEVERITY_INFO,
+    SEVERITY_WARNING,
+    ContentPolicy,
+    DiagnosticCategory,
+    DiagnosticFieldValue,
+    DiagnosticVisibility,
+    ErrorDiagnostics,
+    Severity,
+)
+from puripuly_heart.core.observability import (
+    ConversationRecord,
+    ConversationRecordChannel,
+    ConversationRecordSink,
+    DiagnosticEvent,
+    DiagnosticsSink,
+    PersistedDiagnosticRecord,
+    PersistedDiagnosticStore,
+    ProviderObservationEvent,
+    ProviderObservationOutcome,
+    ProviderObservationSink,
+    RuntimeLogEvent,
+    RuntimeLogSink,
+)
 from puripuly_heart.core.output.models import OutputRoutingDecision
 
 MAIN_LOG_FILENAME = "puripuly_heart.log"
@@ -163,6 +195,9 @@ class RealtimeLogSink(Protocol):
     def append_log(self, line: str) -> None: ...
 
 
+ObservabilityRunner = Callable[[Awaitable[None]], None]
+
+
 class SessionLoggingMode(str, Enum):
     BASIC = "basic"
     DETAILED = "detailed"
@@ -281,6 +316,12 @@ class SessionRuntimeLoggingService:
         session_logger: logging.Logger | None = None,
         sinks: RuntimeLoggingSinks | None = None,
         ui_handler_factory: Callable[[RealtimeLogSink], logging.Handler] | None = None,
+        runtime_log_sink: RuntimeLogSink | None = None,
+        diagnostics_sink: DiagnosticsSink | None = None,
+        provider_observation_sink: ProviderObservationSink | None = None,
+        conversation_record_sink: ConversationRecordSink | None = None,
+        persisted_diagnostic_store: PersistedDiagnosticStore | None = None,
+        observability_runner: ObservabilityRunner | None = None,
     ) -> None:
         self._root_logger = root_logger or logging.getLogger()
         self._owns_sinks = sinks is None
@@ -290,6 +331,12 @@ class SessionRuntimeLoggingService:
         self._session_logger.setLevel(logging.INFO)
         self._session_logger.propagate = False
         self._ui_handler_factory = ui_handler_factory
+        self._runtime_log_sink = runtime_log_sink
+        self._diagnostics_sink = diagnostics_sink
+        self._provider_observation_sink = provider_observation_sink
+        self._conversation_record_sink = conversation_record_sink
+        self._persisted_diagnostic_store = persisted_diagnostic_store
+        self._observability_runner = observability_runner
         self._realtime_sink: RealtimeLogSink | None = None
         self._ui_handler: logging.Handler | None = None
         self._session_handlers: list[logging.Handler] = []
@@ -316,6 +363,29 @@ class SessionRuntimeLoggingService:
 
     def set_mode(self, mode: SessionLoggingMode | str) -> None:
         self._mode = SessionLoggingMode(mode)
+
+    def configure_structured_observability(
+        self,
+        *,
+        runtime_log_sink: RuntimeLogSink | None = None,
+        diagnostics_sink: DiagnosticsSink | None = None,
+        provider_observation_sink: ProviderObservationSink | None = None,
+        conversation_record_sink: ConversationRecordSink | None = None,
+        persisted_diagnostic_store: PersistedDiagnosticStore | None = None,
+        observability_runner: ObservabilityRunner | None = None,
+    ) -> None:
+        if runtime_log_sink is not None:
+            self._runtime_log_sink = runtime_log_sink
+        if diagnostics_sink is not None:
+            self._diagnostics_sink = diagnostics_sink
+        if provider_observation_sink is not None:
+            self._provider_observation_sink = provider_observation_sink
+        if conversation_record_sink is not None:
+            self._conversation_record_sink = conversation_record_sink
+        if persisted_diagnostic_store is not None:
+            self._persisted_diagnostic_store = persisted_diagnostic_store
+        if observability_runner is not None:
+            self._observability_runner = observability_runner
 
     def attach_realtime_sink(self, sink: RealtimeLogSink) -> None:
         if self._closed:
@@ -362,6 +432,11 @@ class SessionRuntimeLoggingService:
         if self._closed:
             return
         self._session_logger.log(level, message)
+        self._emit_structured_runtime_log(
+            message,
+            level=level,
+            visibility=DIAGNOSTIC_VISIBILITY_BASIC,
+        )
 
     def emit_detailed(self, message: str, *, level: int = logging.INFO) -> bool:
         if self._closed:
@@ -369,6 +444,11 @@ class SessionRuntimeLoggingService:
         if self._mode is not SessionLoggingMode.DETAILED:
             return False
         self._session_logger.log(level, message)
+        self._emit_structured_runtime_log(
+            message,
+            level=level,
+            visibility=DIAGNOSTIC_VISIBILITY_DETAILED,
+        )
         return True
 
     def emit_detailed_lazy(
@@ -381,7 +461,13 @@ class SessionRuntimeLoggingService:
             return False
         if self._mode is not SessionLoggingMode.DETAILED:
             return False
-        self._session_logger.log(level, build_message())
+        message = build_message()
+        self._session_logger.log(level, message)
+        self._emit_structured_runtime_log(
+            message,
+            level=level,
+            visibility=DIAGNOSTIC_VISIBILITY_DETAILED,
+        )
         return True
 
     async def observe_output_routing(self, decision: OutputRoutingDecision) -> None:
@@ -404,6 +490,180 @@ class SessionRuntimeLoggingService:
         self._sinks.file_handler.handle(record)
         with contextlib.suppress(Exception):
             self._sinks.file_handler.flush()
+        self._persist_structured_diagnostic(message, level=level)
+
+    def observe_provider_operation(
+        self,
+        *,
+        provider: str,
+        operation: str,
+        outcome: ProviderObservationOutcome,
+        severity: Severity = SEVERITY_INFO,
+        diagnostics: ErrorDiagnostics | None = None,
+        fields: Mapping[str, DiagnosticFieldValue] | None = None,
+        category: DiagnosticCategory | None = None,
+        visibility: DiagnosticVisibility | None = None,
+        content_policy: ContentPolicy | None = None,
+        correlation_id: str | None = None,
+    ) -> None:
+        if self._closed:
+            return
+        event = ProviderObservationEvent(
+            provider=provider,
+            operation=operation,
+            outcome=outcome,
+            correlation_id=correlation_id or _new_correlation_id("provider"),
+            diagnostics=diagnostics,
+            fields=fields or {},
+            category=category
+            or (diagnostics.category if diagnostics is not None else DIAGNOSTIC_CATEGORY_UNKNOWN),
+            severity=severity,
+            visibility=visibility
+            or (
+                diagnostics.visibility
+                if diagnostics is not None
+                else DIAGNOSTIC_VISIBILITY_DETAILED
+            ),
+            content_policy=content_policy
+            or (
+                diagnostics.content_policy
+                if diagnostics is not None
+                else CONTENT_POLICY_METADATA_ONLY
+            ),
+        )
+        self._dispatch_observability(
+            self._provider_observation_sink,
+            lambda sink: sink.emit_provider_observation(event),
+        )
+
+    def record_conversation_observation(
+        self,
+        *,
+        utterance_id: str,
+        speaker_channel: ConversationRecordChannel,
+        transcript_text: str | None,
+        translation_text: str | None,
+        source_language: str | None,
+        target_language: str | None,
+        metadata: Mapping[str, DiagnosticFieldValue] | None = None,
+        category: DiagnosticCategory = DIAGNOSTIC_CATEGORY_UNKNOWN,
+        severity: Severity = SEVERITY_INFO,
+        visibility: DiagnosticVisibility = DIAGNOSTIC_VISIBILITY_BASIC,
+        content_policy: ContentPolicy = CONTENT_POLICY_RAW_USER_TEXT_ALLOWED,
+        correlation_id: str | None = None,
+    ) -> None:
+        if self._closed:
+            return
+        record = ConversationRecord(
+            utterance_id=utterance_id,
+            speaker_channel=speaker_channel,
+            transcript_text=transcript_text,
+            translation_text=translation_text,
+            source_language=source_language,
+            target_language=target_language,
+            metadata=metadata or {},
+            category=category,
+            severity=severity,
+            visibility=visibility,
+            content_policy=content_policy,
+            correlation_id=correlation_id or _new_correlation_id("conversation"),
+        )
+        self._dispatch_observability(
+            self._conversation_record_sink,
+            lambda sink: sink.record_conversation(record),
+        )
+
+    def _emit_structured_runtime_log(
+        self,
+        message: str,
+        *,
+        level: int,
+        visibility: DiagnosticVisibility,
+    ) -> None:
+        if self._observability_runner is None:
+            return
+        if self._runtime_log_sink is None and self._diagnostics_sink is None:
+            return
+
+        correlation_id = _new_correlation_id("runtime-log")
+        fields = _legacy_text_observability_fields(
+            message,
+            level=level,
+            visibility=visibility,
+        )
+        runtime_event = RuntimeLogEvent(
+            category=DIAGNOSTIC_CATEGORY_UNKNOWN,
+            severity=_severity_for_level(level),
+            visibility=visibility,
+            content_policy=CONTENT_POLICY_METADATA_ONLY,
+            correlation_id=correlation_id,
+            message=None,
+            diagnostics=None,
+            fields=fields,
+        )
+        diagnostic_event = DiagnosticEvent(
+            category=runtime_event.category,
+            severity=runtime_event.severity,
+            visibility=runtime_event.visibility,
+            content_policy=runtime_event.content_policy,
+            correlation_id=runtime_event.correlation_id,
+            diagnostics=None,
+            fields=runtime_event.fields,
+        )
+        self._dispatch_observability(
+            self._runtime_log_sink,
+            lambda sink: sink.emit_runtime_log(runtime_event),
+        )
+        self._dispatch_observability(
+            self._diagnostics_sink,
+            lambda sink: sink.emit_diagnostic(diagnostic_event),
+        )
+
+    def _persist_structured_diagnostic(self, message: str, *, level: int) -> None:
+        if self._persisted_diagnostic_store is None or self._observability_runner is None:
+            return
+        diagnostic = DiagnosticEvent(
+            category=DIAGNOSTIC_CATEGORY_UNKNOWN,
+            severity=_severity_for_level(level),
+            visibility=DIAGNOSTIC_VISIBILITY_DIAGNOSTIC_ONLY,
+            content_policy=CONTENT_POLICY_METADATA_ONLY,
+            correlation_id=_new_correlation_id("persisted-log"),
+            diagnostics=None,
+            fields=_legacy_text_observability_fields(
+                message,
+                level=level,
+                visibility=DIAGNOSTIC_VISIBILITY_DIAGNOSTIC_ONLY,
+            ),
+        )
+        persisted = PersistedDiagnosticRecord(
+            diagnostic=diagnostic,
+            storage_key=_persisted_storage_key(self._sinks.log_file),
+            metadata={"renderer": "legacy_text"},
+        )
+        self._dispatch_observability(
+            self._persisted_diagnostic_store,
+            lambda store: store.persist_diagnostic(persisted),
+        )
+
+    def _dispatch_observability(
+        self,
+        sink: object | None,
+        build_awaitable: Callable[[object], Awaitable[None]],
+    ) -> None:
+        runner = self._observability_runner
+        if sink is None or runner is None:
+            return
+        try:
+            awaitable = build_awaitable(sink)
+        except Exception:
+            return
+        try:
+            runner(awaitable)
+        except Exception:
+            close = getattr(awaitable, "close", None)
+            if callable(close):
+                with contextlib.suppress(Exception):
+                    close()
 
     def close(self) -> None:
         self._close(force_owned_sinks=False)
@@ -443,6 +703,44 @@ def _ensure_handler(logger: logging.Logger, handler: logging.Handler) -> bool:
 
 def _new_session_logger_name() -> str:
     return f"{_SESSION_LOGGER_NAME}.{uuid4()}"
+
+
+def _new_correlation_id(prefix: str) -> str:
+    return f"{prefix}-{uuid4()}"
+
+
+def _severity_for_level(level: int) -> Severity:
+    if level >= logging.ERROR:
+        return SEVERITY_ERROR
+    if level >= logging.WARNING:
+        return SEVERITY_WARNING
+    return SEVERITY_INFO
+
+
+def _legacy_text_observability_fields(
+    message: str,
+    *,
+    level: int,
+    visibility: DiagnosticVisibility,
+) -> Mapping[str, DiagnosticFieldValue]:
+    level_name = logging.getLevelName(level)
+    if not isinstance(level_name, str):
+        level_name = str(level_name)
+    return {
+        "renderer": "legacy_text",
+        "visibility": visibility,
+        "levelno": int(level),
+        "level_name": level_name,
+        "text_len": len(message),
+    }
+
+
+def _persisted_storage_key(log_file: object) -> str | None:
+    try:
+        storage_path = Path(log_file)
+    except TypeError:
+        return None
+    return storage_path.name or None
 
 
 def _format_output_routing_decision(decision: OutputRoutingDecision) -> str:

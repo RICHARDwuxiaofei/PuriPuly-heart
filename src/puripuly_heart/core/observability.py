@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final, Literal, Protocol
 
 from puripuly_heart.core.messages import (
+    CONTENT_POLICY_METADATA_ONLY,
+    CONTENT_POLICY_RAW_USER_TEXT_ALLOWED,
+    DIAGNOSTIC_CATEGORY_UNKNOWN,
+    DIAGNOSTIC_VISIBILITY_BASIC,
+    DIAGNOSTIC_VISIBILITY_DETAILED,
+    SEVERITY_INFO,
     ContentPolicy,
     DiagnosticCategory,
     DiagnosticFieldValue,
@@ -33,7 +40,20 @@ ConversationRecordChannel = Literal["self"]
 def _freeze_fields(
     values: Mapping[str, DiagnosticFieldValue],
 ) -> Mapping[str, DiagnosticFieldValue]:
-    return MappingProxyType(dict(values))
+    fields: dict[str, DiagnosticFieldValue] = {}
+    for key, value in values.items():
+        if not isinstance(key, str):
+            raise TypeError("structured observability field keys must be strings")
+        if not _is_json_safe_scalar(value):
+            raise TypeError("structured observability field values must be JSON-safe scalars")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("structured observability float fields must be finite")
+        fields[key] = value
+    return MappingProxyType(fields)
+
+
+def _is_json_safe_scalar(value: object) -> bool:
+    return value is None or isinstance(value, str | int | float | bool)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +93,10 @@ class ProviderObservationEvent:
     correlation_id: str | None
     diagnostics: ErrorDiagnostics | None
     fields: Mapping[str, DiagnosticFieldValue]
+    category: DiagnosticCategory = DIAGNOSTIC_CATEGORY_UNKNOWN
+    severity: Severity = SEVERITY_INFO
+    visibility: DiagnosticVisibility = DIAGNOSTIC_VISIBILITY_DETAILED
+    content_policy: ContentPolicy = CONTENT_POLICY_METADATA_ONLY
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", _freeze_fields(self.fields))
@@ -87,6 +111,11 @@ class ConversationRecord:
     source_language: str | None
     target_language: str | None
     metadata: Mapping[str, DiagnosticFieldValue]
+    category: DiagnosticCategory = DIAGNOSTIC_CATEGORY_UNKNOWN
+    severity: Severity = SEVERITY_INFO
+    visibility: DiagnosticVisibility = DIAGNOSTIC_VISIBILITY_BASIC
+    content_policy: ContentPolicy = CONTENT_POLICY_RAW_USER_TEXT_ALLOWED
+    correlation_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metadata", _freeze_fields(self.metadata))
