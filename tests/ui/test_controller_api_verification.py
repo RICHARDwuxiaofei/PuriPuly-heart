@@ -61,12 +61,25 @@ class DummyDashboard:
         self.local_stt_notice_percent = percent
 
 
+class DummyOutputRuntime:
+    def __init__(self) -> None:
+        self.started_bridges: list[object] = []
+        self.bridge_tasks: list[asyncio.Task[object]] = []
+
+    def start_ui_event_bridge(self, bridge: object) -> asyncio.Task[object]:
+        self.started_bridges.append(bridge)
+        task = asyncio.create_task(bridge.run())  # type: ignore[attr-defined]
+        self.bridge_tasks.append(task)
+        return task
+
+
 class DummyHub:
     def __init__(self, *, llm: object | None = object(), stt: object | None = object()) -> None:
         self.llm = llm
         self.stt = stt
         self.translation_enabled = True
         self.ui_events: asyncio.Queue[object] = asyncio.Queue()
+        self.output_runtime = DummyOutputRuntime()
         self.start_calls: list[bool] = []
 
     async def start(self, *, auto_flush_osc: bool) -> None:
@@ -792,6 +805,76 @@ async def test_local_qwen_repeated_enable_during_runtime_install_is_single_fligh
 
     release.done = True
     await controller._local_stt_download_task
+
+
+@pytest.mark.asyncio
+async def test_local_stt_download_uses_named_runtime_owner_and_ignores_stale_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    dashboard = DummyDashboard()
+    app = SimpleNamespace(
+        view_dashboard=dashboard,
+        _show_snackbar=lambda *_args, **_kwargs: None,
+    )
+    install_started = asyncio.Event()
+    release_install = asyncio.Event()
+    captured_status_callbacks: list[object] = []
+
+    async def fake_install(**kwargs):
+        captured_status_callbacks.append(kwargs["on_status"])
+        install_started.set()
+        await release_install.wait()
+        return object()
+
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller._local_stt_install_state = LocalSTTInstallState(status="missing")
+
+    assert controller._start_local_stt_download(origin="manual") is True
+    await install_started.wait()
+
+    owner = controller._local_stt_download_runtime
+    assert owner is not None
+    assert owner.lifecycle_owner_snapshot()["owner"] == "LocalSTTDownloadRuntime"
+    assert controller._local_stt_download_task is owner.download_task
+    assert controller._local_stt_download_cancel_event is owner.cancel_event
+    assert controller._local_stt_download_origin == "manual"
+
+    on_status = captured_status_callbacks[0]
+    await on_status(controller_module.RuntimeLocalSTTStatusUpdate("downloading", percent=42))
+    assert controller._local_stt_runtime_status == "downloading"
+    assert controller._local_stt_download_percent == 42
+    assert dashboard.local_stt_notice_percent == 42
+
+    await controller._cancel_local_stt_download()
+    controller._local_stt_runtime_status = "ready"
+    controller._local_stt_download_percent = None
+    await on_status(controller_module.RuntimeLocalSTTStatusUpdate("downloading", percent=99))
+
+    release_install.set()
+    assert controller._local_stt_runtime_status == "ready"
+    assert controller._local_stt_download_percent is None
+    assert controller._local_stt_download_task is None
+    assert controller._local_stt_download_cancel_event is None
+
+
+@pytest.mark.asyncio
+async def test_local_stt_download_rejects_new_start_after_runtime_close() -> None:
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(view_dashboard=DummyDashboard()),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = AppSettings()
+    owner = controller._get_local_stt_download_runtime()
+    await owner.close()
+
+    assert controller._start_local_stt_download(origin="manual") is False
+    assert controller._local_stt_download_task is None
 
 
 @pytest.mark.asyncio

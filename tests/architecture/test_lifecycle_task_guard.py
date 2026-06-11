@@ -34,7 +34,7 @@ LEGACY_TASK_CREATION_ALLOWLIST = Counter(
         ("src/puripuly_heart/providers/stt/soniox.py", ASYNCIO_CREATE_TASK): 3,
         ("src/puripuly_heart/ui/app.py", RUN_TASK): 13,
         ("src/puripuly_heart/ui/components/settings/api_key_field.py", RUN_TASK): 1,
-        ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 7,
+        ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 3,
         ("src/puripuly_heart/ui/desktop_overlay.py", ASYNCIO_CREATE_TASK): 11,
     }
 )
@@ -48,6 +48,8 @@ NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST = Counter(
         ("src/puripuly_heart/core/runtime/output.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/oauth.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/clipboard.py", ASYNCIO_CREATE_TASK): 1,
+        ("src/puripuly_heart/core/runtime/local_stt_download.py", ASYNCIO_CREATE_TASK): 1,
+        ("src/puripuly_heart/core/runtime/mic_test.py", ASYNCIO_CREATE_TASK): 2,
     }
 )
 
@@ -143,5 +145,20 @@ def test_order37_named_owner_allowlist_preserves_remaining_legacy_ui_task_debt()
     ) in NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST
     assert (
         "src/puripuly_heart/core/runtime/clipboard.py",
+        ASYNCIO_CREATE_TASK,
+    ) in NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST
+
+
+def test_order38_named_owner_allowlist_preserves_installer_legacy_task_debt() -> None:
+    assert (
+        "src/puripuly_heart/core/local_stt_runtime_installer.py",
+        ASYNCIO_CREATE_TASK,
+    ) in LEGACY_TASK_CREATION_ALLOWLIST
+    assert (
+        "src/puripuly_heart/core/runtime/local_stt_download.py",
+        ASYNCIO_CREATE_TASK,
+    ) in NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST
+    assert (
+        "src/puripuly_heart/core/runtime/mic_test.py",
         ASYNCIO_CREATE_TASK,
     ) in NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST

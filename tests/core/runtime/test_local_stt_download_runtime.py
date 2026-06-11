@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+import asyncio
+import threading
+
+import pytest
+
+from puripuly_heart.core.local_stt_runtime_installer import RuntimeLocalSTTStatusUpdate
+from puripuly_heart.core.runtime import LocalSTTDownloadRuntime
+
+
+def test_local_stt_download_runtime_exposes_lifecycle_inventory_and_policy() -> None:
+    runtime = LocalSTTDownloadRuntime()
+
+    snapshot = runtime.lifecycle_owner_snapshot()
+
+    assert snapshot["owner"] == "LocalSTTDownloadRuntime"
+    assert snapshot["resource_fields"] == (
+        "_download_task",
+        "_cancel_event",
+        "_origin",
+        "_generation",
+    )
+    assert snapshot["stop_ingress"] == "reject new install/start commands"
+    assert "cancel active install task" in snapshot["shutdown_policy"]
+    assert snapshot["late_callback_rule"] == "late progress ignored after generation change"
+
+
+@pytest.mark.asyncio
+async def test_local_stt_download_runtime_close_sets_cancel_event_and_cancels_task() -> None:
+    runtime = LocalSTTDownloadRuntime(cancel_timeout_s=0.05)
+    started = asyncio.Event()
+    cancel_events: list[threading.Event] = []
+
+    async def run_download(cancel_event: threading.Event, generation: int) -> object:
+        assert runtime.is_current_generation(generation)
+        cancel_events.append(cancel_event)
+        started.set()
+        await asyncio.sleep(999)
+        return object()
+
+    task = runtime.start(origin="manual", run_download=run_download)
+    await started.wait()
+
+    await runtime.close()
+
+    assert task.done()
+    assert cancel_events[0].is_set() is True
+    assert runtime.download_task is None
+    assert runtime.cancel_event is None
+    assert runtime.origin is None
+    assert runtime.is_closed is True
+
+
+@pytest.mark.asyncio
+async def test_local_stt_download_runtime_rejects_start_while_closing_or_closed() -> None:
+    runtime = LocalSTTDownloadRuntime(cancel_timeout_s=0.01)
+    await runtime.close()
+
+    async def never_started(_cancel_event: threading.Event, _generation: int) -> object:
+        await asyncio.sleep(999)
+        return object()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        runtime.start(origin="manual", run_download=never_started)
+
+
+@pytest.mark.asyncio
+async def test_late_local_stt_progress_from_old_generation_is_ignored() -> None:
+    runtime = LocalSTTDownloadRuntime(cancel_timeout_s=0.01)
+    started = asyncio.Event()
+    seen_updates: list[RuntimeLocalSTTStatusUpdate] = []
+
+    async def run_download(_cancel_event: threading.Event, _generation: int) -> object:
+        started.set()
+        await asyncio.sleep(999)
+        return object()
+
+    runtime.start(origin="manual", run_download=run_download)
+    generation = runtime.generation
+    await started.wait()
+
+    await runtime.dispatch_status_update(
+        RuntimeLocalSTTStatusUpdate(status="downloading", percent=25),
+        generation=generation,
+        on_status=seen_updates.append,
+    )
+    await runtime.close()
+    await runtime.dispatch_status_update(
+        RuntimeLocalSTTStatusUpdate(status="downloading", percent=99),
+        generation=generation,
+        on_status=seen_updates.append,
+    )
+
+    assert seen_updates == [RuntimeLocalSTTStatusUpdate(status="downloading", percent=25)]
+
+
+@pytest.mark.asyncio
+async def test_late_local_stt_progress_after_normal_completion_is_ignored() -> None:
+    runtime = LocalSTTDownloadRuntime(cancel_timeout_s=0.01)
+    seen_updates: list[RuntimeLocalSTTStatusUpdate] = []
+
+    async def run_download(_cancel_event: threading.Event, _generation: int) -> object:
+        return object()
+
+    task = runtime.start(origin="manual", run_download=run_download)
+    generation = runtime.generation
+    await task
+    await asyncio.sleep(0)
+
+    await runtime.dispatch_status_update(
+        RuntimeLocalSTTStatusUpdate(status="downloading", percent=99),
+        generation=generation,
+        on_status=seen_updates.append,
+    )
+
+    assert seen_updates == []

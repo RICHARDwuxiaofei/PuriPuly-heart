@@ -162,6 +162,8 @@ from puripuly_heart.core.overlay.process import (
     OverlayProcessRunner,
 )
 from puripuly_heart.core.runtime.clipboard import ClipboardRuntime
+from puripuly_heart.core.runtime.local_stt_download import LocalSTTDownloadRuntime
+from puripuly_heart.core.runtime.mic_test import MicTestRuntime
 from puripuly_heart.core.runtime.oauth import OAuthRuntime
 from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
 from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
@@ -958,6 +960,7 @@ class GuiController:
         repr=False,
     )
     _microphone_test_meter_level: float = field(init=False, default=0.0)
+    _microphone_test_runtime: MicTestRuntime | None = field(init=False, default=None)
     _microphone_test_task: asyncio.Task[None] | None = field(
         init=False,
         default=None,
@@ -1016,6 +1019,10 @@ class GuiController:
         default_factory=lambda: LocalSTTInstallState(status="ready"),
     )
     _local_stt_runtime_status: str = field(init=False, default="ready")
+    _local_stt_download_runtime: LocalSTTDownloadRuntime | None = field(
+        init=False,
+        default=None,
+    )
     _local_stt_download_origin: str | None = field(init=False, default=None)
     _local_stt_download_percent: int | None = field(init=False, default=None)
     _local_stt_download_task: asyncio.Task[object] | None = field(
@@ -3487,7 +3494,7 @@ class GuiController:
         await self._close_app_oauth_runtime_for_release(cleanup_failures)
         await self._close_oauth_runtime()
         await self._cancel_local_stt_download()
-        await self.stop_microphone_test()
+        await self._close_microphone_test_runtime_for_release(cleanup_failures)
         try:
             await self.set_stt_enabled(False)
         except Exception as exc:
@@ -4294,6 +4301,33 @@ class GuiController:
             self._local_stt_runtime_status = self._local_stt_install_state.status
         self._sync_local_stt_notice()
 
+    def _get_local_stt_download_runtime(self) -> LocalSTTDownloadRuntime:
+        if self._local_stt_download_runtime is None:
+            self._local_stt_download_runtime = LocalSTTDownloadRuntime(
+                state_changed=self._sync_local_stt_download_runtime_aliases,
+            )
+            if self._local_stt_download_task is not None:
+                self._local_stt_download_runtime.adopt_legacy_state(
+                    task=self._local_stt_download_task,
+                    cancel_event=self._local_stt_download_cancel_event,
+                    origin=self._local_stt_download_origin,
+                )
+        return self._local_stt_download_runtime
+
+    def _sync_local_stt_download_runtime_aliases(
+        self,
+        runtime: LocalSTTDownloadRuntime | None = None,
+    ) -> None:
+        owner = runtime or self._local_stt_download_runtime
+        if owner is None:
+            self._local_stt_download_task = None
+            self._local_stt_download_cancel_event = None
+            self._local_stt_download_origin = None
+            return
+        self._local_stt_download_task = owner.download_task
+        self._local_stt_download_cancel_event = owner.cancel_event
+        self._local_stt_download_origin = owner.origin
+
     def _current_local_stt_runtime_status(self) -> str:
         if self._local_stt_runtime_status in ("downloading", "download_failed"):
             return self._local_stt_runtime_status
@@ -4340,34 +4374,68 @@ class GuiController:
             )
 
     def _start_local_stt_download(self, *, origin: str) -> bool:
-        task = self._local_stt_download_task
+        runtime = self._get_local_stt_download_runtime()
+        task = runtime.download_task
         if task is not None and not task.done():
             return False
         self._local_stt_download_origin = origin
         self._local_stt_download_percent = 0
-        self._local_stt_download_cancel_event = threading.Event()
-        self._local_stt_download_task = asyncio.create_task(
-            self._run_local_stt_download(origin=origin)
-        )
+        try:
+            runtime.start(
+                origin=origin,
+                run_download=lambda cancel_event, generation: self._run_local_stt_download(
+                    origin=origin,
+                    cancel_event=cancel_event,
+                    generation=generation,
+                ),
+            )
+        except RuntimeError:
+            self._sync_local_stt_download_runtime_aliases(runtime)
+            return False
+        self._sync_local_stt_download_runtime_aliases(runtime)
         return True
 
-    async def _run_local_stt_download(self, *, origin: str) -> None:
-        current_task = asyncio.current_task()
-        cancel_event = self._local_stt_download_cancel_event
+    async def _run_local_stt_download(
+        self,
+        *,
+        origin: str,
+        cancel_event: threading.Event | None = None,
+        generation: int | None = None,
+    ) -> None:
+        runtime = self._local_stt_download_runtime
+        if generation is None and runtime is not None:
+            generation = runtime.generation
         if self.settings is None:
             return
+        if generation is not None and runtime is not None:
+            if not runtime.is_current_generation(generation):
+                return
         self._local_stt_runtime_status = "downloading"
         self._local_stt_download_percent = 0
         self._sync_local_stt_notice()
         try:
+
+            async def on_status(update: RuntimeLocalSTTStatusUpdate) -> None:
+                if generation is not None and runtime is not None:
+                    await runtime.dispatch_status_update(
+                        update,
+                        generation=generation,
+                        on_status=self._handle_local_stt_download_status,
+                    )
+                    return
+                await self._handle_local_stt_download_status(update)
+
             installed = await ensure_local_stt_installed(
                 locale=self.settings.ui.locale,
-                on_status=self._handle_local_stt_download_status,
+                on_status=on_status,
                 cancel_event=cancel_event,
             )
         except (asyncio.CancelledError, LocalSTTRuntimeInstallCancelled):
             return
         except LocalSTTRuntimeInstallError as exc:
+            if generation is not None and runtime is not None:
+                if not runtime.is_current_generation(generation):
+                    return
             self._local_stt_runtime_status = "download_failed"
             self._local_stt_download_percent = None
             self._sync_local_stt_notice()
@@ -4376,12 +4444,11 @@ class GuiController:
             self._log_error(f"Local STT download failed: {exc}")
             return
         finally:
-            if self._local_stt_download_task is current_task:
-                self._local_stt_download_task = None
-            if self._local_stt_download_cancel_event is cancel_event:
-                self._local_stt_download_cancel_event = None
-            if self._local_stt_download_origin == origin:
-                self._local_stt_download_origin = None
+            self._sync_local_stt_download_runtime_aliases(runtime)
+
+        if generation is not None and runtime is not None:
+            if not runtime.is_current_generation(generation):
+                return
 
         self._local_stt_install_state = LocalSTTInstallState(
             status="ready",
@@ -4418,7 +4485,15 @@ class GuiController:
             self._reset_local_stt_pending_peer_enable_after_install()
             await self._refresh_overlay_runtime_dependencies()
 
-    async def _handle_local_stt_download_status(self, update: RuntimeLocalSTTStatusUpdate) -> None:
+    async def _handle_local_stt_download_status(
+        self,
+        update: RuntimeLocalSTTStatusUpdate,
+        *,
+        generation: int | None = None,
+    ) -> None:
+        if generation is not None and self._local_stt_download_runtime is not None:
+            if not self._local_stt_download_runtime.is_current_generation(generation):
+                return
         self._local_stt_runtime_status = update.status
         self._local_stt_download_percent = update.percent
         self._sync_local_stt_notice()
@@ -4551,10 +4626,16 @@ class GuiController:
                     await close_backend()
 
     async def _cancel_local_stt_download(self) -> None:
-        task = self._local_stt_download_task
-        cancel_event = self._local_stt_download_cancel_event
         self._reset_local_stt_pending_enable_after_install()
         self._reset_local_stt_pending_peer_enable_after_install()
+        runtime = self._local_stt_download_runtime
+        if runtime is not None:
+            await runtime.close()
+            self._sync_local_stt_download_runtime_aliases(runtime)
+            return
+
+        task = self._local_stt_download_task
+        cancel_event = self._local_stt_download_cancel_event
         if cancel_event is not None:
             cancel_event.set()
         if task is None:
@@ -6818,13 +6899,35 @@ class GuiController:
 
     @property
     def microphone_test_active(self) -> bool:
-        task = self._microphone_test_task
+        runtime = self._microphone_test_runtime
+        task = runtime.session_task if runtime is not None else self._microphone_test_task
         return task is not None and not task.done()
 
     def _get_microphone_test_lifecycle_lock(self) -> asyncio.Lock:
         if self._microphone_test_lifecycle_lock is None:
             self._microphone_test_lifecycle_lock = asyncio.Lock()
         return self._microphone_test_lifecycle_lock
+
+    def _get_microphone_test_runtime(self) -> MicTestRuntime:
+        if self._microphone_test_runtime is None:
+            self._microphone_test_runtime = MicTestRuntime(
+                state_changed=self._sync_microphone_test_runtime_aliases,
+            )
+            if self._microphone_test_task is not None:
+                self._microphone_test_runtime.adopt_legacy_state(
+                    task=self._microphone_test_task,
+                )
+        return self._microphone_test_runtime
+
+    def _sync_microphone_test_runtime_aliases(
+        self,
+        runtime: MicTestRuntime | None = None,
+    ) -> None:
+        owner = runtime or self._microphone_test_runtime
+        if owner is None:
+            self._microphone_test_task = None
+            return
+        self._microphone_test_task = owner.session_task
 
     @staticmethod
     def _microphone_test_audio_settings_signature(
@@ -6913,34 +7016,44 @@ class GuiController:
                 self._microphone_test_audio_settings_signature(self.settings)
             )
         async with self._get_microphone_test_lifecycle_lock():
-            task = self._microphone_test_task
+            runtime = self._get_microphone_test_runtime()
+            task = runtime.session_task
             if task is not None:
                 if not task.done():
                     return False
                 await asyncio.gather(task, return_exceptions=True)
-                if self._microphone_test_task is task:
-                    self._microphone_test_task = None
+                self._sync_microphone_test_runtime_aliases(runtime)
+
+            if not await self._recover_microphone_test_runtime_before_start(runtime):
+                return False
 
             if not await self._prepare_microphone_test_capture():
                 return False
 
-            self._microphone_test_task = asyncio.create_task(
-                self._run_microphone_test_session(
-                    meter_callback=meter_callback,
-                    level_log_interval_s=level_log_interval_s,
+            try:
+                runtime.start(
+                    lambda generation: self._run_microphone_test_session(
+                        generation=generation,
+                        meter_callback=meter_callback,
+                        level_log_interval_s=level_log_interval_s,
+                    )
                 )
-            )
+            except RuntimeError:
+                self._sync_microphone_test_runtime_aliases(runtime)
+                return False
+            self._sync_microphone_test_runtime_aliases(runtime)
             return True
 
     async def _run_microphone_test_session(
         self,
         *,
+        generation: int | None = None,
         meter_callback: Callable[[float], object] | None,
         level_log_interval_s: float,
     ) -> None:
-        current_task = asyncio.current_task()
         try:
             await self.run_microphone_test_capture(
+                generation=generation,
                 meter_callback=meter_callback,
                 level_log_interval_s=level_log_interval_s,
             )
@@ -6949,11 +7062,17 @@ class GuiController:
         except Exception as exc:
             self._log_error(f"Microphone test error: {exc}")
         finally:
-            if self._microphone_test_task is current_task:
-                self._microphone_test_task = None
+            self._sync_microphone_test_runtime_aliases()
 
     async def stop_microphone_test(self) -> None:
         async with self._get_microphone_test_lifecycle_lock():
+            runtime = self._microphone_test_runtime
+            if runtime is not None:
+                await runtime.stop()
+                self._microphone_test_meter_level = 0.0
+                self._sync_microphone_test_runtime_aliases(runtime)
+                return
+
             task = self._microphone_test_task
             if task is None:
                 return
@@ -6962,15 +7081,58 @@ class GuiController:
             await asyncio.gather(task, return_exceptions=True)
             if self._microphone_test_task is task:
                 self._microphone_test_task = None
+            self._microphone_test_meter_level = 0.0
 
     async def stop_microphone_test_for_audio_settings_change(self) -> None:
         await self.stop_microphone_test()
+
+    async def _recover_microphone_test_runtime_before_start(
+        self,
+        runtime: MicTestRuntime,
+    ) -> bool:
+        if runtime.has_active_direct_capture:
+            return False
+        if runtime.source is None and runtime.pending_frame_task is None:
+            return True
+        if runtime.pending_frame_task is not None and not runtime.pending_frame_task.done():
+            return False
+        try:
+            await runtime.stop()
+        except Exception as exc:
+            self._log_error(f"Microphone test cleanup retry failed: {exc}")
+            self._sync_microphone_test_runtime_aliases(runtime)
+            return False
+        self._sync_microphone_test_runtime_aliases(runtime)
+        return runtime.source is None and runtime.pending_frame_task is None
+
+    async def _close_microphone_test_runtime_for_release(
+        self,
+        cleanup_failures: list[Exception],
+    ) -> None:
+        runtime = self._microphone_test_runtime
+        if runtime is None and self._microphone_test_task is not None:
+            runtime = self._get_microphone_test_runtime()
+        if runtime is None:
+            return
+        try:
+            await runtime.close()
+        except Exception as exc:
+            cleanup_failures.append(exc)
+        finally:
+            self._microphone_test_meter_level = 0.0
+            self._sync_microphone_test_runtime_aliases(runtime)
 
     async def _set_microphone_test_meter_level(
         self,
         value: float,
         meter_callback: Callable[[float], object] | None,
+        *,
+        generation: int | None = None,
     ) -> None:
+        if generation is not None:
+            runtime = self._microphone_test_runtime
+            if runtime is None or not runtime.is_current_generation(generation):
+                return
         level = max(0.0, min(1.0, float(value)))
         if level <= 1e-6:
             level = 0.0
@@ -7117,141 +7279,182 @@ class GuiController:
     async def run_microphone_test_capture(
         self,
         *,
+        generation: int | None = None,
         meter_callback: Callable[[float], object] | None = None,
         level_log_interval_s: float = _MICROPHONE_TEST_LEVEL_INTERVAL_S,
     ) -> None:
         assert self.settings is not None
-        level_log_interval_s = max(0.0, float(level_log_interval_s))
-        source: object | None = None
-        opened = False
-        end_exception: BaseException | None = None
-        level_logged = False
-        pending_frame: asyncio.Task[object] | None = None
-        interval_stats = _MicrophoneTestLevelStats()
-        total_stats = _MicrophoneTestLevelStats()
-
-        await self._set_microphone_test_meter_level(0.0, meter_callback)
-        observation = observe_microphone_test_route(
-            saved_host_api=self.settings.audio.input_host_api,
-            requested_device=self.settings.audio.input_device,
+        runtime = self._get_microphone_test_runtime()
+        direct_generation = generation is None
+        capture_generation = (
+            generation if generation is not None else runtime.begin_direct_capture()
         )
-        self.log_basic(self._format_microphone_test_route_log(observation))
-
         try:
-            if not observation.should_attempt_open:
-                self._log_microphone_test_open(
-                    attempted=False,
-                    opened=False,
-                    requested_channels=None,
-                    source=None,
-                    observation=observation,
-                )
-                self._log_microphone_test_level(interval_stats, source=None)
-                level_logged = True
-                return
+            level_log_interval_s = max(0.0, float(level_log_interval_s))
+            source: object | None = None
+            opened = False
+            end_exception: BaseException | None = None
+            level_logged = False
+            pending_frame: asyncio.Task[object] | None = None
+            interval_stats = _MicrophoneTestLevelStats()
+            total_stats = _MicrophoneTestLevelStats()
 
-            decision = determine_self_mic_capture_channels(
-                device_idx=observation.resolved_device_idx,
-                internal_channels=self.settings.audio.internal_channels,
+            await self._set_microphone_test_meter_level(
+                0.0,
+                meter_callback,
+                generation=capture_generation,
             )
-            requested_channels = decision.preferred_capture_channels
+            observation = observe_microphone_test_route(
+                saved_host_api=self.settings.audio.input_host_api,
+                requested_device=self.settings.audio.input_device,
+            )
+            self.log_basic(self._format_microphone_test_route_log(observation))
+
             try:
-                source = SoundDeviceAudioSource(
-                    sample_rate_hz=None,
-                    channels=requested_channels,
-                    device=observation.resolved_device_idx,
-                    wasapi_auto_convert=observation.wasapi_auto_convert,
-                    wasapi_exclusive=observation.wasapi_exclusive,
+                if not observation.should_attempt_open:
+                    self._log_microphone_test_open(
+                        attempted=False,
+                        opened=False,
+                        requested_channels=None,
+                        source=None,
+                        observation=observation,
+                    )
+                    self._log_microphone_test_level(interval_stats, source=None)
+                    level_logged = True
+                    return
+
+                decision = determine_self_mic_capture_channels(
+                    device_idx=observation.resolved_device_idx,
+                    internal_channels=self.settings.audio.internal_channels,
                 )
-            except Exception as exc:
-                end_exception = exc
+                requested_channels = decision.preferred_capture_channels
+                try:
+                    source = SoundDeviceAudioSource(
+                        sample_rate_hz=None,
+                        channels=requested_channels,
+                        device=observation.resolved_device_idx,
+                        wasapi_auto_convert=observation.wasapi_auto_convert,
+                        wasapi_exclusive=observation.wasapi_exclusive,
+                    )
+                    if not runtime.attach_source(source, generation=capture_generation):
+                        with contextlib.suppress(Exception):
+                            close = getattr(source, "close", None)
+                            if callable(close):
+                                result = close()
+                                if inspect.isawaitable(result):
+                                    await result
+                        return
+                except Exception as exc:
+                    end_exception = exc
+                    self._log_microphone_test_open(
+                        attempted=True,
+                        opened=False,
+                        requested_channels=requested_channels,
+                        source=None,
+                        observation=observation,
+                        exception=exc,
+                    )
+                    self._log_microphone_test_level(interval_stats, source=None)
+                    level_logged = True
+                    return
+
+                opened = True
                 self._log_microphone_test_open(
                     attempted=True,
-                    opened=False,
+                    opened=True,
                     requested_channels=requested_channels,
-                    source=None,
+                    source=source,
                     observation=observation,
-                    exception=exc,
                 )
-                self._log_microphone_test_level(interval_stats, source=None)
-                level_logged = True
-                return
 
-            opened = True
-            self._log_microphone_test_open(
-                attempted=True,
-                opened=True,
-                requested_channels=requested_channels,
-                source=source,
-                observation=observation,
-            )
+                frame_iterator = source.frames()  # type: ignore[attr-defined]
+                pending_frame = runtime.create_frame_task(
+                    anext(frame_iterator),
+                    generation=capture_generation,
+                )
+                last_level_log_s = self.clock.now()
+                while True:
+                    if level_log_interval_s > 0.0:
+                        elapsed_s = max(0.0, self.clock.now() - last_level_log_s)
+                        timeout_s = max(0.0, level_log_interval_s - elapsed_s)
+                        done, _pending = await asyncio.wait({pending_frame}, timeout=timeout_s)
+                        if not done:
+                            self._log_microphone_test_level(interval_stats, source=source)
+                            level_logged = True
+                            interval_stats.reset()
+                            last_level_log_s = self.clock.now()
+                            continue
+                    else:
+                        await asyncio.wait({pending_frame})
 
-            frame_iterator = source.frames()  # type: ignore[attr-defined]
-            pending_frame = asyncio.create_task(anext(frame_iterator))
-            last_level_log_s = self.clock.now()
-            while True:
-                if level_log_interval_s > 0.0:
-                    elapsed_s = max(0.0, self.clock.now() - last_level_log_s)
-                    timeout_s = max(0.0, level_log_interval_s - elapsed_s)
-                    done, _pending = await asyncio.wait({pending_frame}, timeout=timeout_s)
-                    if not done:
+                    try:
+                        frame = pending_frame.result()
+                    except StopAsyncIteration:
+                        pending_frame = None
+                        break
+
+                    interval_stats.add_frame(frame)
+                    total_stats.add_frame(frame)
+                    await self._set_microphone_test_meter_level(
+                        self._microphone_test_meter_level_from_frame(frame),
+                        meter_callback,
+                        generation=capture_generation,
+                    )
+                    pending_frame = runtime.create_frame_task(
+                        anext(frame_iterator),
+                        generation=capture_generation,
+                    )
+
+                    if level_log_interval_s <= 0.0 or (
+                        self.clock.now() - last_level_log_s >= level_log_interval_s
+                    ):
                         self._log_microphone_test_level(interval_stats, source=source)
                         level_logged = True
                         interval_stats.reset()
                         last_level_log_s = self.clock.now()
-                        continue
-                else:
-                    await asyncio.wait({pending_frame})
+            except asyncio.CancelledError as exc:
+                end_exception = exc
+                raise
+            except Exception as exc:
+                end_exception = exc
+            finally:
+                cleanup_failures: list[Exception] = []
+                if pending_frame is not None and not pending_frame.done():
+                    try:
+                        await runtime.cancel_frame_task(pending_frame)
+                    except Exception as exc:
+                        cleanup_failures.append(exc)
 
-                try:
-                    frame = pending_frame.result()
-                except StopAsyncIteration:
-                    pending_frame = None
-                    break
+                if source is not None:
+                    try:
+                        await runtime.close_source(source)
+                    except Exception as exc:
+                        cleanup_failures.append(exc)
 
-                interval_stats.add_frame(frame)
-                total_stats.add_frame(frame)
-                await self._set_microphone_test_meter_level(
-                    self._microphone_test_meter_level_from_frame(frame),
-                    meter_callback,
-                )
-                pending_frame = asyncio.create_task(anext(frame_iterator))
-
-                if level_log_interval_s <= 0.0 or (
-                    self.clock.now() - last_level_log_s >= level_log_interval_s
-                ):
+                if source is not None and interval_stats.frames > 0:
                     self._log_microphone_test_level(interval_stats, source=source)
                     level_logged = True
-                    interval_stats.reset()
-                    last_level_log_s = self.clock.now()
-        except asyncio.CancelledError as exc:
-            end_exception = exc
-            raise
-        except Exception as exc:
-            end_exception = exc
+                elif source is not None and not level_logged:
+                    self._log_microphone_test_level(interval_stats, source=source)
+
+                self._log_microphone_test_end(
+                    opened=opened,
+                    stats=total_stats,
+                    source=source,
+                    exception=end_exception,
+                )
+                await self._set_microphone_test_meter_level(
+                    0.0,
+                    meter_callback,
+                    generation=capture_generation,
+                )
+                _raise_lifecycle_cleanup_failures(
+                    "Microphone test capture cleanup failed",
+                    cleanup_failures,
+                )
         finally:
-            if pending_frame is not None and not pending_frame.done():
-                pending_frame.cancel()
-                with contextlib.suppress(Exception):
-                    await asyncio.gather(pending_frame, return_exceptions=True)
-
-            if source is not None:
-                with contextlib.suppress(Exception):
-                    await source.close()  # type: ignore[attr-defined]
-
-            if source is not None and interval_stats.frames > 0:
-                self._log_microphone_test_level(interval_stats, source=source)
-                level_logged = True
-            elif source is not None and not level_logged:
-                self._log_microphone_test_level(interval_stats, source=source)
-
-            self._log_microphone_test_end(
-                opened=opened,
-                stats=total_stats,
-                source=source,
-                exception=end_exception,
-            )
-            await self._set_microphone_test_meter_level(0.0, meter_callback)
+            if direct_generation:
+                runtime.end_direct_capture(capture_generation)
 
     def _get_self_audio_runtime(self) -> SelfAudioRuntime:
         if self._self_audio_runtime is None:
