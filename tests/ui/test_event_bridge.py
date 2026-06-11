@@ -313,6 +313,8 @@ class RecordingErrorDestination:
     def __init__(self, *, show_dashboard_error: bool = True) -> None:
         self.show_dashboard_error = show_dashboard_error
         self.errors: list[dict[str, object]] = []
+        self.event_payloads: list[object | None] = []
+        self.events: list[UIEvent] = []
 
     def publish_error(
         self,
@@ -321,6 +323,8 @@ class RecordingErrorDestination:
         payload: object | None,
         event: UIEvent,
     ) -> bool:
+        self.event_payloads.append(event.payload)
+        self.events.append(event)
         self.errors.append(
             {
                 "text": text,
@@ -890,6 +894,116 @@ async def test_event_bridge_error_destination_is_separable_from_dashboard_displa
 
 
 @pytest.mark.asyncio
+async def test_event_bridge_sanitizes_legacy_raw_string_payload_for_error_destination() -> None:
+    app = DummyApp()
+    dashboard = RecordingDashboardDestination()
+    error_destination = RecordingErrorDestination(show_dashboard_error=False)
+    bridge = UIEventBridge(
+        app=app,
+        event_queue=asyncio.Queue(),
+        dashboard_destination=dashboard,
+        error_destination=error_destination,
+    )
+    utterance_id = uuid4()
+    raw = (
+        "Provider failed provider_response_body="
+        "{'error': {'message': 'bad'}, 'token': 'provider-secret-custom-destination'}"
+        "\nTraceback (most recent call last):\n"
+        '  File "provider.py", line 42, in translate\n'
+        "RuntimeError: authorization=Bearer provider-token-custom-destination"
+    )
+    event = UIEvent(
+        type=UIEventType.ERROR,
+        utterance_id=utterance_id,
+        payload=raw,
+        source="Provider",
+        channel="peer",
+        runtime_log_handled=True,
+    )
+
+    await bridge._handle_event(event)
+
+    assert len(error_destination.errors) == 1
+    published = error_destination.errors[0]
+    sanitized = published["text"]
+    assert isinstance(sanitized, str)
+    assert published["payload"] == sanitized
+    assert error_destination.event_payloads == [sanitized]
+    sanitized_event = error_destination.events[0]
+    assert sanitized_event is not event
+    assert sanitized_event.type is UIEventType.ERROR
+    assert sanitized_event.utterance_id == utterance_id
+    assert sanitized_event.source == "Provider"
+    assert sanitized_event.channel == "peer"
+    assert sanitized_event.runtime_log_handled is True
+    assert sanitized_event.payload == sanitized
+    combined = repr(error_destination.errors) + repr(error_destination.event_payloads)
+    assert "provider-secret-custom-destination" not in combined
+    assert "provider-token-custom-destination" not in combined
+    assert "provider_response_body" not in combined
+    assert "Traceback" not in combined
+    assert dashboard.errors == []
+    assert app.view_dashboard.display_calls == []
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_preserves_typed_error_payload_identity_for_error_destination() -> None:
+    app = DummyApp()
+    dashboard = RecordingDashboardDestination()
+    error_destination = RecordingErrorDestination(show_dashboard_error=False)
+    bridge = UIEventBridge(
+        app=app,
+        event_queue=asyncio.Queue(),
+        dashboard_destination=dashboard,
+        error_destination=error_destination,
+    )
+    message = messages.UserMessageRef(
+        key="stt.failure",
+        params={
+            "category": messages.DIAGNOSTIC_CATEGORY_TIMEOUT,
+            "operation": "open_session",
+            "provider": "soniox",
+        },
+        severity=messages.SEVERITY_ERROR,
+    )
+    report = messages.UserErrorReport(
+        message=message,
+        diagnostics=messages.ErrorDiagnostics(
+            component="provider.stt",
+            operation="open_session",
+            code="stt.timeout",
+            category=messages.DIAGNOSTIC_CATEGORY_TIMEOUT,
+            visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
+            content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+            status_code=None,
+            retry_after_ms=None,
+            fields={"provider": "soniox"},
+        ),
+    )
+    managed_error = ManagedOpenRouterUserFacingError(
+        message_key="managed_release.openrouter_not_ready",
+        message_kwargs={},
+        diagnostics=ManagedOpenRouterReleaseDiagnostics(operation="issue"),
+    )
+    payloads = [message, report, managed_error]
+    events = [
+        UIEvent(type=UIEventType.ERROR, payload=payload, runtime_log_handled=True)
+        for payload in payloads
+    ]
+
+    for event in events:
+        await bridge._handle_event(event)
+
+    assert [entry["payload"] for entry in error_destination.errors] == payloads
+    for index, payload in enumerate(payloads):
+        assert error_destination.errors[index]["payload"] is payload
+        assert error_destination.event_payloads[index] is payload
+        assert error_destination.events[index] is events[index]
+    assert dashboard.errors == []
+    assert app.view_dashboard.display_calls == []
+
+
+@pytest.mark.asyncio
 async def test_event_bridge_localizes_user_error_report_without_diagnostic_leak() -> None:
     previous_locale = get_locale()
     set_locale("en")
@@ -981,6 +1095,46 @@ async def test_event_bridge_localizes_direct_message_ref_payload() -> None:
         assert "stt.failure" not in rendered
     finally:
         set_locale(previous_locale)
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_sanitizes_legacy_raw_string_error_before_user_visible_sinks() -> None:
+    app = DummyApp()
+    runtime_logging = RuntimeLoggingCapture()
+    bridge = UIEventBridge(
+        app=app,
+        event_queue=asyncio.Queue(),
+        runtime_logging=runtime_logging,
+    )
+    raw = (
+        "Provider failure provider_response_body="
+        "{'error':'bad','token':'provider-secret-123'}\n"
+        "Traceback (most recent call last):\n"
+        '  File "provider.py", line 42, in translate\n'
+        "RuntimeError: authorization=Bearer provider-token-456"
+    )
+
+    await bridge._handle_event(UIEvent(type=UIEventType.ERROR, payload=raw))
+
+    assert app.view_dashboard.display_calls
+    displayed = app.view_dashboard.display_calls[-1][0]
+    assert displayed == runtime_logging.basic_messages[-1][1]
+    combined_user_visible = repr(app.view_dashboard.display_calls) + repr(
+        runtime_logging.basic_messages
+    )
+    assert "Provider failure" in displayed
+    assert "[redacted]" in displayed
+    assert "provider-secret-123" not in combined_user_visible
+    assert "provider-token-456" not in combined_user_visible
+    assert "provider_response_body" not in combined_user_visible
+    assert "Traceback" not in combined_user_visible
+    assert 'File "provider.py"' not in combined_user_visible
+    assert runtime_logging.detailed_messages == [
+        (
+            logging.WARNING,
+            "[UIEventBridge] Deprecated raw string error payload sanitized for user-visible sinks",
+        )
+    ]
 
 
 @pytest.mark.asyncio

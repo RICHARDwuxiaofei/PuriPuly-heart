@@ -154,7 +154,7 @@ _SENSITIVE_TOKEN_KEYS: Final = frozenset(
 _LOCAL_LLM_SENSITIVE_EXTRA_BODY_KEYS: Final = frozenset(
     {"api_key", "authorization", "headers", "password", "secret", "token"}
 )
-_BROKER_RAW_MESSAGE_KEYS: Final = frozenset(
+BROKER_RAW_MESSAGE_KEYS: Final = frozenset(
     {
         "broker_eligibility_message",
         "broker_raw_eligibility_message",
@@ -164,7 +164,7 @@ _BROKER_RAW_MESSAGE_KEYS: Final = frozenset(
         "raw_broker_message",
     }
 )
-_PROVIDER_RESPONSE_BODY_KEYS: Final = frozenset(
+PROVIDER_RESPONSE_BODY_KEYS: Final = frozenset(
     {
         "provider_payload",
         "provider_response",
@@ -179,6 +179,8 @@ _PROVIDER_RESPONSE_BODY_KEYS: Final = frozenset(
         "response_text",
     }
 )
+_BROKER_RAW_MESSAGE_KEYS: Final = BROKER_RAW_MESSAGE_KEYS
+_PROVIDER_RESPONSE_BODY_KEYS: Final = PROVIDER_RESPONSE_BODY_KEYS
 _UNSAFE_TEXT_KEYS: Final = frozenset(
     {
         "exception_text",
@@ -558,6 +560,7 @@ def _compact_key(key: str) -> str:
 
 
 __all__ = [
+    "BROKER_RAW_MESSAGE_KEYS",
     "BROKER_RAW_MESSAGE_REDACTION_MARKER",
     "DEFAULT_DIAGNOSTIC_REDACTION_POLICY",
     "DIAGNOSTIC_FIELD_MAX_DEPTH",
@@ -583,6 +586,7 @@ __all__ = [
     "DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED",
     "DIAGNOSTIC_VALIDATION_STATUS_REJECTED",
     "LOCAL_LLM_EXTRA_BODY_REDACTION_MARKER",
+    "PROVIDER_RESPONSE_BODY_KEYS",
     "PROVIDER_RESPONSE_BODY_REDACTION_MARKER",
     "ContentPolicy",
     "DiagnosticRedactionPolicy",

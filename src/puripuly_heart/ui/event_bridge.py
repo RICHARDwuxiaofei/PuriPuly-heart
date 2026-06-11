@@ -6,10 +6,12 @@ import json
 import logging
 from collections import OrderedDict
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Protocol
 
 import flet as ft
 
+from puripuly_heart.core.error_messages import sanitize_legacy_raw_user_visible_error_text
 from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterUserFacingError
 from puripuly_heart.core.messages import UserErrorReport, UserMessageRef
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
@@ -20,6 +22,9 @@ from puripuly_heart.ui.i18n import localize_user_message_ref, t
 logger = logging.getLogger(__name__)
 
 _FINAL_TRANSCRIPT_CACHE_LIMIT = 500
+_RAW_STRING_ERROR_DEPRECATION_DIAGNOSTIC = (
+    "[UIEventBridge] Deprecated raw string error payload sanitized for user-visible sinks"
+)
 
 
 def _short_visual_debug_token(value: object | None) -> str:
@@ -235,6 +240,8 @@ class AppErrorEventDestination:
         event: UIEvent,
     ) -> bool:
         self._emit_runtime_error_log(text, runtime_log_handled=event.runtime_log_handled)
+        if _is_legacy_raw_error_payload(payload):
+            self._emit_legacy_raw_payload_deprecation_diagnostic()
         if _is_managed_openrouter_error_payload(payload):
             self._clear_managed_auth_pending_state()
             if self._show_managed_auth_snackbar(text):
@@ -250,6 +257,13 @@ class AppErrorEventDestination:
                 logger.error(text)
         except Exception:
             logger.error(text)
+
+    def _emit_legacy_raw_payload_deprecation_diagnostic(self) -> None:
+        emit_detailed = getattr(self._runtime_logging, "emit_detailed", None)
+        if not callable(emit_detailed):
+            return
+        with contextlib.suppress(Exception):
+            emit_detailed(_RAW_STRING_ERROR_DEPRECATION_DIAGNOSTIC, level=logging.WARNING)
 
     def _clear_managed_auth_pending_state(self) -> None:
         controller = getattr(self._app, "controller", None)
@@ -291,7 +305,9 @@ def _localized_error_event_text(payload: object | None) -> str:
         return localize_user_message_ref(payload.message)
     if isinstance(payload, UserMessageRef):
         return localize_user_message_ref(payload)
-    return str(payload) if payload is not None else t("error.unknown")
+    if payload is None:
+        return t("error.unknown")
+    return sanitize_legacy_raw_user_visible_error_text(payload) or t("error.unknown")
 
 
 def _safe_i18n_params(params: Mapping[str, object]) -> dict[str, object]:
@@ -312,6 +328,13 @@ def _is_managed_openrouter_error_payload(payload: object | None) -> bool:
     if isinstance(payload, UserMessageRef):
         return _is_managed_openrouter_message(payload)
     return False
+
+
+def _is_legacy_raw_error_payload(payload: object | None) -> bool:
+    return payload is not None and not isinstance(
+        payload,
+        ManagedOpenRouterUserFacingError | UserErrorReport | UserMessageRef,
+    )
 
 
 def _is_managed_openrouter_message(message: UserMessageRef) -> bool:
@@ -595,6 +618,15 @@ class UIEventBridge:
         if event.type == UIEventType.ERROR:
             payload = event.payload
             text = _localized_error_event_text(payload)
-            if self.error_destination.publish_error(text, payload=payload, event=event):
+            destination_payload = payload
+            destination_event = event
+            if _is_legacy_raw_error_payload(payload):
+                destination_payload = text
+                destination_event = replace(event, payload=destination_payload)
+            if self.error_destination.publish_error(
+                text,
+                payload=destination_payload,
+                event=destination_event,
+            ):
                 self.dashboard_destination.publish_error(text)
             return
