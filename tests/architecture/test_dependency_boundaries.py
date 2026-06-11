@@ -323,6 +323,22 @@ KNOWN_ALLOWED_VIOLATIONS: frozenset[ImportViolation] = frozenset(
             reason="orchestrator modules must avoid Flet UI, concrete provider construction, settings migration internals, services, and product-output adapters",
         ),
         ImportViolation(
+            rule_id="runtime-owners-use-ports",
+            importer="src/puripuly_heart/core/runtime/logging.py",
+            imported="puripuly_heart.core.runtime_logging",
+            importer_layer="runtime owners",
+            imported_layer="adapters",
+            reason="runtime owners must coordinate through domain events, resolved DTOs, lifecycle/message/observability protocols, not app wiring, Flet UI, provider config parsing, or concrete adapters",
+        ),
+        ImportViolation(
+            rule_id="runtime-owners-use-ports",
+            importer="src/puripuly_heart/core/runtime/receiver.py",
+            imported="puripuly_heart.core.osc.receiver",
+            importer_layer="runtime owners",
+            imported_layer="adapters",
+            reason="runtime owners must coordinate through domain events, resolved DTOs, lifecycle/message/observability protocols, not app wiring, Flet UI, provider config parsing, or concrete adapters",
+        ),
+        ImportViolation(
             rule_id="providers-avoid-ui-settings-and-runtime-log-concretes",
             importer="src/puripuly_heart/providers/llm/deepseek.py",
             imported="puripuly_heart.core.runtime_logging",
@@ -727,6 +743,22 @@ def test_overlay_calibration_value_object_has_config_schema_ownership() -> None:
     assert not (forbidden_imports & actual_imports)
 
 
+def test_internal_source_imports_canonical_overlay_calibration_not_ui_facade() -> None:
+    facade_module = "puripuly_heart.ui.overlay_calibration"
+    internal_modules = _internal_module_names()
+    offenders: set[str] = set()
+
+    for importer_path in sorted(SOURCE_PACKAGE_ROOT.rglob("*.py")):
+        importer_module = _module_name_for_path(importer_path)
+        imported_modules = set(_imported_modules(importer_module, importer_path, internal_modules))
+        if facade_module not in imported_modules:
+            continue
+
+        offenders.add(_relative_repo_path(importer_path))
+
+    assert offenders == set()
+
+
 def test_current_concrete_osc_imports_are_adapter_boundary_violations() -> None:
     orchestrator_rule = _rule_for_layer(ORCHESTRATOR)
     ui_rule = _rule_for_layer(UI_ADAPTERS_RENDERERS)
@@ -766,6 +798,31 @@ def test_current_concrete_osc_imports_are_adapter_boundary_violations() -> None:
     }
 
     assert expected <= _dependency_violations()
+
+
+def test_current_runtime_owner_imports_are_allowlist_synchronization_only() -> None:
+    runtime_owner_rule = _rule_for_layer(RUNTIME_OWNERS)
+    inherited_runtime_owner_violations = {
+        ImportViolation(
+            rule_id=runtime_owner_rule.rule_id,
+            importer="src/puripuly_heart/core/runtime/logging.py",
+            imported="puripuly_heart.core.runtime_logging",
+            importer_layer=RUNTIME_OWNERS,
+            imported_layer=ADAPTERS,
+            reason=runtime_owner_rule.reason,
+        ),
+        ImportViolation(
+            rule_id=runtime_owner_rule.rule_id,
+            importer="src/puripuly_heart/core/runtime/receiver.py",
+            imported="puripuly_heart.core.osc.receiver",
+            importer_layer=RUNTIME_OWNERS,
+            imported_layer=ADAPTERS,
+            reason=runtime_owner_rule.reason,
+        ),
+    }
+
+    assert inherited_runtime_owner_violations <= _dependency_violations()
+    assert inherited_runtime_owner_violations <= KNOWN_ALLOWED_VIOLATIONS
 
 
 def test_absolute_from_import_resolves_layer_root_namespace_candidates(

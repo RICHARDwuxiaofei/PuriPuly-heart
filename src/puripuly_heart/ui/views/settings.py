@@ -19,6 +19,10 @@ from puripuly_heart.config.llm_profiles import (
     fallback_profile_for_alias,
     profile_for_alias,
 )
+from puripuly_heart.config.overlay_calibration import (
+    OVERLAY_CALIBRATION_ANCHORS,
+    OverlayCalibration,
+)
 from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
     DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA,
@@ -67,10 +71,6 @@ from puripuly_heart.ui.i18n import (
     locale_label,
     provider_label,
     t,
-)
-from puripuly_heart.ui.overlay_calibration import (
-    OVERLAY_CALIBRATION_ANCHORS,
-    OverlayCalibration,
 )
 from puripuly_heart.ui.overlay_peer_contract import OverlayPeerConsumerContract
 from puripuly_heart.ui.theme import (

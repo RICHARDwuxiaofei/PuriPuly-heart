@@ -53,6 +53,7 @@ from puripuly_heart.app.wiring import (
 )
 from puripuly_heart.config.audio_host_api import normalize_input_host_api
 from puripuly_heart.config.llm_profiles import profile_for_alias
+from puripuly_heart.config.overlay_calibration import OverlayCalibration
 from puripuly_heart.config.resolved import ResolvedOverlayConfig
 from puripuly_heart.config.settings import (
     DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA,
@@ -190,7 +191,6 @@ from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaLoadEr
 from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 from puripuly_heart.ui.event_bridge import UIEventBridge
 from puripuly_heart.ui.i18n import get_locale, set_locale, t
-from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 from puripuly_heart.ui.overlay_peer_contract import (
     OverlayPeerConsumerContract,
     build_overlay_peer_consumer_contract,
