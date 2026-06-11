@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from puripuly_heart.core.clock import Clock, SystemClock
 from puripuly_heart.core.messages import DiagnosticFieldValue
-from puripuly_heart.core.output.models import PeerSubtitlePublication
+from puripuly_heart.core.output.subtitle import PeerSubtitlePublication
 from puripuly_heart.domain.models import ChannelId, Transcript
 
 AppliedContextMode = Literal["local", "integrated"]

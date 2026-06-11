@@ -14,7 +14,7 @@ from puripuly_heart.core.diagnostic_validation import (
     redact_text_for_sink,
 )
 from puripuly_heart.core.osc.sender import OscSender
-from puripuly_heart.core.output.models import SelfUtterancePublication, SystemDisclosurePublication
+from puripuly_heart.core.output.chatbox import SelfUtterancePublication, SystemDisclosurePublication
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.models import OSCMessage
 

@@ -5,7 +5,16 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final, Literal, Protocol
 
-from puripuly_heart.core.messages import DiagnosticFieldValue, UserMessageRef
+from puripuly_heart.core.messages import DiagnosticFieldValue
+from puripuly_heart.core.output.chatbox import (
+    SelfChatboxOutputPort,
+    SelfUtterancePublication,
+    SystemDisclosurePublication,
+)
+from puripuly_heart.core.output.subtitle import (
+    PeerSubtitlePublication,
+    SubtitleOverlayOutputPort,
+)
 
 OutputRoute = Literal[
     "self_chatbox",
@@ -62,44 +71,6 @@ def _freeze_metadata(
 
 
 @dataclass(frozen=True, slots=True)
-class SelfUtterancePublication:
-    utterance_id: str
-    transcript_text: str | None
-    translation_text: str | None
-    source_language: str | None
-    target_language: str | None
-    is_final: bool
-    metadata: Mapping[str, DiagnosticFieldValue]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "metadata", _freeze_metadata(self.metadata))
-
-
-@dataclass(frozen=True, slots=True)
-class PeerSubtitlePublication:
-    utterance_id: str
-    transcript_text: str | None
-    translation_text: str | None
-    source_language: str | None
-    target_language: str | None
-    is_final: bool
-    metadata: Mapping[str, DiagnosticFieldValue]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "metadata", _freeze_metadata(self.metadata))
-
-
-@dataclass(frozen=True, slots=True)
-class SystemDisclosurePublication:
-    disclosure_id: str
-    message: UserMessageRef
-    metadata: Mapping[str, DiagnosticFieldValue]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "metadata", _freeze_metadata(self.metadata))
-
-
-@dataclass(frozen=True, slots=True)
 class ConversationFeedPublication:
     utterance_id: str
     transcript_text: str | None
@@ -123,25 +94,6 @@ class OutputRoutingDecision:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metadata", _freeze_metadata(self.metadata))
-
-
-class SelfChatboxOutputPort(Protocol):
-    async def publish_self_utterance(
-        self,
-        publication: SelfUtterancePublication,
-    ) -> None: ...
-
-    async def publish_system_disclosure(
-        self,
-        publication: SystemDisclosurePublication,
-    ) -> None: ...
-
-
-class SubtitleOverlayOutputPort(Protocol):
-    async def publish_peer_subtitle(
-        self,
-        publication: PeerSubtitlePublication,
-    ) -> None: ...
 
 
 class DashboardOutputPort(Protocol):

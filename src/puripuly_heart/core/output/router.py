@@ -4,6 +4,11 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from puripuly_heart.core.messages import DiagnosticFieldValue
+from puripuly_heart.core.output.chatbox import (
+    SelfChatboxOutputPort,
+    SelfUtterancePublication,
+    SystemDisclosurePublication,
+)
 from puripuly_heart.core.output.models import (
     OUTPUT_ROUTE_CONVERSATION_FEED,
     OUTPUT_ROUTE_DASHBOARD,
@@ -25,11 +30,10 @@ from puripuly_heart.core.output.models import (
     OutputRoutingDecision,
     OutputRoutingDecisionStatus,
     OutputRoutingObserverPort,
+)
+from puripuly_heart.core.output.subtitle import (
     PeerSubtitlePublication,
-    SelfChatboxOutputPort,
-    SelfUtterancePublication,
     SubtitleOverlayOutputPort,
-    SystemDisclosurePublication,
 )
 
 _DecisionMetadata = Mapping[str, DiagnosticFieldValue]

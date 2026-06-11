@@ -23,6 +23,7 @@ FORBIDDEN_IMPORT_PREFIXES = (
     "puripuly_heart.config.settings",
     "puripuly_heart.core.managed_openrouter_broker_client",
     "puripuly_heart.core.osc",
+    "puripuly_heart.core.overlay",
     "puripuly_heart.core.runtime_logging",
     "puripuly_heart.providers",
     "puripuly_heart.ui",
@@ -116,6 +117,61 @@ class FailingSystemDisclosureChatbox:
 
 def test_router_facade_is_import_safe() -> None:
     _assert_no_forbidden_imports("puripuly_heart.core.output.router")
+
+
+def test_chatbox_and_subtitle_contract_modules_are_canonical_owners() -> None:
+    _assert_no_forbidden_imports("puripuly_heart.core.output.chatbox")
+    _assert_no_forbidden_imports("puripuly_heart.core.output.subtitle")
+    chatbox = importlib.import_module("puripuly_heart.core.output.chatbox")
+    subtitle = importlib.import_module("puripuly_heart.core.output.subtitle")
+    output_models = importlib.import_module("puripuly_heart.core.output.models")
+
+    chatbox_owned_names = (
+        "SelfUtterancePublication",
+        "SystemDisclosurePublication",
+        "SelfChatboxOutputPort",
+    )
+    subtitle_owned_names = ("PeerSubtitlePublication", "SubtitleOverlayOutputPort")
+
+    for name in chatbox_owned_names:
+        contract = getattr(chatbox, name)
+        assert contract.__module__ == "puripuly_heart.core.output.chatbox"
+        assert getattr(output_models, name) is contract
+    for name in subtitle_owned_names:
+        contract = getattr(subtitle, name)
+        assert contract.__module__ == "puripuly_heart.core.output.subtitle"
+        assert getattr(output_models, name) is contract
+
+
+def test_router_and_adapters_import_canonical_channel_contract_modules() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    expected_imports = {
+        repo_root
+        / "src"
+        / "puripuly_heart"
+        / "core"
+        / "output"
+        / "router.py": {
+            "puripuly_heart.core.output.chatbox",
+            "puripuly_heart.core.output.subtitle",
+        },
+        repo_root
+        / "src"
+        / "puripuly_heart"
+        / "core"
+        / "osc"
+        / "chatbox_paginator.py": {"puripuly_heart.core.output.chatbox"},
+        repo_root
+        / "src"
+        / "puripuly_heart"
+        / "core"
+        / "overlay"
+        / "sink.py": {"puripuly_heart.core.output.subtitle"},
+    }
+
+    for module_file, expected in expected_imports.items():
+        imports = _imported_modules(str(module_file))
+        assert expected <= imports
 
 
 def test_peer_chatbox_denial_reason_is_closed_safe_contract() -> None:
