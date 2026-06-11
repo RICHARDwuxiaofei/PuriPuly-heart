@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,11 +38,13 @@ class VrcOscReceiver:
         host: str = VRC_OSC_RECEIVER_HOST,
         port: int = VRC_OSC_RECEIVER_PORT,
         mute_delay_s: float = 0.4,
+        mute_packet_handler: Callable[[bool], object] | None = None,
     ) -> None:
         self.state = state
         self.host = host
         self.port = port
         self.mute_delay_s = mute_delay_s
+        self._mute_packet_handler = mute_packet_handler
         self.transport = None
         self._mute_task: asyncio.Task[None] | None = None
 
@@ -50,6 +53,10 @@ class VrcOscReceiver:
         if not args:
             return
         is_muted = bool(args[0])
+
+        if self._mute_packet_handler is not None:
+            self._mute_packet_handler(is_muted)
+            return
 
         if self._mute_task is not None and not self._mute_task.done():
             self._mute_task.cancel()

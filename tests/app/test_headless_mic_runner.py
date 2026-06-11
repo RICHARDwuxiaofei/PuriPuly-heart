@@ -521,6 +521,86 @@ async def test_headless_mic_runner_rejects_managed_openrouter_without_release_se
 
 
 @pytest.mark.asyncio
+async def test_headless_mic_runner_closes_vrc_receiver_runtime_before_hub_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    settings = AppSettings()
+    settings.osc.vrc_mic_intercept = True
+    config_path = tmp_path / "settings.json"
+    vad_path = tmp_path / "vad.onnx"
+    vad_path.write_text("dummy", encoding="utf-8")
+    events: list[str] = []
+
+    class FakeReceiverRuntime:
+        def __init__(self, *args, **kwargs):
+            _ = (args, kwargs)
+            self.receiver = object()
+            events.append("receiver_runtime_init")
+
+        async def start(self):
+            events.append("receiver_start")
+            return self.receiver
+
+        async def close(self):
+            events.append("receiver_close")
+            self.receiver = None
+
+    class FakeSender:
+        def close(self):
+            events.append("sender_close")
+
+    class FakeHub:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def start(self, *args, **kwargs):
+            events.append("hub_start")
+
+        async def stop(self):
+            events.append("hub_stop")
+
+    class FakeSource:
+        async def close(self):
+            events.append("source_close")
+
+    async def fake_run_audio_vad_loop(*_args, **_kwargs):
+        return None
+
+    def fail_direct_receiver(*_args, **_kwargs):
+        pytest.fail("headless VRC mic sync must be routed through VrcMicReceiverRuntime")
+
+    monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
+    monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
+    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
+    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
+    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
+    monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
+    monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "ClientHub", FakeHub)
+    monkeypatch.setattr(headless_mic, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "SoundDeviceAudioSource", lambda *a, **k: FakeSource())
+    monkeypatch.setattr(headless_mic, "run_audio_vad_loop", fake_run_audio_vad_loop)
+    monkeypatch.setattr(headless_mic, "resolve_sounddevice_input_device", lambda *a, **k: None)
+    monkeypatch.setattr(headless_mic, "VrcOscReceiver", fail_direct_receiver)
+    monkeypatch.setattr(headless_mic, "VrcMicReceiverRuntime", FakeReceiverRuntime, raising=False)
+
+    runner = headless_mic.HeadlessMicRunner(
+        settings=settings,
+        config_path=config_path,
+        vad_model_path=vad_path,
+        use_llm=True,
+    )
+    result = await runner.run()
+
+    assert result == 0
+    assert events.index("receiver_close") < events.index("hub_stop")
+    assert "receiver_runtime_init" in events
+
+
+@pytest.mark.asyncio
 async def test_headless_mic_runner_starts_and_stops_vrc_receiver_when_enabled(
     monkeypatch, tmp_path
 ) -> None:

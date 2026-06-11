@@ -7519,7 +7519,7 @@ async def test_overlay_successful_recovery_clears_previous_failure_reason(
 
 
 @pytest.mark.asyncio
-async def test_stop_disables_vrc_receiver_before_teardown(
+async def test_stop_terminally_closes_vrc_receiver_runtime_before_hub_teardown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[tuple[str, object]] = []
@@ -7529,9 +7529,13 @@ async def test_stop_disables_vrc_receiver_before_teardown(
         _ = self
         events.append(("stt", enabled))
 
-    async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
-        _ = self
-        events.append(("receiver", enabled))
+    class FakeReceiverRuntime:
+        async def stop(self, *, strict_runtime_errors: bool = False) -> None:
+            events.append(("receiver_stop", strict_runtime_errors))
+
+        async def close(self) -> None:
+            events.append(("receiver_close", None))
+            controller.receiver = None
 
     class FakeHub:
         async def stop(self) -> None:
@@ -7542,21 +7546,70 @@ async def test_stop_disables_vrc_receiver_before_teardown(
             events.append(("sender_close", None))
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
-    )
+    controller._vrc_mic_receiver_runtime = FakeReceiverRuntime()
+    controller.receiver = object()
     controller.hub = FakeHub()
     controller.sender = FakeSender()
     controller._bridge_task = asyncio.create_task(asyncio.sleep(3600))
 
     await controller.stop()
 
-    assert events[:2] == [("stt", False), ("receiver", False)]
+    assert events[:3] == [("stt", False), ("receiver_close", None), ("hub_stop", None)]
+    assert ("receiver_stop", False) not in events
     assert controller.hub is None
     assert controller.sender is None
     assert controller._bridge_task is None
+
+
+@pytest.mark.asyncio
+async def test_stop_aggregates_vrc_receiver_close_failure_and_still_stops_hub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    controller = _make_controller(app=SimpleNamespace())
+    receiver = object()
+
+    class FailingReceiverRuntime:
+        async def stop(self, *, strict_runtime_errors: bool = False) -> None:
+            _ = strict_runtime_errors
+            events.append("receiver_stop")
+
+        async def close(self) -> None:
+            events.append("receiver_close")
+            raise RuntimeError("receiver close failed")
+
+    class FakeHub:
+        async def stop(self) -> None:
+            events.append("hub_stop")
+
+    class FakeSender:
+        def close(self) -> None:
+            events.append("sender_close")
+
+    async def fake_set_stt_enabled(self, enabled: bool) -> None:
+        _ = (self, enabled)
+        events.append("stt_off")
+
+    async def fake_shutdown_overlay(self, *, preserve_failure_reason: bool) -> None:
+        _ = (self, preserve_failure_reason)
+        events.append("overlay_shutdown")
+
+    controller._vrc_mic_receiver_runtime = FailingReceiverRuntime()
+    controller.receiver = receiver
+    controller.hub = FakeHub()
+    controller.sender = FakeSender()
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
+    monkeypatch.setattr(GuiController, "_shutdown_overlay_runtime", fake_shutdown_overlay)
+
+    with pytest.raises(RuntimeError, match="receiver close failed"):
+        await controller.stop()
+
+    assert events[:4] == ["stt_off", "receiver_close", "overlay_shutdown", "hub_stop"]
+    assert events[-1] == "sender_close"
+    assert "receiver_stop" not in events
+    assert controller._vrc_mic_receiver_runtime is not None
+    assert controller.receiver is receiver
 
 
 @pytest.mark.asyncio
@@ -8827,8 +8880,11 @@ async def test_controller_stop_closes_mic_test_runtime_and_continues_after_close
         _ = self, enabled
         events.append("stt-off")
 
-    async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
-        _ = self, enabled
+    async def fake_close_vrc_mic_receiver_runtime_for_release(
+        self,
+        failures: list[Exception],
+    ) -> None:
+        _ = self, failures
         events.append("vrc-off")
 
     async def fake_shutdown_overlay_runtime(self, *, preserve_failure_reason: bool) -> None:
@@ -8838,8 +8894,8 @@ async def test_controller_stop_closes_mic_test_runtime_and_continues_after_close
     monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
     monkeypatch.setattr(
         GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
+        "_close_vrc_mic_receiver_runtime_for_release",
+        fake_close_vrc_mic_receiver_runtime_for_release,
     )
     monkeypatch.setattr(GuiController, "_shutdown_overlay_runtime", fake_shutdown_overlay_runtime)
 
@@ -10246,7 +10302,8 @@ async def test_configure_vrc_mic_receiver_start_success_stores_receiver_and_rese
     assert gate.reset_calls == 1
 
 
-def test_stop_vrc_mic_receiver_stops_receiver_and_marks_gate_inactive() -> None:
+@pytest.mark.asyncio
+async def test_stop_vrc_mic_receiver_stops_receiver_and_marks_gate_inactive() -> None:
     controller = _make_controller(app=SimpleNamespace())
     gate = DummyGate()
     stop_calls: list[str] = []
@@ -10258,11 +10315,206 @@ def test_stop_vrc_mic_receiver_stops_receiver_and_marks_gate_inactive() -> None:
     controller.receiver = FakeReceiver()
     controller.vrc_mic_audio_gate = gate
 
-    controller._stop_vrc_mic_receiver()
+    await controller._stop_vrc_mic_receiver()
 
     assert stop_calls == ["stopped"]
     assert controller.receiver is None
     assert gate.receiver_active_calls == [False]
+
+
+@pytest.mark.asyncio
+async def test_configure_vrc_mic_receiver_disabled_stops_runtime_owner_and_marks_gate_inactive() -> (
+    None
+):
+    controller = _make_controller(app=SimpleNamespace())
+    gate = DummyGate()
+    receiver = object()
+    stop_calls: list[str] = []
+
+    class FakeReceiverRuntime:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def stop(self, *, strict_runtime_errors: bool = False) -> None:
+            assert strict_runtime_errors is False
+            stop_calls.append("runtime-stopped")
+            controller.receiver = None
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    controller.receiver = receiver
+    controller.vrc_mic_audio_gate = gate
+    runtime = FakeReceiverRuntime()
+    controller._vrc_mic_receiver_runtime = runtime
+
+    await controller._configure_vrc_mic_receiver(enabled=False)
+
+    assert stop_calls == ["runtime-stopped"]
+    assert runtime.close_calls == 0
+    assert controller._vrc_mic_receiver_runtime is runtime
+    assert controller.receiver is None
+    assert gate.enabled_calls == [False]
+    assert gate.receiver_active_calls == [False]
+
+
+@pytest.mark.asyncio
+async def test_controller_stop_closes_vrc_mic_receiver_before_hub_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.hub = DummyHub()
+    order: list[str] = []
+
+    class FakeReceiverRuntime:
+        async def stop(self, *, strict_runtime_errors: bool = False) -> None:
+            _ = strict_runtime_errors
+            order.append("receiver_stop")
+
+        async def close(self) -> None:
+            order.append("receiver_close")
+            controller.receiver = None
+
+    async def fake_set_stt_enabled(self, enabled: bool) -> None:
+        _ = (self, enabled)
+        order.append("stt")
+
+    async def fake_shutdown_overlay(self, *, preserve_failure_reason: bool) -> None:
+        _ = (self, preserve_failure_reason)
+        order.append("overlay")
+
+    async def fake_stop_hub_for_release(self, failures: list[Exception]) -> None:
+        _ = failures
+        order.append("hub")
+        self.hub = None
+
+    async def fake_noop(self, *args, **kwargs) -> None:  # noqa: ANN001, ANN002, ANN003
+        _ = (self, args, kwargs)
+
+    controller._vrc_mic_receiver_runtime = FakeReceiverRuntime()
+    controller.receiver = object()
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
+    monkeypatch.setattr(GuiController, "_close_clipboard_runtime", fake_noop)
+    monkeypatch.setattr(GuiController, "_close_app_oauth_runtime_for_release", fake_noop)
+    monkeypatch.setattr(GuiController, "_close_oauth_runtime", fake_noop)
+    monkeypatch.setattr(GuiController, "_cancel_local_stt_download", fake_noop)
+    monkeypatch.setattr(GuiController, "_close_microphone_test_runtime_for_release", fake_noop)
+    monkeypatch.setattr(GuiController, "_shutdown_overlay_runtime", fake_shutdown_overlay)
+    monkeypatch.setattr(GuiController, "_close_peer_runtime_for_release", fake_noop)
+    monkeypatch.setattr(GuiController, "_stop_hub_for_release", fake_stop_hub_for_release)
+    monkeypatch.setattr(GuiController, "_replace_managed_openrouter_release_service", fake_noop)
+    monkeypatch.setattr(
+        GuiController, "_close_app_github_star_prompt_runtime_for_release", fake_noop
+    )
+
+    await controller.stop()
+
+    assert order == ["stt", "receiver_close", "overlay", "hub"]
+
+
+@pytest.mark.asyncio
+async def test_controller_stop_uses_bounded_prompt_runtime_close_and_still_stops_hub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    runtime = controller_module.GithubStarPromptRuntime(cancel_timeout_s=0.01)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    events: list[str] = []
+    hub_stopped = asyncio.Event()
+
+    async def suppress_cancellation() -> bool:
+        started.set()
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                events.append("prompt_cancelled")
+        return True
+
+    task = runtime.start_translation_success_observation(suppress_cancellation())
+    await started.wait()
+    controller._github_star_prompt_runtime = runtime
+    controller._sync_github_star_prompt_runtime_aliases(runtime)
+
+    class FakeHub:
+        async def stop(self) -> None:
+            events.append("hub_stop")
+            hub_stopped.set()
+
+    async def fake_set_stt_enabled(self, enabled: bool) -> None:
+        _ = self
+        events.append(f"stt:{enabled}")
+
+    async def fake_shutdown_overlay(self, *, preserve_failure_reason: bool) -> None:
+        _ = (self, preserve_failure_reason)
+        events.append("overlay_shutdown")
+
+    async def fake_noop(self, *args, **kwargs) -> None:  # noqa: ANN001, ANN002, ANN003
+        _ = (self, args, kwargs)
+
+    controller.hub = FakeHub()
+    monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
+    monkeypatch.setattr(GuiController, "_close_clipboard_runtime", fake_noop)
+    monkeypatch.setattr(GuiController, "_close_app_oauth_runtime_for_release", fake_noop)
+    monkeypatch.setattr(GuiController, "_close_oauth_runtime", fake_noop)
+    monkeypatch.setattr(GuiController, "_cancel_local_stt_download", fake_noop)
+    monkeypatch.setattr(GuiController, "_close_microphone_test_runtime_for_release", fake_noop)
+    monkeypatch.setattr(GuiController, "_shutdown_overlay_runtime", fake_shutdown_overlay)
+    monkeypatch.setattr(GuiController, "_close_peer_runtime_for_release", fake_noop)
+    monkeypatch.setattr(GuiController, "_replace_managed_openrouter_release_service", fake_noop)
+
+    stop_task = asyncio.create_task(controller.stop())
+    try:
+        await asyncio.wait_for(hub_stopped.wait(), timeout=0.2)
+
+        with pytest.raises(TimeoutError, match="translation_success"):
+            await asyncio.wait_for(stop_task, timeout=0.2)
+
+        assert events[:3] == ["prompt_cancelled", "stt:False", "overlay_shutdown"]
+        assert events[-1] == "hub_stop"
+        assert runtime.translation_success_task is task
+    finally:
+        release.set()
+        await asyncio.wait_for(task, timeout=0.2)
+        if not stop_task.done():
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(stop_task, timeout=0.2)
+
+
+@pytest.mark.asyncio
+async def test_schedule_github_star_prompt_translation_success_uses_runtime_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.translation.connection = TranslationConnection.OPENROUTER
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = settings
+    observed = asyncio.Event()
+
+    async def persist_success() -> bool:
+        observed.set()
+        return True
+
+    monkeypatch.setattr(
+        GuiController,
+        "persist_github_star_prompt_translation_success_observed",
+        lambda self: persist_success(),
+    )
+
+    assert controller.schedule_github_star_prompt_translation_success_observed() is True
+    runtime = controller._github_star_prompt_runtime
+    assert runtime is not None
+    assert (
+        controller._github_star_prompt_translation_success_task is runtime.translation_success_task
+    )
+
+    await observed.wait()
+    await controller._drain_github_star_prompt_translation_success_task()
+
+    assert controller._github_star_prompt_translation_success_task is None
+    assert runtime.translation_success_task is None
 
 
 @pytest.mark.asyncio

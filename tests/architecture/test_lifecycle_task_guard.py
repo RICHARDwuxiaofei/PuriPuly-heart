@@ -48,8 +48,13 @@ NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST = Counter(
         ("src/puripuly_heart/core/runtime/output.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/oauth.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/clipboard.py", ASYNCIO_CREATE_TASK): 1,
+        (
+            "src/puripuly_heart/core/runtime/github_star_prompt.py",
+            ASYNCIO_CREATE_TASK,
+        ): 2,
         ("src/puripuly_heart/core/runtime/local_stt_download.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/mic_test.py", ASYNCIO_CREATE_TASK): 2,
+        ("src/puripuly_heart/core/runtime/receiver.py", ASYNCIO_CREATE_TASK): 1,
     }
 )
 
@@ -162,3 +167,19 @@ def test_order38_named_owner_allowlist_preserves_installer_legacy_task_debt() ->
         "src/puripuly_heart/core/runtime/mic_test.py",
         ASYNCIO_CREATE_TASK,
     ) in NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST
+
+
+def test_order39_named_owner_allowlist_adds_receiver_and_prompt_owners() -> None:
+    assert (
+        "src/puripuly_heart/core/runtime/receiver.py",
+        ASYNCIO_CREATE_TASK,
+    ) in NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST
+    assert (
+        "src/puripuly_heart/core/runtime/github_star_prompt.py",
+        ASYNCIO_CREATE_TASK,
+    ) in NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST
+    assert (
+        "src/puripuly_heart/ui/controller.py",
+        ASYNCIO_CREATE_TASK,
+    ) in LEGACY_TASK_CREATION_ALLOWLIST
+    assert ("src/puripuly_heart/ui/app.py", RUN_TASK) in LEGACY_TASK_CREATION_ALLOWLIST

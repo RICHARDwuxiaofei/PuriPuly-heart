@@ -38,6 +38,7 @@ from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
 from puripuly_heart.core.osc.receiver import VrcMicState, VrcOscReceiver
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
+from puripuly_heart.core.runtime.receiver import VrcMicReceiverRuntime
 from puripuly_heart.core.runtime.self_audio import SelfAudioRuntime
 from puripuly_heart.core.storage.secrets import SecretStore
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
@@ -100,6 +101,21 @@ def _raise_lifecycle_cleanup_failures(message: str, failures: list[Exception]) -
     if len(failures) == 1:
         raise failures[0]
     raise ExceptionGroup(message, failures)
+
+
+def _create_headless_vrc_osc_receiver(**kwargs: object) -> VrcOscReceiver:
+    return VrcOscReceiver(**kwargs)  # type: ignore[arg-type]
+
+
+def _headless_vrc_mic_receiver_runtime_diagnostics_sink(
+    event: str,
+    metadata,
+) -> None:  # noqa: ANN001
+    logger.debug(
+        "[Lifecycle][VrcMicReceiverRuntime] event=%s metadata=%s",
+        event,
+        dict(metadata),
+    )
 
 
 @dataclass(slots=True)
@@ -278,15 +294,22 @@ class HeadlessMicRunner:
             state=vrc_mic_state,
             enabled=self.settings.osc.vrc_mic_intercept,
         )
-        receiver: VrcOscReceiver | None = None
+        vrc_mic_receiver_runtime: VrcMicReceiverRuntime | None = None
         if self.settings.osc.vrc_mic_intercept:
-            receiver = VrcOscReceiver(state=vrc_mic_state)
+            vrc_mic_receiver_runtime = VrcMicReceiverRuntime(
+                state=vrc_mic_state,
+                receiver_factory=_create_headless_vrc_osc_receiver,
+                diagnostics_sink=_headless_vrc_mic_receiver_runtime_diagnostics_sink,
+            )
             try:
-                await receiver.start()
+                await vrc_mic_receiver_runtime.start()
             except OSError as exc:
                 logger.warning("VRChat mic sync receiver unavailable: %s", exc)
-                receiver = None
-            vrc_mic_audio_gate.set_receiver_active(receiver is not None)
+                vrc_mic_receiver_runtime = None
+            vrc_mic_audio_gate.set_receiver_active(
+                vrc_mic_receiver_runtime is not None
+                and vrc_mic_receiver_runtime.receiver is not None
+            )
             vrc_mic_audio_gate.reset()
 
         self_audio_runtime = SelfAudioRuntime()
@@ -404,15 +427,15 @@ class HeadlessMicRunner:
                     await peer_runtime.close()
                 except Exception as exc:
                     cleanup_failures.append(exc)
+            if vrc_mic_receiver_runtime is not None:
+                try:
+                    await vrc_mic_receiver_runtime.close()
+                except Exception as exc:
+                    cleanup_failures.append(exc)
             try:
                 await hub.stop()
             except Exception as exc:
                 cleanup_failures.append(exc)
-            if receiver is not None:
-                try:
-                    receiver.stop()
-                except Exception as exc:
-                    cleanup_failures.append(exc)
             try:
                 sender.close()
             except Exception as exc:

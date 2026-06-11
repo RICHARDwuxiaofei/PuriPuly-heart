@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from puripuly_heart.core.runtime.clipboard import ClipboardRuntime
+    from puripuly_heart.core.runtime.github_star_prompt import GithubStarPromptRuntime
     from puripuly_heart.core.runtime.local_stt_download import LocalSTTDownloadRuntime
     from puripuly_heart.core.runtime.mic_test import MicTestRuntime
     from puripuly_heart.core.runtime.oauth import OAuthRuntime
@@ -14,17 +15,21 @@ if TYPE_CHECKING:
         PeerRuntimeConfig,
         SpeechChannelRuntime,
     )
+    from puripuly_heart.core.runtime.receiver import OscReceiverRuntime, VrcMicReceiverRuntime
 
 __all__ = [
     "PeerChannelRuntime",
     "PeerChannelRuntimeState",
     "PeerRuntimeConfig",
     "ClipboardRuntime",
+    "GithubStarPromptRuntime",
     "LocalSTTDownloadRuntime",
     "MicTestRuntime",
     "OAuthRuntime",
+    "OscReceiverRuntime",
     "OutputRuntime",
     "SpeechChannelRuntime",
+    "VrcMicReceiverRuntime",
 ]
 
 
@@ -34,6 +39,10 @@ def __getattr__(name: str) -> object:
             from puripuly_heart.core.runtime import clipboard
 
             return getattr(clipboard, name)
+        if name == "GithubStarPromptRuntime":
+            from puripuly_heart.core.runtime import github_star_prompt
+
+            return getattr(github_star_prompt, name)
         if name == "LocalSTTDownloadRuntime":
             from puripuly_heart.core.runtime import local_stt_download
 
@@ -50,6 +59,10 @@ def __getattr__(name: str) -> object:
             from puripuly_heart.core.runtime import output
 
             return getattr(output, name)
+        if name in {"OscReceiverRuntime", "VrcMicReceiverRuntime"}:
+            from puripuly_heart.core.runtime import receiver
+
+            return getattr(receiver, name)
         from puripuly_heart.core.runtime import peer_channel
 
         return getattr(peer_channel, name)

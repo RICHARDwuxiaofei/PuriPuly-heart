@@ -28,6 +28,7 @@ from puripuly_heart.core.discord_oauth_loopback import (
 )
 from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
+from puripuly_heart.core.runtime.github_star_prompt import GithubStarPromptRuntime
 from puripuly_heart.core.runtime.oauth import OAuthRuntime
 from puripuly_heart.core.updater import check_for_update
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
@@ -134,6 +135,11 @@ class TranslatorApp:
         self._discord_managed_auth_cancelled = False
         self._discord_managed_auth_task_handle = None
         self._github_star_prompt_launch_pending = True
+        self._github_star_prompt_runtime = GithubStarPromptRuntime(
+            diagnostics_sink=self._github_star_prompt_runtime_diagnostics_sink,
+            state_changed=self._sync_github_star_prompt_runtime_aliases,
+        )
+        self._github_star_prompt_launch_task: asyncio.Task[bool] | None = None
         self._launch_high_priority_feedback_shown = False
         self._launch_high_priority_feedback_reason: str | None = None
         self._launch_high_priority_snackbar = None
@@ -302,6 +308,24 @@ class TranslatorApp:
         *,
         delay_s: float = GITHUB_STAR_PROMPT_DELAY_S,
     ) -> bool:
+        runtime = self._get_github_star_prompt_runtime()
+        try:
+            task = runtime.start_launch_prompt(
+                lambda generation: self._run_github_star_prompt_after_launch(
+                    delay_s=delay_s,
+                    generation=generation,
+                )
+            )
+        except RuntimeError:
+            return False
+        return await task
+
+    async def _run_github_star_prompt_after_launch(
+        self,
+        *,
+        delay_s: float,
+        generation: int,
+    ) -> bool:
         try:
             controller = getattr(self, "controller", None)
             persist_eligible_launch = getattr(
@@ -319,9 +343,13 @@ class TranslatorApp:
             should_show = getattr(controller, "should_show_github_star_prompt", None)
             if not callable(should_show) or not should_show():
                 return False
+            if not self._is_current_github_star_prompt_generation(generation):
+                return False
 
             await asyncio.sleep(delay_s)
 
+            if not self._is_current_github_star_prompt_generation(generation):
+                return False
             if self._launch_feedback_conflicts_with_github_star_prompt():
                 return False
             if not should_show():
@@ -331,6 +359,48 @@ class TranslatorApp:
             )
         finally:
             self._github_star_prompt_launch_pending = False
+
+    def _get_github_star_prompt_runtime(self) -> GithubStarPromptRuntime:
+        runtime = getattr(self, "_github_star_prompt_runtime", None)
+        if runtime is None:
+            runtime = GithubStarPromptRuntime(
+                diagnostics_sink=self._github_star_prompt_runtime_diagnostics_sink,
+                state_changed=self._sync_github_star_prompt_runtime_aliases,
+            )
+            self._github_star_prompt_runtime = runtime
+            self._github_star_prompt_launch_task = runtime.launch_prompt_task
+        return runtime
+
+    def _sync_github_star_prompt_runtime_aliases(
+        self,
+        runtime: GithubStarPromptRuntime | None = None,
+    ) -> None:
+        owner = runtime or getattr(self, "_github_star_prompt_runtime", None)
+        self._github_star_prompt_launch_task = (
+            owner.launch_prompt_task if owner is not None else None
+        )
+
+    def _is_current_github_star_prompt_generation(self, generation: int) -> bool:
+        runtime = getattr(self, "_github_star_prompt_runtime", None)
+        return runtime is not None and runtime.is_current_generation(generation)
+
+    def _github_star_prompt_runtime_diagnostics_sink(
+        self,
+        event: str,
+        metadata,
+    ) -> None:  # noqa: ANN001
+        self._log_detailed(
+            f"[Lifecycle][GithubStarPromptRuntime] event={event} metadata={dict(metadata)}",
+            level=logging.WARNING,
+        )
+
+    async def close_github_star_prompt_runtime(self) -> None:
+        runtime = getattr(self, "_github_star_prompt_runtime", None)
+        if runtime is None:
+            return
+        await runtime.close()
+        self._github_star_prompt_launch_pending = False
+        self._sync_github_star_prompt_runtime_aliases(runtime)
 
     async def _open_github_star_prompt_snackbar(self, *, should_open=None) -> bool:  # noqa: ANN001
         if getattr(self, "_github_star_prompt_shown_this_launch", False):

@@ -162,11 +162,13 @@ from puripuly_heart.core.overlay.process import (
     OverlayProcessRunner,
 )
 from puripuly_heart.core.runtime.clipboard import ClipboardRuntime
+from puripuly_heart.core.runtime.github_star_prompt import GithubStarPromptRuntime
 from puripuly_heart.core.runtime.local_stt_download import LocalSTTDownloadRuntime
 from puripuly_heart.core.runtime.mic_test import MicTestRuntime
 from puripuly_heart.core.runtime.oauth import OAuthRuntime
 from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
 from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
+from puripuly_heart.core.runtime.receiver import VrcMicReceiverRuntime
 from puripuly_heart.core.runtime.self_audio import SelfAudioRuntime
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.controller import (
@@ -948,6 +950,11 @@ class GuiController:
     _self_audio_runtime: SelfAudioRuntime | None = field(init=False, default=None)
     _peer_runtime: PeerChannelRuntime | None = None
     receiver: VrcOscReceiver | None = None
+    _vrc_mic_receiver_runtime: VrcMicReceiverRuntime | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     vrc_mic_state: VrcMicState | None = None
     vrc_mic_audio_gate: VrcMicAudioGate | None = None
 
@@ -1098,6 +1105,11 @@ class GuiController:
     _translation_toggle_intent_enabled: bool = field(init=False, default=False)
     _translation_toggle_generation: int = field(init=False, default=0)
     _github_star_prompt_translation_success_task: asyncio.Task[bool] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _github_star_prompt_runtime: GithubStarPromptRuntime | None = field(
         init=False,
         default=None,
         repr=False,
@@ -1990,6 +2002,61 @@ class GuiController:
             self.persist_github_star_prompt_translation_success_observed()
         )
 
+    def _get_github_star_prompt_runtime(self) -> GithubStarPromptRuntime:
+        if self._github_star_prompt_runtime is None:
+            self._github_star_prompt_runtime = GithubStarPromptRuntime(
+                diagnostics_sink=self._github_star_prompt_runtime_diagnostics_sink,
+                state_changed=self._sync_github_star_prompt_runtime_aliases,
+            )
+        return self._github_star_prompt_runtime
+
+    def _sync_github_star_prompt_runtime_aliases(
+        self,
+        runtime: GithubStarPromptRuntime | None = None,
+    ) -> None:
+        owner = runtime or self._github_star_prompt_runtime
+        self._github_star_prompt_translation_success_task = (
+            owner.translation_success_task if owner is not None else None
+        )
+
+    def _github_star_prompt_runtime_diagnostics_sink(
+        self,
+        event: str,
+        metadata: Mapping[str, object],
+    ) -> None:
+        self.log_detailed(
+            f"[Lifecycle][GithubStarPromptRuntime] event={event} metadata={dict(metadata)}",
+            level=logging.WARNING,
+        )
+
+    async def _close_github_star_prompt_runtime_for_release(
+        self,
+        failures: list[Exception],
+    ) -> None:
+        runtime = self._github_star_prompt_runtime
+        if runtime is None:
+            return
+        try:
+            await runtime.close()
+        except Exception as exc:
+            failures.append(exc)
+        finally:
+            self._sync_github_star_prompt_runtime_aliases(runtime)
+
+    async def _close_app_github_star_prompt_runtime_for_release(
+        self,
+        failures: list[Exception],
+    ) -> None:
+        close_prompt_runtime = getattr(self.app, "close_github_star_prompt_runtime", None)
+        if not callable(close_prompt_runtime):
+            return
+        try:
+            result = close_prompt_runtime()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            failures.append(exc)
+
     def schedule_github_star_prompt_translation_success_observed(self) -> bool:
         if self.settings is None:
             return False
@@ -2005,17 +2072,23 @@ class GuiController:
         except RuntimeError:
             return self.record_github_star_prompt_translation_success_observed()
 
-        task = loop.create_task(self.persist_github_star_prompt_translation_success_observed())
+        _ = loop
+        runtime = self._get_github_star_prompt_runtime()
+        try:
+            task = runtime.start_translation_success_observation(
+                self.persist_github_star_prompt_translation_success_observed()
+            )
+        except RuntimeError:
+            return False
         self._github_star_prompt_translation_success_task = task
-
-        def _clear_completed_task(completed_task: asyncio.Task[bool]) -> None:
-            if self._github_star_prompt_translation_success_task is completed_task:
-                self._github_star_prompt_translation_success_task = None
-
-        task.add_done_callback(_clear_completed_task)
         return True
 
     async def _drain_github_star_prompt_translation_success_task(self) -> None:
+        runtime = self._github_star_prompt_runtime
+        if runtime is not None:
+            await runtime.drain_translation_success_task()
+            self._sync_github_star_prompt_runtime_aliases(runtime)
+            return
         task = self._github_star_prompt_translation_success_task
         if task is None:
             return
@@ -3487,9 +3560,43 @@ class GuiController:
         if self.hub is hub:
             self.hub = None
 
+    async def _close_vrc_mic_receiver_runtime_for_release(
+        self,
+        failures: list[Exception],
+    ) -> None:
+        self._last_vrc_mic_sync_enabled = False
+        if self.vrc_mic_audio_gate is not None:
+            self.vrc_mic_audio_gate.set_enabled(False)
+            self.vrc_mic_audio_gate.set_receiver_active(False)
+
+        runtime = self._vrc_mic_receiver_runtime
+        if runtime is None:
+            receiver = self.receiver
+            if receiver is not None:
+                try:
+                    receiver.stop()
+                except Exception as exc:
+                    failures.append(exc)
+                    return
+                self.receiver = None
+            return
+
+        try:
+            await runtime.close()
+        except Exception as exc:
+            failures.append(exc)
+            remaining_receiver = getattr(runtime, "receiver", self.receiver)
+            self.receiver = remaining_receiver
+            return
+
+        if self._vrc_mic_receiver_runtime is runtime:
+            self._vrc_mic_receiver_runtime = None
+        self.receiver = None
+
     async def stop(self) -> None:
         cleanup_failures: list[Exception] = []
-        await self._drain_github_star_prompt_translation_success_task()
+        await self._close_app_github_star_prompt_runtime_for_release(cleanup_failures)
+        await self._close_github_star_prompt_runtime_for_release(cleanup_failures)
         await self._close_clipboard_runtime()
         await self._close_app_oauth_runtime_for_release(cleanup_failures)
         await self._close_oauth_runtime()
@@ -3499,7 +3606,7 @@ class GuiController:
             await self.set_stt_enabled(False)
         except Exception as exc:
             cleanup_failures.append(exc)
-        await self._configure_vrc_mic_receiver(enabled=False)
+        await self._close_vrc_mic_receiver_runtime_for_release(cleanup_failures)
         await self._shutdown_overlay_runtime(preserve_failure_reason=True)
         await self._close_peer_runtime_for_release(cleanup_failures)
 
@@ -7798,6 +7905,40 @@ class GuiController:
         except Exception as exc:
             self._log_error(f"Mic loop error: {exc}")
 
+    def _create_vrc_osc_receiver_for_runtime(self, **kwargs: object) -> VrcOscReceiver:
+        return VrcOscReceiver(**kwargs)  # type: ignore[arg-type]
+
+    def _get_vrc_mic_receiver_runtime(self) -> VrcMicReceiverRuntime | None:
+        if self.vrc_mic_state is None:
+            return None
+        if self._vrc_mic_receiver_runtime is None:
+            self._vrc_mic_receiver_runtime = VrcMicReceiverRuntime(
+                state=self.vrc_mic_state,
+                host=VRC_OSC_RECEIVER_HOST,
+                port=VRC_OSC_RECEIVER_PORT,
+                receiver_factory=self._create_vrc_osc_receiver_for_runtime,
+                diagnostics_sink=self._vrc_mic_receiver_runtime_diagnostics_sink,
+                state_changed=self._sync_vrc_mic_receiver_runtime_aliases,
+            )
+        return self._vrc_mic_receiver_runtime
+
+    def _sync_vrc_mic_receiver_runtime_aliases(
+        self,
+        runtime: VrcMicReceiverRuntime | None = None,
+    ) -> None:
+        owner = runtime or self._vrc_mic_receiver_runtime
+        self.receiver = getattr(owner, "receiver", None) if owner is not None else None
+
+    def _vrc_mic_receiver_runtime_diagnostics_sink(
+        self,
+        event: str,
+        metadata: Mapping[str, object],
+    ) -> None:
+        self.log_detailed(
+            f"[Lifecycle][VrcMicReceiverRuntime] event={event} metadata={dict(metadata)}",
+            level=logging.WARNING,
+        )
+
     async def _configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
         if self._vrc_receiver_lock is None:
             self._vrc_receiver_lock = asyncio.Lock()
@@ -7808,7 +7949,9 @@ class GuiController:
                 self.vrc_mic_audio_gate.set_enabled(enabled)
 
             if not enabled:
-                self._stop_vrc_mic_receiver()
+                stop_result = self._stop_vrc_mic_receiver()
+                if inspect.isawaitable(stop_result):
+                    await stop_result
                 return
 
             if self.receiver is not None or self.vrc_mic_state is None:
@@ -7816,13 +7959,13 @@ class GuiController:
                     self.vrc_mic_audio_gate.set_receiver_active(self.receiver is not None)
                 return
 
-            receiver = VrcOscReceiver(
-                state=self.vrc_mic_state,
-                host=VRC_OSC_RECEIVER_HOST,
-                port=VRC_OSC_RECEIVER_PORT,
-            )
+            runtime = self._get_vrc_mic_receiver_runtime()
+            if runtime is None:
+                if self.vrc_mic_audio_gate is not None:
+                    self.vrc_mic_audio_gate.set_receiver_active(False)
+                return
             try:
-                await receiver.start()
+                receiver = await runtime.start()
             except OSError as exc:
                 if self.vrc_mic_audio_gate is not None:
                     self.vrc_mic_audio_gate.set_receiver_active(False)
@@ -7832,13 +7975,18 @@ class GuiController:
                 )
                 return
 
-            self.receiver = receiver
+            self.receiver = receiver  # type: ignore[assignment]
             if self.vrc_mic_audio_gate is not None:
                 self.vrc_mic_audio_gate.set_receiver_active(True)
                 self.vrc_mic_audio_gate.reset()
 
-    def _stop_vrc_mic_receiver(self) -> None:
-        if self.receiver is not None:
+    async def _stop_vrc_mic_receiver(self) -> None:
+        runtime = self._vrc_mic_receiver_runtime
+        if runtime is not None:
+            with contextlib.suppress(Exception):
+                await runtime.stop(strict_runtime_errors=False)
+            self._sync_vrc_mic_receiver_runtime_aliases(runtime)
+        elif self.receiver is not None:
             with contextlib.suppress(Exception):
                 self.receiver.stop()
             self.receiver = None

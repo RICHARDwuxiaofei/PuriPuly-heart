@@ -633,6 +633,38 @@ async def test_launch_github_star_snackbar_skips_if_feedback_appears_during_dela
 
 
 @pytest.mark.asyncio
+async def test_launch_github_star_prompt_runtime_close_cancels_delay_and_prevents_late_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, page, controller = _eligible_app()
+    controller.settings.ui.github_star_prompt_eligible_launch_count = 2
+    sleep_started = asyncio.Event()
+    sleep_cancelled = asyncio.Event()
+    original_sleep = asyncio.sleep
+
+    async def cancellable_sleep(_seconds: float) -> None:
+        sleep_started.set()
+        try:
+            await original_sleep(999)
+        except asyncio.CancelledError:
+            sleep_cancelled.set()
+            raise
+
+    monkeypatch.setattr(app_module.asyncio, "sleep", cancellable_sleep)
+    monkeypatch.setattr(controller_module, "save_settings", lambda _path, _updated: None)
+
+    prompt_task = asyncio.create_task(app.maybe_show_github_star_prompt_after_launch())
+    await sleep_started.wait()
+
+    await app.close_github_star_prompt_runtime()
+
+    assert await prompt_task is False
+    assert sleep_cancelled.is_set() is True
+    assert page.opened == []
+    assert app._github_star_prompt_launch_pending is False
+
+
+@pytest.mark.asyncio
 async def test_launch_github_star_snackbar_skips_and_restores_if_feedback_appears_during_open_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
