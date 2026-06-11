@@ -7899,6 +7899,74 @@ async def test_runtime_logging_close_failure_is_aggregated_not_suppressed(
 
 
 @pytest.mark.asyncio
+async def test_stop_aggregates_oauth_runtime_close_failure_and_continues_later_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    events: list[str] = []
+    oauth_failure = RuntimeError("oauth cleanup sentinel")
+    hub_failure = RuntimeError("hub cleanup sentinel")
+    logging_failure = OSError("runtime logging cleanup sentinel")
+
+    class FailingOAuthRuntime:
+        async def close(self) -> None:
+            events.append("oauth_close")
+            raise oauth_failure
+
+    class FakeRuntimeLogging:
+        def close_after_producers_stop(self, *, cleanup_failures=()) -> None:
+            events.append(
+                "runtime_logging_summary:"
+                + ",".join(type(failure).__name__ for failure in cleanup_failures)
+            )
+            events.append("runtime_logging_close")
+            raise logging_failure
+
+    hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+
+    async def failing_stop() -> None:
+        hub.stop_calls += 1
+        events.append("hub_stop")
+        raise hub_failure
+
+    async def fake_set_stt_enabled(self, value: bool) -> None:
+        _ = (self, value)
+        events.append("stt_off")
+
+    async def fake_shutdown_overlay(self, *, preserve_failure_reason: bool) -> None:
+        _ = (self, preserve_failure_reason)
+        events.append("overlay_shutdown")
+
+    hub.stop = failing_stop  # type: ignore[method-assign]
+    controller.hub = hub
+    controller._oauth_runtime = FailingOAuthRuntime()  # type: ignore[assignment]
+    controller._runtime_logging = FakeRuntimeLogging()
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
+    monkeypatch.setattr(GuiController, "_shutdown_overlay_runtime", fake_shutdown_overlay)
+
+    with pytest.raises(ExceptionGroup) as exc_info:
+        await controller.stop()
+
+    assert list(exc_info.value.exceptions) == [
+        oauth_failure,
+        hub_failure,
+        logging_failure,
+    ]
+    assert events == [
+        "oauth_close",
+        "stt_off",
+        "overlay_shutdown",
+        "hub_stop",
+        "runtime_logging_summary:RuntimeError,RuntimeError",
+        "runtime_logging_close",
+    ]
+    assert controller.hub is hub
+    assert controller._runtime_logging is not None
+
+
+@pytest.mark.asyncio
 async def test_stop_closes_app_owned_oauth_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[str] = []
 

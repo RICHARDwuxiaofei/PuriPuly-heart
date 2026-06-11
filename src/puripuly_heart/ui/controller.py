@@ -3600,7 +3600,7 @@ class GuiController:
         await self._close_github_star_prompt_runtime_for_release(cleanup_failures)
         await self._close_clipboard_runtime()
         await self._close_app_oauth_runtime_for_release(cleanup_failures)
-        await self._close_oauth_runtime()
+        await self._close_oauth_runtime_for_release(cleanup_failures)
         await self._cancel_local_stt_download()
         await self._close_microphone_test_runtime_for_release(cleanup_failures)
         try:
@@ -6987,6 +6987,12 @@ class GuiController:
         if runtime is None:
             return
         await runtime.close()
+
+    async def _close_oauth_runtime_for_release(self, failures: list[Exception]) -> None:
+        try:
+            await self._close_oauth_runtime()
+        except Exception as exc:
+            failures.append(exc)
 
     async def _close_app_oauth_runtime_for_release(self, failures: list[Exception]) -> None:
         close_oauth_runtime = getattr(self.app, "close_oauth_runtime", None)
