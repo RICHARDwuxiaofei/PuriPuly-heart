@@ -1098,6 +1098,39 @@ async def test_event_bridge_localizes_direct_message_ref_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_event_bridge_redacts_unsafe_message_ref_params_before_user_visible_sinks() -> None:
+    previous_locale = get_locale()
+    set_locale("en")
+    try:
+        app = DummyApp()
+        runtime_logging = RuntimeLoggingCapture()
+        bridge = UIEventBridge(
+            app=app,
+            event_queue=asyncio.Queue(),
+            runtime_logging=runtime_logging,
+        )
+        message = messages.UserMessageRef(
+            key="provider.failure",
+            params={
+                "category": "network token=provider-secret-param",
+                "operation": "translate",
+                "provider": "openrouter",
+            },
+            severity=messages.SEVERITY_ERROR,
+        )
+
+        await bridge._handle_event(UIEvent(type=UIEventType.ERROR, payload=message))
+
+        combined = repr(app.view_dashboard.display_calls) + repr(runtime_logging.basic_messages)
+        assert "provider-secret-param" not in combined
+        assert "network token=" not in combined
+        assert "[redacted]" in combined
+        assert app.view_dashboard.display_calls[-1][0] == runtime_logging.basic_messages[-1][1]
+    finally:
+        set_locale(previous_locale)
+
+
+@pytest.mark.asyncio
 async def test_event_bridge_sanitizes_legacy_raw_string_error_before_user_visible_sinks() -> None:
     app = DummyApp()
     runtime_logging = RuntimeLoggingCapture()
@@ -1135,6 +1168,30 @@ async def test_event_bridge_sanitizes_legacy_raw_string_error_before_user_visibl
             "[UIEventBridge] Deprecated raw string error payload sanitized for user-visible sinks",
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_routes_legacy_raw_fallback_through_central_redactor() -> None:
+    app = DummyApp()
+    runtime_logging = RuntimeLoggingCapture()
+    bridge = UIEventBridge(
+        app=app,
+        event_queue=asyncio.Queue(),
+        runtime_logging=runtime_logging,
+    )
+    raw = (
+        "raw_exception=ValueError('raw provider exception text')\n"
+        "file_contents=user document text must not display"
+    )
+
+    await bridge._handle_event(UIEvent(type=UIEventType.ERROR, payload=raw))
+
+    combined = repr(app.view_dashboard.display_calls) + repr(runtime_logging.basic_messages)
+    assert "raw_exception" not in combined
+    assert "raw provider exception text" not in combined
+    assert "file_contents" not in combined
+    assert "user document text" not in combined
+    assert "[redacted]" in combined
 
 
 @pytest.mark.asyncio

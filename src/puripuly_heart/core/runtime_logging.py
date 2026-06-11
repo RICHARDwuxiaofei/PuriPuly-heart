@@ -12,6 +12,17 @@ from typing import Callable, Protocol
 from uuid import uuid4
 
 from puripuly_heart.config.paths import user_config_dir
+from puripuly_heart.core.diagnostic_validation import (
+    DIAGNOSTIC_REDACTION_MARKER,
+    DIAGNOSTIC_SINK_BASIC_LOGS,
+    DIAGNOSTIC_SINK_DETAILED_LOGS,
+    DIAGNOSTIC_SINK_PERSISTED_LOGS,
+    DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED,
+    DiagnosticSink,
+    redact_diagnostics_for_sink,
+    redact_text_for_sink,
+    validate_diagnostics_for_sink,
+)
 from puripuly_heart.core.messages import (
     CONTENT_POLICY_METADATA_ONLY,
     CONTENT_POLICY_RAW_USER_TEXT_ALLOWED,
@@ -203,6 +214,27 @@ class SessionLoggingMode(str, Enum):
     DETAILED = "detailed"
 
 
+class _DiagnosticRedactionFilter(logging.Filter):
+    def __init__(self, sink: DiagnosticSink) -> None:
+        super().__init__()
+        self.sink = sink
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        with contextlib.suppress(Exception):
+            message = record.getMessage()
+            safe_message = _redact_legacy_text_for_sink(message, self.sink)
+            if record.exc_info is not None or record.stack_info is not None:
+                record.msg = safe_message
+                record.args = ()
+                record.exc_info = None
+                record.exc_text = None
+                record.stack_info = None
+            elif safe_message != message:
+                record.msg = safe_message
+                record.args = ()
+        return True
+
+
 @dataclass(slots=True)
 class RuntimeLoggingSinks:
     stream_handler: logging.Handler
@@ -255,6 +287,7 @@ def configure_main_logging(
         stream_handler.set_name(_MAIN_STREAM_HANDLER_NAME)
         target_logger.addHandler(stream_handler)
     stream_handler.setFormatter(_main_formatter())
+    _ensure_redaction_filter(stream_handler, DIAGNOSTIC_SINK_BASIC_LOGS)
 
     _remove_stale_main_file_queue_handlers(target_logger, log_file=log_file)
     existing_queue = _find_main_file_queue_handler(target_logger, log_file=log_file)
@@ -273,9 +306,11 @@ def configure_main_logging(
         file_handler.namer = _main_log_backup_namer
         file_handler.set_name(_MAIN_FILE_HANDLER_NAME)
         file_handler.setFormatter(_main_formatter())
+        _ensure_redaction_filter(file_handler, DIAGNOSTIC_SINK_PERSISTED_LOGS)
         file_queue: queue.Queue[logging.LogRecord] = queue.Queue()
         file_queue_handler = QueueHandler(file_queue)
         file_queue_handler.set_name(_MAIN_FILE_QUEUE_HANDLER_NAME)
+        _ensure_redaction_filter(file_queue_handler, DIAGNOSTIC_SINK_PERSISTED_LOGS)
         file_queue_listener = QueueListener(file_queue, file_handler, respect_handler_level=True)
         setattr(file_queue_handler, _QUEUE_HANDLER_LOG_FILE_ATTR, str(log_file.resolve()))
         setattr(file_queue_handler, _QUEUE_HANDLER_FILE_HANDLER_ATTR, file_handler)
@@ -288,6 +323,7 @@ def configure_main_logging(
     else:
         file_queue_handler, file_handler, file_queue_listener = existing_queue
         file_queue = _main_file_queue_for_handler(file_queue_handler)
+        _ensure_redaction_filter(file_queue_handler, DIAGNOSTIC_SINK_PERSISTED_LOGS)
         setattr(
             file_queue_handler,
             _QUEUE_HANDLER_REFCOUNT_ATTR,
@@ -295,6 +331,7 @@ def configure_main_logging(
         )
         file_handler.namer = _main_log_backup_namer
         file_handler.setFormatter(_main_formatter())
+        _ensure_redaction_filter(file_handler, DIAGNOSTIC_SINK_PERSISTED_LOGS)
 
     target_logger.setLevel(logging.INFO)
     return RuntimeLoggingSinks(
@@ -346,6 +383,10 @@ class SessionRuntimeLoggingService:
         file_output_handler = (
             getattr(self._sinks, "file_queue_handler", None) or self._sinks.file_handler
         )
+        _ensure_redaction_filter(self._sinks.stream_handler, DIAGNOSTIC_SINK_BASIC_LOGS)
+        _ensure_redaction_filter(file_output_handler, DIAGNOSTIC_SINK_PERSISTED_LOGS)
+        if file_output_handler is not self._sinks.file_handler:
+            _ensure_redaction_filter(self._sinks.file_handler, DIAGNOSTIC_SINK_PERSISTED_LOGS)
         _ensure_handler(self._root_logger, self._sinks.stream_handler)
         _ensure_handler(self._root_logger, file_output_handler)
         if _ensure_handler(self._session_logger, self._sinks.stream_handler):
@@ -399,6 +440,7 @@ class SessionRuntimeLoggingService:
             return
 
         handler = self._ui_handler_factory(sink)
+        _ensure_redaction_filter(handler, DIAGNOSTIC_SINK_BASIC_LOGS)
         self._ui_handler = handler
         _ensure_handler(self._root_logger, handler)
         _ensure_handler(self._session_logger, handler)
@@ -431,9 +473,10 @@ class SessionRuntimeLoggingService:
     def emit_basic(self, message: str, *, level: int = logging.INFO) -> None:
         if self._closed:
             return
-        self._session_logger.log(level, message)
+        safe_message = _redact_legacy_text_for_sink(message, DIAGNOSTIC_SINK_BASIC_LOGS)
+        self._session_logger.log(level, safe_message)
         self._emit_structured_runtime_log(
-            message,
+            safe_message,
             level=level,
             visibility=DIAGNOSTIC_VISIBILITY_BASIC,
         )
@@ -443,9 +486,10 @@ class SessionRuntimeLoggingService:
             return False
         if self._mode is not SessionLoggingMode.DETAILED:
             return False
-        self._session_logger.log(level, message)
+        safe_message = _redact_legacy_text_for_sink(message, DIAGNOSTIC_SINK_DETAILED_LOGS)
+        self._session_logger.log(level, safe_message)
         self._emit_structured_runtime_log(
-            message,
+            safe_message,
             level=level,
             visibility=DIAGNOSTIC_VISIBILITY_DETAILED,
         )
@@ -461,7 +505,10 @@ class SessionRuntimeLoggingService:
             return False
         if self._mode is not SessionLoggingMode.DETAILED:
             return False
-        message = build_message()
+        message = _redact_legacy_text_for_sink(
+            build_message(),
+            DIAGNOSTIC_SINK_DETAILED_LOGS,
+        )
         self._session_logger.log(level, message)
         self._emit_structured_runtime_log(
             message,
@@ -477,12 +524,13 @@ class SessionRuntimeLoggingService:
     def emit_persisted(self, message: str, *, level: int = logging.INFO) -> None:
         if self._closed:
             return
+        safe_message = _redact_legacy_text_for_sink(message, DIAGNOSTIC_SINK_PERSISTED_LOGS)
         record = self._session_logger.makeRecord(
             self._session_logger.name,
             level,
             fn="",
             lno=0,
-            msg=message,
+            msg=safe_message,
             args=(),
             exc_info=None,
         )
@@ -490,7 +538,7 @@ class SessionRuntimeLoggingService:
         self._sinks.file_handler.handle(record)
         with contextlib.suppress(Exception):
             self._sinks.file_handler.flush()
-        self._persist_structured_diagnostic(message, level=level)
+        self._persist_structured_diagnostic(safe_message, level=level)
 
     def observe_provider_operation(
         self,
@@ -508,28 +556,32 @@ class SessionRuntimeLoggingService:
     ) -> None:
         if self._closed:
             return
+        event_visibility = visibility or (
+            diagnostics.visibility if diagnostics is not None else DIAGNOSTIC_VISIBILITY_DETAILED
+        )
+        event_content_policy = content_policy or (
+            diagnostics.content_policy if diagnostics is not None else CONTENT_POLICY_METADATA_ONLY
+        )
+        sink = _sink_for_live_visibility(event_visibility)
+        safe_diagnostics = _redact_diagnostics_for_observability_sink(diagnostics, sink)
+        safe_fields = _redact_observability_fields_for_sink(
+            fields or {},
+            sink,
+            visibility=event_visibility,
+            content_policy=event_content_policy,
+        )
         event = ProviderObservationEvent(
             provider=provider,
             operation=operation,
             outcome=outcome,
             correlation_id=correlation_id or _new_correlation_id("provider"),
-            diagnostics=diagnostics,
-            fields=fields or {},
+            diagnostics=safe_diagnostics,
+            fields=safe_fields,
             category=category
             or (diagnostics.category if diagnostics is not None else DIAGNOSTIC_CATEGORY_UNKNOWN),
             severity=severity,
-            visibility=visibility
-            or (
-                diagnostics.visibility
-                if diagnostics is not None
-                else DIAGNOSTIC_VISIBILITY_DETAILED
-            ),
-            content_policy=content_policy
-            or (
-                diagnostics.content_policy
-                if diagnostics is not None
-                else CONTENT_POLICY_METADATA_ONLY
-            ),
+            visibility=event_visibility,
+            content_policy=event_content_policy,
         )
         self._dispatch_observability(
             self._provider_observation_sink,
@@ -554,6 +606,12 @@ class SessionRuntimeLoggingService:
     ) -> None:
         if self._closed:
             return
+        safe_metadata = _redact_observability_fields_for_sink(
+            metadata or {},
+            _sink_for_live_visibility(visibility),
+            visibility=visibility,
+            content_policy=content_policy,
+        )
         record = ConversationRecord(
             utterance_id=utterance_id,
             speaker_channel=speaker_channel,
@@ -561,7 +619,7 @@ class SessionRuntimeLoggingService:
             translation_text=translation_text,
             source_language=source_language,
             target_language=target_language,
-            metadata=metadata or {},
+            metadata=safe_metadata,
             category=category,
             severity=severity,
             visibility=visibility,
@@ -701,6 +759,13 @@ def _ensure_handler(logger: logging.Logger, handler: logging.Handler) -> bool:
     return False
 
 
+def _ensure_redaction_filter(handler: logging.Handler, sink: DiagnosticSink) -> None:
+    for existing in handler.filters:
+        if isinstance(existing, _DiagnosticRedactionFilter) and existing.sink == sink:
+            return
+    handler.addFilter(_DiagnosticRedactionFilter(sink))
+
+
 def _new_session_logger_name() -> str:
     return f"{_SESSION_LOGGER_NAME}.{uuid4()}"
 
@@ -715,6 +780,65 @@ def _severity_for_level(level: int) -> Severity:
     if level >= logging.WARNING:
         return SEVERITY_WARNING
     return SEVERITY_INFO
+
+
+def _redact_legacy_text_for_sink(message: str, sink: DiagnosticSink) -> str:
+    result = redact_text_for_sink(message, sink)
+    if result.status == DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED and result.text is not None:
+        return result.text
+    return DIAGNOSTIC_REDACTION_MARKER
+
+
+def _sink_for_live_visibility(visibility: DiagnosticVisibility) -> DiagnosticSink:
+    if visibility == DIAGNOSTIC_VISIBILITY_BASIC:
+        return DIAGNOSTIC_SINK_BASIC_LOGS
+    return DIAGNOSTIC_SINK_DETAILED_LOGS
+
+
+def _redact_diagnostics_for_observability_sink(
+    diagnostics: ErrorDiagnostics | None,
+    sink: DiagnosticSink,
+) -> ErrorDiagnostics | None:
+    if diagnostics is None:
+        return None
+    validation = validate_diagnostics_for_sink(diagnostics, sink)
+    if validation.status == DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED:
+        return diagnostics
+    result = redact_diagnostics_for_sink(diagnostics, sink)
+    if result.status != DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED:
+        return None
+    return result.diagnostics
+
+
+def _redact_observability_fields_for_sink(
+    fields: Mapping[str, DiagnosticFieldValue],
+    sink: DiagnosticSink,
+    *,
+    visibility: DiagnosticVisibility,
+    content_policy: ContentPolicy,
+) -> Mapping[str, DiagnosticFieldValue]:
+    if not fields:
+        return {}
+    diagnostics = ErrorDiagnostics(
+        component="observability",
+        operation="emit",
+        code="observability.fields",
+        category=DIAGNOSTIC_CATEGORY_UNKNOWN,
+        visibility=visibility,
+        content_policy=content_policy,
+        status_code=None,
+        retry_after_ms=None,
+        fields=fields,
+    )
+    validation = validate_diagnostics_for_sink(diagnostics, sink)
+    if validation.status == DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED:
+        return fields
+    result = redact_diagnostics_for_sink(diagnostics, sink)
+    if result.status != DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED:
+        return {}
+    if result.diagnostics is None:
+        return {}
+    return result.diagnostics.fields
 
 
 def _legacy_text_observability_fields(

@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from puripuly_heart.config.paths import user_config_dir
+from puripuly_heart.core.diagnostic_validation import (
+    DIAGNOSTIC_REDACTION_MARKER,
+    DIAGNOSTIC_SINK_FAILURE_JSONL,
+    DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED,
+    redact_text_for_sink,
+)
 
 _PROCESS_EVENT_LIMIT = 50
 _CHILD_LINE_LIMIT = 100
@@ -24,12 +30,34 @@ def default_overlay_diagnostics_dir() -> Path:
 
 def _json_safe(value: Any) -> Any:
     if isinstance(value, Path):
-        return str(value)
+        return _redact_failure_jsonl_text(str(value))
     if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
+        return _json_safe_fields(value)
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
+    if isinstance(value, str):
+        return _redact_failure_jsonl_text(value)
     return value
+
+
+def _json_safe_fields(fields: dict[Any, Any]) -> dict[str, Any]:
+    safe_fields: dict[str, Any] = {}
+    for key, value in fields.items():
+        key_text = str(key)
+        raw_assignment = f"{key_text}={value}"
+        redacted_assignment = _redact_failure_jsonl_text(raw_assignment)
+        if redacted_assignment != raw_assignment:
+            safe_fields[f"redacted_field_{len(safe_fields) + 1}"] = redacted_assignment
+            continue
+        safe_fields[key_text] = _json_safe(value)
+    return safe_fields
+
+
+def _redact_failure_jsonl_text(text: str) -> str:
+    result = redact_text_for_sink(text, DIAGNOSTIC_SINK_FAILURE_JSONL)
+    if result.status == DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED and result.text is not None:
+        return result.text
+    return DIAGNOSTIC_REDACTION_MARKER
 
 
 @dataclass(slots=True)
@@ -129,7 +157,7 @@ class OverlayDiagnosticsRecorder:
             "category": category,
             "event": event,
         }
-        payload.update({key: _json_safe(value) for key, value in fields.items()})
+        payload.update(_json_safe_fields(dict(fields)))
         return payload
 
     def _sorted_events(self) -> list[dict[str, Any]]:

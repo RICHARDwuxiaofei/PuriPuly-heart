@@ -7,6 +7,12 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from puripuly_heart.core.clock import Clock
+from puripuly_heart.core.diagnostic_validation import (
+    DIAGNOSTIC_REDACTION_MARKER,
+    DIAGNOSTIC_SINK_CHATBOX_DISCLOSURE,
+    DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED,
+    redact_text_for_sink,
+)
 from puripuly_heart.core.osc.sender import OscSender
 from puripuly_heart.core.output.models import SelfUtterancePublication, SystemDisclosurePublication
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
@@ -181,7 +187,7 @@ class ChatboxPaginatorOutputAdapter:
     async def publish_system_disclosure(self, publication: SystemDisclosurePublication) -> None:
         message = OSCMessage(
             utterance_id=UUID(publication.disclosure_id),
-            text=self.render_system_disclosure(publication),
+            text=_redact_chatbox_disclosure_text(self.render_system_disclosure(publication)),
             created_at=self.paginator.clock.now(),
         )
         self.paginator.enqueue(message)
@@ -194,3 +200,10 @@ class ChatboxPaginatorOutputAdapter:
         if self.include_source and transcript_text:
             return f"{transcript_text} ({translation_text})"
         return translation_text
+
+
+def _redact_chatbox_disclosure_text(text: str) -> str:
+    result = redact_text_for_sink(text, DIAGNOSTIC_SINK_CHATBOX_DISCLOSURE)
+    if result.status == DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED and result.text is not None:
+        return result.text
+    return DIAGNOSTIC_REDACTION_MARKER

@@ -263,6 +263,116 @@ def test_configure_main_logging_routes_file_writes_through_queue(tmp_path) -> No
         sinks.close()
 
 
+def test_configured_main_logging_redacts_direct_logger_records_before_live_and_file(
+    tmp_path,
+) -> None:
+    root_logger = logging.getLogger(f"test.runtime_logging.direct_redaction.{uuid4()}")
+    root_logger.handlers.clear()
+    root_logger.propagate = False
+    stream = io.StringIO()
+    root_logger.addHandler(logging.StreamHandler(stream))
+    sinks = configure_main_logging(root_logger=root_logger, log_dir=tmp_path)
+    unsafe = "provider_response_body={'token':'direct-log-secret'}"
+
+    try:
+        root_logger.error(unsafe)
+        _wait_for_log_text(sinks.log_file, "provider-response-body-redacted")
+
+        combined = stream.getvalue() + sinks.log_file.read_text(encoding="utf-8")
+        assert "direct-log-secret" not in combined
+        assert "provider_response_body" not in combined
+        assert "[provider-response-body-redacted]" in combined
+    finally:
+        sinks.close()
+
+
+def test_configured_main_logging_drops_exception_and_stack_details_before_live_and_file(
+    tmp_path,
+) -> None:
+    root_logger = logging.getLogger(f"test.runtime_logging.exception_redaction.{uuid4()}")
+    root_logger.handlers.clear()
+    root_logger.propagate = False
+    stream = io.StringIO()
+    root_logger.addHandler(logging.StreamHandler(stream))
+    sinks = configure_main_logging(root_logger=root_logger, log_dir=tmp_path)
+
+    try:
+        root_logger.info("ordinary safe exception-neighbor message")
+        try:
+            raise RuntimeError(
+                "provider_response_body={'token':'exception-provider-secret'} "
+                "authorization=Bearer exception-token-secret"
+            )
+        except RuntimeError:
+            root_logger.exception("provider call failed safely")
+        root_logger.error("stack-only failure breadcrumb", stack_info=True)
+        _wait_for_log_text(sinks.log_file, "stack-only failure breadcrumb")
+
+        combined = stream.getvalue() + sinks.log_file.read_text(encoding="utf-8")
+        assert "ordinary safe exception-neighbor message" in combined
+        assert "provider call failed safely" in combined
+        assert "stack-only failure breadcrumb" in combined
+        assert "exception-provider-secret" not in combined
+        assert "exception-token-secret" not in combined
+        assert "provider_response_body" not in combined
+        assert "Traceback" not in combined
+        assert "Stack (most recent call last)" not in combined
+        assert 'File "' not in combined
+        assert "RuntimeError" not in combined
+    finally:
+        sinks.close()
+
+
+def test_session_runtime_logging_redacts_direct_records_with_injected_sinks(tmp_path) -> None:
+    root_logger = logging.getLogger(f"test.runtime_logging.injected.root.{uuid4()}")
+    root_logger.handlers.clear()
+    root_logger.propagate = False
+    session_logger = logging.getLogger(f"test.runtime_logging.injected.session.{uuid4()}")
+    session_logger.handlers.clear()
+    session_logger.propagate = False
+    stream = io.StringIO()
+    stream_handler = logging.StreamHandler(stream)
+    stream_handler.setFormatter(logging.Formatter("%(message)s"))
+    log_file = tmp_path / "injected-direct.log"
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+    runtime_logging = SessionRuntimeLoggingService(
+        root_logger=root_logger,
+        session_logger=session_logger,
+        sinks=_SharedSinkBundle(
+            stream_handler=stream_handler,
+            file_handler=file_handler,
+            log_file=log_file,
+        ),
+    )
+
+    try:
+        root_logger.info("ordinary safe injected direct record")
+        root_logger.error("provider_response_body={'token':'injected-root-secret'}")
+        try:
+            raise RuntimeError("raw_exception=token=injected-exception-secret")
+        except RuntimeError:
+            session_logger.exception("session exception breadcrumb")
+        session_logger.error("session stack breadcrumb", stack_info=True)
+        file_handler.flush()
+
+        combined = stream.getvalue() + log_file.read_text(encoding="utf-8")
+        assert "ordinary safe injected direct record" in combined
+        assert "session exception breadcrumb" in combined
+        assert "session stack breadcrumb" in combined
+        assert "injected-root-secret" not in combined
+        assert "injected-exception-secret" not in combined
+        assert "provider_response_body" not in combined
+        assert "raw_exception" not in combined
+        assert "Traceback" not in combined
+        assert "Stack (most recent call last)" not in combined
+        assert 'File "' not in combined
+        assert "RuntimeError" not in combined
+    finally:
+        runtime_logging.close()
+        file_handler.close()
+
+
 def test_configure_main_logging_uses_bounded_rotation_policy(tmp_path) -> None:
     root_logger = logging.getLogger(f"test.runtime_logging.rotation_policy.{uuid4()}")
     root_logger.handlers.clear()
@@ -468,6 +578,109 @@ def test_emit_persisted_preserves_queued_record_order_before_direct_write(tmp_pa
         sinks.close()
 
 
+def test_session_runtime_logging_redacts_unsafe_legacy_text_before_live_and_persisted_sinks(
+    tmp_path,
+) -> None:
+    root_logger = logging.getLogger(f"test.runtime_logging.redaction.root.{uuid4()}")
+    root_logger.handlers.clear()
+    root_logger.propagate = False
+    session_logger = logging.getLogger(f"test.runtime_logging.redaction.session.{uuid4()}")
+    session_logger.handlers.clear()
+    session_logger.propagate = False
+    stream = io.StringIO()
+    stream_handler = logging.StreamHandler(stream)
+    stream_handler.setFormatter(logging.Formatter("%(message)s"))
+    log_file = tmp_path / "runtime-redaction.log"
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+    runtime_logging = SessionRuntimeLoggingService(
+        root_logger=root_logger,
+        session_logger=session_logger,
+        sinks=_SharedSinkBundle(
+            stream_handler=stream_handler,
+            file_handler=file_handler,
+            log_file=log_file,
+        ),
+    )
+    unsafe_text = (
+        "Provider failure provider_response_body="
+        "{'error':'bad','token':'provider-secret-live-123'}\n"
+        "Traceback (most recent call last):\n"
+        '  File "provider.py", line 42, in translate\n'
+        "RuntimeError: authorization=Bearer provider-token-live-456"
+    )
+
+    try:
+        runtime_logging.emit_basic("ordinary safe line")
+        runtime_logging.emit_basic(unsafe_text, level=logging.ERROR)
+        runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+        runtime_logging.emit_detailed(unsafe_text, level=logging.WARNING)
+        runtime_logging.emit_persisted(unsafe_text, level=logging.ERROR)
+        file_handler.flush()
+
+        live_text = stream.getvalue()
+        persisted_text = log_file.read_text(encoding="utf-8")
+        combined = live_text + persisted_text
+        assert "ordinary safe line" in combined
+        assert "provider-secret-live-123" not in combined
+        assert "provider-token-live-456" not in combined
+        assert "provider_response_body" not in combined
+        assert "Traceback" not in combined
+        assert 'File "provider.py"' not in combined
+        assert "[provider-response-body-redacted]" in combined or "[redacted]" in combined
+    finally:
+        runtime_logging.close()
+        file_handler.close()
+
+
+def test_session_runtime_logging_redacts_unsafe_text_assignment_keys_before_sinks(
+    tmp_path,
+) -> None:
+    root_logger = logging.getLogger(f"test.runtime_logging.assignment_keys.root.{uuid4()}")
+    root_logger.handlers.clear()
+    root_logger.propagate = False
+    session_logger = logging.getLogger(f"test.runtime_logging.assignment_keys.session.{uuid4()}")
+    session_logger.handlers.clear()
+    session_logger.propagate = False
+    stream = io.StringIO()
+    stream_handler = logging.StreamHandler(stream)
+    stream_handler.setFormatter(logging.Formatter("%(message)s"))
+    log_file = tmp_path / "unsafe-assignment-keys.log"
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+    runtime_logging = SessionRuntimeLoggingService(
+        root_logger=root_logger,
+        session_logger=session_logger,
+        sinks=_SharedSinkBundle(
+            stream_handler=stream_handler,
+            file_handler=file_handler,
+            log_file=log_file,
+        ),
+    )
+    unsafe_text = (
+        "file_contents=user document text must not persist\n"
+        "raw_exception=ValueError('raw provider exception text')\n"
+        'stack_trace=File "provider.py", line 42, in translate'
+    )
+
+    try:
+        runtime_logging.emit_basic(unsafe_text, level=logging.ERROR)
+        runtime_logging.emit_persisted(unsafe_text, level=logging.ERROR)
+        file_handler.flush()
+
+        combined = stream.getvalue() + log_file.read_text(encoding="utf-8")
+        assert "file_contents" not in combined
+        assert "user document text" not in combined
+        assert "raw_exception" not in combined
+        assert "raw provider exception text" not in combined
+        assert "stack_trace" not in combined
+        assert 'File "provider.py"' not in combined
+        assert "[redacted]" in combined
+    finally:
+        runtime_logging.close()
+        file_handler.close()
+
+
 def test_configure_main_logging_reconfigures_after_close(tmp_path) -> None:
     root_logger = logging.getLogger(f"test.runtime_logging.queue.close_reconfigure.{uuid4()}")
     root_logger.handlers.clear()
@@ -640,6 +853,53 @@ async def test_session_runtime_logging_dispatches_provider_and_conversation_even
         assert conversation.content_policy == CONTENT_POLICY_RAW_USER_TEXT_ALLOWED
         assert isinstance(conversation.correlation_id, str)
         assert dict(conversation.metadata) == {"transcript_len": 5, "translation_len": 7}
+    finally:
+        runtime_logging.close()
+
+
+@pytest.mark.asyncio
+async def test_session_runtime_logging_redacts_diagnostics_before_structured_sinks() -> None:
+    runner = _ObservabilityRunner()
+    sink = _StructuredObservabilitySink()
+    runtime_logging, _stream = _make_runtime_logging_capture()
+    runtime_logging.configure_structured_observability(
+        provider_observation_sink=sink,
+        observability_runner=runner,
+    )
+    diagnostics = ErrorDiagnostics(
+        component="provider.openrouter",
+        operation="translate",
+        code="provider.invalid_response",
+        category=DIAGNOSTIC_CATEGORY_NETWORK,
+        visibility=DIAGNOSTIC_VISIBILITY_DETAILED,
+        content_policy="redacted",
+        status_code=502,
+        retry_after_ms=None,
+        fields={
+            "raw_response_body": "{'error':'bad','token':'provider-secret-structured'}",
+            "provider": "openrouter",
+        },
+    )
+
+    try:
+        runtime_logging.observe_provider_operation(
+            provider="openrouter",
+            operation="translate",
+            outcome="failure",
+            severity=SEVERITY_ERROR,
+            diagnostics=diagnostics,
+            fields={"provider_response_body": "token=provider-secret-field"},
+        )
+        await runner.drain()
+
+        assert len(sink.provider_events) == 1
+        event = sink.provider_events[0]
+        rendered = repr(event)
+        assert "provider-secret-structured" not in rendered
+        assert "provider-secret-field" not in rendered
+        assert event.diagnostics is not None
+        assert event.diagnostics.fields["raw_response_body"] == "[provider-response-body-redacted]"
+        assert event.fields["provider_response_body"] == "[provider-response-body-redacted]"
     finally:
         runtime_logging.close()
 

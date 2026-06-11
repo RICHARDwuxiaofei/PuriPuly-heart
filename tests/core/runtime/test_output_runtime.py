@@ -265,6 +265,25 @@ async def test_output_runtime_start_after_close_does_not_reopen_or_accept_public
 
 
 @pytest.mark.asyncio
+async def test_output_runtime_redacts_unsafe_system_disclosure_before_chatbox() -> None:
+    OutputRuntime = _output_runtime_class()
+    chatbox = RecordingChatbox()
+    owner = OutputRuntime(chatbox=chatbox, clock=FakeClock(_now=10.0))
+
+    await owner.start()
+    result = owner.publish_system_disclosure_chatbox(
+        text="provider_response_body={'token':'chatbox-disclosure-secret'}",
+    )
+
+    assert result.decision.decision == "published"
+    assert len(chatbox.messages) == 1
+    published_text = chatbox.messages[0].text
+    assert "chatbox-disclosure-secret" not in published_text
+    assert "provider_response_body" not in published_text
+    assert "[provider-response-body-redacted]" in published_text
+
+
+@pytest.mark.asyncio
 async def test_output_runtime_start_after_failed_close_does_not_reopen() -> None:
     OutputRuntime = _output_runtime_class()
     chatbox = DropPendingFailsOnceChatbox()

@@ -76,6 +76,27 @@ async def test_chatbox_paginator_output_adapter_preserves_self_and_system_paths(
 
 
 @pytest.mark.asyncio
+async def test_chatbox_paginator_output_adapter_redacts_system_disclosure_text() -> None:
+    sender = RecordingOscSender()
+    paginator = ChatboxPaginator(sender=sender, clock=FakeClock(_now=123.0))
+    adapter = ChatboxPaginatorOutputAdapter(
+        paginator=paginator,
+        render_system_disclosure=lambda _publication: (
+            "broker_raw_message=eligibility token=chatbox-adapter-secret"
+        ),
+    )
+    system_publication = SystemDisclosurePublication(
+        disclosure_id=str(uuid4()),
+        message=UserMessageRef(key="runtime.disclosure", params={}, severity=SEVERITY_INFO),
+        metadata={},
+    )
+
+    await adapter.publish_system_disclosure(system_publication)
+
+    assert sender.chatbox_texts == ["[broker-raw-message-redacted]"]
+
+
+@pytest.mark.asyncio
 async def test_subtitle_overlay_output_adapter_emits_peer_translation_final_event() -> None:
     utterance_id = uuid4()
     sink = RecordingOverlaySink()

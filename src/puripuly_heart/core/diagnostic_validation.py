@@ -9,6 +9,7 @@ from typing import Final, Literal, TypeAlias
 
 from puripuly_heart.core.messages import (
     CONTENT_POLICY_REDACTED,
+    DIAGNOSTIC_CATEGORY_UNKNOWN,
     DIAGNOSTIC_FIELD_KEY_MAX_LENGTH,
     DIAGNOSTIC_FIELD_MAX_ITEMS,
     DIAGNOSTIC_FIELD_VALUE_MAX_LENGTH,
@@ -19,6 +20,8 @@ from puripuly_heart.core.messages import (
     ContentPolicy,
     DiagnosticVisibility,
     ErrorDiagnostics,
+    SafeMessageParam,
+    UserMessageRef,
 )
 
 DiagnosticSink: TypeAlias = Literal[
@@ -203,7 +206,37 @@ _SECRET_VALUE_PATTERNS: Final = (
 )
 _STACK_TRACE_PATTERNS: Final = (
     re.compile(r"Traceback \(most recent call last\):"),
+    re.compile(r"Stack \(most recent call last\):"),
     re.compile(r'File "[^"]+", line \d+'),
+)
+_PRIVATE_KEY_BLOCK_TEXT_RE: Final = re.compile(
+    r"(?is)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"
+)
+_SECRET_ASSIGNMENT_TEXT_RE: Final = re.compile(
+    r"(?i)\b(api[_-]?key|authorization|password|private[_-]?key|secret|session[_-]?token|token)\b[\"']?\s*[:=]\s*[\"']?(?:Bearer\s+[A-Za-z0-9._~+\-/]{8,}|[^\s\"',;}]+)"
+)
+_BEARER_SECRET_TEXT_RE: Final = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+\-/]{8,}")
+_OPENAI_STYLE_SECRET_TEXT_RE: Final = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9._-]{8,}\b")
+
+
+def _raw_text_key_assignment_re(keys: frozenset[str]) -> re.Pattern[str]:
+    alternatives = sorted(
+        (_raw_text_key_pattern(key) for key in keys),
+        key=len,
+        reverse=True,
+    )
+    return re.compile(r"(?is)\b(?:" + "|".join(alternatives) + r")\b[\"']?\s*[=:]\s*")
+
+
+def _raw_text_key_pattern(key: str) -> str:
+    return r"[_ -]?".join(re.escape(part) for part in key.split("_"))
+
+
+_PROVIDER_RESPONSE_BODY_TEXT_RE: Final = _raw_text_key_assignment_re(_PROVIDER_RESPONSE_BODY_KEYS)
+_BROKER_RAW_MESSAGE_TEXT_RE: Final = _raw_text_key_assignment_re(_BROKER_RAW_MESSAGE_KEYS)
+_UNSAFE_TEXT_PAYLOAD_TEXT_RE: Final = _raw_text_key_assignment_re(_UNSAFE_TEXT_KEYS)
+_LOCAL_LLM_EXTRA_BODY_TEXT_RE: Final = re.compile(
+    r"(?is)\b(?:local[_ -]?(?:llm|openai)[_ -]?extra[_ -]?body)\b\s*[=:]\s*"
 )
 
 
@@ -213,6 +246,9 @@ class DiagnosticRedactionPolicy:
 
 
 DEFAULT_DIAGNOSTIC_REDACTION_POLICY: Final = DiagnosticRedactionPolicy()
+MESSAGE_PARAM_REDACTION_POLICY: Final = DiagnosticRedactionPolicy(
+    allow_sensitive_local_llm_extra_body_fields=True,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +256,18 @@ class DiagnosticValidationResult:
     status: DiagnosticValidationStatus
     sink: DiagnosticSink
     diagnostics: ErrorDiagnostics | None
+    redacted: bool
+    reasons: tuple[DiagnosticValidationReason, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "reasons", tuple(self.reasons))
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticTextValidationResult:
+    status: DiagnosticValidationStatus
+    sink: DiagnosticSink
+    text: str | None
     redacted: bool
     reasons: tuple[DiagnosticValidationReason, ...]
 
@@ -277,6 +325,70 @@ def redact_diagnostics_for_sink(
     )
 
 
+def redact_text_for_sink(text: str, sink: DiagnosticSink) -> DiagnosticTextValidationResult:
+    redacted_text, redacted = _redact_text_payload(text)
+    reasons = _text_content_reasons(redacted_text)
+    if reasons:
+        return DiagnosticTextValidationResult(
+            status=DIAGNOSTIC_VALIDATION_STATUS_REJECTED,
+            sink=sink,
+            text=None,
+            redacted=redacted,
+            reasons=reasons,
+        )
+    return DiagnosticTextValidationResult(
+        status=DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED,
+        sink=sink,
+        text=redacted_text,
+        redacted=redacted,
+        reasons=(),
+    )
+
+
+def redact_message_params_for_sink(
+    params: Mapping[str, SafeMessageParam],
+    sink: DiagnosticSink,
+) -> Mapping[str, SafeMessageParam]:
+    diagnostics = ErrorDiagnostics(
+        component="user_message",
+        operation="localize",
+        code="user_message.params",
+        category=DIAGNOSTIC_CATEGORY_UNKNOWN,
+        visibility=_compatible_visibility_for_sink(sink),
+        content_policy=CONTENT_POLICY_REDACTED,
+        status_code=None,
+        retry_after_ms=None,
+        fields=params,
+    )
+    validation = redact_diagnostics_for_sink(
+        diagnostics,
+        sink,
+        policy=MESSAGE_PARAM_REDACTION_POLICY,
+    )
+    if validation.status != DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED:
+        return MappingProxyType({})
+    if validation.diagnostics is None:
+        return MappingProxyType({})
+    return MappingProxyType(
+        {
+            key: value
+            for key, value in validation.diagnostics.fields.items()
+            if _is_supported_diagnostic_value(value)
+        }
+    )
+
+
+def redact_user_message_ref_for_sink(
+    message: UserMessageRef,
+    sink: DiagnosticSink,
+) -> UserMessageRef:
+    return UserMessageRef(
+        key=message.key,
+        params=redact_message_params_for_sink(message.params, sink),
+        severity=message.severity,
+    )
+
+
 def _validation_reasons(
     diagnostics: ErrorDiagnostics,
     sink: DiagnosticSink,
@@ -291,6 +403,19 @@ def _validation_reasons(
     reasons.extend(_field_shape_reasons(diagnostics.fields))
     reasons.extend(_content_reasons(diagnostics.fields, policy=policy))
     return tuple(dict.fromkeys(reasons))
+
+
+def _compatible_visibility_for_sink(sink: DiagnosticSink) -> DiagnosticVisibility:
+    allowed = DIAGNOSTIC_SINK_VISIBILITY_RULES.get(sink, frozenset())
+    for visibility in (
+        DIAGNOSTIC_VISIBILITY_BASIC,
+        DIAGNOSTIC_VISIBILITY_DETAILED,
+        DIAGNOSTIC_VISIBILITY_DIAGNOSTIC_ONLY,
+        DIAGNOSTIC_VISIBILITY_PERSISTED_FAILURE_ONLY,
+    ):
+        if visibility in allowed:
+            return visibility
+    return DIAGNOSTIC_VISIBILITY_BASIC
 
 
 def _field_shape_reasons(
@@ -399,6 +524,137 @@ def _redact_fields(
     return MappingProxyType(fields), redacted
 
 
+def _redact_text_payload(text: str) -> tuple[str, bool]:
+    redacted = text.replace("\r\n", "\n").replace("\r", "\n")
+    redacted = _redact_raw_assignment_values(
+        redacted,
+        _PROVIDER_RESPONSE_BODY_TEXT_RE,
+        PROVIDER_RESPONSE_BODY_REDACTION_MARKER,
+    )
+    redacted = _redact_raw_assignment_values(
+        redacted,
+        _BROKER_RAW_MESSAGE_TEXT_RE,
+        BROKER_RAW_MESSAGE_REDACTION_MARKER,
+    )
+    redacted = _redact_raw_assignment_values(
+        redacted,
+        _LOCAL_LLM_EXTRA_BODY_TEXT_RE,
+        LOCAL_LLM_EXTRA_BODY_REDACTION_MARKER,
+    )
+    redacted = _redact_raw_assignment_values(
+        redacted,
+        _UNSAFE_TEXT_PAYLOAD_TEXT_RE,
+        DIAGNOSTIC_REDACTION_MARKER,
+    )
+    redacted = re.sub(
+        r"(?is)\n?Traceback \(most recent call last\):.*",
+        DIAGNOSTIC_REDACTION_MARKER,
+        redacted,
+    )
+    redacted = re.sub(
+        r"(?is)\n?Stack \(most recent call last\):.*",
+        DIAGNOSTIC_REDACTION_MARKER,
+        redacted,
+    )
+    redacted = re.sub(r'(?im)^\s*File "[^"]+", line \d+.*$', DIAGNOSTIC_REDACTION_MARKER, redacted)
+    redacted = _PRIVATE_KEY_BLOCK_TEXT_RE.sub(DIAGNOSTIC_REDACTION_MARKER, redacted)
+    redacted = _SECRET_ASSIGNMENT_TEXT_RE.sub(_redact_secret_assignment, redacted)
+    redacted = _BEARER_SECRET_TEXT_RE.sub(f"Bearer {DIAGNOSTIC_REDACTION_MARKER}", redacted)
+    redacted = _OPENAI_STYLE_SECRET_TEXT_RE.sub(DIAGNOSTIC_REDACTION_MARKER, redacted)
+    changed = redacted != text
+    if changed:
+        redacted = re.sub(r"\s+", " ", redacted).strip()
+    return redacted or DIAGNOSTIC_REDACTION_MARKER, changed
+
+
+def _text_content_reasons(text: str) -> tuple[DiagnosticValidationReason, ...]:
+    reasons: list[DiagnosticValidationReason] = []
+    if _PROVIDER_RESPONSE_BODY_TEXT_RE.search(text):
+        reasons.append(DIAGNOSTIC_VALIDATION_REASON_PROVIDER_RESPONSE_BODY)
+    if _BROKER_RAW_MESSAGE_TEXT_RE.search(text):
+        reasons.append(DIAGNOSTIC_VALIDATION_REASON_BROKER_RAW_MESSAGE)
+    if _LOCAL_LLM_EXTRA_BODY_TEXT_RE.search(text):
+        reasons.append(DIAGNOSTIC_VALIDATION_REASON_SENSITIVE_LOCAL_LLM_EXTRA_BODY)
+    if _UNSAFE_TEXT_PAYLOAD_TEXT_RE.search(text):
+        reasons.append(DIAGNOSTIC_VALIDATION_REASON_UNSAFE_TEXT_PAYLOAD)
+    if any(pattern.search(text) for pattern in _SECRET_VALUE_PATTERNS):
+        reasons.append(DIAGNOSTIC_VALIDATION_REASON_SECRET_PATTERN)
+    if any(pattern.search(text) for pattern in _STACK_TRACE_PATTERNS):
+        reasons.append(DIAGNOSTIC_VALIDATION_REASON_UNSAFE_TEXT_PAYLOAD)
+    if _PRIVATE_KEY_BLOCK_TEXT_RE.search(text):
+        reasons.append(DIAGNOSTIC_VALIDATION_REASON_SECRET_PATTERN)
+    return tuple(dict.fromkeys(reasons))
+
+
+def _redact_raw_assignment_values(
+    text: str,
+    pattern: re.Pattern[str],
+    marker: str,
+) -> str:
+    redacted_parts: list[str] = []
+    cursor = 0
+    for match in pattern.finditer(text):
+        if match.start() < cursor:
+            continue
+        redacted_parts.append(text[cursor : match.start()])
+        redacted_parts.append(marker)
+        cursor = _raw_assignment_value_end(text, match.end())
+    redacted_parts.append(text[cursor:])
+    return "".join(redacted_parts)
+
+
+def _raw_assignment_value_end(text: str, start: int) -> int:
+    if start >= len(text):
+        return start
+    char = text[start]
+    if char in ("{", "["):
+        return _balanced_raw_value_end(text, start)
+    if char in ("'", '"'):
+        return _quoted_raw_value_end(text, start)
+
+    end = start
+    while end < len(text) and text[end] not in "\n;":
+        end += 1
+    return end
+
+
+def _balanced_raw_value_end(text: str, start: int) -> int:
+    closing_for_open = {"{": "}", "[": "]"}
+    expected_closers = [closing_for_open[text[start]]]
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if char in ("'", '"'):
+            index = _quoted_raw_value_end(text, index)
+            continue
+        if char in closing_for_open:
+            expected_closers.append(closing_for_open[char])
+        elif char == expected_closers[-1]:
+            expected_closers.pop()
+            if not expected_closers:
+                return index + 1
+        index += 1
+    return len(text)
+
+
+def _quoted_raw_value_end(text: str, start: int) -> int:
+    quote = text[start]
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == quote:
+            return index + 1
+        index += 1
+    return len(text)
+
+
+def _redact_secret_assignment(match: re.Match[str]) -> str:
+    return f"{match.group(1)}={DIAGNOSTIC_REDACTION_MARKER}"
+
+
 def _copy_diagnostics_with_fields(
     diagnostics: ErrorDiagnostics,
     fields: Mapping[str, object],
@@ -495,16 +751,22 @@ def _is_unsafe_text_key(key: str) -> bool:
 
 
 def _contains_unredacted_provider_response_body(key: str, value: object) -> bool:
-    return _is_provider_response_body_key(key) and value != PROVIDER_RESPONSE_BODY_REDACTION_MARKER
+    if _is_provider_response_body_key(key) and value != PROVIDER_RESPONSE_BODY_REDACTION_MARKER:
+        return True
+    return isinstance(value, str) and bool(_PROVIDER_RESPONSE_BODY_TEXT_RE.search(value))
 
 
 def _contains_unredacted_broker_raw_message(key: str, value: object) -> bool:
-    return _is_broker_raw_message_key(key) and value != BROKER_RAW_MESSAGE_REDACTION_MARKER
+    if _is_broker_raw_message_key(key) and value != BROKER_RAW_MESSAGE_REDACTION_MARKER:
+        return True
+    return isinstance(value, str) and bool(_BROKER_RAW_MESSAGE_TEXT_RE.search(value))
 
 
 def _contains_unredacted_sensitive_local_llm_extra_body(key: str, value: object) -> bool:
     if value == LOCAL_LLM_EXTRA_BODY_REDACTION_MARKER:
         return False
+    if isinstance(value, str) and _LOCAL_LLM_EXTRA_BODY_TEXT_RE.search(value):
+        return True
     if not _is_local_llm_extra_body_key(key):
         return False
     if _LOCAL_LLM_SENSITIVE_EXTRA_BODY_KEYS.intersection(_key_segments(key)):
@@ -545,6 +807,8 @@ def _contains_unredacted_unsafe_text_payload(key: str, value: object) -> bool:
     if _is_safe_redaction_marker(value):
         return False
     if _is_unsafe_text_key(key):
+        return True
+    if isinstance(value, str) and _UNSAFE_TEXT_PAYLOAD_TEXT_RE.search(value):
         return True
     return isinstance(value, str) and any(
         pattern.search(value) for pattern in _STACK_TRACE_PATTERNS
@@ -591,9 +855,14 @@ __all__ = [
     "ContentPolicy",
     "DiagnosticRedactionPolicy",
     "DiagnosticSink",
+    "DiagnosticTextValidationResult",
     "DiagnosticValidationReason",
     "DiagnosticValidationResult",
     "DiagnosticValidationStatus",
+    "MESSAGE_PARAM_REDACTION_POLICY",
     "redact_diagnostics_for_sink",
+    "redact_message_params_for_sink",
+    "redact_text_for_sink",
+    "redact_user_message_ref_for_sink",
     "validate_diagnostics_for_sink",
 ]

@@ -11,6 +11,16 @@ from typing import Protocol
 
 import flet as ft
 
+from puripuly_heart.core.diagnostic_validation import (
+    DIAGNOSTIC_REDACTION_MARKER,
+    DIAGNOSTIC_SINK_DASHBOARD,
+    DIAGNOSTIC_SINK_SNACKBAR,
+    DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED,
+    redact_diagnostics_for_sink,
+    redact_message_params_for_sink,
+    redact_text_for_sink,
+    redact_user_message_ref_for_sink,
+)
 from puripuly_heart.core.error_messages import sanitize_legacy_raw_user_visible_error_text
 from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterUserFacingError
 from puripuly_heart.core.messages import UserErrorReport, UserMessageRef
@@ -299,15 +309,30 @@ class AppErrorEventDestination:
 
 
 def _localized_error_event_text(payload: object | None) -> str:
+    sink = (
+        DIAGNOSTIC_SINK_SNACKBAR
+        if _is_managed_openrouter_error_payload(payload)
+        else DIAGNOSTIC_SINK_DASHBOARD
+    )
     if isinstance(payload, ManagedOpenRouterUserFacingError):
-        return t(payload.message_key, **_safe_i18n_params(payload.message_kwargs))
+        return t(
+            payload.message_key,
+            **redact_message_params_for_sink(_safe_i18n_params(payload.message_kwargs), sink),
+        )
     if isinstance(payload, UserErrorReport):
-        return localize_user_message_ref(payload.message)
+        with contextlib.suppress(Exception):
+            redact_diagnostics_for_sink(payload.diagnostics, sink)
+        return localize_user_message_ref(redact_user_message_ref_for_sink(payload.message, sink))
     if isinstance(payload, UserMessageRef):
-        return localize_user_message_ref(payload)
+        return localize_user_message_ref(redact_user_message_ref_for_sink(payload, sink))
     if payload is None:
         return t("error.unknown")
-    return sanitize_legacy_raw_user_visible_error_text(payload) or t("error.unknown")
+    redaction = redact_text_for_sink(str(payload), sink)
+    if redaction.status == DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED and redaction.text is not None:
+        legacy_text = redaction.text
+    else:
+        legacy_text = DIAGNOSTIC_REDACTION_MARKER
+    return sanitize_legacy_raw_user_visible_error_text(legacy_text) or t("error.unknown")
 
 
 def _safe_i18n_params(params: Mapping[str, object]) -> dict[str, object]:

@@ -8,6 +8,12 @@ from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 from puripuly_heart.core.clock import Clock, SystemClock
+from puripuly_heart.core.diagnostic_validation import (
+    DIAGNOSTIC_REDACTION_MARKER,
+    DIAGNOSTIC_SINK_CHATBOX_DISCLOSURE,
+    DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED,
+    redact_text_for_sink,
+)
 from puripuly_heart.core.output.models import (
     OUTPUT_ROUTE_SELF_CHATBOX,
     OUTPUT_ROUTE_SYSTEM_DISCLOSURE_CHATBOX,
@@ -234,7 +240,11 @@ class OutputRuntime:
                 ),
                 metadata={"channel": "system", "state": self._state},
             )
-        message = OSCMessage(utterance_id=disclosure_uuid, text=text, created_at=self.clock.now())
+        message = OSCMessage(
+            utterance_id=disclosure_uuid,
+            text=_redact_chatbox_disclosure_text(text),
+            created_at=self.clock.now(),
+        )
         self.chatbox.enqueue(message)
         return self._observe_result(
             status=OUTPUT_ROUTING_DECISION_PUBLISHED,
@@ -448,6 +458,13 @@ def _raise_output_runtime_failures(failures: list[Exception]) -> None:
     if len(failures) == 1:
         raise failures[0]
     raise ExceptionGroup("OutputRuntime close failed", failures)
+
+
+def _redact_chatbox_disclosure_text(text: str) -> str:
+    result = redact_text_for_sink(text, DIAGNOSTIC_SINK_CHATBOX_DISCLOSURE)
+    if result.status == DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED and result.text is not None:
+        return result.text
+    return DIAGNOSTIC_REDACTION_MARKER
 
 
 __all__ = [
