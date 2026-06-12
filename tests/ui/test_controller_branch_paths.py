@@ -7343,6 +7343,55 @@ async def test_stale_overlay_start_after_hub_ingress_closes_runtime_without_lega
 
 
 @pytest.mark.asyncio
+async def test_stale_overlay_start_exception_after_runtime_replacement_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
+
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    current_runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
+    current_presenter = OverlayPresenter(
+        calibration=controller.overlay_calibration.copy(),
+        clock=controller.clock,
+    )
+    current_bridge = FakeOverlayBridge(session_token="current")
+    current_runtime.attach_presenter(current_presenter)
+    current_runtime.attach_bridge(current_bridge)
+    current_runtime.set_overlay_instance_id("overlay-current")
+
+    class StalingFailingOverlayBridge(FakeOverlayBridge):
+        async def start(self) -> None:
+            await super().start()
+            controller._overlay_runtime = current_runtime
+            controller.overlay_state = "connected"
+            controller.hub.overlay_sink = current_presenter
+            raise RuntimeError("stale start failed")
+
+    monkeypatch.setattr(controller_module, "OverlayBridge", StalingFailingOverlayBridge)
+
+    stale_runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
+
+    await controller._run_overlay_start(stale_runtime)
+
+    stale_bridge = next(
+        bridge
+        for bridge in FakeOverlayBridge.instances
+        if isinstance(bridge, StalingFailingOverlayBridge)
+    )
+    assert controller._overlay_runtime is current_runtime
+    assert controller.overlay_state == "connected"
+    assert controller.hub.overlay_sink is current_presenter
+    assert current_bridge.stopped is False
+    assert stale_bridge.stopped is True
+
+
+@pytest.mark.asyncio
 async def test_overlay_restart_reuses_presenter_scene_for_new_bridge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

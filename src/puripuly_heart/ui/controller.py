@@ -4023,6 +4023,17 @@ class GuiController:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if not self._overlay_runtime_is_current(
+                runtime,
+                overlay_instance_id=overlay_instance_id,
+            ):
+                self.log_detailed(
+                    "[Overlay] Ignoring stale overlay runtime start failure",
+                    level=logging.WARNING,
+                    exception=exc,
+                )
+                await self._close_stale_overlay_start_runtime(runtime)
+                return
             self.log_detailed(
                 "[Overlay] Failed to start overlay runtime",
                 level=logging.ERROR,
