@@ -6811,9 +6811,11 @@ async def test_desktop_overlay_start_disables_peer_presentation_refresh_for_new_
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
 
-    assert controller._overlay_presenter is not None
-    assert controller._overlay_presenter.peer_presentation_refresh_burst is False
-    assert controller._overlay_presenter.self_presentation_refresh_burst is False
+    assert controller._overlay_runtime is not None
+    presenter = controller._overlay_runtime.presenter
+    assert isinstance(presenter, OverlayPresenter)
+    assert presenter.peer_presentation_refresh_burst is False
+    assert presenter.self_presentation_refresh_burst is False
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
     await controller.set_overlay_enabled(False)
@@ -6875,8 +6877,11 @@ async def test_desktop_overlay_start_disables_existing_peer_presentation_refresh
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
 
-    assert controller._overlay_presenter.peer_presentation_refresh_burst is False
-    assert controller._overlay_presenter.self_presentation_refresh_burst is False
+    assert controller._overlay_runtime is not None
+    presenter = controller._overlay_runtime.presenter
+    assert isinstance(presenter, OverlayPresenter)
+    assert presenter.peer_presentation_refresh_burst is False
+    assert presenter.self_presentation_refresh_burst is False
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
     await controller.set_overlay_enabled(False)

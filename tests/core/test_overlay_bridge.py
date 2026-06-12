@@ -94,6 +94,43 @@ class _RecordingSendConnection:
         return None
 
 
+def _refresh_marker_snapshot(
+    *,
+    revision: int,
+    peer_session_scope: str | None,
+    self_session_scope: str | None,
+) -> OverlayPresentationSnapshot:
+    return OverlayPresentationSnapshot(
+        revision=revision,
+        calibration=OverlayPresentationCalibration(),
+        blocks=[
+            OverlayPresentationBlock(
+                id="peer:refresh-turn",
+                occupant_key="peer:refresh-turn",
+                appearance_seq=1,
+                channel="peer",
+                block_variant="finalized",
+                primary_text="peer translated text",
+                secondary_text="peer source text",
+                secondary_enabled=True,
+                update_id="peer-refresh-update",
+                session_scope=peer_session_scope,
+            ),
+            OverlayPresentationBlock(
+                id="self:refresh-turn",
+                occupant_key="self:refresh-turn",
+                appearance_seq=2,
+                channel="self",
+                block_variant="finalized",
+                primary_text="self source text",
+                secondary_text="",
+                secondary_enabled=True,
+                session_scope=self_session_scope,
+            ),
+        ],
+    )
+
+
 @pytest.mark.asyncio
 async def test_overlay_bridge_stop_preserves_authenticated_connection_when_close_fails() -> None:
     class FailingOnceCloseConnection:
@@ -319,6 +356,71 @@ async def test_overlay_bridge_broadcasts_full_snapshot_replacements() -> None:
     assert message["type"] == "snapshot"
     assert message["payload"]["revision"] == 1
     assert message["payload"]["calibration"]["distance"] == 1.4
+
+
+@pytest.mark.asyncio
+async def test_overlay_bridge_broadcasts_every_refresh_marker_revision_and_cleanup() -> None:
+    bridge = OverlayBridge(
+        session_token="expected-token",
+        initial_snapshot=_refresh_marker_snapshot(
+            revision=1,
+            peer_session_scope="session:peer",
+            self_session_scope=None,
+        ),
+    )
+    connection = _RecordingSendConnection()
+    bridge._authenticated_connections.add(connection)  # type: ignore[arg-type]
+
+    await bridge.replace_snapshot(
+        _refresh_marker_snapshot(
+            revision=2,
+            peer_session_scope="session:peer|peer_presentation_refresh=1",
+            self_session_scope="self_presentation_refresh=1",
+        )
+    )
+    await bridge.replace_snapshot(
+        _refresh_marker_snapshot(
+            revision=3,
+            peer_session_scope="session:peer|peer_presentation_refresh=2",
+            self_session_scope="self_presentation_refresh=2",
+        )
+    )
+    await bridge.replace_snapshot(
+        _refresh_marker_snapshot(
+            revision=4,
+            peer_session_scope="session:peer",
+            self_session_scope=None,
+        )
+    )
+
+    snapshot_payloads = [
+        payload["payload"]
+        for payload in connection.sent_payloads
+        if payload.get("type") == "snapshot"
+    ]
+    assert [payload["revision"] for payload in snapshot_payloads] == [2, 3, 4]
+    assert [
+        (
+            payload["blocks"][0]["primary_text"],
+            payload["blocks"][0]["secondary_text"],
+            payload["blocks"][1]["primary_text"],
+        )
+        for payload in snapshot_payloads
+    ] == [
+        ("peer translated text", "peer source text", "self source text"),
+        ("peer translated text", "peer source text", "self source text"),
+        ("peer translated text", "peer source text", "self source text"),
+    ]
+    assert [payload["blocks"][0].get("session_scope") for payload in snapshot_payloads] == [
+        "session:peer|peer_presentation_refresh=1",
+        "session:peer|peer_presentation_refresh=2",
+        "session:peer",
+    ]
+    assert [payload["blocks"][1].get("session_scope") for payload in snapshot_payloads] == [
+        "self_presentation_refresh=1",
+        "self_presentation_refresh=2",
+        None,
+    ]
 
 
 @pytest.mark.asyncio

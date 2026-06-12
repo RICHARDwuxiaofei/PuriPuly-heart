@@ -299,6 +299,101 @@ def test_overlay_presentation_state_self_refresh_marker_revises_source_only_fina
     assert state.rendered_block_signature(clean_snapshot.blocks[0]) == initial_signature
 
 
+def test_overlay_presentation_state_peer_refresh_marker_revises_translated_peer() -> None:
+    state = OverlayPresentationState()
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    turn_id = uuid4()
+    key = ("peer", turn_id)
+
+    state.apply_peer_finalized_update(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=turn_id,
+                channel="peer",
+                text="peer source",
+                is_final=True,
+                created_at=10.0,
+            ),
+            source_language="en",
+            target_language="ko",
+        ),
+        now=10.0,
+        show_peer_original=True,
+        next_appearance_seq=lambda: 1,
+        terminal_update_reason=lambda _channel, _utterance_id: None,
+    )
+    state.apply_peer_translation_update(
+        adapter.translation_final(
+            utterance_id=turn_id,
+            channel="peer",
+            text="피어 번역",
+            source_language="en",
+            target_language="ko",
+            applied_context_mode=None,
+            created_at=10.1,
+            update_id="upd-peer-final",
+            origin_wall_clock_ms=1712345678901,
+            session_scope="session:peer",
+            source_text_hash="peerfinalhash123",
+            source_text_len=len("peer source"),
+            logical_turn_key=f"peer:{turn_id}",
+        ),
+        now=10.1,
+        show_peer_original=True,
+        next_appearance_seq=lambda: 1,
+        terminal_update_reason=lambda _channel, _utterance_id: None,
+    )
+
+    initial_snapshot = _generate_overlay_state_snapshot(
+        state,
+        revision=1,
+        peer_presentation_refresh_burst=True,
+    )
+    initial_block = initial_snapshot.blocks[0]
+    initial_signature = state.rendered_block_signature(initial_block)
+    assert initial_block.channel == "peer"
+    assert initial_block.block_variant == "finalized"
+    assert initial_block.primary_text == "피어 번역"
+    assert initial_block.secondary_text == "peer source"
+    assert initial_block.session_scope == "session:peer"
+
+    assert state.begin_peer_presentation_refresh(key) is False
+    assert state.tick_peer_presentation_refresh(key) is True
+    first_refresh = _generate_overlay_state_snapshot(
+        state,
+        revision=2,
+        peer_presentation_refresh_burst=True,
+    )
+    first_refresh_block = first_refresh.blocks[0]
+
+    assert first_refresh_block.session_scope == "session:peer|peer_presentation_refresh=1"
+    assert state._snapshot_has_peer_presentation_refresh_marker() is True
+    first_refresh_signature = state.rendered_block_signature(first_refresh_block)
+    assert first_refresh_signature != initial_signature
+
+    assert state.tick_peer_presentation_refresh(key) is True
+    second_refresh = _generate_overlay_state_snapshot(
+        state,
+        revision=3,
+        peer_presentation_refresh_burst=True,
+    )
+    second_refresh_block = second_refresh.blocks[0]
+
+    assert second_refresh_block.session_scope == "session:peer|peer_presentation_refresh=2"
+    assert state.rendered_block_signature(second_refresh_block) != first_refresh_signature
+
+    assert state.end_peer_presentation_refresh(key) is True
+    clean_snapshot = _generate_overlay_state_snapshot(
+        state,
+        revision=4,
+        peer_presentation_refresh_burst=True,
+    )
+
+    assert clean_snapshot.blocks[0].session_scope == "session:peer"
+    assert state._snapshot_has_peer_presentation_refresh_marker() is False
+    assert state.rendered_block_signature(clean_snapshot.blocks[0]) == initial_signature
+
+
 def test_overlay_presentation_state_self_refresh_marker_appends_to_existing_self_session_scope() -> (
     None
 ):
