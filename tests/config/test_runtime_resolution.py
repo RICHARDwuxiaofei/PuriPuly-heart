@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import importlib
 import importlib.util
+import inspect
 import sys
 from dataclasses import FrozenInstanceError, is_dataclass
 from pathlib import Path
@@ -736,6 +737,200 @@ def test_legacy_current_openrouter_aliases_normalize_to_canonical_intent_and_res
     assert config.fallback_model == profiles.OPENROUTER_MODEL_DEEPSEEK_V4_FLASH
     assert config.fallback_credential.source == resolved.CREDENTIAL_SOURCE_SECRET_STORE
     assert config.concurrency_limit == 7
+
+
+@pytest.mark.parametrize(
+    (
+        "legacy_alias",
+        "selected_source",
+        "expected_alias",
+        "expected_source",
+        "expected_model",
+        "expected_credential_source",
+        "expected_credential_reference",
+    ),
+    [
+        (
+            "openrouter:byok:google/gemma-4-26b-a4b-it",
+            "managed",
+            "gemma4_byok",
+            "byok",
+            "google/gemma-4-26b-a4b-it",
+            "secret_store",
+            "openrouter:byok",
+        ),
+        (
+            "openrouter:managed:google/gemma-4-26b-a4b-it",
+            "byok",
+            "gemma4_managed",
+            "managed",
+            "google/gemma-4-26b-a4b-it",
+            "managed",
+            "openrouter:managed",
+        ),
+        (
+            "openrouter:none:google/gemma-4-26b-a4b-it",
+            "managed",
+            "gemma4_managed",
+            "managed",
+            "google/gemma-4-26b-a4b-it",
+            "managed",
+            "openrouter:managed",
+        ),
+        (
+            "openrouter:byok:qwen/qwen3.5-flash-02-23",
+            "managed",
+            "qwen35_flash_byok",
+            "byok",
+            "qwen/qwen3.5-flash-02-23",
+            "secret_store",
+            "openrouter:byok",
+        ),
+        (
+            "openrouter:none:qwen/qwen3.5-flash-02-23",
+            "managed",
+            "qwen35_flash_managed",
+            "managed",
+            "qwen/qwen3.5-flash-02-23",
+            "managed",
+            "openrouter:managed",
+        ),
+    ],
+)
+def test_legacy_openrouter_selection_aliases_normalize_before_resolved_runtime(
+    legacy_alias: str,
+    selected_source: str,
+    expected_alias: str,
+    expected_source: str,
+    expected_model: str,
+    expected_credential_source: str,
+    expected_credential_reference: str,
+) -> None:
+    runtime_resolution = _runtime_resolution_module()
+    resolved = _resolved_module()
+
+    openrouter_intent = runtime_resolution.normalize_openrouter_runtime_intent(
+        provider_llm="openrouter",
+        selected_source=selected_source,
+        selection_alias=legacy_alias,
+        fallback_selection_alias="none",
+    )
+    translation_intent = runtime_resolution.derive_translation_runtime_intent_from_compatibility(
+        provider_llm="openrouter",
+        openrouter_model=openrouter_intent.model,
+        openrouter_selected_source=openrouter_intent.selected_source,
+        openrouter_provider_routing=openrouter_intent.provider_routing,
+        concurrency_limit=5,
+    )
+    config = runtime_resolution.resolve_llm_config(
+        runtime_resolution.RuntimeResolutionInput(
+            translation=translation_intent,
+            openrouter=openrouter_intent,
+        )
+    )
+
+    assert openrouter_intent.selection_alias == expected_alias
+    assert openrouter_intent.selected_source == expected_source
+    assert openrouter_intent.model == expected_model
+    assert config.provider == "openrouter"
+    assert config.model == expected_model
+    assert config.credential == resolved.ResolvedCredentialRequirement(
+        source=expected_credential_source,
+        required=True,
+        reference=expected_credential_reference,
+    )
+    assert not hasattr(config, "selection_alias")
+    assert not hasattr(config, "fallback_selection_alias")
+
+
+@pytest.mark.parametrize("legacy_key", ["credential_source", "selected_credential_source"])
+def test_old_openrouter_credential_source_keys_normalize_through_settings_to_resolved_dto(
+    legacy_key: str,
+) -> None:
+    runtime_resolution = _runtime_resolution_module()
+    resolved = _resolved_module()
+    from puripuly_heart.config.settings import AppSettings, from_dict, to_dict  # noqa: PLC0415
+
+    raw_settings = to_dict(AppSettings())
+    raw_settings.pop("translation", None)
+    raw_settings["provider"]["llm"] = "openrouter"
+    raw_settings["openrouter"]["llm_model"] = "google/gemma-4-26b-a4b-it"
+    raw_settings["openrouter"].pop("selected_source", None)
+    raw_settings["openrouter"][legacy_key] = "managed"
+    raw_settings["openrouter"]["selection_alias"] = "openrouter:none:google/gemma-4-26b-a4b-it"
+    raw_settings["openrouter"]["fallback_selection_alias"] = "none"
+
+    settings = from_dict(raw_settings)
+    openrouter_intent = runtime_resolution.normalize_openrouter_runtime_intent(
+        provider_llm=settings.provider.llm.value,
+        model=settings.openrouter.llm_model.value,
+        selected_source=settings.openrouter.selected_source.value,
+        selection_alias=(
+            settings.openrouter.selection_alias.value
+            if settings.openrouter.selection_alias is not None
+            else None
+        ),
+        fallback_selection_alias=settings.openrouter.fallback_selection_alias.value,
+        routing_mode=settings.openrouter.routing_mode.value,
+        provider_routing=settings.openrouter.provider_routing.value,
+        broker_base_url=settings.openrouter.broker_base_url,
+    )
+    translation_intent = runtime_resolution.derive_translation_runtime_intent_from_compatibility(
+        provider_llm=settings.provider.llm.value,
+        openrouter_model=openrouter_intent.model,
+        openrouter_selected_source=openrouter_intent.selected_source,
+        openrouter_provider_routing=openrouter_intent.provider_routing,
+        gemini_model=settings.gemini.llm_model.value,
+        qwen_model=settings.qwen.llm_model.value,
+        deepseek_model=settings.deepseek.llm_model.value,
+        concurrency_limit=settings.llm.concurrency_limit,
+    )
+    config = runtime_resolution.resolve_llm_config(
+        runtime_resolution.RuntimeResolutionInput(
+            translation=translation_intent,
+            openrouter=openrouter_intent,
+        )
+    )
+
+    assert settings.openrouter.selected_source.value == "managed"
+    assert settings.openrouter.selection_alias is not None
+    assert settings.openrouter.selection_alias.value == "gemma4_managed"
+    assert openrouter_intent.selected_source == "managed"
+    assert openrouter_intent.selection_alias == "gemma4_managed"
+    assert config.provider == "openrouter"
+    assert config.model == "google/gemma-4-26b-a4b-it"
+    assert config.credential == resolved.ResolvedCredentialRequirement(
+        source=resolved.CREDENTIAL_SOURCE_MANAGED,
+        required=True,
+        reference="openrouter:managed",
+    )
+    assert not hasattr(config, legacy_key)
+    assert not hasattr(config, "selection_alias")
+
+
+def test_runtime_resolution_resolved_llm_path_has_no_legacy_alias_literals() -> None:
+    runtime_resolution = _runtime_resolution_module()
+    source = "\n".join(
+        inspect.getsource(getattr(runtime_resolution, name))
+        for name in (
+            "resolve_llm_config",
+            "_resolved_openrouter_config",
+            "_openrouter_fallback_fields",
+        )
+    )
+
+    for legacy_literal in (
+        "LEGACY_OPENROUTER",
+        "LEGACY_PROFILE_BY_ALIAS",
+        "gemini25_flash_lite",
+        "gemini31_flash_lite",
+        "openrouter:none:google/gemma-4-26b-a4b-it",
+        "openrouter:managed:google/gemma-4-26b-a4b-it",
+        "openrouter:byok:google/gemma-4-26b-a4b-it",
+        "openrouter:none:qwen/qwen3.5-flash-02-23",
+        "openrouter:byok:qwen/qwen3.5-flash-02-23",
+    ):
+        assert legacy_literal not in source
 
 
 def test_current_and_legacy_setting_value_snapshots_convert_to_canonical_input_and_resolve() -> (

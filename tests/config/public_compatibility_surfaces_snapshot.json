@@ -244,6 +244,66 @@
       "deepseek_v4_flash_byok": "deepseek_v4_flash"
     }
   },
+  "provider_runtime_public_config": {
+    "runtime_resolution_input_fields": [
+      "translation",
+      "openrouter",
+      "direct",
+      "self_stt",
+      "peer_stt",
+      "overlay"
+    ],
+    "translation_runtime_intent_fields": [
+      "model",
+      "connection",
+      "concurrency_limit"
+    ],
+    "openrouter_runtime_intent_fields": [
+      "model",
+      "selected_source",
+      "selection_alias",
+      "fallback_selection_alias",
+      "routing_mode",
+      "provider_routing",
+      "broker_base_url"
+    ],
+    "resolved_llm_config_fields": [
+      "provider",
+      "model",
+      "credential",
+      "fallback_provider",
+      "fallback_model",
+      "fallback_credential",
+      "fallback_provider_routing",
+      "base_url",
+      "service_endpoint",
+      "region",
+      "routing_mode",
+      "provider_routing",
+      "concurrency_limit",
+      "provider_options"
+    ],
+    "resolved_credential_requirement_fields": [
+      "source",
+      "required",
+      "reference"
+    ],
+    "credential_sources": [
+      "none",
+      "secret_store",
+      "managed"
+    ],
+    "current_credential_source_key": "selected_source",
+    "old_credential_source_keys": [
+      "credential_source",
+      "selected_credential_source"
+    ],
+    "legacy_alias_normalization_boundary": "normalize_openrouter_runtime_intent",
+    "resolved_runtime_forbidden_alias_fields": [
+      "selection_alias",
+      "fallback_selection_alias"
+    ]
+  },
   "guard_coverage": {
     "secret_store": [
       "tests/config/test_public_compatibility_surfaces.py::test_secret_store_key_registry_snapshot_matches_current_public_keys",
@@ -294,6 +354,12 @@
       "tests/config/test_config_and_secrets.py::test_from_dict_migrates_legacy_openrouter_fallbacks_to_deepseek_v4_flash",
       "tests/config/test_config_and_secrets.py::test_openrouter_legacy_gemini25_flash_lite_fallback_normalizes_to_deepseek",
       "tests/config/test_config_and_secrets.py::test_openrouter_deepseek_v4_flash_aliases_use_stable_slug"
+    ],
+    "provider_runtime_public_config": [
+      "tests/config/test_public_compatibility_surfaces.py::test_provider_runtime_public_config_snapshot_matches_resolved_contracts",
+      "tests/config/test_runtime_resolution.py::test_legacy_openrouter_selection_aliases_normalize_before_resolved_runtime",
+      "tests/config/test_runtime_resolution.py::test_old_openrouter_credential_source_keys_normalize_through_settings_to_resolved_dto",
+      "tests/config/test_runtime_resolution.py::test_runtime_resolution_resolved_llm_path_has_no_legacy_alias_literals"
     ],
     "i18n_parity": [
       "tests/ui/test_i18n_key_usage.py::test_i18n_bundles_share_the_same_keys",

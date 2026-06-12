@@ -8,14 +8,16 @@ import json
 import re
 import shutil
 from collections.abc import Iterator
+from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from puripuly_heart.app import wiring
-from puripuly_heart.config import llm_profiles
+from puripuly_heart.config import llm_profiles, runtime_resolution
 from puripuly_heart.config import prompts as prompts_module
+from puripuly_heart.config import resolved as resolved_config
 from puripuly_heart.config.prompts import (
     TRANSLATION_PROMPT_NAME,
     load_prompt,
@@ -61,6 +63,7 @@ REQUIRED_SURFACES = (
     "overlay",
     "prompts",
     "provider_aliases",
+    "provider_runtime_public_config",
     "guard_coverage",
     "blockers",
 )
@@ -559,6 +562,7 @@ def test_guard_coverage_references_existing_tests_for_every_surface() -> None:
         "overlay",
         "prompt_loader",
         "provider_aliases",
+        "provider_runtime_public_config",
         "i18n_parity",
         "packaging",
     }
@@ -840,3 +844,37 @@ def test_provider_alias_snapshot_matches_current_aliases_and_legacy_acceptance()
         assert llm_profiles.normalize_openrouter_fallback_selection_alias(legacy_alias) == (
             canonical_alias
         )
+
+
+def test_provider_runtime_public_config_snapshot_matches_resolved_contracts() -> None:
+    snapshot = _load_snapshot()["provider_runtime_public_config"]
+
+    assert tuple(snapshot["runtime_resolution_input_fields"]) == tuple(
+        field.name for field in fields(runtime_resolution.RuntimeResolutionInput)
+    )
+    assert tuple(snapshot["translation_runtime_intent_fields"]) == tuple(
+        field.name for field in fields(runtime_resolution.TranslationRuntimeIntent)
+    )
+    assert tuple(snapshot["openrouter_runtime_intent_fields"]) == tuple(
+        field.name for field in fields(runtime_resolution.OpenRouterRuntimeIntent)
+    )
+    assert tuple(snapshot["resolved_llm_config_fields"]) == tuple(
+        field.name for field in fields(resolved_config.ResolvedLLMConfig)
+    )
+    assert tuple(snapshot["resolved_credential_requirement_fields"]) == tuple(
+        field.name for field in fields(resolved_config.ResolvedCredentialRequirement)
+    )
+    assert tuple(snapshot["credential_sources"]) == resolved_config.CREDENTIAL_SOURCES
+    assert snapshot["current_credential_source_key"] == "selected_source"
+    assert tuple(snapshot["old_credential_source_keys"]) == (
+        "credential_source",
+        "selected_credential_source",
+    )
+    assert snapshot["legacy_alias_normalization_boundary"] == (
+        "normalize_openrouter_runtime_intent"
+    )
+    assert hasattr(runtime_resolution, snapshot["legacy_alias_normalization_boundary"])
+
+    resolved_llm_fields = {field.name for field in fields(resolved_config.ResolvedLLMConfig)}
+    for field_name in snapshot["resolved_runtime_forbidden_alias_fields"]:
+        assert field_name not in resolved_llm_fields
