@@ -1,0 +1,1063 @@
+{
+  "metadata": {
+    "gate_id": "compatibility-boundary-freeze",
+    "work_ref": "freeze-compatibility-inventories",
+    "order": 1,
+    "changed_boundaries": [
+      "settings/persistence",
+      "runtime resolution",
+      "adapter wiring",
+      "output routing",
+      "message/diagnostics"
+    ],
+    "purpose": "Gate 0 stable inventory input. It names compatibility surfaces and source-of-truth refs only; later Gate 0 orders own detailed compatibility fixtures."
+  },
+  "bundle": {
+    "ref": "vnext-internal-cutover",
+    "path": ".agents/bundles/vnext-internal-cutover.yaml",
+    "sha256": "033912b4bf580cd5d488066dd9139c3ff0896d962df94e5de405bb3c694dd1b6"
+  },
+  "source_spec": {
+    "source_id": "S1",
+    "path": "docs/superpowers/specs/2026-06-12-vnext-internal-cutover-design.md",
+    "sha256": "42e4a691eacdbbc495eb5ede54c0c3511b1c0c78b67159ead94d2bad35c0c1f9"
+  },
+  "compatibility_surfaces": {
+    "public_import_facades": {
+      "classification": "public_compatibility_preserve",
+      "source_of_truth_refs": [
+        "tests/config/compatibility_surface_inventory.json::public_imports",
+        "src/puripuly_heart/__init__.py",
+        "pyproject.toml::tool.setuptools.packages.find"
+      ],
+      "fixture_or_guard_refs": [
+        "tests/config/test_public_compatibility_surfaces.py::test_public_import_inventory_smoke_imports_every_exported_name",
+        "tests/config/test_public_compatibility_surfaces.py::test_public_facade_inventory_classifies_thin_delegate_targets"
+      ],
+      "detail_owner_work_ref": "freeze-compatibility-inventories"
+    },
+    "settings_runtime_compatibility": {
+      "classification": "public_compatibility_preserve",
+      "source_of_truth_refs": [
+        "src/puripuly_heart/config/settings.py",
+        "src/puripuly_heart/config/settings_vnext/schema.py",
+        "src/puripuly_heart/config/settings_vnext/migration.py",
+        "src/puripuly_heart/config/settings_vnext/serialization.py",
+        "tests/config/settings_migration_fixtures.py"
+      ],
+      "fixture_or_guard_refs": [
+        "tests/config/test_settings_migration_fixtures.py",
+        "tests/config/test_settings_vnext_migration_serialization.py"
+      ],
+      "detail_owner_work_ref": "freeze-settings-secrets-and-persisted-state-fixtures"
+    },
+    "persisted_operational_state": {
+      "classification": "public_compatibility_preserve",
+      "source_of_truth_refs": [
+        "src/puripuly_heart/config/settings_vnext/schema.py::PersistedOperationalState",
+        "tests/config/settings_migration_fixtures.py::CURRENT_OPERATIONAL_STATE_DESTINATIONS",
+        "src/puripuly_heart/core/local_stt_assets.py::LOCAL_STT_INSTALLED_MANIFEST_FILENAME"
+      ],
+      "fixture_or_guard_refs": [
+        "tests/config/test_settings_migration_fixtures.py::test_vnext_schema_persisted_leaves_are_classified_from_current_settings",
+        "tests/config/test_local_stt_assets.py",
+        "tests/core/test_local_stt_runtime_installer.py"
+      ],
+      "detail_owner_work_ref": "freeze-settings-secrets-and-persisted-state-fixtures"
+    },
+    "secret_store": {
+      "classification": "public_compatibility_preserve",
+      "source_of_truth_refs": [
+        "src/puripuly_heart/core/storage/secrets.py",
+        "src/puripuly_heart/app/wiring.py::create_secret_store",
+        "src/puripuly_heart/core/openrouter_credentials.py",
+        "src/puripuly_heart/core/managed_identity.py",
+        "tests/config/public_compatibility_surfaces_snapshot.json::secret_store"
+      ],
+      "fixture_or_guard_refs": [
+        "tests/config/test_public_compatibility_surfaces.py::test_secret_store_key_registry_snapshot_matches_current_public_keys",
+        "tests/config/test_public_compatibility_surfaces.py::test_secret_store_env_lookup_snapshot_matches_current_fallback_behavior",
+        "tests/app/test_secret_settings_transaction.py",
+        "tests/app/test_wiring_secrets.py"
+      ],
+      "detail_owner_work_ref": "freeze-settings-secrets-and-persisted-state-fixtures"
+    },
+    "provider_aliases": {
+      "classification": "public_compatibility_preserve",
+      "source_of_truth_refs": [
+        "src/puripuly_heart/config/llm_profiles.py",
+        "src/puripuly_heart/config/settings.py::OpenRouterSelectionAlias",
+        "src/puripuly_heart/config/settings.py::OpenRouterFallbackSelectionAlias",
+        "tests/config/public_compatibility_surfaces_snapshot.json::provider_aliases"
+      ],
+      "fixture_or_guard_refs": [
+        "tests/config/test_public_compatibility_surfaces.py::test_provider_alias_snapshot_matches_current_aliases_and_legacy_acceptance",
+        "tests/config/test_config_and_secrets.py::test_from_dict_migrates_legacy_openrouter_fallbacks_to_deepseek_v4_flash"
+      ],
+      "detail_owner_work_ref": "freeze-provider-config-prompt-and-i18n-fixtures"
+    },
+    "provider_runtime_public_config": {
+      "classification": "public_compatibility_preserve",
+      "source_of_truth_refs": [
+        "src/puripuly_heart/config/resolved.py",
+        "src/puripuly_heart/config/runtime_resolution.py",
+        "src/puripuly_heart/app/wiring.py::create_llm_provider_from_resolved_config",
+        "src/puripuly_heart/app/wiring.py::create_stt_backend_from_resolved_config"
+      ],
+      "fixture_or_guard_refs": [
+        "tests/app/test_wiring_providers.py",
+        "tests/config/test_public_compatibility_surfaces.py::test_provider_alias_snapshot_matches_current_aliases_and_legacy_acceptance"
+      ],
+      "detail_owner_work_ref": "freeze-provider-config-prompt-and-i18n-fixtures"
+    },
+    "prompt_fallback": {
+      "classification": "public_compatibility_preserve",
+      "source_of_truth_refs": [
+        "src/puripuly_heart/config/prompts.py",
+        "prompts/translation_prompt.md",
+        "tests/config/public_compatibility_surfaces_snapshot.json::prompts"
+      ],
+      "fixture_or_guard_refs": [
+        "tests/config/test_public_compatibility_surfaces.py::test_prompt_loader_snapshot_freezes_fallback_order_and_translation_prompt_requirement",
+        "tests/config/test_prompt_loader.py"
+      ],
+      "detail_owner_work_ref": "freeze-provider-config-prompt-and-i18n-fixtures"
+    },
+    "broker_v1": {
+      "classification": "public_compatibility_preserve",
+      "source_of_truth_refs": [
+        "src/puripuly_heart/core/managed_openrouter_broker_client.py",
+        "src/puripuly_heart/core/managed_identity.py::DISCORD_OPENROUTER_ISSUE_PATH",
+        "broker/src",
+        "tests/config/public_compatibility_surfaces_snapshot.json::broker_v1"
+      ],
+      "fixture_or_guard_refs": [
+        "tests/config/test_public_compatibility_surfaces.py::test_broker_v1_snapshot_matches_client_paths_and_public_error_vocabulary",
+        "tests/core/test_managed_openrouter_broker_client.py"
+      ],
+      "detail_owner_work_ref": "freeze-broker-v1-fixtures"
+    },
+    "overlay_protocol_startup_snapshot": {
+      "classification": "public_compatibility_preserve",
+      "source_of_truth_refs": [
+        "src/puripuly_heart/core/overlay/protocol.py",
+        "src/puripuly_heart/core/overlay/manifest.py",
+        "src/puripuly_heart/core/overlay/process.py",
+        "src/puripuly_heart/ui/desktop_overlay.py",
+        "tests/config/public_compatibility_surfaces_snapshot.json::overlay"
+      ],
+      "fixture_or_guard_refs": [
+        "tests/config/test_public_compatibility_surfaces.py::test_overlay_contract_snapshot_matches_manifest_and_protocol_wire_shape",
+        "tests/core/test_overlay_protocol.py",
+        "tests/core/test_overlay_manifest.py",
+        "tests/app/test_desktop_overlay_runner.py"
+      ],
+      "detail_owner_work_ref": "freeze-overlay-native-and-installer-fixtures"
+    },
+    "i18n_key_parity": {
+      "classification": "public_compatibility_preserve",
+      "source_of_truth_refs": [
+        "src/puripuly_heart/data/i18n/en.json",
+        "src/puripuly_heart/data/i18n/ko.json",
+        "src/puripuly_heart/data/i18n/ja.json",
+        "src/puripuly_heart/data/i18n/zh-CN.json",
+        "src/puripuly_heart/ui/i18n.py"
+      ],
+      "fixture_or_guard_refs": [
+        "tests/ui/test_i18n_key_usage.py::test_i18n_bundles_share_the_same_keys",
+        "tests/ui/test_i18n_key_usage.py::test_i18n_bundles_do_not_keep_unused_runtime_keys"
+      ],
+      "detail_owner_work_ref": "freeze-provider-config-prompt-and-i18n-fixtures"
+    },
+    "installer_identity": {
+      "classification": "public_compatibility_preserve",
+      "source_of_truth_refs": [
+        "installer.iss",
+        "scripts/ci/build-release-artifacts.ps1"
+      ],
+      "fixture_or_guard_refs": [
+        "tests/app/test_release_dependency_guards.py::test_shared_windows_build_script_uses_alternate_app_id_and_isolated_installer_smoke_dir",
+        "tests/app/test_release_dependency_guards.py::test_shared_windows_build_script_uses_separate_smoke_installer_build_with_alternate_app_id"
+      ],
+      "detail_owner_work_ref": "freeze-overlay-native-and-installer-fixtures"
+    },
+    "rust_overlay_startup": {
+      "classification": "public_compatibility_preserve",
+      "source_of_truth_refs": [
+        "native/overlay/Cargo.toml",
+        "native/overlay/src"
+      ],
+      "fixture_or_guard_refs": [
+        "native/overlay/tests",
+        "tests/app/test_desktop_overlay_runner.py::test_overlay_manifest_serialization_omits_target_and_desktop_runtime_fields"
+      ],
+      "detail_owner_work_ref": "freeze-overlay-native-and-installer-fixtures"
+    }
+  },
+  "public_imports": [
+    {
+      "module": "puripuly_heart",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/__init__.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "thin_reexport",
+        "implementation_owner": "canonical_vnext_owner"
+      },
+      "exports": [
+        {"name": "__version__", "kind": "attribute"},
+        {"name": "GITHUB_REPO", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.app",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/app/__init__.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "thin_reexport",
+        "implementation_owner": "canonical_vnext_owner"
+      },
+      "exports": [
+        {"name": "headless_stdin", "kind": "submodule"},
+        {"name": "headless_mic", "kind": "submodule"},
+        {"name": "wiring", "kind": "submodule"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.app.wiring",
+      "source_rule": "approved facade",
+      "source_of_truth_refs": ["src/puripuly_heart/app/wiring.py", "tests/app/test_wiring_providers.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "thin_delegate",
+        "implementation_owner": "adapter_owner_until_split"
+      },
+      "exports": [
+        {"name": "SECRETS_PASSPHRASE_ENV", "kind": "attribute"},
+        {"name": "MANAGED_OPENROUTER_RELEASE_SERVICE_REQUIRED_ERROR", "kind": "attribute"},
+        {"name": "ResolvedPeerSTTConfig", "kind": "attribute"},
+        {"name": "build_peer_stt_provider_signature", "kind": "attribute"},
+        {"name": "create_llm_provider", "kind": "attribute"},
+        {"name": "create_llm_provider_from_resolved_config", "kind": "attribute"},
+        {"name": "create_peer_stt_backend", "kind": "attribute"},
+        {"name": "create_peer_stt_backend_from_resolved_config", "kind": "attribute"},
+        {"name": "create_provider_verifier", "kind": "attribute"},
+        {"name": "create_secret_store", "kind": "attribute"},
+        {"name": "create_stt_backend", "kind": "attribute"},
+        {"name": "create_stt_backend_from_resolved_config", "kind": "attribute"},
+        {"name": "require_secret", "kind": "attribute"},
+        {"name": "require_secret_any", "kind": "attribute"},
+        {"name": "resolve_overlay_config", "kind": "attribute"},
+        {"name": "resolve_peer_stt_config", "kind": "attribute"},
+        {"name": "resolve_peer_stt_runtime_config", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.config",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/config/__init__.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "thin_reexport",
+        "implementation_owner": "canonical_vnext_owner"
+      },
+      "exports": [{"name": "settings", "kind": "submodule"}]
+    },
+    {
+      "module": "puripuly_heart.config.settings",
+      "source_rule": "approved facade",
+      "source_of_truth_refs": ["src/puripuly_heart/config/settings.py", "tests/config/test_settings_migration_fixtures.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "compatibility_boundary_owner",
+        "implementation_owner": "compatibility_boundary"
+      },
+      "exports": [
+        {"name": "SETTINGS_SCHEMA_VERSION", "kind": "attribute"},
+        {"name": "AppSettings", "kind": "attribute"},
+        {"name": "ApiKeyVerificationSettings", "kind": "attribute"},
+        {"name": "AudioSettings", "kind": "attribute"},
+        {"name": "DeepSeekLLMModel", "kind": "attribute"},
+        {"name": "DeepSeekSettings", "kind": "attribute"},
+        {"name": "DeepgramSTTSettings", "kind": "attribute"},
+        {"name": "DesktopAudioSettings", "kind": "attribute"},
+        {"name": "DesktopFletOverlaySettings", "kind": "attribute"},
+        {"name": "DesktopFletOverlayVisualSettings", "kind": "attribute"},
+        {"name": "GeminiLLMModel", "kind": "attribute"},
+        {"name": "GeminiSettings", "kind": "attribute"},
+        {"name": "LLMProviderName", "kind": "attribute"},
+        {"name": "LLMSettings", "kind": "attribute"},
+        {"name": "LanguageSettings", "kind": "attribute"},
+        {"name": "LocalLLMSettings", "kind": "attribute"},
+        {"name": "ManagedIdentitySettings", "kind": "attribute"},
+        {"name": "OSCSettings", "kind": "attribute"},
+        {"name": "OpenRouterCredentialSource", "kind": "attribute"},
+        {"name": "OpenRouterFallbackSelectionAlias", "kind": "attribute"},
+        {"name": "OpenRouterLLMModel", "kind": "attribute"},
+        {"name": "OpenRouterProviderRouting", "kind": "attribute"},
+        {"name": "OpenRouterRoutingMode", "kind": "attribute"},
+        {"name": "OpenRouterSelectionAlias", "kind": "attribute"},
+        {"name": "OpenRouterSettings", "kind": "attribute"},
+        {"name": "OverlaySettings", "kind": "attribute"},
+        {"name": "ProviderSettings", "kind": "attribute"},
+        {"name": "QwenASRSTTSettings", "kind": "attribute"},
+        {"name": "QwenLLMModel", "kind": "attribute"},
+        {"name": "QwenRegion", "kind": "attribute"},
+        {"name": "QwenSettings", "kind": "attribute"},
+        {"name": "STTProviderName", "kind": "attribute"},
+        {"name": "STTSettings", "kind": "attribute"},
+        {"name": "SecretsBackend", "kind": "attribute"},
+        {"name": "SecretsSettings", "kind": "attribute"},
+        {"name": "SonioxSTTSettings", "kind": "attribute"},
+        {"name": "TranslationConnection", "kind": "attribute"},
+        {"name": "TranslationModel", "kind": "attribute"},
+        {"name": "TranslationSettings", "kind": "attribute"},
+        {"name": "UiSettings", "kind": "attribute"},
+        {"name": "from_dict", "kind": "attribute"},
+        {"name": "to_dict", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.config.settings_vnext",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/config/settings_vnext/__init__.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "thin_reexport",
+        "implementation_owner": "canonical_vnext_owner"
+      },
+      "exports": [
+        {"name": "AppSettingsVNext", "kind": "attribute"},
+        {"name": "PersistedOperationalState", "kind": "attribute"},
+        {"name": "UserIntentSettings", "kind": "attribute"},
+        {"name": "VNEXT_SETTINGS_SCHEMA_VERSION", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.config.settings_vnext.facade",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/config/settings_vnext/facade.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "compatibility_boundary_owner",
+        "implementation_owner": "compatibility_boundary"
+      },
+      "exports": [
+        {"name": "FacadeSettingsLoadResult", "kind": "attribute"},
+        {"name": "load_settings", "kind": "attribute"},
+        {"name": "load_settings_with_result", "kind": "attribute"},
+        {"name": "load_vnext_settings", "kind": "attribute"},
+        {"name": "save_settings", "kind": "attribute"},
+        {"name": "save_settings_with_result", "kind": "attribute"},
+        {"name": "save_vnext_settings", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.config.settings_vnext.serialization",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/config/settings_vnext/serialization.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": null,
+      "exports": [
+        {"name": "CANONICAL_TOP_LEVEL_KEYS", "kind": "attribute"},
+        {"name": "from_dict", "kind": "attribute"},
+        {"name": "to_dict", "kind": "attribute"},
+        {"name": "to_json_text", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.config.settings_vnext.migration",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/config/settings_vnext/migration.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": null,
+      "exports": [
+        {"name": "from_dict", "kind": "attribute"},
+        {"name": "from_legacy_app_settings", "kind": "attribute"},
+        {"name": "is_vnext_settings_dict", "kind": "attribute"},
+        {"name": "to_legacy_dict", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.config.settings_vnext.compat",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/config/settings_vnext/compat.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": null,
+      "exports": [
+        {"name": "SettingsPersistenceError", "kind": "attribute"},
+        {"name": "SettingsPersistenceStatus", "kind": "attribute"},
+        {"name": "VNextSettingsLoadResult", "kind": "attribute"},
+        {"name": "VNextSettingsSaveResult", "kind": "attribute"},
+        {"name": "backup_candidate_path", "kind": "attribute"},
+        {"name": "backup_timestamp", "kind": "attribute"},
+        {"name": "create_pre_migration_backup", "kind": "attribute"},
+        {"name": "load_vnext_settings", "kind": "attribute"},
+        {"name": "previous_schema_version_label", "kind": "attribute"},
+        {"name": "save_vnext_settings", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.config.prompts",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/config/prompts.py", "tests/config/test_prompt_loader.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [
+        {"name": "TRANSLATION_PROMPT_NAME", "kind": "attribute"},
+        {"name": "get_default_prompt", "kind": "attribute"},
+        {"name": "load_prompt", "kind": "attribute"},
+        {"name": "load_prompt_for_provider", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.config.llm_profiles",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/config/llm_profiles.py", "tests/config/test_config_and_secrets.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [
+        {"name": "LLMSelectionProfile", "kind": "attribute"},
+        {"name": "OpenRouterFallbackProfile", "kind": "attribute"},
+        {"name": "OPENROUTER_MAIN_SELECTION_ALIASES", "kind": "attribute"},
+        {"name": "OPENROUTER_FALLBACK_SELECTION_ALIASES", "kind": "attribute"},
+        {"name": "LEGACY_PROFILE_BY_ALIAS", "kind": "attribute"},
+        {"name": "LEGACY_FALLBACK_ALIAS_TO_ALIAS", "kind": "attribute"},
+        {"name": "fallback_profile_for_alias", "kind": "attribute"},
+        {"name": "get_openrouter_llm_profile", "kind": "attribute"},
+        {"name": "get_openrouter_selection_alias_for_model_and_source", "kind": "attribute"},
+        {"name": "normalize_openrouter_fallback_selection_alias", "kind": "attribute"},
+        {"name": "openrouter_alias_for_fields", "kind": "attribute"},
+        {"name": "profile_for_alias", "kind": "attribute"},
+        {"name": "resolve_openrouter_fallback_model", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.core",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/core/__init__.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "thin_reexport",
+        "implementation_owner": "canonical_vnext_owner"
+      },
+      "exports": [{"name": "clock", "kind": "submodule"}]
+    },
+    {
+      "module": "puripuly_heart.core.llm",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/core/llm/__init__.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "thin_reexport",
+        "implementation_owner": "public_contract_owner"
+      },
+      "exports": [
+        {"name": "provider", "kind": "submodule"},
+        {"name": "LLMProvider", "kind": "attribute"},
+        {"name": "SemaphoreLLMProvider", "kind": "attribute"},
+        {"name": "FallbackRacingLLMProvider", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.core.storage",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/core/storage/__init__.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "thin_reexport",
+        "implementation_owner": "canonical_vnext_owner"
+      },
+      "exports": [{"name": "secrets", "kind": "submodule"}]
+    },
+    {
+      "module": "puripuly_heart.core.storage.secrets",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/core/storage/secrets.py", "tests/config/test_config_and_secrets.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [
+        {"name": "EncryptedFileSecretStore", "kind": "attribute"},
+        {"name": "InMemorySecretStore", "kind": "attribute"},
+        {"name": "KeyringSecretStore", "kind": "attribute"},
+        {"name": "SecretStore", "kind": "attribute"},
+        {"name": "mask_secret", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.core.openrouter_credentials",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/core/openrouter_credentials.py", "tests/core/test_openrouter_credentials.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [
+        {"name": "OPENROUTER_BYOK_API_KEY_ENV", "kind": "attribute"},
+        {"name": "OPENROUTER_BYOK_API_KEY_SECRET", "kind": "attribute"},
+        {"name": "OPENROUTER_MANAGED_API_KEY_SECRET", "kind": "attribute"},
+        {"name": "OPENROUTER_MANAGED_USER_ID_SECRET", "kind": "attribute"},
+        {"name": "OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET", "kind": "attribute"},
+        {"name": "OpenRouterCredentialResolution", "kind": "attribute"},
+        {"name": "OpenRouterManagedRecoveryAction", "kind": "attribute"},
+        {"name": "OpenRouterManagedRecoveryResult", "kind": "attribute"},
+        {"name": "best_effort_clear_managed_openrouter_user_identifier", "kind": "attribute"},
+        {"name": "best_effort_store_managed_openrouter_user_identifier", "kind": "attribute"},
+        {"name": "clear_temporary_managed_release_state", "kind": "attribute"},
+        {"name": "handle_managed_availability", "kind": "attribute"},
+        {"name": "handle_managed_release_error", "kind": "attribute"},
+        {"name": "load_managed_openrouter_user_identifier", "kind": "attribute"},
+        {"name": "normalize_managed_openrouter_user_identifier", "kind": "attribute"},
+        {"name": "require_openrouter_execution_api_key", "kind": "attribute"},
+        {"name": "resolve_openrouter_credentials", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.core.managed_identity",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/core/managed_identity.py", "tests/core/test_managed_identity.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [
+        {"name": "DISCORD_OPENROUTER_ISSUE_METHOD", "kind": "attribute"},
+        {"name": "DISCORD_OPENROUTER_ISSUE_PATH", "kind": "attribute"},
+        {"name": "MANAGED_DEVICE_PRIVATE_KEY_SECRET", "kind": "attribute"},
+        {"name": "MANAGED_DEVICE_PUBLIC_KEY_SECRET", "kind": "attribute"},
+        {"name": "MANAGED_IDENTITY_BINDING_SECRET", "kind": "attribute"},
+        {"name": "ManagedIdentityBundle", "kind": "attribute"},
+        {"name": "canonical_discord_issue_payload", "kind": "attribute"},
+        {"name": "canonical_issue_payload", "kind": "attribute"},
+        {"name": "canonical_status_payload", "kind": "attribute"},
+        {"name": "canonical_verify_payload", "kind": "attribute"},
+        {"name": "decode_base64url", "kind": "attribute"},
+        {"name": "encode_base64url", "kind": "attribute"},
+        {"name": "ensure_managed_identity_bundle", "kind": "attribute"},
+        {"name": "load_existing_managed_identity_bundle", "kind": "attribute"},
+        {"name": "regenerate_managed_identity_bundle", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.core.managed_openrouter_broker_client",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/core/managed_openrouter_broker_client.py", "tests/core/test_managed_openrouter_broker_client.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [
+        {"name": "HttpManagedOpenRouterBrokerClient", "kind": "attribute"},
+        {"name": "PUBLIC_ERROR_CLASSES", "kind": "attribute"},
+        {"name": "PUBLIC_ERROR_CODES", "kind": "attribute"},
+        {"name": "RETRYABLE_ERROR_CLASS", "kind": "attribute"},
+        {"name": "RETRYABLE_ERROR_CODE", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.core.managed_openrouter_release",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/core/managed_openrouter_release.py", "tests/core/test_managed_openrouter_release.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [
+        {"name": "ManagedOpenRouterReleaseBehavior", "kind": "attribute"},
+        {"name": "ManagedOpenRouterReleaseClient", "kind": "attribute"},
+        {"name": "ManagedOpenRouterReleaseDiagnostics", "kind": "attribute"},
+        {"name": "ManagedOpenRouterReleaseError", "kind": "attribute"},
+        {"name": "ManagedOpenRouterReleaseResult", "kind": "attribute"},
+        {"name": "ManagedOpenRouterReleaseService", "kind": "attribute"},
+        {"name": "ManagedOpenRouterLLMProvider", "kind": "attribute"},
+        {"name": "ManagedOpenRouterUserFacingError", "kind": "attribute"},
+        {"name": "UnavailableManagedOpenRouterReleaseClient", "kind": "attribute"},
+        {"name": "format_managed_openrouter_diagnostics", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.core.overlay",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/core/overlay/__init__.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "thin_reexport",
+        "implementation_owner": "public_contract_owner"
+      },
+      "exports": [
+        {"name": "OverlayPresentationBlock", "kind": "attribute"},
+        {"name": "OverlayPresentationCalibration", "kind": "attribute"},
+        {"name": "OverlayPresentationSnapshot", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.core.overlay.protocol",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/core/overlay/protocol.py", "tests/core/test_overlay_protocol.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [
+        {"name": "OverlayPresentationBlock", "kind": "attribute"},
+        {"name": "OverlayPresentationCalibration", "kind": "attribute"},
+        {"name": "OverlayPresentationSnapshot", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.core.overlay.manifest",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/core/overlay/manifest.py", "tests/core/test_overlay_manifest.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [
+        {"name": "OVERLAY_CONTRACT_VERSION", "kind": "attribute"},
+        {"name": "OverlayLaunchManifest", "kind": "attribute"},
+        {"name": "normalize_overlay_logging_mode", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.core.runtime",
+      "source_rule": "lazy __getattr__",
+      "source_of_truth_refs": ["src/puripuly_heart/core/runtime/__init__.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "lazy_reexport",
+        "implementation_owner": "canonical_vnext_owner"
+      },
+      "exports": [
+        {"name": "PeerChannelRuntime", "kind": "attribute"},
+        {"name": "PeerChannelRuntimeState", "kind": "attribute"},
+        {"name": "PeerRuntimeConfig", "kind": "attribute"},
+        {"name": "ClipboardRuntime", "kind": "attribute"},
+        {"name": "GithubStarPromptRuntime", "kind": "attribute"},
+        {"name": "LocalSTTDownloadRuntime", "kind": "attribute"},
+        {"name": "MicTestRuntime", "kind": "attribute"},
+        {"name": "OAuthRuntime", "kind": "attribute"},
+        {"name": "OscReceiverRuntime", "kind": "attribute"},
+        {"name": "OutputRuntime", "kind": "attribute"},
+        {"name": "RuntimeLoggingCloseError", "kind": "attribute"},
+        {"name": "RuntimeLoggingService", "kind": "attribute"},
+        {"name": "SpeechChannelRuntime", "kind": "attribute"},
+        {"name": "VrcMicReceiverRuntime", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.core.runtime.overlay",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/core/runtime/overlay.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": null,
+      "exports": [{"name": "OverlayRuntimeHandle", "kind": "attribute"}]
+    },
+    {
+      "module": "puripuly_heart.core.runtime.provider_handle",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/core/runtime/provider_handle.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": null,
+      "exports": [{"name": "ProviderRuntimeHandle", "kind": "attribute"}]
+    },
+    {
+      "module": "puripuly_heart.core.runtime.self_audio",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/core/runtime/self_audio.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": null,
+      "exports": [{"name": "SelfAudioRuntime", "kind": "attribute"}]
+    },
+    {
+      "module": "puripuly_heart.core.output",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/core/output/__init__.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "thin_reexport",
+        "implementation_owner": "public_contract_owner"
+      },
+      "exports": [{"name": "OutputRouter", "kind": "attribute"}]
+    },
+    {
+      "module": "puripuly_heart.core.messages",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/core/messages.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [
+        {"name": "ErrorDiagnostics", "kind": "attribute"},
+        {"name": "RuntimeApplyResult", "kind": "attribute"},
+        {"name": "TransactionResult", "kind": "attribute"},
+        {"name": "UserErrorReport", "kind": "attribute"},
+        {"name": "UserMessageRef", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.core.diagnostic_validation",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/core/diagnostic_validation.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [
+        {"name": "DiagnosticRedactionPolicy", "kind": "attribute"},
+        {"name": "DiagnosticValidationResult", "kind": "attribute"},
+        {"name": "redact_diagnostics_for_sink", "kind": "attribute"},
+        {"name": "validate_diagnostics_for_sink", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.domain",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/domain/__init__.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "thin_reexport",
+        "implementation_owner": "canonical_vnext_owner"
+      },
+      "exports": [
+        {"name": "events", "kind": "submodule"},
+        {"name": "models", "kind": "submodule"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.domain.models",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/domain/models.py", "tests/integration/test_helpers.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [
+        {"name": "ChannelId", "kind": "attribute"},
+        {"name": "OSCMessage", "kind": "attribute"},
+        {"name": "Transcript", "kind": "attribute"},
+        {"name": "Translation", "kind": "attribute"},
+        {"name": "UtteranceBundle", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.domain.events",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/domain/events.py", "tests/ui/test_event_bridge.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [
+        {"name": "STTErrorEvent", "kind": "attribute"},
+        {"name": "STTEvent", "kind": "attribute"},
+        {"name": "STTEventType", "kind": "attribute"},
+        {"name": "STTFinalEvent", "kind": "attribute"},
+        {"name": "STTPartialEvent", "kind": "attribute"},
+        {"name": "STTSessionState", "kind": "attribute"},
+        {"name": "STTSessionStateEvent", "kind": "attribute"},
+        {"name": "UIEvent", "kind": "attribute"},
+        {"name": "UIEventType", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.providers",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/providers/__init__.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "thin_reexport",
+        "implementation_owner": "canonical_vnext_owner"
+      },
+      "exports": [
+        {"name": "llm", "kind": "submodule"},
+        {"name": "stt", "kind": "submodule"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.providers.llm",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/providers/llm/__init__.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "thin_reexport",
+        "implementation_owner": "canonical_vnext_owner"
+      },
+      "exports": [
+        {"name": "deepseek", "kind": "submodule"},
+        {"name": "gemini", "kind": "submodule"},
+        {"name": "local_openai", "kind": "submodule"},
+        {"name": "openrouter", "kind": "submodule"},
+        {"name": "qwen", "kind": "submodule"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.providers.llm.deepseek",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/providers/llm/deepseek.py", "tests/integration/test_deepseek_llm_integration.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [{"name": "DeepSeekLLMProvider", "kind": "attribute"}]
+    },
+    {
+      "module": "puripuly_heart.providers.llm.gemini",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/providers/llm/gemini.py", "tests/ui/test_controller_branch_paths.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [{"name": "GeminiLLMProvider", "kind": "attribute"}]
+    },
+    {
+      "module": "puripuly_heart.providers.llm.local_openai",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/providers/llm/local_openai.py", "tests/integration/test_local_llm_integration.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [{"name": "LocalOpenAICompatibleLLMProvider", "kind": "attribute"}]
+    },
+    {
+      "module": "puripuly_heart.providers.llm.openrouter",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/providers/llm/openrouter.py", "tests/integration/test_openrouter_llm_integration.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [{"name": "OpenRouterLLMProvider", "kind": "attribute"}]
+    },
+    {
+      "module": "puripuly_heart.providers.llm.qwen",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/providers/llm/qwen.py", "tests/integration/test_qwen_llm_integration.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [{"name": "QwenLLMProvider", "kind": "attribute"}]
+    },
+    {
+      "module": "puripuly_heart.providers.llm.qwen_async",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/providers/llm/qwen_async.py", "tests/integration/test_qwen_llm_integration.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [{"name": "AsyncQwenLLMProvider", "kind": "attribute"}]
+    },
+    {
+      "module": "puripuly_heart.providers.stt",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/providers/stt/__init__.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "thin_reexport",
+        "implementation_owner": "canonical_vnext_owner"
+      },
+      "exports": [
+        {"name": "deepgram", "kind": "submodule"},
+        {"name": "local_qwen_sherpa", "kind": "submodule"},
+        {"name": "qwen_asr", "kind": "submodule"},
+        {"name": "soniox", "kind": "submodule"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.providers.stt.deepgram",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/providers/stt/deepgram.py", "tests/app/test_wiring_providers.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [{"name": "DeepgramRealtimeSTTBackend", "kind": "attribute"}]
+    },
+    {
+      "module": "puripuly_heart.providers.stt.local_qwen_sherpa",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/providers/stt/local_qwen_sherpa.py", "tests/integration/test_local_qwen_stt_integration.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [
+        {"name": "LocalQwenSherpaInferenceError", "kind": "attribute"},
+        {"name": "LocalQwenSherpaSTTBackend", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.providers.stt.qwen_asr",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/providers/stt/qwen_asr.py", "tests/app/test_wiring_providers.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [{"name": "QwenASRRealtimeSTTBackend", "kind": "attribute"}]
+    },
+    {
+      "module": "puripuly_heart.providers.stt.soniox",
+      "source_rule": "existing public test or packaging import",
+      "source_of_truth_refs": ["src/puripuly_heart/providers/stt/soniox.py", "tests/app/test_wiring_providers.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [{"name": "SonioxRealtimeSTTBackend", "kind": "attribute"}]
+    },
+    {
+      "module": "puripuly_heart.ui.event_bridge",
+      "source_rule": "approved facade",
+      "source_of_truth_refs": ["src/puripuly_heart/ui/event_bridge.py", "tests/ui/test_event_bridge.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": {
+        "preserve_import_path": true,
+        "target_role": "thin_delegate",
+        "implementation_owner": "adapter_owner_until_split"
+      },
+      "exports": [{"name": "UIEventBridge", "kind": "attribute"}]
+    },
+    {
+      "module": "puripuly_heart.ui.overlay_calibration",
+      "source_rule": "__all__",
+      "source_of_truth_refs": ["src/puripuly_heart/ui/overlay_calibration.py"],
+      "runtime_all_matches_exports": true,
+      "facade_contract": null,
+      "exports": [
+        {"name": "OVERLAY_CALIBRATION_ANCHOR_HEAD_LOCKED", "kind": "attribute"},
+        {"name": "OVERLAY_CALIBRATION_ANCHORS", "kind": "attribute"},
+        {"name": "OverlayCalibration", "kind": "attribute"}
+      ]
+    },
+    {
+      "module": "puripuly_heart.main",
+      "source_rule": "documented entry point",
+      "source_of_truth_refs": ["src/puripuly_heart/main.py", "tests/app/test_main_cli.py"],
+      "runtime_all_matches_exports": false,
+      "facade_contract": null,
+      "exports": [{"name": "main", "kind": "attribute"}]
+    }
+  ],
+  "non_public_module_classifications": [
+    {
+      "surface": "underscore-prefixed symbols imported by tests",
+      "classification": "private_internal_or_test_compatibility",
+      "examples": [
+        "puripuly_heart.app.wiring._LazyFactoryLLMProvider",
+        "puripuly_heart.core.managed_openrouter_release._resolve_managed_issue_model"
+      ],
+      "rationale": "Underscore-prefixed symbols remain private/internal despite existing tests; later gates may migrate tests to canonical public contracts before removal."
+    },
+    {
+      "surface": "puripuly_heart.app.adapters provider verifier adapter",
+      "classification": "internal_adapter_implementation_contract",
+      "modules": [
+        "puripuly_heart.app.adapters.provider_verifier"
+      ],
+      "rationale": "ProviderVerifierAdapter is an app adapter implementation of the provider-verifier port; the adapter class is importable for wiring/tests but is not an external public compatibility facade."
+    },
+    {
+      "surface": "puripuly_heart.app.ports service port modules",
+      "classification": "internal_service_port_contracts",
+      "module_prefixes": [
+        "puripuly_heart.app.ports"
+      ],
+      "examples": [
+        "puripuly_heart.app.ports.provider_verifier",
+        "puripuly_heart.app.ports.runtime_apply",
+        "puripuly_heart.app.ports.secret_store"
+      ],
+      "rationale": "Application ports are explicit internal service contracts for app-service wiring. They may be imported by tests and implementations, but they are not external user/package compatibility facades."
+    },
+    {
+      "surface": "puripuly_heart.app.services application service modules",
+      "classification": "internal_application_service_contracts",
+      "module_prefixes": [
+        "puripuly_heart.app.services"
+      ],
+      "examples": [
+        "puripuly_heart.app.services.secret_settings_transaction",
+        "puripuly_heart.app.services.settings_mutation",
+        "puripuly_heart.app.services.managed_connection_auth"
+      ],
+      "rationale": "Application services are internal use-case boundaries. Their public names are stable execution inputs for later gates, but this inventory does not classify them as external public import compatibility."
+    },
+    {
+      "surface": "vNext schema, resolved DTO, and runtime resolution modules",
+      "classification": "internal_schema_and_runtime_resolution_contracts",
+      "modules": [
+        "puripuly_heart.config.resolved",
+        "puripuly_heart.config.runtime_resolution",
+        "puripuly_heart.config.settings_vnext.schema"
+      ],
+      "rationale": "These modules are schema values, resolved DTOs, and runtime-resolution contracts used inside the vNext architecture. They are not legacy implementation owners and are not external compatibility facades."
+    },
+    {
+      "surface": "core lifecycle, observability, error-message, and metadata contract modules",
+      "classification": "internal_core_contract_modules",
+      "modules": [
+        "puripuly_heart.core.error_messages",
+        "puripuly_heart.core.lifecycle",
+        "puripuly_heart.core.observability",
+        "puripuly_heart.core.openrouter_metadata"
+      ],
+      "rationale": "These modules expose internal core contracts for lifecycle, diagnostics, safe error/message shaping, and OpenRouter metadata. They are not external public compatibility facades."
+    },
+    {
+      "surface": "puripuly_heart.core.output implementation and port modules",
+      "classification": "internal_output_message_contract_modules",
+      "module_prefixes": [
+        "puripuly_heart.core.output"
+      ],
+      "examples": [
+        "puripuly_heart.core.output.models",
+        "puripuly_heart.core.output.router",
+        "puripuly_heart.core.output.chatbox"
+      ],
+      "rationale": "Output modules define internal output/message ports and routing implementation. The package-level OutputRouter re-export remains inventoried as public; submodules are classified internal unless separately inventoried."
+    },
+    {
+      "surface": "puripuly_heart.core.runtime owner implementation modules",
+      "classification": "internal_runtime_owner_modules",
+      "module_prefixes": [
+        "puripuly_heart.core.runtime"
+      ],
+      "examples": [
+        "puripuly_heart.core.runtime.output",
+        "puripuly_heart.core.runtime.receiver",
+        "puripuly_heart.core.runtime.clipboard"
+      ],
+      "rationale": "Runtime-owner modules are internal ownership boundaries for runtime-only state and tasks. The lazy core.runtime facade remains inventoried as public; concrete owner modules are internal unless separately inventoried."
+    },
+    {
+      "surface": "puripuly_heart.core.overlay vendored runtime helper",
+      "classification": "internal_overlay_packaging_helper",
+      "modules": [
+        "puripuly_heart.core.overlay.openvr_vendor"
+      ],
+      "rationale": "OpenVR vendoring helpers support packaging/native overlay startup compatibility but are not the public overlay protocol, startup, manifest, or snapshot contract."
+    },
+    {
+      "surface": "puripuly_heart.ui.components and puripuly_heart.ui.views modules",
+      "classification": "internal_ui_rendering",
+      "module_prefixes": [
+        "puripuly_heart.ui.components",
+        "puripuly_heart.ui.views"
+      ],
+      "rationale": "Non-private UI module names are app-internal renderer structure, not external import compatibility, unless separately added to public_imports."
+    },
+    {
+      "surface": "puripuly_heart.core.orchestrator implementation modules",
+      "classification": "internal_orchestration_runtime",
+      "module_prefixes": [
+        "puripuly_heart.core.orchestrator"
+      ],
+      "rationale": "Orchestrator internals are not public compatibility facades; public behavior is preserved through runtime/message/output contracts and tests."
+    },
+    {
+      "surface": "puripuly_heart.core.audio, core.osc, core.stt, and core.vad implementation modules not listed in public_imports",
+      "classification": "internal_adapter_or_runtime_support",
+      "module_prefixes": [
+        "puripuly_heart.core.audio",
+        "puripuly_heart.core.osc",
+        "puripuly_heart.core.stt",
+        "puripuly_heart.core.vad"
+      ],
+      "rationale": "These non-private modules are classified as implementation support unless an explicit __all__, existing public test import, packaging import, documented entry point, or approved facade appears in public_imports."
+    },
+    {
+      "surface": "broker source modules",
+      "classification": "public_protocol_private_implementation",
+      "rationale": "Broker /v1 paths, envelopes, public error codes, and classes are public compatibility; Cloudflare worker internals are not public Python import surfaces."
+    },
+    {
+      "surface": "native/overlay Rust modules",
+      "classification": "public_protocol_private_implementation",
+      "rationale": "Overlay startup/protocol/snapshot compatibility and Rust startup behavior are public compatibility; Rust module layout remains private implementation."
+    }
+  ],
+  "ambiguous_public_private_surfaces": []
+}

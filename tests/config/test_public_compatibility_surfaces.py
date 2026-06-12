@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
 import json
 import re
@@ -37,7 +38,10 @@ from tests.config.settings_migration_fixtures import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+SOURCE_PACKAGE_ROOT = REPO_ROOT / "src" / "puripuly_heart"
+PACKAGE_NAME = "puripuly_heart"
 SNAPSHOT_PATH = Path(__file__).with_name("public_compatibility_surfaces_snapshot.json")
+INVENTORY_PATH = Path(__file__).with_name("compatibility_surface_inventory.json")
 
 REQUIRED_SURFACES = (
     "secret_store",
@@ -47,6 +51,56 @@ REQUIRED_SURFACES = (
     "provider_aliases",
     "guard_coverage",
     "blockers",
+)
+REQUIRED_INVENTORY_SURFACES = (
+    "public_import_facades",
+    "settings_runtime_compatibility",
+    "persisted_operational_state",
+    "secret_store",
+    "provider_aliases",
+    "provider_runtime_public_config",
+    "prompt_fallback",
+    "broker_v1",
+    "overlay_protocol_startup_snapshot",
+    "i18n_key_parity",
+    "installer_identity",
+    "rust_overlay_startup",
+)
+REQUIRED_INVENTORY_SOURCE_RULES = {
+    "__all__",
+    "lazy __getattr__",
+    "documented entry point",
+    "existing public test or packaging import",
+    "approved facade",
+}
+DOCUMENTED_ENTRY_POINT_OR_TEST_IMPORT_MODULES = frozenset(
+    {
+        "puripuly_heart.app.wiring",
+        "puripuly_heart.config.llm_profiles",
+        "puripuly_heart.config.prompts",
+        "puripuly_heart.config.settings",
+        "puripuly_heart.core.managed_identity",
+        "puripuly_heart.core.managed_openrouter_broker_client",
+        "puripuly_heart.core.managed_openrouter_release",
+        "puripuly_heart.core.openrouter_credentials",
+        "puripuly_heart.core.overlay.manifest",
+        "puripuly_heart.core.overlay.protocol",
+        "puripuly_heart.core.storage.secrets",
+        "puripuly_heart.domain.events",
+        "puripuly_heart.domain.models",
+        "puripuly_heart.main",
+        "puripuly_heart.providers.llm.deepseek",
+        "puripuly_heart.providers.llm.gemini",
+        "puripuly_heart.providers.llm.local_openai",
+        "puripuly_heart.providers.llm.openrouter",
+        "puripuly_heart.providers.llm.qwen",
+        "puripuly_heart.providers.llm.qwen_async",
+        "puripuly_heart.providers.stt.deepgram",
+        "puripuly_heart.providers.stt.local_qwen_sherpa",
+        "puripuly_heart.providers.stt.qwen_asr",
+        "puripuly_heart.providers.stt.soniox",
+        "puripuly_heart.ui.event_bridge",
+    }
 )
 REQUIRED_SECRET_KEYS = (
     "google_api_key",
@@ -153,11 +207,81 @@ def _load_snapshot() -> dict[str, Any]:
     return json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
 
 
+def _load_inventory() -> dict[str, Any]:
+    return json.loads(INVENTORY_PATH.read_text(encoding="utf-8"))
+
+
 def _test_function_names(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     return {
         node.name for node in tree.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
     }
+
+
+def _module_name_for_source_path(path: Path) -> str:
+    relative = path.relative_to(SOURCE_PACKAGE_ROOT).with_suffix("")
+    parts = (PACKAGE_NAME, *relative.parts)
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
+
+
+def _is_non_private_source_module(path: Path) -> bool:
+    relative = path.relative_to(SOURCE_PACKAGE_ROOT)
+    parts = relative.with_suffix("").parts
+    return not any(part.startswith("_") and part != "__init__" for part in parts)
+
+
+def _module_public_export_signals(path: Path) -> frozenset[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    signals: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets
+        ):
+            try:
+                exported_names = ast.literal_eval(node.value)
+            except (SyntaxError, ValueError):
+                signals.add("__all__")
+                continue
+            if exported_names:
+                signals.add("__all__")
+        elif (
+            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == "__getattr__"
+        ):
+            signals.add("lazy __getattr__")
+    return frozenset(signals)
+
+
+def _relevant_non_private_inventory_modules() -> dict[str, frozenset[str]]:
+    relevant: dict[str, frozenset[str]] = {}
+    for path in SOURCE_PACKAGE_ROOT.rglob("*.py"):
+        if not _is_non_private_source_module(path):
+            continue
+
+        module_name = _module_name_for_source_path(path)
+        signals = set(_module_public_export_signals(path))
+        if module_name in DOCUMENTED_ENTRY_POINT_OR_TEST_IMPORT_MODULES:
+            signals.add("documented/test import")
+        if signals:
+            relevant[module_name] = frozenset(signals)
+    return relevant
+
+
+def _inventory_accounts_for_module(inventory: dict[str, Any], module_name: str) -> bool:
+    public_modules = {entry["module"] for entry in inventory["public_imports"]}
+    if module_name in public_modules:
+        return True
+
+    for classification in inventory["non_public_module_classifications"]:
+        if module_name in classification.get("modules", []):
+            return True
+        if any(
+            module_name == prefix or module_name.startswith(f"{prefix}.")
+            for prefix in classification.get("module_prefixes", [])
+        ):
+            return True
+    return False
 
 
 def _leaf_values(value: object) -> Iterator[object]:
@@ -170,6 +294,22 @@ def _leaf_values(value: object) -> Iterator[object]:
             yield from _leaf_values(child)
         return
     yield value
+
+
+def _assert_source_ref_exists(ref: str) -> None:
+    path_text = ref.split("::", maxsplit=1)[0]
+    assert path_text, ref
+    assert (REPO_ROOT / path_text).exists(), ref
+
+
+def _assert_inventory_export_resolves(module_name: str, export: dict[str, str]) -> None:
+    export_name = export["name"]
+    if export["kind"] == "submodule":
+        importlib.import_module(f"{module_name}.{export_name}")
+        return
+
+    module = importlib.import_module(module_name)
+    assert hasattr(module, export_name), f"{module_name}.{export_name}"
 
 
 def _clear_entry_env(monkeypatch: pytest.MonkeyPatch, entry: dict[str, Any]) -> None:
@@ -314,6 +454,88 @@ def test_public_compatibility_snapshot_declares_all_required_surfaces() -> None:
 
     assert tuple(snapshot) == REQUIRED_SURFACES
     assert snapshot["blockers"] == []
+
+
+def test_gate_zero_compatibility_inventory_declares_required_surfaces() -> None:
+    inventory = _load_inventory()
+
+    assert inventory["bundle"]["ref"] == "vnext-internal-cutover"
+    assert inventory["bundle"]["sha256"] == (
+        "033912b4bf580cd5d488066dd9139c3ff0896d962df94e5de405bb3c694dd1b6"
+    )
+    assert inventory["source_spec"]["sha256"] == (
+        "42e4a691eacdbbc495eb5ede54c0c3511b1c0c78b67159ead94d2bad35c0c1f9"
+    )
+    assert tuple(inventory["compatibility_surfaces"]) == REQUIRED_INVENTORY_SURFACES
+    assert inventory["ambiguous_public_private_surfaces"] == []
+
+    for surface_name, surface in inventory["compatibility_surfaces"].items():
+        assert surface["classification"] == "public_compatibility_preserve", surface_name
+        assert surface["source_of_truth_refs"], surface_name
+        assert surface["fixture_or_guard_refs"], surface_name
+        for ref in [*surface["source_of_truth_refs"], *surface["fixture_or_guard_refs"]]:
+            _assert_source_ref_exists(ref)
+
+
+def test_public_import_inventory_smoke_imports_every_exported_name() -> None:
+    public_imports = _load_inventory()["public_imports"]
+
+    assert public_imports
+    for entry in public_imports:
+        module_name = entry["module"]
+        source_rule = entry["source_rule"]
+        exports = entry["exports"]
+
+        assert source_rule in REQUIRED_INVENTORY_SOURCE_RULES, module_name
+        assert exports, module_name
+        for ref in entry["source_of_truth_refs"]:
+            _assert_source_ref_exists(ref)
+
+        module = importlib.import_module(module_name)
+        if entry.get("runtime_all_matches_exports"):
+            assert tuple(module.__all__) == tuple(export["name"] for export in exports)
+        for export in exports:
+            _assert_inventory_export_resolves(module_name, export)
+
+
+def test_public_facade_inventory_classifies_thin_delegate_targets() -> None:
+    inventory = _load_inventory()
+    public_imports = inventory["public_imports"]
+    facade_entries = [entry for entry in public_imports if entry["facade_contract"]]
+
+    assert facade_entries
+    for entry in facade_entries:
+        contract = entry["facade_contract"]
+        assert contract["preserve_import_path"] is True, entry["module"]
+        assert contract["target_role"] in {
+            "thin_delegate",
+            "thin_reexport",
+            "lazy_reexport",
+            "compatibility_boundary_owner",
+        }, entry["module"]
+        assert contract["implementation_owner"] in {
+            "canonical_vnext_owner",
+            "compatibility_boundary",
+            "adapter_owner_until_split",
+            "public_contract_owner",
+        }, entry["module"]
+
+    for classification in inventory["non_public_module_classifications"]:
+        assert classification["classification"] != "ambiguous", classification
+        assert classification["rationale"], classification
+
+
+def test_relevant_non_private_modules_are_inventoried_or_classified() -> None:
+    inventory = _load_inventory()
+    relevant_modules = _relevant_non_private_inventory_modules()
+
+    missing = {
+        module_name: sorted(signals)
+        for module_name, signals in sorted(relevant_modules.items())
+        if not _inventory_accounts_for_module(inventory, module_name)
+    }
+
+    assert missing == {}
 
 
 def test_guard_coverage_references_existing_tests_for_every_surface() -> None:
