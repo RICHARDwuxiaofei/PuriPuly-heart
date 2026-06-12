@@ -11,6 +11,9 @@ from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
 class FakePresenter:
     def __init__(self, events: list[str]) -> None:
         self.events = events
+        self.bridge: object | None = None
+        self.diagnostics: object | None = None
+        self.task_factory: object | None = None
         self.broadcast_shutdown_calls = 0
         self.clear_for_runtime_detach_calls = 0
         self.detach_bridge_calls = 0
@@ -26,6 +29,7 @@ class FakePresenter:
 
     def detach_bridge(self) -> None:
         self.detach_bridge_calls += 1
+        self.bridge = None
         self.events.append("presenter.detach_bridge")
 
     def reset_scene(self) -> None:
@@ -144,6 +148,119 @@ def test_overlay_runtime_handle_exposes_lifecycle_inventory_and_policy() -> None
     assert "kill escalation" in snapshot["shutdown_policy"]
     assert snapshot["late_callback_rule"] == (
         "old overlay instance events ignored after instance id changes"
+    )
+
+
+def test_overlay_runtime_handle_exposes_current_runtime_resources() -> None:
+    events: list[str] = []
+    presenter = FakePresenter(events)
+    bridge = FakeBridge(events)
+    manager = FakeManager(events)
+    diagnostics = object()
+    renderer_events: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    handle = OverlayRuntimeHandle()
+
+    handle.attach_presenter(presenter)
+    handle.attach_bridge(bridge)
+    handle.attach_process_manager(manager)
+    handle.attach_diagnostics(diagnostics)
+    handle.attach_renderer_events(renderer_events)
+
+    assert handle.has_resources()
+    assert handle.current_presenter_for_ingress() is presenter
+    assert handle.current_bridge_for_runtime_command() is bridge
+    assert handle.process_manager is manager
+    assert handle.diagnostics is diagnostics
+    assert handle.renderer_events_or_none() is renderer_events
+    assert handle.start_task is None
+    assert handle.monitor_task is None
+    assert handle.renderer_event_task is None
+
+
+@pytest.mark.asyncio
+async def test_overlay_runtime_handle_rejects_preserved_presenter_detach_before_close() -> None:
+    events: list[str] = []
+    presenter = FakePresenter(events)
+    bridge = FakeBridge(events)
+    hub = FakeHub(presenter, object())
+    handle = OverlayRuntimeHandle(shutdown_grace_s=0)
+    handle.attach_presenter(presenter)
+    handle.attach_bridge(bridge)
+    presenter.bridge = bridge
+    presenter.task_factory = handle.create_child_task
+    child_task = handle.create_child_task(
+        _blocked_until_cancel("presenter-refresh", events),
+        task_name="presenter-refresh",
+    )
+    await asyncio.sleep(0)
+
+    try:
+        with pytest.raises(RuntimeError, match="close.*preserve_presenter_state=True"):
+            handle.detach_preserved_presenter()
+    finally:
+        await handle.close(
+            preserve_presenter_state=True,
+            hub=hub,
+            emit_shutdown=False,
+        )
+
+    assert child_task.done()
+    assert handle.presenter is presenter
+    assert presenter.bridge is None
+    assert getattr(presenter.task_factory, "__self__", None) is handle
+    assert (
+        getattr(presenter.task_factory, "__func__", None) is OverlayRuntimeHandle.create_child_task
+    )
+
+
+@pytest.mark.asyncio
+async def test_overlay_runtime_handle_detaches_and_adopts_preserved_presenter_after_close() -> None:
+    events: list[str] = []
+    old_diagnostics = object()
+    new_diagnostics = object()
+    stale_bridge = FakeBridge(events)
+    presenter = FakePresenter(events)
+    presenter.bridge = stale_bridge
+    presenter.diagnostics = old_diagnostics
+    old_runtime = OverlayRuntimeHandle()
+    old_runtime.attach_presenter(presenter)
+    old_runtime.attach_bridge(stale_bridge)
+    old_runtime.attach_diagnostics(old_diagnostics)
+    presenter.task_factory = old_runtime.create_child_task
+
+    await old_runtime.close(
+        preserve_presenter_state=True,
+        hub=None,
+        emit_shutdown=False,
+    )
+
+    assert old_runtime.current_presenter_for_ingress() is None
+    assert old_runtime.current_bridge_for_runtime_command() is None
+    assert old_runtime.renderer_events_or_none() is None
+    assert old_runtime.presenter is presenter
+
+    preserved = old_runtime.detach_preserved_presenter()
+
+    assert preserved is presenter
+    assert old_runtime.presenter is None
+    assert presenter.bridge is None
+    assert presenter.diagnostics is None
+    assert presenter.task_factory is None
+    assert presenter.detach_bridge_calls >= 1
+    assert old_runtime.bridge is None
+
+    new_runtime = OverlayRuntimeHandle()
+    new_runtime.attach_diagnostics(new_diagnostics)
+
+    adopted = new_runtime.adopt_presenter(preserved)
+
+    assert adopted is presenter
+    assert new_runtime.presenter is presenter
+    assert presenter.bridge is None
+    assert presenter.diagnostics is new_diagnostics
+    assert getattr(presenter.task_factory, "__self__", None) is new_runtime
+    assert (
+        getattr(presenter.task_factory, "__func__", None) is OverlayRuntimeHandle.create_child_task
     )
 
 

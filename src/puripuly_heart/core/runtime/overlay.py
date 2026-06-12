@@ -110,6 +110,24 @@ class OverlayRuntimeHandle:
     def is_closed(self) -> bool:
         return self._close_completed
 
+    def has_resources(self) -> bool:
+        return self._has_resources()
+
+    def current_presenter_for_ingress(self) -> object | None:
+        if self._closing or self._close_completed:
+            return None
+        return self._presenter
+
+    def current_bridge_for_runtime_command(self) -> object | None:
+        if self._closing or self._close_completed:
+            return None
+        return self._bridge
+
+    def renderer_events_or_none(self) -> asyncio.Queue[dict[str, object]] | None:
+        if self._closing or self._close_completed:
+            return None
+        return self._renderer_events
+
     def lifecycle_owner_snapshot(self) -> dict[str, object]:
         return {
             "owner": self.owner_name,
@@ -134,6 +152,28 @@ class OverlayRuntimeHandle:
     def attach_presenter(self, presenter: object | None) -> None:
         self._presenter = presenter
 
+    def adopt_presenter(self, presenter: object | None) -> object | None:
+        if presenter is None:
+            self._presenter = None
+            return None
+        self._detach_presenter_runtime_resources(presenter)
+        self._attach_presenter_runtime_resources(presenter)
+        self._presenter = presenter
+        return presenter
+
+    def detach_preserved_presenter(self) -> object | None:
+        presenter = self._presenter
+        if presenter is None:
+            return None
+        if self._closing or not self._close_completed or self._has_owned_task_handles():
+            raise RuntimeError(
+                "Cannot detach preserved presenter before "
+                "OverlayRuntimeHandle.close(preserve_presenter_state=True) completes"
+            )
+        self._detach_presenter_runtime_resources(presenter)
+        self._presenter = None
+        return presenter
+
     def attach_bridge(self, bridge: object | None) -> None:
         self._bridge = bridge
 
@@ -148,6 +188,31 @@ class OverlayRuntimeHandle:
         renderer_events: asyncio.Queue[dict[str, object]] | None,
     ) -> None:
         self._renderer_events = renderer_events
+
+    def _attach_presenter_runtime_resources(self, presenter: object) -> None:
+        if hasattr(presenter, "diagnostics"):
+            setattr(presenter, "diagnostics", self._diagnostics)
+        if hasattr(presenter, "task_factory"):
+            setattr(presenter, "task_factory", self.create_child_task)
+
+    def _detach_presenter_runtime_resources(self, presenter: object) -> None:
+        detach_bridge = getattr(presenter, "detach_bridge", None)
+        if callable(detach_bridge):
+            detach_bridge()
+        if hasattr(presenter, "diagnostics"):
+            setattr(presenter, "diagnostics", None)
+        if hasattr(presenter, "task_factory"):
+            setattr(presenter, "task_factory", None)
+
+    def _has_owned_task_handles(self) -> bool:
+        return any(
+            task is not None
+            for task in (
+                self._start_task,
+                self._monitor_task,
+                self._renderer_event_task,
+            )
+        ) or bool(self._child_task_names)
 
     def create_start_task(
         self,
