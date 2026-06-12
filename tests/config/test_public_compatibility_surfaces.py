@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import ast
+import base64
 import importlib
 import inspect
 import json
 import re
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,13 @@ from puripuly_heart.config.prompts import (
     load_prompt,
     load_prompt_for_provider,
 )
-from puripuly_heart.config.settings import AppSettings, OpenRouterCredentialSource, to_dict
+from puripuly_heart.config.settings import (
+    AppSettings,
+    OpenRouterCredentialSource,
+    SecretsBackend,
+    SecretsSettings,
+    to_dict,
+)
 from puripuly_heart.core import (
     managed_identity,
     openrouter_credentials,
@@ -31,7 +39,11 @@ from puripuly_heart.core.overlay.protocol import (
     OverlayPresentationBlock,
     OverlayPresentationCalibration,
 )
-from puripuly_heart.core.storage.secrets import InMemorySecretStore, KeyringSecretStore
+from puripuly_heart.core.storage.secrets import (
+    EncryptedFileSecretStore,
+    InMemorySecretStore,
+    KeyringSecretStore,
+)
 from tests.config.settings_migration_fixtures import (
     maximal_v24_settings_fixture,
     serialized_field_paths,
@@ -194,6 +206,7 @@ EXPECTED_PROMPT_FALLBACK_ORDER = (
     "default.md",
     "default.txt",
 )
+EXPECTED_ENCRYPTED_FILE_PASSPHRASE = "fixture-passphrase-not-secret"
 
 
 @pytest.fixture(autouse=True)
@@ -648,6 +661,79 @@ def test_settings_serialization_excludes_secret_store_registry_keys() -> None:
 
         assert forbidden_paths == []
         assert registry_keys.isdisjoint(string_values)
+
+
+def test_secret_store_encrypted_file_fixture_decrypts_and_freezes_wire_format(
+    tmp_path: Path,
+) -> None:
+    encrypted_snapshot = _load_snapshot()["secret_store"]["encrypted_file"]
+    fixture_path = REPO_ROOT / encrypted_snapshot["golden_fixture"]
+    raw_fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    assert tuple(raw_fixture) == ("version", "salt", "items")
+    assert raw_fixture["version"] == encrypted_snapshot["version"] == 1
+    assert raw_fixture["salt"] == encrypted_snapshot["salt_b64"]
+    assert len(base64.b64decode(raw_fixture["salt"])) == encrypted_snapshot["salt_bytes"] == 16
+    assert tuple(raw_fixture["items"]) == tuple(encrypted_snapshot["item_keys"])
+    assert all(
+        isinstance(token, str) and token.startswith("gAAAAA")
+        for token in raw_fixture["items"].values()
+    )
+
+    rendered_fixture = json.dumps(raw_fixture, ensure_ascii=False)
+    for raw_secret in encrypted_snapshot["expected_fake_values"].values():
+        assert raw_secret not in rendered_fixture
+
+    store = EncryptedFileSecretStore(
+        fixture_path,
+        passphrase=encrypted_snapshot["passphrase"],
+    )
+    assert {key: store.get(key) for key in encrypted_snapshot["item_keys"]} == encrypted_snapshot[
+        "expected_fake_values"
+    ]
+
+    wrong = EncryptedFileSecretStore(fixture_path, passphrase="wrong-fixture-passphrase")
+    with pytest.raises(ValueError, match="invalid passphrase"):
+        wrong.get(encrypted_snapshot["item_keys"][0])
+
+    working_path = tmp_path / "secrets.json"
+    shutil.copyfile(fixture_path, working_path)
+    working = EncryptedFileSecretStore(working_path, passphrase=encrypted_snapshot["passphrase"])
+    working.set("deepseek_api_key", "fixture-deepseek-api-key")
+    updated = json.loads(working_path.read_text(encoding="utf-8"))
+
+    assert updated["version"] == raw_fixture["version"]
+    assert updated["salt"] == raw_fixture["salt"]
+    assert set(updated["items"]) == {*encrypted_snapshot["item_keys"], "deepseek_api_key"}
+    assert "fixture-deepseek-api-key" not in json.dumps(updated, ensure_ascii=False)
+    assert working.get("deepseek_api_key") == "fixture-deepseek-api-key"
+
+
+def test_secret_store_encrypted_file_path_resolution_and_env_passphrase(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config" / "settings.json"
+    config_path.parent.mkdir()
+    settings = SecretsSettings(
+        backend=SecretsBackend.ENCRYPTED_FILE,
+        encrypted_file_path="fixture-secrets.json",
+    )
+
+    monkeypatch.setenv(wiring.SECRETS_PASSPHRASE_ENV, EXPECTED_ENCRYPTED_FILE_PASSPHRASE)
+    store = wiring.create_secret_store(settings, config_path=config_path)
+
+    assert isinstance(store, EncryptedFileSecretStore)
+    assert store.path == config_path.parent / "fixture-secrets.json"
+    raw = json.loads(store.path.read_text(encoding="utf-8"))
+    assert tuple(raw) == ("version", "salt", "items")
+    assert raw["version"] == 1
+    assert isinstance(raw["salt"], str)
+    assert raw["items"] == {}
+
+    monkeypatch.delenv(wiring.SECRETS_PASSPHRASE_ENV, raising=False)
+    with pytest.raises(ValueError, match=wiring.SECRETS_PASSPHRASE_ENV):
+        wiring.create_secret_store(settings, config_path=config_path)
 
 
 def test_broker_v1_snapshot_matches_client_paths_and_public_error_vocabulary() -> None:

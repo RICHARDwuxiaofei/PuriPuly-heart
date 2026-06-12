@@ -100,7 +100,22 @@
           "LOCAL_LLM_API_KEY"
         ]
       }
-    ]
+    ],
+    "encrypted_file": {
+      "version": 1,
+      "salt_b64": "dm5leHQtZ2F0ZTAtc2FsdA==",
+      "salt_bytes": 16,
+      "item_keys": [
+        "google_api_key",
+        "alibaba_api_key"
+      ],
+      "golden_fixture": "tests/config/fixtures/secret_store_encrypted_file_v1.json",
+      "passphrase": "fixture-passphrase-not-secret",
+      "expected_fake_values": {
+        "google_api_key": "fixture-google-api-key",
+        "alibaba_api_key": "fixture-legacy-alibaba-api-key"
+      }
+    }
   },
   "broker_v1": {
     "paths": [
@@ -235,6 +250,8 @@
       "tests/config/test_public_compatibility_surfaces.py::test_secret_store_env_lookup_snapshot_matches_current_fallback_behavior",
       "tests/config/test_public_compatibility_surfaces.py::test_secret_store_accepts_legacy_alibaba_key_and_backfills_current_key",
       "tests/config/test_public_compatibility_surfaces.py::test_settings_serialization_excludes_secret_store_registry_keys",
+      "tests/config/test_public_compatibility_surfaces.py::test_secret_store_encrypted_file_fixture_decrypts_and_freezes_wire_format",
+      "tests/config/test_public_compatibility_surfaces.py::test_secret_store_encrypted_file_path_resolution_and_env_passphrase",
       "tests/app/test_wiring_secrets.py::test_create_secret_store_encrypted_file_resolves_relative_path",
       "tests/app/test_wiring_secrets.py::test_create_secret_store_encrypted_file_requires_passphrase",
       "tests/app/test_wiring_providers.py::test_create_llm_provider_openrouter_uses_env_fallback",

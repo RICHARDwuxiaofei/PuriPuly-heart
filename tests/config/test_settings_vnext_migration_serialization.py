@@ -446,6 +446,28 @@ def test_malformed_current_vnext_top_level_shape_fails_without_backup_or_overwri
     assert not list(tmp_path.glob("*.bak"))
 
 
+def test_lower_version_vnext_shape_is_explicitly_unsupported_without_backup_or_overwrite(
+    tmp_path: Path,
+) -> None:
+    compat = _compat()
+    serialization = _serialization()
+    path = tmp_path / "settings.json"
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["settings_version"] = VNEXT_SETTINGS_SCHEMA_VERSION - 1
+    raw["intent"]["ui"]["locale"] = "ja"
+    original_bytes = _write_json_bytes(path, raw)
+
+    result = compat.load_vnext_settings(path)
+
+    assert result.status == compat.SettingsPersistenceStatus.MIGRATION_FAILED
+    assert result.settings is None
+    assert result.backup_path is None
+    assert path.read_bytes() == original_bytes
+    assert not list(tmp_path.glob("*.bak"))
+    assert result.error is not None
+    assert "lower-version vNext settings" in result.error.message
+
+
 def test_facade_projection_failure_returns_explicit_result_without_overwrite(
     tmp_path: Path,
 ) -> None:
@@ -503,6 +525,22 @@ def test_raw_provider_api_key_fields_are_absent_from_vnext_serialized_output() -
     assert "raw-deepgram-secret" not in encoded
     assert "raw-soniox-secret" not in encoded
     assert "raw-local-secret" not in encoded
+
+
+def test_secret_bearing_legacy_local_llm_extra_body_is_repaired_before_vnext_output() -> None:
+    migration = _migration()
+    serialization = _serialization()
+    raw = maximal_v24_settings_fixture()
+    raw["local_llm"]["extra_body"] = {
+        "temperature": 0.2,
+        "api_key": "raw-local-llm-secret",
+    }
+
+    serialized = serialization.to_dict(migration.from_dict(raw))
+    encoded = json.dumps(serialized, ensure_ascii=False)
+
+    assert serialized["intent"]["local_llm"]["extra_body"] == {"reasoning_effort": "none"}
+    assert "raw-local-llm-secret" not in encoded
 
 
 def test_public_settings_facade_keeps_legacy_imports_and_reads_vnext_dict() -> None:

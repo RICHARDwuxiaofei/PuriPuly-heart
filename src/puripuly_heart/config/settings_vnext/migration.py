@@ -48,6 +48,14 @@ def is_vnext_settings_dict(data: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_lower_version_vnext_shape(data: Mapping[str, Any]) -> bool:
+    return (
+        isinstance(data, Mapping)
+        and not is_vnext_settings_dict(data)
+        and ("intent" in data or "state" in data)
+    )
+
+
 _PROVIDER_VERIFICATION_FIELDS = (
     "deepgram",
     "soniox",
@@ -67,6 +75,11 @@ def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
     if is_vnext_settings_dict(data):
         _validate_vnext_top_level_shape(data)
         return serialization.from_dict(data)
+    if _is_lower_version_vnext_shape(data):
+        raise ValueError(
+            "lower-version vNext settings are unsupported; restore a pre-vNext backup or "
+            "upgrade with a compatible build"
+        )
 
     # Legacy compatibility belongs here: use the public legacy migration chain first, then
     # project the normalized AppSettings values into canonical vNext intent/state values.
