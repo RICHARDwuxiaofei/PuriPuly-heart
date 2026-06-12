@@ -1067,25 +1067,12 @@ class GuiController:
     )
     _local_stt_pending_enable_after_install: bool = field(init=False, default=False)
     _local_stt_pending_peer_enable_after_install: bool = field(init=False, default=False)
-    _overlay_bridge: OverlayBridge | None = None
-    _overlay_presenter: OverlayPresenter | None = None
-    _overlay_manager: OverlayProcessManager | None = None
-    _overlay_diagnostics: OverlayDiagnosticsRecorder | None = None
+    # Overlay runtime internals are owned by OverlayRuntimeHandle. Temporary
+    # private alias shims below delegate to this owner for legacy tests and are
+    # tracked for removal in Phase 2A controller-overlay-mirror-removal review.
     _overlay_runtime: OverlayRuntimeHandle | None = None
-    _overlay_start_task: asyncio.Task[None] | None = None
-    _overlay_monitor_task: asyncio.Task[None] | None = None
     _overlay_lock: asyncio.Lock | None = None
     _active_overlay_target: str | None = field(init=False, default=None)
-    _desktop_renderer_events: asyncio.Queue[dict[str, object]] | None = field(
-        init=False,
-        default=None,
-        repr=False,
-    )
-    _desktop_renderer_events_task: asyncio.Task[None] | None = field(
-        init=False,
-        default=None,
-        repr=False,
-    )
     _desktop_bounds_persist_task: asyncio.Task[None] | None = field(
         init=False,
         default=None,
@@ -2646,7 +2633,7 @@ class GuiController:
             self._peer_translation_activation_requested_for(settings)
             and self._effective_peer_overlay_enabled_for(settings)
             and self.hub is not None
-            and self._overlay_bridge is not None
+            and self._current_overlay_bridge_for_direct_runtime_command() is not None
         )
 
     @staticmethod
@@ -2666,21 +2653,142 @@ class GuiController:
         self._overlay_runtime = runtime
         return runtime
 
-    def _ensure_overlay_runtime_handle(
-        self,
-        *,
-        adopt_legacy_presenter_mirror: bool = True,
-    ) -> OverlayRuntimeHandle:
+    def _overlay_runtime_for_private_alias(self) -> OverlayRuntimeHandle:
+        """Return the runtime owner used by temporary private alias shims.
+
+        These aliases exist only to keep older private tests/compatibility
+        probes delegating to the canonical owner while active controller logic
+        migrates to `_overlay_runtime` directly. Follow-up: remove the aliases
+        after the Phase 2A controller-overlay-mirror-removal gate review
+        confirms no private callers remain.
+        """
+
         runtime = self._overlay_runtime
         if runtime is None:
-            runtime = OverlayRuntimeHandle(shutdown_grace_s=OVERLAY_SHUTDOWN_GRACE_S)
-            if adopt_legacy_presenter_mirror:
-                runtime.attach_presenter(self._overlay_presenter)
-            runtime.attach_bridge(self._overlay_bridge)
-            runtime.attach_process_manager(self._overlay_manager)
-            runtime.attach_diagnostics(self._overlay_diagnostics)
-            runtime.attach_renderer_events(self._desktop_renderer_events)
-            self._overlay_runtime = runtime
+            runtime = self._new_overlay_runtime_handle()
+        return runtime
+
+    @property
+    def _overlay_presenter(self) -> OverlayPresenter | None:
+        runtime = self._overlay_runtime
+        if runtime is None:
+            return None
+        return cast(OverlayPresenter | None, runtime.presenter)
+
+    @_overlay_presenter.setter
+    def _overlay_presenter(self, presenter: OverlayPresenter | None) -> None:
+        if presenter is None:
+            if self._overlay_runtime is not None:
+                self._overlay_runtime.attach_presenter(None)
+            return
+        self._overlay_runtime_for_private_alias().attach_presenter(presenter)
+
+    @property
+    def _overlay_bridge(self) -> OverlayBridge | None:
+        runtime = self._overlay_runtime
+        if runtime is None:
+            return None
+        return cast(OverlayBridge | None, runtime.bridge)
+
+    @_overlay_bridge.setter
+    def _overlay_bridge(self, bridge: OverlayBridge | None) -> None:
+        if bridge is None:
+            if self._overlay_runtime is not None:
+                self._overlay_runtime.attach_bridge(None)
+            return
+        self._overlay_runtime_for_private_alias().attach_bridge(bridge)
+
+    @property
+    def _overlay_manager(self) -> OverlayProcessManager | None:
+        runtime = self._overlay_runtime
+        if runtime is None:
+            return None
+        return cast(OverlayProcessManager | None, runtime.process_manager)
+
+    @_overlay_manager.setter
+    def _overlay_manager(self, manager: OverlayProcessManager | None) -> None:
+        if manager is None:
+            if self._overlay_runtime is not None:
+                self._overlay_runtime.attach_process_manager(None)
+            return
+        self._overlay_runtime_for_private_alias().attach_process_manager(manager)
+
+    @property
+    def _overlay_diagnostics(self) -> OverlayDiagnosticsRecorder | None:
+        runtime = self._overlay_runtime
+        if runtime is None:
+            return None
+        return cast(OverlayDiagnosticsRecorder | None, runtime.diagnostics)
+
+    @_overlay_diagnostics.setter
+    def _overlay_diagnostics(
+        self,
+        diagnostics: OverlayDiagnosticsRecorder | None,
+    ) -> None:
+        if diagnostics is None:
+            if self._overlay_runtime is not None:
+                self._overlay_runtime.attach_diagnostics(None)
+            return
+        self._overlay_runtime_for_private_alias().attach_diagnostics(diagnostics)
+
+    @property
+    def _overlay_start_task(self) -> asyncio.Task[None] | None:
+        runtime = self._overlay_runtime
+        if runtime is None:
+            return None
+        return cast(asyncio.Task[None] | None, runtime.start_task)
+
+    @_overlay_start_task.setter
+    def _overlay_start_task(self, task: asyncio.Task[None] | None) -> None:
+        if task is not None:
+            raise AttributeError("_overlay_start_task is owned by OverlayRuntimeHandle")
+
+    @property
+    def _overlay_monitor_task(self) -> asyncio.Task[None] | None:
+        runtime = self._overlay_runtime
+        if runtime is None:
+            return None
+        return cast(asyncio.Task[None] | None, runtime.monitor_task)
+
+    @_overlay_monitor_task.setter
+    def _overlay_monitor_task(self, task: asyncio.Task[None] | None) -> None:
+        if task is not None:
+            raise AttributeError("_overlay_monitor_task is owned by OverlayRuntimeHandle")
+
+    @property
+    def _desktop_renderer_events(self) -> asyncio.Queue[dict[str, object]] | None:
+        runtime = self._overlay_runtime
+        if runtime is None:
+            return None
+        return runtime.renderer_events
+
+    @_desktop_renderer_events.setter
+    def _desktop_renderer_events(
+        self,
+        renderer_events: asyncio.Queue[dict[str, object]] | None,
+    ) -> None:
+        if renderer_events is None:
+            if self._overlay_runtime is not None:
+                self._overlay_runtime.attach_renderer_events(None)
+            return
+        self._overlay_runtime_for_private_alias().attach_renderer_events(renderer_events)
+
+    @property
+    def _desktop_renderer_events_task(self) -> asyncio.Task[None] | None:
+        runtime = self._overlay_runtime
+        if runtime is None:
+            return None
+        return cast(asyncio.Task[None] | None, runtime.renderer_event_task)
+
+    @_desktop_renderer_events_task.setter
+    def _desktop_renderer_events_task(self, task: asyncio.Task[None] | None) -> None:
+        if task is not None:
+            raise AttributeError("_desktop_renderer_events_task is owned by OverlayRuntimeHandle")
+
+    def _ensure_overlay_runtime_handle(self) -> OverlayRuntimeHandle:
+        runtime = self._overlay_runtime
+        if runtime is None:
+            runtime = self._new_overlay_runtime_handle()
         return runtime
 
     def _overlay_runtime_is_current(
@@ -2694,35 +2802,6 @@ class GuiController:
         if overlay_instance_id is None:
             return True
         return runtime.is_current_instance_id(overlay_instance_id)
-
-    def _sync_overlay_legacy_fields_from_runtime(
-        self,
-        runtime: OverlayRuntimeHandle | None,
-    ) -> None:
-        if runtime is None:
-            self._overlay_presenter = None
-            self._overlay_bridge = None
-            self._overlay_manager = None
-            self._overlay_diagnostics = None
-            self._overlay_start_task = None
-            self._overlay_monitor_task = None
-            self._desktop_renderer_events = None
-            self._desktop_renderer_events_task = None
-            return
-        self._overlay_presenter = cast(OverlayPresenter | None, runtime.presenter)
-        self._overlay_bridge = cast(OverlayBridge | None, runtime.bridge)
-        self._overlay_manager = cast(OverlayProcessManager | None, runtime.process_manager)
-        self._overlay_diagnostics = cast(
-            OverlayDiagnosticsRecorder | None,
-            runtime.diagnostics,
-        )
-        self._overlay_start_task = cast(asyncio.Task[None] | None, runtime.start_task)
-        self._overlay_monitor_task = cast(asyncio.Task[None] | None, runtime.monitor_task)
-        self._desktop_renderer_events = runtime.renderer_events
-        self._desktop_renderer_events_task = cast(
-            asyncio.Task[None] | None,
-            runtime.renderer_event_task,
-        )
 
     def _overlay_runtime_has_resources(self, runtime: OverlayRuntimeHandle | None) -> bool:
         if runtime is None:
@@ -2746,13 +2825,7 @@ class GuiController:
         runtime: OverlayRuntimeHandle,
     ) -> None:
         stale_presenter = runtime.presenter
-        stale_bridge = runtime.bridge
-        stale_manager = runtime.process_manager
         stale_diagnostics = runtime.diagnostics
-        stale_renderer_events = runtime.renderer_events
-        stale_start_task = runtime.start_task
-        stale_monitor_task = runtime.monitor_task
-        stale_renderer_event_task = runtime.renderer_event_task
         try:
             await runtime.close(
                 preserve_presenter_state=True,
@@ -2770,70 +2843,28 @@ class GuiController:
                 self.hub.overlay_sink = None
             if getattr(self.hub, "overlay_diagnostics", None) is stale_diagnostics:
                 self.hub.overlay_diagnostics = None
-        current_runtime = self._overlay_runtime
-        current_presenter = current_runtime.presenter if current_runtime is not None else None
-        if self._overlay_presenter is stale_presenter and current_presenter is not stale_presenter:
-            self._overlay_presenter = None
-        if self._overlay_bridge is stale_bridge:
-            self._overlay_bridge = None
-        if self._overlay_manager is stale_manager:
-            self._overlay_manager = None
-        if self._overlay_diagnostics is stale_diagnostics:
-            self._overlay_diagnostics = None
-        if self._desktop_renderer_events is stale_renderer_events:
-            self._desktop_renderer_events = None
-        if self._overlay_start_task is stale_start_task:
-            self._overlay_start_task = None
-        if self._overlay_monitor_task is stale_monitor_task:
-            self._overlay_monitor_task = None
-        if self._desktop_renderer_events_task is stale_renderer_event_task:
-            self._desktop_renderer_events_task = None
 
     def _overlay_runtime_is_active(self) -> bool:
         runtime = self._overlay_runtime
-        start_task = runtime.start_task if runtime is not None else self._overlay_start_task
+        start_task = runtime.start_task if runtime is not None else None
         return bool(
             self.overlay_state in {"starting", "connected"}
-            or self._overlay_bridge is not None
-            or self._overlay_manager is not None
             or (runtime is not None and runtime.bridge is not None)
             or (runtime is not None and runtime.process_manager is not None)
             or (start_task is not None and not start_task.done())
         )
 
-    def _overlay_presenter_ingress_is_active(
-        self,
-        presenter: OverlayPresenter | None,
-    ) -> bool:
-        if presenter is None or self.overlay_state not in {"starting", "connected"}:
-            return False
-        runtime = self._overlay_runtime
-        if runtime is None:
-            return True
-        return not runtime.is_closing and not runtime.is_closed and runtime.presenter is presenter
-
     def _current_overlay_presenter_for_direct_runtime_command(self) -> OverlayPresenter | None:
-        presenter = self._overlay_presenter
-        if presenter is None:
+        runtime = self._overlay_runtime
+        if runtime is None or self.overlay_state not in {"starting", "connected"}:
             return None
-        if self._overlay_runtime is None:
-            return presenter
-        if self._overlay_presenter_ingress_is_active(presenter):
-            return presenter
-        return None
+        return cast(OverlayPresenter | None, runtime.current_presenter_for_ingress())
 
     def _current_overlay_bridge_for_direct_runtime_command(self) -> OverlayBridge | None:
-        bridge = self._overlay_bridge
-        if bridge is None:
-            return None
         runtime = self._overlay_runtime
         if runtime is None:
-            return bridge
-        if runtime.is_closing or runtime.is_closed:
             return None
-        if runtime.bridge is not bridge:
-            return None
-        return bridge
+        return cast(OverlayBridge | None, runtime.current_bridge_for_runtime_command())
 
     def _previous_overlay_target_for_apply(self) -> str:
         if self._overlay_runtime_is_active() and self._active_overlay_target is not None:
@@ -3098,7 +3129,8 @@ class GuiController:
         )
 
     def _drain_pending_desktop_user_bounds_events(self) -> None:
-        queue = self._desktop_renderer_events
+        runtime = self._overlay_runtime
+        queue = runtime.renderer_events_or_none() if runtime is not None else None
         if queue is None:
             return
         retained: list[dict[str, object]] = []
@@ -3141,7 +3173,10 @@ class GuiController:
             return
         if self.overlay_state != "connected":
             return
-        if self._active_overlay_target != OVERLAY_TARGET_DESKTOP or self._overlay_bridge is None:
+        if (
+            self._active_overlay_target != OVERLAY_TARGET_DESKTOP
+            or self._current_overlay_bridge_for_direct_runtime_command() is None
+        ):
             return
 
         mode = DESKTOP_INTERACTION_MODE_PASS_THROUGH if locked else DESKTOP_INTERACTION_MODE_EDIT
@@ -3379,7 +3414,7 @@ class GuiController:
         )
         desktop_renderer_active = bool(
             self._active_overlay_target == OVERLAY_TARGET_DESKTOP
-            and self._overlay_bridge is not None
+            and self._current_overlay_bridge_for_direct_runtime_command() is not None
         )
         if not configured_for_desktop and not desktop_renderer_active:
             return
@@ -3441,15 +3476,6 @@ class GuiController:
             )
         except Exception:
             return None
-
-    async def _cancel_desktop_renderer_event_task(self) -> None:
-        current_task = asyncio.current_task()
-        task = self._desktop_renderer_events_task
-        self._desktop_renderer_events_task = None
-        self._desktop_renderer_events = None
-        if task is not None and task is not current_task and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
 
     async def _cancel_desktop_bounds_persistence(self) -> None:
         current_task = asyncio.current_task()
@@ -3552,7 +3578,7 @@ class GuiController:
             return
         if (
             self._active_overlay_target == OVERLAY_TARGET_DESKTOP
-            and self._overlay_bridge is not None
+            and self._current_overlay_bridge_for_direct_runtime_command() is not None
         ):
             return
         self._set_desktop_overlay_interaction_mode(DESKTOP_INTERACTION_MODE_EDIT)
@@ -3716,11 +3742,12 @@ class GuiController:
             return
 
         self.log_basic(f"[Overlay] Toggle request: enabled={enabled}")
+        runtime = self._overlay_runtime
         self.log_detailed(
             "[Overlay] Toggle detail: "
             f"current_state={self.overlay_state} "
-            f"has_bridge={self._overlay_bridge is not None} "
-            f"has_manager={self._overlay_manager is not None}"
+            f"has_bridge={runtime is not None and runtime.bridge is not None} "
+            f"has_manager={runtime is not None and runtime.process_manager is not None}"
         )
         self.settings.ui.overlay_enabled = bool(enabled)
         if not enabled:
@@ -3814,7 +3841,6 @@ class GuiController:
             previous_runtime = self._overlay_runtime
             teardown_succeeded = await self._teardown_overlay_runtime(
                 preserve_presenter_state=True,
-                adopt_legacy_presenter_mirror=False,
             )
             if not teardown_succeeded:
                 return
@@ -3833,14 +3859,13 @@ class GuiController:
             self.auto_restart_scheduled = False
             self._log_overlay_state_transition(previous_state, self.overlay_state)
             self._notify_overlay_state()
-            self._overlay_start_task = runtime.create_start_task(self._run_overlay_start(runtime))
+            runtime.create_start_task(self._run_overlay_start(runtime))
 
     async def _run_overlay_start(self, runtime: OverlayRuntimeHandle | None = None) -> None:
         if runtime is None:
             runtime = self._overlay_runtime
             if runtime is None:
                 runtime = self._new_overlay_runtime_handle()
-        current_task = asyncio.current_task()
         overlay_instance_id: str | None = None
         try:
             if self.settings is None or self.hub is None:
@@ -3893,7 +3918,6 @@ class GuiController:
             )
             await presenter.update_peer_presentation_refresh_burst(peer_presentation_refresh_burst)
             await presenter.update_self_presentation_refresh_burst(self_presentation_refresh_burst)
-            self._overlay_presenter = presenter
             bridge = OverlayBridge(
                 session_token=secrets.token_urlsafe(16),
                 initial_snapshot=presenter.snapshot(),
@@ -3934,8 +3958,6 @@ class GuiController:
             latest_snapshot = presenter.snapshot()
             if bridge.snapshot() != latest_snapshot:
                 await bridge.replace_snapshot(latest_snapshot)
-            self._overlay_bridge = bridge
-            self._overlay_diagnostics = diagnostics
             runtime.attach_diagnostics(diagnostics)
             self.hub.overlay_sink = presenter
             self.hub.overlay_diagnostics = diagnostics
@@ -3943,9 +3965,8 @@ class GuiController:
             renderer_events: asyncio.Queue[dict[str, object]] | None = None
             if overlay_target == OVERLAY_TARGET_DESKTOP:
                 renderer_events = asyncio.Queue(maxsize=64)
-                self._desktop_renderer_events = renderer_events
                 runtime.attach_renderer_events(renderer_events)
-                self._desktop_renderer_events_task = runtime.create_renderer_event_task(
+                runtime.create_renderer_event_task(
                     self._consume_desktop_renderer_events(
                         renderer_events,
                         overlay_instance_id=overlay_instance_id,
@@ -3970,7 +3991,6 @@ class GuiController:
                 diagnostics=diagnostics,
                 task_factory=runtime.create_child_task,
             )
-            self._overlay_manager = manager
             runtime.attach_process_manager(manager)
             await manager.start()
 
@@ -3981,7 +4001,7 @@ class GuiController:
                 await self._close_stale_overlay_start_runtime(runtime)
                 return
 
-            if self._overlay_manager is not manager:
+            if runtime.process_manager is not manager:
                 return
 
             if manager.state != "connected":
@@ -3992,7 +4012,7 @@ class GuiController:
             await self._refresh_overlay_runtime_dependencies()
             monitor_task = getattr(manager, "_monitor_task", None)
             if monitor_task is not None:
-                self._overlay_monitor_task = runtime.create_monitor_task(
+                runtime.create_monitor_task(
                     self._watch_overlay_runtime(
                         manager,
                         monitor_task,
@@ -4009,14 +4029,6 @@ class GuiController:
                 exception=exc,
             )
             await self._handle_overlay_start_failure("unknown")
-        finally:
-            if self._overlay_start_task is current_task:
-                self._overlay_start_task = None
-            if runtime.start_task is current_task and self._overlay_runtime_is_current(
-                runtime,
-                overlay_instance_id=overlay_instance_id,
-            ):
-                self._sync_overlay_legacy_fields_from_runtime(runtime)
 
     async def _watch_overlay_runtime(
         self,
@@ -4028,7 +4040,6 @@ class GuiController:
     ) -> None:
         if runtime is None:
             runtime = self._overlay_runtime
-        current_task = asyncio.current_task()
         try:
             await monitor_task
             if runtime is not None and not self._overlay_runtime_is_current(
@@ -4036,7 +4047,7 @@ class GuiController:
                 overlay_instance_id=overlay_instance_id,
             ):
                 return
-            if self._overlay_manager is not manager:
+            if runtime is None or runtime.process_manager is not manager:
                 return
             if manager.state != "failed":
                 return
@@ -4052,11 +4063,6 @@ class GuiController:
             await self._refresh_overlay_runtime_dependencies()
         except asyncio.CancelledError:
             raise
-        finally:
-            if self._overlay_monitor_task is current_task:
-                self._overlay_monitor_task = None
-            if runtime is not None and runtime.monitor_task is current_task:
-                self._sync_overlay_legacy_fields_from_runtime(runtime)
 
     async def _handle_overlay_start_failure(self, failure_reason: str | None) -> None:
         self.on_overlay_start_failed(failure_reason)
@@ -4068,22 +4074,18 @@ class GuiController:
             self._overlay_lock = asyncio.Lock()
 
         self.log_basic("[Overlay] Shutdown requested")
+        runtime = self._overlay_runtime
         self.log_detailed(
             "[Overlay] Shutdown detail: "
             f"preserve_failure_reason={preserve_failure_reason} "
             f"state={self.overlay_state} "
-            f"has_bridge={self._overlay_bridge is not None} "
-            f"has_manager={self._overlay_manager is not None} "
-            f"presenter_attached={self._overlay_presenter is not None}"
+            f"has_bridge={runtime is not None and runtime.bridge is not None} "
+            f"has_manager={runtime is not None and runtime.process_manager is not None} "
+            f"presenter_attached={runtime is not None and runtime.presenter is not None}"
         )
         async with self._overlay_lock:
             runtime = self._overlay_runtime
-            has_runtime = (
-                self._overlay_bridge is not None
-                or self._overlay_manager is not None
-                or (self._overlay_start_task is not None and not self._overlay_start_task.done())
-                or self._overlay_runtime_has_resources(runtime)
-            )
+            has_runtime = self._overlay_runtime_has_resources(runtime)
             if not has_runtime and self.overlay_state == "off":
                 return
 
@@ -4119,7 +4121,7 @@ class GuiController:
             self._notify_overlay_state()
 
     async def _emit_overlay_shutdown(self) -> None:
-        presenter = self._overlay_presenter
+        presenter = self._current_overlay_presenter_for_direct_runtime_command()
         if presenter is None:
             return
         with contextlib.suppress(Exception):
@@ -4131,25 +4133,8 @@ class GuiController:
         *,
         preserve_presenter_state: bool,
         emit_shutdown: bool = False,
-        adopt_legacy_presenter_mirror: bool = True,
     ) -> bool:
-        runtime = self._ensure_overlay_runtime_handle(
-            adopt_legacy_presenter_mirror=adopt_legacy_presenter_mirror,
-        )
-        if (
-            adopt_legacy_presenter_mirror
-            and self._overlay_presenter is not None
-            and runtime.presenter is None
-        ):
-            runtime.attach_presenter(self._overlay_presenter)
-        if self._overlay_bridge is not None and runtime.bridge is None:
-            runtime.attach_bridge(self._overlay_bridge)
-        if self._overlay_manager is not None and runtime.process_manager is None:
-            runtime.attach_process_manager(self._overlay_manager)
-        if self._overlay_diagnostics is not None and runtime.diagnostics is None:
-            runtime.attach_diagnostics(self._overlay_diagnostics)
-        if self._desktop_renderer_events is not None and runtime.renderer_events is None:
-            runtime.attach_renderer_events(self._desktop_renderer_events)
+        runtime = self._ensure_overlay_runtime_handle()
 
         await self._cancel_desktop_bounds_persistence()
         close_succeeded = True
@@ -4169,7 +4154,6 @@ class GuiController:
             )
             if not detailed_emitted:
                 self.log_basic(message, level=logging.WARNING)
-        self._sync_overlay_legacy_fields_from_runtime(runtime)
         if close_succeeded and not self._overlay_runtime_has_resources(runtime):
             self._overlay_runtime = None
         self._active_overlay_target = None
@@ -4198,15 +4182,16 @@ class GuiController:
             bridge.report_overlay_state(self.overlay_state, failure_reason=self.failure_reason)
 
     def _log_overlay_state_transition(self, previous_state: str, next_state: str) -> None:
-        manager = self._overlay_manager
+        runtime = self._overlay_runtime
+        manager = runtime.process_manager if runtime is not None else None
         transition_message = f"[Overlay] State transition: {previous_state} -> {next_state}"
         if self.failure_reason is not None:
             transition_message = f"{transition_message} failure_reason={self.failure_reason}"
         self.log_basic(transition_message)
         self.log_detailed(
             "[Overlay] State detail: "
-            f"presenter_attached={self._overlay_presenter is not None} "
-            f"bridge_attached={self._overlay_bridge is not None} "
+            f"presenter_attached={runtime is not None and runtime.presenter is not None} "
+            f"bridge_attached={runtime is not None and runtime.bridge is not None} "
             f"manager_state={manager.state if manager is not None else None}"
         )
 
@@ -5381,7 +5366,8 @@ class GuiController:
             )
         )
         if source_language_changed or target_language_changed:
-            presenter = self._overlay_presenter
+            presenter = self._current_overlay_presenter_for_direct_runtime_command()
+            bridge = self._current_overlay_bridge_for_direct_runtime_command()
             self.log_basic(
                 "[Settings] Applying languages: "
                 f"source={prev_source_lang}->{settings.languages.source_language} "
@@ -5391,7 +5377,7 @@ class GuiController:
                 "[Settings] Language apply detail: "
                 f"overlay_state={self.overlay_state} "
                 f"presenter_attached={presenter is not None} "
-                f"bridge_attached={self._overlay_bridge is not None} "
+                f"bridge_attached={bridge is not None} "
                 "overlay_sink_matches_presenter="
                 f"{self.hub is not None and presenter is not None and getattr(self.hub, 'overlay_sink', None) is presenter}"
             )
@@ -6901,8 +6887,8 @@ class GuiController:
         )
         await self._init_pipeline()
         assert self.hub is not None
-        presenter = self._overlay_presenter
-        if self._overlay_presenter_ingress_is_active(presenter):
+        presenter = self._current_overlay_presenter_for_direct_runtime_command()
+        if presenter is not None:
             self.hub.overlay_sink = presenter
 
         dash = getattr(self.app, "view_dashboard", None)
@@ -8310,7 +8296,8 @@ class GuiController:
             and self.runtime_logging.mode is SessionLoggingMode.DETAILED
         ):
             self._schedule_audio_environment_snapshot()
-        manager = self._overlay_manager
+        runtime = self._overlay_runtime
+        manager = runtime.process_manager if runtime is not None else None
         if manager is not None:
             set_logging_mode = getattr(manager, "set_logging_mode", None)
             if callable(set_logging_mode):

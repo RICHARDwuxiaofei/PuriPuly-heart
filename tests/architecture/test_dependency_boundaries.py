@@ -748,6 +748,41 @@ def test_ui_controller_uses_adapter_seam_instead_of_concrete_provider_imports() 
     }
 
 
+def test_ui_controller_active_overlay_logic_avoids_legacy_resource_mirrors() -> None:
+    controller_path = SOURCE_PACKAGE_ROOT / "ui" / "controller.py"
+    tree = ast.parse(controller_path.read_text(encoding="utf-8"))
+    legacy_mirror_fields = {
+        "_overlay_presenter",
+        "_overlay_bridge",
+        "_overlay_manager",
+        "_overlay_diagnostics",
+        "_overlay_start_task",
+        "_overlay_monitor_task",
+        "_desktop_renderer_events",
+        "_desktop_renderer_events_task",
+    }
+    allowed_private_alias_shims = legacy_mirror_fields | {
+        "_overlay_runtime_for_private_alias",
+    }
+    offenders: list[str] = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        if node.name in allowed_private_alias_shims:
+            continue
+        for child in ast.walk(node):
+            if (
+                isinstance(child, ast.Attribute)
+                and child.attr in legacy_mirror_fields
+                and isinstance(child.value, ast.Name)
+                and child.value.id == "self"
+            ):
+                offenders.append(f"{node.name}:{child.lineno}:{child.attr}")
+
+    assert offenders == []
+
+
 def test_current_concrete_osc_imports_are_adapter_boundary_violations() -> None:
     orchestrator_rule = _rule_for_layer(ORCHESTRATOR)
     ui_rule = _rule_for_layer(UI_ADAPTERS_RENDERERS)

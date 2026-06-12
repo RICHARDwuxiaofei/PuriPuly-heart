@@ -4583,6 +4583,83 @@ async def test_overlay_start_task_is_owned_by_overlay_runtime_handle(
     await controller.set_overlay_enabled(False)
 
 
+def test_overlay_private_resource_aliases_delegate_to_runtime_owner() -> None:
+    from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
+
+    controller = _make_controller(app=SimpleNamespace())
+    presenter = object()
+    bridge = object()
+    manager = SimpleNamespace(state="connected")
+    diagnostics = object()
+    renderer_events: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+    controller._overlay_presenter = presenter  # type: ignore[assignment]
+    controller._overlay_bridge = bridge  # type: ignore[assignment]
+    controller._overlay_manager = manager  # type: ignore[assignment]
+    controller._overlay_diagnostics = diagnostics  # type: ignore[assignment]
+    controller._desktop_renderer_events = renderer_events
+
+    runtime = controller._overlay_runtime  # noqa: SLF001 - compatibility shim assertion
+    assert isinstance(runtime, OverlayRuntimeHandle)
+    assert runtime.presenter is presenter
+    assert runtime.bridge is bridge
+    assert runtime.process_manager is manager
+    assert runtime.diagnostics is diagnostics
+    assert runtime.renderer_events is renderer_events
+
+    replacement_bridge = object()
+    runtime.attach_bridge(replacement_bridge)
+
+    assert controller._overlay_bridge is replacement_bridge
+
+
+@pytest.mark.asyncio
+async def test_overlay_start_and_shutdown_do_not_call_legacy_runtime_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
+
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    if hasattr(GuiController, "_sync_overlay_legacy_fields_from_runtime"):
+
+        def fail_legacy_sync(self: GuiController, runtime: OverlayRuntimeHandle | None) -> None:
+            _ = self, runtime
+            raise AssertionError("active overlay paths must not call legacy runtime sync")
+
+        monkeypatch.setattr(
+            GuiController,
+            "_sync_overlay_legacy_fields_from_runtime",
+            fail_legacy_sync,
+        )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    runtime = controller._overlay_runtime  # noqa: SLF001 - runtime owner assertion
+    assert isinstance(runtime, OverlayRuntimeHandle)
+    start_task = runtime.start_task
+    assert start_task is not None
+
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await start_task
+
+    assert controller.overlay_state == "connected"
+    assert runtime.presenter is controller.hub.overlay_sink
+    assert runtime.bridge is FakeOverlayBridge.instances[0]
+    assert runtime.process_manager is manager
+
+    await controller.set_overlay_enabled(False)
+
+    assert controller.overlay_state == "off"
+    assert controller._overlay_runtime is None
+
+
 @pytest.mark.asyncio
 async def test_overlay_shutdown_stops_bridge_while_bridge_start_is_in_flight(
     monkeypatch: pytest.MonkeyPatch,
@@ -7398,10 +7475,6 @@ async def test_overlay_restart_detaches_preserved_presenter_from_old_runtime_bef
     assert old_runtime is not None
     assert old_runtime.presenter is presenter
 
-    controller._overlay_presenter = OverlayPresenter(
-        calibration=controller.overlay_calibration.copy(),
-        clock=controller.clock,
-    )
     controller.overlay_state = "failed"
 
     try:
@@ -16571,6 +16644,7 @@ async def test_order23_apply_settings_runtime_failure_degrades_without_rollback_
     controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
     controller.settings = AppSettings()
     controller.hub = DummyHub()
+    controller.overlay_state = "connected"
     controller._overlay_presenter = FailingOverlayPresenter()  # type: ignore[assignment]
     pending = copy.deepcopy(controller.settings)
     pending.overlay.show_translation = False
@@ -17821,6 +17895,7 @@ def test_apply_overlay_calibration_uses_page_run_task_when_available(
     page = FakePage()
     controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
     controller.settings = AppSettings()
+    controller.overlay_state = "connected"
     service = RecordingSettingsMutationService()
     controller.settings_mutation_service = service
     controller._overlay_bridge = FakeOverlayBridge(session_token="token")
@@ -17848,7 +17923,9 @@ def test_apply_overlay_calibration_uses_page_run_task_when_available(
     )
     assert service.requests[0].values == {"overlay.calibration.offset_x": 0.25}
     assert controller.settings.overlay.calibration.offset_x == 0.25
-    assert controller._overlay_bridge.snapshots[-1].calibration.offset_x == 0.25
+    runtime = controller._overlay_runtime
+    assert runtime is not None
+    assert runtime.bridge.snapshots[-1].calibration.offset_x == 0.25
 
 
 def test_apply_overlay_calibration_without_page_run_task_skips_persistence_and_logs(
@@ -17892,6 +17969,7 @@ def test_schedule_overlay_calibration_emit_preserves_traceback_in_detailed_log()
         config_path=Path("settings.json"),
     )
     controller._runtime_logging = RuntimeLoggingSpy()
+    controller.overlay_state = "connected"
     controller._overlay_presenter = object()  # type: ignore[assignment]
 
     controller._schedule_overlay_calibration_emit()
@@ -17924,6 +18002,7 @@ async def test_apply_overlay_calibration_persists_settings_and_emits_overlay_eve
     page = FakePage()
     controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
     controller.settings = AppSettings()
+    controller.overlay_state = "connected"
     service = RecordingSettingsMutationService()
     controller.settings_mutation_service = service
     controller._overlay_bridge = FakeOverlayBridge(session_token="token")
@@ -17945,7 +18024,9 @@ async def test_apply_overlay_calibration_persists_settings_and_emits_overlay_eve
     assert controller.settings.overlay.calibration.distance == 1.2
     assert len(service.requests) == 1
     assert service.requests[0].values == {"overlay.calibration.distance": 1.2}
-    assert controller._overlay_bridge.snapshots[-1].calibration.distance == 1.2
+    runtime = controller._overlay_runtime
+    assert runtime is not None
+    assert runtime.bridge.snapshots[-1].calibration.distance == 1.2
 
 
 @pytest.mark.asyncio
@@ -17953,6 +18034,7 @@ async def test_apply_settings_updates_overlay_presenter_display_preferences() ->
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.hub = DummyHub()
+    controller.overlay_state = "connected"
     controller._overlay_bridge = FakeOverlayBridge(session_token="token")
     controller._overlay_presenter = OverlayPresenter(
         bridge=controller._overlay_bridge,
@@ -17967,10 +18049,13 @@ async def test_apply_settings_updates_overlay_presenter_display_preferences() ->
 
     await controller.apply_settings(updated)
 
-    assert controller._overlay_presenter.show_translation is False
-    assert controller._overlay_presenter.show_peer_original is False
+    runtime = controller._overlay_runtime
+    assert runtime is not None
+    presenter = runtime.presenter
+    assert presenter.show_translation is False
+    assert presenter.show_peer_original is False
     # The product refresh burst is runtime-only, not a settings knob.
-    assert controller._overlay_presenter.peer_presentation_refresh_burst is True
+    assert presenter.peer_presentation_refresh_burst is True
 
 
 @pytest.mark.asyncio
