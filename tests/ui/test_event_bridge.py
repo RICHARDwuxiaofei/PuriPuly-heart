@@ -185,6 +185,7 @@ class DummyApp:
                 translation_enabled=False,
                 stt=SimpleNamespace(state=STTSessionState.STREAMING),
             ),
+            get_event_language_codes=lambda: ("ko", "en"),
             managed_auth_pending=False,
             clear_managed_auth_pending_state=lambda: self._record_clear_managed_auth_pending(),
         )
@@ -241,6 +242,19 @@ class RuntimeLoggingCapture:
             return False
         self.detailed_messages.append((level, message))
         return True
+
+
+def test_event_bridge_reads_language_codes_from_controller_contract_without_settings_shape() -> (
+    None
+):
+    app = DummyApp()
+    app.controller = SimpleNamespace(
+        get_event_language_codes=lambda: ("ja", "de"),
+        hub=SimpleNamespace(translation_enabled=False),
+    )
+    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+
+    assert bridge._get_language_codes() == ("ja", "de")
 
 
 class RecordingDashboardDestination:

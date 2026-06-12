@@ -392,6 +392,14 @@ class ManagedOpenRouterReleaseService:
     def __post_init__(self, hardware_hash_provider: HardwareFingerprintProvider | None) -> None:
         self._legacy_hardware_hash_provider = hardware_hash_provider
 
+    @property
+    def model(self) -> object | None:
+        return self.settings.openrouter.llm_model
+
+    @property
+    def selected_source(self) -> object | None:
+        return self.settings.openrouter.selected_source
+
     def _start_shared_task(
         self,
         attr_name: str,
@@ -1125,17 +1133,13 @@ class ManagedOpenRouterLLMProvider(LLMProvider):
     def model(self) -> object | None:
         if self._delegate is not None:
             return getattr(self._delegate, "model", None)
-        settings = getattr(self.release_service, "settings", None)
-        openrouter_settings = getattr(settings, "openrouter", None)
-        return getattr(openrouter_settings, "llm_model", None)
+        return getattr(self.release_service, "model", None)
 
     @property
     def selected_source(self) -> object | None:
         if self._delegate is not None:
             return getattr(self._delegate, "selected_source", None)
-        settings = getattr(self.release_service, "settings", None)
-        openrouter_settings = getattr(settings, "openrouter", None)
-        return getattr(openrouter_settings, "selected_source", None)
+        return getattr(self.release_service, "selected_source", None)
 
     async def _ensure_delegate(self) -> LLMProvider:
         if self._delegate is not None:

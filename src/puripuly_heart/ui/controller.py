@@ -1174,6 +1174,11 @@ class GuiController:
             resolved_settings
         )
 
+    def get_event_language_codes(self) -> tuple[str | None, str | None]:
+        if self.settings is None:
+            return None, None
+        return self.settings.languages.source_language, self.settings.languages.target_language
+
     def build_overlay_peer_consumer_contract(self) -> OverlayPeerConsumerContract | None:
         if self.settings is None:
             return None

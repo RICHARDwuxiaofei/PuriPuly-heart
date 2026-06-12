@@ -52,6 +52,14 @@ class ImportViolation:
     reason: str
 
 
+@dataclass(frozen=True, order=True, slots=True)
+class SettingsRuntimeConfinementViolation:
+    category: str
+    path: str
+    symbol: str
+    rationale: str
+
+
 @dataclass(frozen=True, slots=True)
 class LayerRule:
     layer: str
@@ -494,6 +502,270 @@ KNOWN_ALLOWED_VIOLATIONS: frozenset[ImportViolation] = frozenset(
     }
 )
 
+SETTINGS_COMPATIBILITY_SOURCE_PATHS = frozenset(
+    {
+        "src/puripuly_heart/config/settings.py",
+        "src/puripuly_heart/config/settings_vnext/compat.py",
+        "src/puripuly_heart/config/settings_vnext/facade.py",
+        "src/puripuly_heart/config/settings_vnext/migration.py",
+        "src/puripuly_heart/config/settings_vnext/serialization.py",
+    }
+)
+
+SETTINGS_PUBLIC_COMPATIBILITY_FACADE_PATHS = frozenset(
+    {
+        "src/puripuly_heart/app/wiring.py",
+    }
+)
+
+LEGACY_SETTINGS_API_NAMES = frozenset(
+    {
+        "AppSettings",
+        "from_dict",
+        "load_settings",
+        "load_settings_with_result",
+        "save_settings",
+        "save_settings_with_result",
+        "to_dict",
+        "to_legacy_dict",
+    }
+)
+
+FLAT_SETTINGS_PATCH_SYMBOLS = frozenset(
+    {
+        "ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS",
+        "ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS",
+        "ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS",
+        "ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS",
+        "SettingsPathMutationValidator",
+        "SettingsPathPatch",
+    }
+)
+
+CONTROLLER_FLAT_SETTINGS_PATCH_HELPERS = frozenset(
+    {
+        "_apply_settings_path_patch",
+        "_build_settings_path_patch",
+        "_get_settings_path_value",
+        "_set_settings_path_value",
+    }
+)
+
+LEGACY_SETTINGS_VALUE_PAYLOAD_KEYS = frozenset(
+    {
+        "api_key_verified",
+        "openrouter.llm_model",
+        "openrouter.selected_source",
+        "openrouter.selection_alias",
+        "provider.llm",
+    }
+)
+
+LEGACY_SETTINGS_VALUE_PAYLOAD_PREFIXES = (
+    "state.managed_connection.",
+    "state.managed_identity.",
+    "state.provider_verification.",
+)
+
+UNKNOWN_SETTINGS_RUNTIME_CONFINEMENT_RATIONALE = "unclassified order-11 settings runtime debt"
+
+KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementViolation] = frozenset(
+    {
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/app/headless_mic.py",
+            "AppSettings",
+            "headless mic runner still consumes legacy settings until a resolved runtime config slice replaces startup inputs",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/app/headless_stdin.py",
+            "AppSettings",
+            "headless stdin runner still consumes legacy settings until a resolved runtime config slice replaces startup inputs",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/core/managed_identity.py",
+            "AppSettings",
+            "managed identity persistence still accepts legacy settings pending managed-identity state port extraction",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/core/managed_openrouter_release.py",
+            "AppSettings",
+            "managed OpenRouter release still owns legacy settings pending explicit managed state and intent contracts",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/core/openrouter_credentials.py",
+            "AppSettings",
+            "OpenRouter credential resolution still accepts legacy settings pending OpenRouter runtime intent adoption",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/core/openrouter_handoff.py",
+            "AppSettings",
+            "OpenRouter handoff still mutates legacy managed state pending managed connection state service extraction",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/core/stt/custom_vocab.py",
+            "AppSettings",
+            "custom vocabulary helpers still derive runtime values from legacy settings pending STT intent DTO adoption",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/main.py",
+            "AppSettings",
+            "CLI/headless entrypoints still load legacy settings until startup resolves vNext DTOs before runtime",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/main.py",
+            "load_settings",
+            "CLI/headless entrypoints still call the public legacy load facade until startup cutover lands",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/ui/app.py",
+            "AppSettings",
+            "UI app managed OpenRouter flows still build legacy settings drafts pending controller/service request DTOs",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/ui/app.py",
+            "save_settings",
+            "UI app still saves through the legacy public facade pending controller/service request DTOs",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/ui/controller.py",
+            "AppSettings",
+            "GuiController still owns legacy settings state pending controller-facing vNext intent/state DTO cutover",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/ui/controller.py",
+            "load_settings",
+            "GuiController still loads through the legacy public facade pending vNext persistence adapter cutover",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/ui/controller.py",
+            "save_settings",
+            "GuiController still saves through the legacy public facade pending vNext persistence adapter cutover",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/ui/controller.py",
+            "to_dict",
+            "GuiController still snapshots legacy settings pending vNext serialization snapshots or typed equality",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/ui/views/settings.py",
+            "AppSettings",
+            "SettingsView still edits legacy settings drafts pending settings view-model DTO adoption",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "dynamic-legacy-settings-shape-read",
+            "src/puripuly_heart/ui/app.py",
+            "TranslatorApp._build_managed_openrouter_byok_target_settings",
+            "UI app managed-auth flow still reads controller.settings pending controller/service request DTOs",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-flat-settings-patch-definition",
+            "src/puripuly_heart/app/services/settings_mutation.py",
+            "ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS",
+            "settings mutation service still exposes legacy flat path surface pending vNext mutation DTOs",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-flat-settings-patch-definition",
+            "src/puripuly_heart/app/services/settings_mutation.py",
+            "ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS",
+            "settings mutation service still exposes legacy flat path surface pending vNext mutation DTOs",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-flat-settings-patch-definition",
+            "src/puripuly_heart/app/services/settings_mutation.py",
+            "ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS",
+            "settings mutation service still exposes legacy flat path surface pending vNext mutation DTOs",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-flat-settings-patch-definition",
+            "src/puripuly_heart/app/services/settings_mutation.py",
+            "ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS",
+            "settings mutation service still exposes legacy flat path surface pending vNext mutation DTOs",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-flat-settings-patch-definition",
+            "src/puripuly_heart/app/services/settings_mutation.py",
+            "SettingsPathMutationValidator",
+            "settings mutation service still validates legacy flat paths pending typed mutation commands",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-flat-settings-patch-definition",
+            "src/puripuly_heart/app/services/settings_mutation.py",
+            "SettingsPathPatch",
+            "settings mutation service still carries legacy flat path patches pending typed mutation commands",
+        ),
+        *(
+            SettingsRuntimeConfinementViolation(
+                "legacy-flat-settings-patch-import",
+                "src/puripuly_heart/ui/controller.py",
+                symbol,
+                "GuiController still imports legacy flat patch surfaces pending controller-facing typed mutation commands",
+            )
+            for symbol in FLAT_SETTINGS_PATCH_SYMBOLS
+        ),
+        *(
+            SettingsRuntimeConfinementViolation(
+                "legacy-flat-settings-patch-helper",
+                "src/puripuly_heart/ui/controller.py",
+                symbol,
+                "GuiController still diffs/applies legacy flat settings paths pending typed mutation commands",
+            )
+            for symbol in CONTROLLER_FLAT_SETTINGS_PATCH_HELPERS
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-value-payload-key",
+            "src/puripuly_heart/app/services/openrouter_pkce_handoff.py",
+            "state.provider_verification.*",
+            "PKCE handoff still writes provider verification via flat settings payload pending operational-state DTO persistence",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-value-payload-key",
+            "src/puripuly_heart/app/services/secret_settings_transaction.py",
+            "state.provider_verification.*",
+            "secret verification still writes provider verification via flat settings payload pending operational-state DTO persistence",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-value-payload-key",
+            "src/puripuly_heart/app/services/settings_mutation.py",
+            "openrouter.llm_model",
+            "settings mutation flat path surface still carries legacy OpenRouter payload keys pending vNext mutation DTOs",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-value-payload-key",
+            "src/puripuly_heart/app/services/settings_mutation.py",
+            "openrouter.selected_source",
+            "settings mutation flat path surface still carries legacy OpenRouter payload keys pending vNext mutation DTOs",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-value-payload-key",
+            "src/puripuly_heart/app/services/settings_mutation.py",
+            "openrouter.selection_alias",
+            "settings mutation flat path surface still carries legacy OpenRouter payload keys pending vNext mutation DTOs",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-value-payload-key",
+            "src/puripuly_heart/app/services/settings_mutation.py",
+            "provider.llm",
+            "settings mutation flat path surface still carries legacy provider payload keys pending vNext mutation DTOs",
+        ),
+    }
+)
+
 
 def _module_name_for_path(path: Path) -> str:
     relative = path.relative_to(SOURCE_PACKAGE_ROOT).with_suffix("")
@@ -648,6 +920,336 @@ def _format_violations(violations: list[ImportViolation]) -> str:
         "  ),"
         for violation in violations
     )
+
+
+def _format_settings_runtime_violations(
+    violations: list[SettingsRuntimeConfinementViolation],
+) -> str:
+    if not violations:
+        return "  <none>"
+
+    return "\n".join(
+        "  SettingsRuntimeConfinementViolation(\n"
+        f'      category="{violation.category}",\n'
+        f'      path="{violation.path}",\n'
+        f'      symbol="{violation.symbol}",\n'
+        f'      rationale="{violation.rationale}",\n'
+        "  ),"
+        for violation in violations
+    )
+
+
+def _known_settings_runtime_rationale(
+    *,
+    category: str,
+    path: str,
+    symbol: str,
+) -> str:
+    for violation in KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT:
+        if violation.category == category and violation.path == path and violation.symbol == symbol:
+            return violation.rationale
+    return UNKNOWN_SETTINGS_RUNTIME_CONFINEMENT_RATIONALE
+
+
+def _settings_runtime_violation(
+    *,
+    category: str,
+    path: str,
+    symbol: str,
+) -> SettingsRuntimeConfinementViolation:
+    return SettingsRuntimeConfinementViolation(
+        category=category,
+        path=path,
+        symbol=symbol,
+        rationale=_known_settings_runtime_rationale(
+            category=category,
+            path=path,
+            symbol=symbol,
+        ),
+    )
+
+
+def _settings_runtime_confinement_violations() -> frozenset[SettingsRuntimeConfinementViolation]:
+    violations: set[SettingsRuntimeConfinementViolation] = set()
+    for source_path in sorted(SOURCE_PACKAGE_ROOT.rglob("*.py")):
+        relative_path = _relative_repo_path(source_path)
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        violations.update(_legacy_settings_api_import_violations(tree, relative_path))
+        violations.update(_dynamic_settings_shape_violations(tree, relative_path))
+        violations.update(_flat_settings_patch_violations(tree, relative_path))
+        violations.update(_legacy_settings_value_payload_key_violations(tree, relative_path))
+    return frozenset(violations)
+
+
+def _legacy_settings_api_import_violations(
+    tree: ast.AST,
+    relative_path: str,
+) -> set[SettingsRuntimeConfinementViolation]:
+    if relative_path in SETTINGS_COMPATIBILITY_SOURCE_PATHS:
+        return set()
+    if relative_path in SETTINGS_PUBLIC_COMPATIBILITY_FACADE_PATHS:
+        return set()
+
+    violations: set[SettingsRuntimeConfinementViolation] = set()
+    migration_module_aliases = _settings_vnext_migration_module_aliases(tree)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            if _uses_qualified_to_legacy_dict(node, migration_module_aliases):
+                violations.add(
+                    _settings_runtime_violation(
+                        category="legacy-settings-migration-projection",
+                        path=relative_path,
+                        symbol="to_legacy_dict",
+                    )
+                )
+            continue
+        if node.module == "puripuly_heart.config.settings":
+            imported_legacy_symbols = {
+                alias.name for alias in node.names if alias.name in LEGACY_SETTINGS_API_NAMES
+            }
+        elif node.module == "puripuly_heart.config.settings_vnext.migration":
+            imported_legacy_symbols = {
+                alias.name for alias in node.names if alias.name == "to_legacy_dict"
+            }
+        else:
+            continue
+        for symbol in sorted(imported_legacy_symbols):
+            violations.add(
+                _settings_runtime_violation(
+                    category="legacy-settings-api-import",
+                    path=relative_path,
+                    symbol=symbol,
+                )
+            )
+    return violations
+
+
+def _settings_vnext_migration_module_aliases(tree: ast.AST) -> frozenset[str]:
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "puripuly_heart.config.settings_vnext.migration":
+                    aliases.add(alias.asname or "puripuly_heart")
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "puripuly_heart.config.settings_vnext":
+                aliases.update(
+                    alias.asname or alias.name for alias in node.names if alias.name == "migration"
+                )
+    return frozenset(aliases)
+
+
+def _uses_qualified_to_legacy_dict(
+    node: ast.AST,
+    migration_module_aliases: frozenset[str],
+) -> bool:
+    if not isinstance(node, ast.Attribute) or node.attr != "to_legacy_dict":
+        return False
+    parts = _attribute_parts(node)
+    if len(parts) < 2:
+        return False
+    module_parts = parts[:-1]
+    if module_parts[0] in migration_module_aliases:
+        return True
+    return module_parts == ["puripuly_heart", "config", "settings_vnext", "migration"]
+
+
+def _attribute_parts(node: ast.AST) -> list[str]:
+    if isinstance(node, ast.Name):
+        return [node.id]
+    if isinstance(node, ast.Attribute):
+        return [*_attribute_parts(node.value), node.attr]
+    return []
+
+
+def _dynamic_settings_shape_violations(
+    tree: ast.AST,
+    relative_path: str,
+) -> set[SettingsRuntimeConfinementViolation]:
+    if relative_path in SETTINGS_COMPATIBILITY_SOURCE_PATHS:
+        return set()
+
+    violations: set[SettingsRuntimeConfinementViolation] = set()
+    for node, qualified_name in _function_nodes_with_qualified_names(tree):
+        function_symbol = _settings_shape_function_symbol(node, qualified_name)
+        if function_symbol is None:
+            continue
+        violations.add(
+            _settings_runtime_violation(
+                category="dynamic-legacy-settings-shape-read",
+                path=relative_path,
+                symbol=function_symbol,
+            )
+        )
+    return violations
+
+
+def _function_nodes_with_qualified_names(
+    tree: ast.AST,
+) -> Iterator[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str]]:
+    parents = {
+        id(child): parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        parent = parents.get(id(node))
+        if isinstance(parent, ast.ClassDef):
+            yield node, f"{parent.name}.{node.name}"
+        else:
+            yield node, node.name
+
+
+def _settings_shape_function_symbol(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    qualified_name: str,
+) -> str | None:
+    calls_dynamic_settings = False
+    reads_legacy_settings_leaf = False
+    calls_settings_identity_helper = False
+    for child in ast.walk(node):
+        if _is_getattr_settings_call(child):
+            calls_dynamic_settings = True
+        if isinstance(child, ast.Attribute) and child.attr in {"languages", "openrouter"}:
+            reads_legacy_settings_leaf = True
+        if _is_getattr_legacy_settings_leaf_call(child):
+            reads_legacy_settings_leaf = True
+        if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute):
+            if child.func.attr == "_settings_identity":
+                calls_settings_identity_helper = True
+
+    if calls_dynamic_settings and (reads_legacy_settings_leaf or calls_settings_identity_helper):
+        return qualified_name
+    if node.name == "_settings_identity" and reads_legacy_settings_leaf:
+        return qualified_name
+    return None
+
+
+def _is_getattr_settings_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "settings"
+    )
+
+
+def _is_getattr_legacy_settings_leaf_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value in {"languages", "llm_model", "openrouter", "selected_source"}
+    )
+
+
+def _flat_settings_patch_violations(
+    tree: ast.AST,
+    relative_path: str,
+) -> set[SettingsRuntimeConfinementViolation]:
+    violations: set[SettingsRuntimeConfinementViolation] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == (
+            "puripuly_heart.app.services.settings_mutation"
+        ):
+            for alias in node.names:
+                if alias.name in FLAT_SETTINGS_PATCH_SYMBOLS:
+                    violations.add(
+                        _settings_runtime_violation(
+                            category="legacy-flat-settings-patch-import",
+                            path=relative_path,
+                            symbol=alias.name,
+                        )
+                    )
+        if isinstance(node, ast.ClassDef) and node.name in FLAT_SETTINGS_PATCH_SYMBOLS:
+            violations.add(
+                _settings_runtime_violation(
+                    category="legacy-flat-settings-patch-definition",
+                    path=relative_path,
+                    symbol=node.name,
+                )
+            )
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name in (
+            CONTROLLER_FLAT_SETTINGS_PATCH_HELPERS
+        ):
+            violations.add(
+                _settings_runtime_violation(
+                    category="legacy-flat-settings-patch-helper",
+                    path=relative_path,
+                    symbol=node.name,
+                )
+            )
+        if isinstance(node, ast.Assign | ast.AnnAssign):
+            for target_name in _assignment_target_names(node):
+                if target_name in FLAT_SETTINGS_PATCH_SYMBOLS:
+                    violations.add(
+                        _settings_runtime_violation(
+                            category="legacy-flat-settings-patch-definition",
+                            path=relative_path,
+                            symbol=target_name,
+                        )
+                    )
+    return violations
+
+
+def _assignment_target_names(node: ast.Assign | ast.AnnAssign) -> Iterator[str]:
+    targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
+    for target in targets:
+        if isinstance(target, ast.Name):
+            yield target.id
+
+
+def _legacy_settings_value_payload_key_violations(
+    tree: ast.AST,
+    relative_path: str,
+) -> set[SettingsRuntimeConfinementViolation]:
+    if not relative_path.startswith("src/puripuly_heart/app/services/"):
+        return set()
+
+    violations: set[SettingsRuntimeConfinementViolation] = set()
+    for node in ast.walk(tree):
+        symbol = _legacy_settings_value_payload_symbol(node)
+        if symbol is None:
+            continue
+        violations.add(
+            _settings_runtime_violation(
+                category="legacy-settings-value-payload-key",
+                path=relative_path,
+                symbol=symbol,
+            )
+        )
+    return violations
+
+
+def _legacy_settings_value_payload_symbol(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return _legacy_settings_value_payload_text_symbol(node.value)
+    if isinstance(node, ast.JoinedStr):
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                symbol = _legacy_settings_value_payload_text_symbol(value.value, dynamic=True)
+                if symbol is not None:
+                    return symbol
+    return None
+
+
+def _legacy_settings_value_payload_text_symbol(
+    text: str,
+    *,
+    dynamic: bool = False,
+) -> str | None:
+    if text in LEGACY_SETTINGS_VALUE_PAYLOAD_KEYS:
+        return text
+    for prefix in LEGACY_SETTINGS_VALUE_PAYLOAD_PREFIXES:
+        if text.startswith(prefix):
+            return f"{prefix}*"
+        if dynamic and prefix.startswith(text):
+            return f"{prefix}*"
+    return None
 
 
 def test_dependency_rule_vocabulary_distinguishes_required_layers() -> None:
@@ -968,3 +1570,40 @@ def test_dependency_boundary_allowlist_matches_current_violations() -> None:
         "Stale allowlist entries:\n"
         f"{_format_violations(stale)}"
     )
+
+
+def test_settings_runtime_confinement_guard_tracks_current_debt() -> None:
+    actual = _settings_runtime_confinement_violations()
+
+    unexpected = sorted(actual - KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT)
+    stale = sorted(KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT - actual)
+
+    assert not unexpected and not stale, (
+        "Settings runtime confinement guard mismatch. Legacy settings APIs, "
+        "dynamic settings-shape reads, and legacy flat payload keys must be "
+        "confined to compatibility/migration locations or listed as current "
+        "order-11 debt with an explicit rationale.\n"
+        "Unexpected violations:\n"
+        f"{_format_settings_runtime_violations(unexpected)}\n"
+        "Stale allowlist entries:\n"
+        f"{_format_settings_runtime_violations(stale)}"
+    )
+
+
+def test_settings_runtime_confinement_guard_flags_qualified_to_legacy_dict_usage() -> None:
+    tree = ast.parse(
+        "import puripuly_heart.config.settings_vnext.migration as migration\n"
+        "migration.to_legacy_dict({})\n"
+    )
+
+    violations = _legacy_settings_api_import_violations(
+        tree,
+        "src/puripuly_heart/app/services/example.py",
+    )
+    violation_keys = {(item.category, item.path, item.symbol) for item in violations}
+
+    assert (
+        "legacy-settings-migration-projection",
+        "src/puripuly_heart/app/services/example.py",
+        "to_legacy_dict",
+    ) in violation_keys

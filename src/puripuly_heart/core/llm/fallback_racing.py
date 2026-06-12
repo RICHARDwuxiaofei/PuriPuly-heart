@@ -474,29 +474,22 @@ class FallbackRacingLLMProvider(LLMProvider):
                 getattr(provider, "credential_source", None),
             )
         )
-        settings_model, settings_source = cls._settings_identity(
-            getattr(provider, "settings", None)
-        )
-        release_model, release_source = cls._settings_identity(
-            getattr(getattr(provider, "release_service", None), "settings", None)
+        release_service = getattr(provider, "release_service", None)
+        release_model = cls._stringify_metadata(getattr(release_service, "model", None))
+        release_source = cls._stringify_metadata(
+            getattr(
+                release_service,
+                "selected_source",
+                getattr(release_service, "credential_source", None),
+            )
         )
 
-        model = direct_model or settings_model or release_model
-        source = direct_source or settings_source or release_source
+        model = direct_model or release_model
+        source = direct_source or release_source
         is_openrouter = cls._is_openrouter_provider(provider) or any(
-            value is not None
-            for value in (release_model, release_source, settings_model, settings_source)
+            value is not None for value in (release_model, release_source)
         )
         return model, source, is_openrouter
-
-    @classmethod
-    def _settings_identity(cls, settings: object | None) -> tuple[str | None, str | None]:
-        if settings is None:
-            return None, None
-        openrouter_settings = getattr(settings, "openrouter", settings)
-        model = cls._stringify_metadata(getattr(openrouter_settings, "llm_model", None))
-        source = cls._stringify_metadata(getattr(openrouter_settings, "selected_source", None))
-        return model, source
 
     @staticmethod
     def _is_openrouter_provider(provider: object) -> bool:

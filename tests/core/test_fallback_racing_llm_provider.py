@@ -228,6 +228,14 @@ class _ManagedReleaseServiceStub:
     settings: AppSettings
     api_key: str = "managed-openrouter-key"
 
+    @property
+    def model(self) -> object | None:
+        return self.settings.openrouter.llm_model
+
+    @property
+    def selected_source(self) -> object | None:
+        return self.settings.openrouter.selected_source
+
     async def ensure_key_for_llm_start(self) -> ManagedOpenRouterReleaseResult:
         return ManagedOpenRouterReleaseResult(
             behavior=ManagedOpenRouterReleaseBehavior.READY,
@@ -238,7 +246,24 @@ class _ManagedReleaseServiceStub:
 
 def test_provider_identity_recovers_managed_wrapper_settings_before_delegate_init() -> None:
     provider = ManagedOpenRouterLLMProvider(
-        release_service=SimpleNamespace(settings=_managed_openrouter_settings()),
+        release_service=_ManagedReleaseServiceStub(settings=_managed_openrouter_settings()),
+        delegate_factory=lambda api_key: FakeLLM(translated_text=api_key),
+    )
+
+    identity = FallbackRacingLLMProvider._provider_identity(provider)
+
+    assert identity == (
+        OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
+        OpenRouterCredentialSource.MANAGED.value,
+    )
+
+
+def test_provider_identity_uses_managed_release_identity_metadata_before_delegate_init() -> None:
+    provider = ManagedOpenRouterLLMProvider(
+        release_service=SimpleNamespace(
+            model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            selected_source=OpenRouterCredentialSource.MANAGED,
+        ),
         delegate_factory=lambda api_key: FakeLLM(translated_text=api_key),
     )
 

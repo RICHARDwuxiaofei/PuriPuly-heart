@@ -397,10 +397,11 @@ class UIEventBridge:
 
     def _get_language_codes(self) -> tuple[str | None, str | None]:
         controller = getattr(self.app, "controller", None)
-        settings = getattr(controller, "settings", None)
-        if settings is None:
-            return None, None
-        return settings.languages.source_language, settings.languages.target_language
+        get_language_codes = getattr(controller, "get_event_language_codes", None)
+        if callable(get_language_codes):
+            source_language, target_language = get_language_codes()
+            return source_language, target_language
+        return None, None
 
     def _translation_enabled(self) -> bool:
         controller = getattr(self.app, "controller", None)
