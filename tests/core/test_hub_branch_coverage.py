@@ -359,11 +359,11 @@ async def test_start_is_idempotent_and_creates_background_tasks() -> None:
 
     await hub.start(auto_flush_osc=True)
     stt_task = hub._stt_task
-    osc_task = hub._osc_flush_task
+    osc_task = hub.output_runtime.chatbox_flush_task
     await hub.start(auto_flush_osc=True)
 
     assert hub._stt_task is stt_task
-    assert hub._osc_flush_task is osc_task
+    assert hub.output_runtime.chatbox_flush_task is osc_task
     await hub.stop()
 
 

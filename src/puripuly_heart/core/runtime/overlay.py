@@ -12,13 +12,13 @@ class OverlayRuntimeHandle:
     """Owns one overlay runtime generation and its background work."""
 
     resource_fields = (
-        "_overlay_presenter",
-        "_overlay_bridge",
-        "_overlay_manager",
-        "_overlay_start_task",
-        "_overlay_monitor_task",
-        "_desktop_renderer_events",
-        "_desktop_renderer_events_task",
+        "_presenter",
+        "_bridge",
+        "_process_manager",
+        "_start_task",
+        "_monitor_task",
+        "_renderer_events",
+        "_renderer_event_task",
         "OverlayBridge._heartbeat_task",
         "_AsyncioOverlayProcess._reader_tasks",
         "OverlayProcessManager._monitor_task",

@@ -79,20 +79,6 @@ class LocalSTTDownloadRuntime:
             "late_callback_rule": self.late_callback_rule,
         }
 
-    def adopt_legacy_state(
-        self,
-        *,
-        task: asyncio.Task[object] | None,
-        cancel_event: threading.Event | None,
-        origin: str | None,
-    ) -> None:
-        self._download_task = task
-        self._cancel_event = cancel_event
-        self._origin = origin
-        if task is not None:
-            task.add_done_callback(self._on_download_task_done)
-        self._notify_state_changed()
-
     def start(
         self,
         *,

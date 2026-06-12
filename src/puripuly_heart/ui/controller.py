@@ -392,14 +392,6 @@ def _github_star_prompt_latest_timestamp(*values: str | None) -> str | None:
     return latest[1] if latest is not None else None
 
 
-class ClipboardWatcherRuntime(Protocol):
-    def start(self) -> None:
-        pass
-
-    def stop(self) -> None:
-        pass
-
-
 @dataclass(frozen=True, slots=True)
 class _ProviderRuntimeApplyPlan:
     should_rebuild_llm: bool
@@ -991,11 +983,6 @@ class GuiController:
     )
     _microphone_test_meter_level: float = field(init=False, default=0.0)
     _microphone_test_runtime: MicTestRuntime | None = field(init=False, default=None)
-    _microphone_test_task: asyncio.Task[None] | None = field(
-        init=False,
-        default=None,
-        repr=False,
-    )
     _microphone_test_lifecycle_lock: asyncio.Lock | None = field(
         init=False,
         default=None,
@@ -1036,8 +1023,6 @@ class GuiController:
     _vrc_receiver_lock: asyncio.Lock | None = None
     _ui_event_bridge: UIEventBridge | None = None
     _clipboard_runtime: ClipboardRuntime | None = field(init=False, default=None)
-    _clipboard_watcher: ClipboardWatcherRuntime | None = field(init=False, default=None)
-    _clipboard_loop: asyncio.AbstractEventLoop | None = field(init=False, default=None)
     _clipboard_watcher_lock: asyncio.Lock | None = field(init=False, default=None)
     _strict_runtime_errors_for_clipboard_watcher: bool = field(
         init=False,
@@ -1053,23 +1038,10 @@ class GuiController:
         init=False,
         default=None,
     )
-    _local_stt_download_origin: str | None = field(init=False, default=None)
     _local_stt_download_percent: int | None = field(init=False, default=None)
-    _local_stt_download_task: asyncio.Task[object] | None = field(
-        init=False,
-        default=None,
-        repr=False,
-    )
-    _local_stt_download_cancel_event: threading.Event | None = field(
-        init=False,
-        default=None,
-        repr=False,
-    )
     _local_stt_pending_enable_after_install: bool = field(init=False, default=False)
     _local_stt_pending_peer_enable_after_install: bool = field(init=False, default=False)
-    # Overlay runtime internals are owned by OverlayRuntimeHandle. Temporary
-    # private alias shims below delegate to this owner for legacy tests and are
-    # tracked for removal in Phase 2A controller-overlay-mirror-removal review.
+    # Overlay runtime internals are owned by OverlayRuntimeHandle.
     _overlay_runtime: OverlayRuntimeHandle | None = None
     _overlay_lock: asyncio.Lock | None = None
     _active_overlay_target: str | None = field(init=False, default=None)
@@ -1114,11 +1086,6 @@ class GuiController:
     )
     _translation_toggle_intent_enabled: bool = field(init=False, default=False)
     _translation_toggle_generation: int = field(init=False, default=0)
-    _github_star_prompt_translation_success_task: asyncio.Task[bool] | None = field(
-        init=False,
-        default=None,
-        repr=False,
-    )
     _github_star_prompt_runtime: GithubStarPromptRuntime | None = field(
         init=False,
         default=None,
@@ -2016,18 +1983,8 @@ class GuiController:
         if self._github_star_prompt_runtime is None:
             self._github_star_prompt_runtime = GithubStarPromptRuntime(
                 diagnostics_sink=self._github_star_prompt_runtime_diagnostics_sink,
-                state_changed=self._sync_github_star_prompt_runtime_aliases,
             )
         return self._github_star_prompt_runtime
-
-    def _sync_github_star_prompt_runtime_aliases(
-        self,
-        runtime: GithubStarPromptRuntime | None = None,
-    ) -> None:
-        owner = runtime or self._github_star_prompt_runtime
-        self._github_star_prompt_translation_success_task = (
-            owner.translation_success_task if owner is not None else None
-        )
 
     def _github_star_prompt_runtime_diagnostics_sink(
         self,
@@ -2045,14 +2002,11 @@ class GuiController:
     ) -> None:
         runtime = self._github_star_prompt_runtime
         if runtime is None:
-            await self._drain_github_star_prompt_translation_success_task()
             return
         try:
             await runtime.close()
         except Exception as exc:
             failures.append(exc)
-        finally:
-            self._sync_github_star_prompt_runtime_aliases(runtime)
 
     async def _close_app_github_star_prompt_runtime_for_release(
         self,
@@ -2075,9 +2029,6 @@ class GuiController:
             return False
         if self.settings.ui.github_star_prompt_translation_success_observed:
             return False
-        existing_task = self._github_star_prompt_translation_success_task
-        if existing_task is not None and not existing_task.done():
-            return False
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -2085,33 +2036,27 @@ class GuiController:
 
         _ = loop
         runtime = self._get_github_star_prompt_runtime()
+        existing_task = runtime.translation_success_task
+        if existing_task is not None and not existing_task.done():
+            return False
         try:
-            task = runtime.start_translation_success_observation(
+            runtime.start_translation_success_observation(
                 self.persist_github_star_prompt_translation_success_observed()
             )
         except RuntimeError:
             return False
-        self._github_star_prompt_translation_success_task = task
         return True
 
-    async def _drain_github_star_prompt_translation_success_task(self) -> None:
+    async def _drain_github_star_prompt_translation_success_observation(self) -> None:
         runtime = self._github_star_prompt_runtime
         if runtime is not None:
             await runtime.drain_translation_success_task()
-            self._sync_github_star_prompt_runtime_aliases(runtime)
-            return
-        task = self._github_star_prompt_translation_success_task
-        if task is None:
-            return
-        await asyncio.gather(task, return_exceptions=True)
-        if self._github_star_prompt_translation_success_task is task:
-            self._github_star_prompt_translation_success_task = None
 
     async def _preserve_github_star_prompt_observation_before_settings_replace(
         self,
         replacement_settings: AppSettings,
     ) -> None:
-        await self._drain_github_star_prompt_translation_success_task()
+        await self._drain_github_star_prompt_translation_success_observation()
         async with self._get_github_star_prompt_persistence_lock():
             if self.settings is None:
                 return
@@ -2652,138 +2597,6 @@ class GuiController:
         runtime = OverlayRuntimeHandle(shutdown_grace_s=OVERLAY_SHUTDOWN_GRACE_S)
         self._overlay_runtime = runtime
         return runtime
-
-    def _overlay_runtime_for_private_alias(self) -> OverlayRuntimeHandle:
-        """Return the runtime owner used by temporary private alias shims.
-
-        These aliases exist only to keep older private tests/compatibility
-        probes delegating to the canonical owner while active controller logic
-        migrates to `_overlay_runtime` directly. Follow-up: remove the aliases
-        after the Phase 2A controller-overlay-mirror-removal gate review
-        confirms no private callers remain.
-        """
-
-        runtime = self._overlay_runtime
-        if runtime is None:
-            runtime = self._new_overlay_runtime_handle()
-        return runtime
-
-    @property
-    def _overlay_presenter(self) -> OverlayPresenter | None:
-        runtime = self._overlay_runtime
-        if runtime is None:
-            return None
-        return cast(OverlayPresenter | None, runtime.presenter)
-
-    @_overlay_presenter.setter
-    def _overlay_presenter(self, presenter: OverlayPresenter | None) -> None:
-        if presenter is None:
-            if self._overlay_runtime is not None:
-                self._overlay_runtime.attach_presenter(None)
-            return
-        self._overlay_runtime_for_private_alias().attach_presenter(presenter)
-
-    @property
-    def _overlay_bridge(self) -> OverlayBridge | None:
-        runtime = self._overlay_runtime
-        if runtime is None:
-            return None
-        return cast(OverlayBridge | None, runtime.bridge)
-
-    @_overlay_bridge.setter
-    def _overlay_bridge(self, bridge: OverlayBridge | None) -> None:
-        if bridge is None:
-            if self._overlay_runtime is not None:
-                self._overlay_runtime.attach_bridge(None)
-            return
-        self._overlay_runtime_for_private_alias().attach_bridge(bridge)
-
-    @property
-    def _overlay_manager(self) -> OverlayProcessManager | None:
-        runtime = self._overlay_runtime
-        if runtime is None:
-            return None
-        return cast(OverlayProcessManager | None, runtime.process_manager)
-
-    @_overlay_manager.setter
-    def _overlay_manager(self, manager: OverlayProcessManager | None) -> None:
-        if manager is None:
-            if self._overlay_runtime is not None:
-                self._overlay_runtime.attach_process_manager(None)
-            return
-        self._overlay_runtime_for_private_alias().attach_process_manager(manager)
-
-    @property
-    def _overlay_diagnostics(self) -> OverlayDiagnosticsRecorder | None:
-        runtime = self._overlay_runtime
-        if runtime is None:
-            return None
-        return cast(OverlayDiagnosticsRecorder | None, runtime.diagnostics)
-
-    @_overlay_diagnostics.setter
-    def _overlay_diagnostics(
-        self,
-        diagnostics: OverlayDiagnosticsRecorder | None,
-    ) -> None:
-        if diagnostics is None:
-            if self._overlay_runtime is not None:
-                self._overlay_runtime.attach_diagnostics(None)
-            return
-        self._overlay_runtime_for_private_alias().attach_diagnostics(diagnostics)
-
-    @property
-    def _overlay_start_task(self) -> asyncio.Task[None] | None:
-        runtime = self._overlay_runtime
-        if runtime is None:
-            return None
-        return cast(asyncio.Task[None] | None, runtime.start_task)
-
-    @_overlay_start_task.setter
-    def _overlay_start_task(self, task: asyncio.Task[None] | None) -> None:
-        if task is not None:
-            raise AttributeError("_overlay_start_task is owned by OverlayRuntimeHandle")
-
-    @property
-    def _overlay_monitor_task(self) -> asyncio.Task[None] | None:
-        runtime = self._overlay_runtime
-        if runtime is None:
-            return None
-        return cast(asyncio.Task[None] | None, runtime.monitor_task)
-
-    @_overlay_monitor_task.setter
-    def _overlay_monitor_task(self, task: asyncio.Task[None] | None) -> None:
-        if task is not None:
-            raise AttributeError("_overlay_monitor_task is owned by OverlayRuntimeHandle")
-
-    @property
-    def _desktop_renderer_events(self) -> asyncio.Queue[dict[str, object]] | None:
-        runtime = self._overlay_runtime
-        if runtime is None:
-            return None
-        return runtime.renderer_events
-
-    @_desktop_renderer_events.setter
-    def _desktop_renderer_events(
-        self,
-        renderer_events: asyncio.Queue[dict[str, object]] | None,
-    ) -> None:
-        if renderer_events is None:
-            if self._overlay_runtime is not None:
-                self._overlay_runtime.attach_renderer_events(None)
-            return
-        self._overlay_runtime_for_private_alias().attach_renderer_events(renderer_events)
-
-    @property
-    def _desktop_renderer_events_task(self) -> asyncio.Task[None] | None:
-        runtime = self._overlay_runtime
-        if runtime is None:
-            return None
-        return cast(asyncio.Task[None] | None, runtime.renderer_event_task)
-
-    @_desktop_renderer_events_task.setter
-    def _desktop_renderer_events_task(self, task: asyncio.Task[None] | None) -> None:
-        if task is not None:
-            raise AttributeError("_desktop_renderer_events_task is owned by OverlayRuntimeHandle")
 
     def _ensure_overlay_runtime_handle(self) -> OverlayRuntimeHandle:
         runtime = self._overlay_runtime
@@ -4520,30 +4333,8 @@ class GuiController:
 
     def _get_local_stt_download_runtime(self) -> LocalSTTDownloadRuntime:
         if self._local_stt_download_runtime is None:
-            self._local_stt_download_runtime = LocalSTTDownloadRuntime(
-                state_changed=self._sync_local_stt_download_runtime_aliases,
-            )
-            if self._local_stt_download_task is not None:
-                self._local_stt_download_runtime.adopt_legacy_state(
-                    task=self._local_stt_download_task,
-                    cancel_event=self._local_stt_download_cancel_event,
-                    origin=self._local_stt_download_origin,
-                )
+            self._local_stt_download_runtime = LocalSTTDownloadRuntime()
         return self._local_stt_download_runtime
-
-    def _sync_local_stt_download_runtime_aliases(
-        self,
-        runtime: LocalSTTDownloadRuntime | None = None,
-    ) -> None:
-        owner = runtime or self._local_stt_download_runtime
-        if owner is None:
-            self._local_stt_download_task = None
-            self._local_stt_download_cancel_event = None
-            self._local_stt_download_origin = None
-            return
-        self._local_stt_download_task = owner.download_task
-        self._local_stt_download_cancel_event = owner.cancel_event
-        self._local_stt_download_origin = owner.origin
 
     def _current_local_stt_runtime_status(self) -> str:
         if self._local_stt_runtime_status in ("downloading", "download_failed"):
@@ -4595,7 +4386,6 @@ class GuiController:
         task = runtime.download_task
         if task is not None and not task.done():
             return False
-        self._local_stt_download_origin = origin
         self._local_stt_download_percent = 0
         try:
             runtime.start(
@@ -4607,9 +4397,7 @@ class GuiController:
                 ),
             )
         except RuntimeError:
-            self._sync_local_stt_download_runtime_aliases(runtime)
             return False
-        self._sync_local_stt_download_runtime_aliases(runtime)
         return True
 
     async def _run_local_stt_download(
@@ -4660,9 +4448,6 @@ class GuiController:
                 self._show_short_stt_message("local_stt.download_failed")
             self._log_error(f"Local STT download failed: {exc}")
             return
-        finally:
-            self._sync_local_stt_download_runtime_aliases(runtime)
-
         if generation is not None and runtime is not None:
             if not runtime.is_current_generation(generation):
                 return
@@ -4848,21 +4633,7 @@ class GuiController:
         runtime = self._local_stt_download_runtime
         if runtime is not None:
             await runtime.close()
-            self._sync_local_stt_download_runtime_aliases(runtime)
             return
-
-        task = self._local_stt_download_task
-        cancel_event = self._local_stt_download_cancel_event
-        if cancel_event is not None:
-            cancel_event.set()
-        if task is None:
-            self._local_stt_download_cancel_event = None
-            return
-        if not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        self._local_stt_download_task = None
-        self._local_stt_download_cancel_event = None
 
     async def _ensure_stt_switch(self) -> None:
         if self._stt_switch_task is None or self._stt_switch_task.done():
@@ -4931,23 +4702,8 @@ class GuiController:
             self._clipboard_runtime = ClipboardRuntime(
                 watcher_factory=create_clipboard_watcher,
                 submit_handler=self._submit_clipboard_text,
-                state_changed=self._sync_clipboard_runtime_aliases,
             )
-            if self._clipboard_watcher is not None:
-                self._clipboard_runtime.adopt_legacy_state(
-                    watcher=self._clipboard_watcher,
-                    loop=self._clipboard_loop,
-                )
         return self._clipboard_runtime
-
-    def _sync_clipboard_runtime_aliases(self, runtime: ClipboardRuntime | None = None) -> None:
-        runtime = runtime or self._clipboard_runtime
-        if runtime is None:
-            self._clipboard_watcher = None
-            self._clipboard_loop = None
-            return
-        self._clipboard_watcher = runtime.watcher  # type: ignore[assignment]
-        self._clipboard_loop = runtime.loop
 
     async def _sync_clipboard_watcher(self) -> None:
         strict_runtime_errors = self._strict_runtime_errors_for_clipboard_watcher
@@ -4964,7 +4720,6 @@ class GuiController:
                     strict_runtime_errors=strict_runtime_errors,
                 )
             except Exception:
-                self._sync_clipboard_runtime_aliases()
                 self._log_error("Clipboard watcher failed to start")
                 if strict_runtime_errors:
                     raise
@@ -4972,10 +4727,7 @@ class GuiController:
     async def _stop_clipboard_watcher(self) -> None:
         async with self._get_clipboard_watcher_lock():
             runtime = self._clipboard_runtime
-            if runtime is None and self._clipboard_watcher is not None:
-                runtime = self._get_clipboard_runtime()
             if runtime is None:
-                self._sync_clipboard_runtime_aliases(None)
                 return
             try:
                 await runtime.stop(
@@ -4985,14 +4737,11 @@ class GuiController:
                 self._log_error("Clipboard watcher failed to stop")
                 if self._strict_runtime_errors_for_clipboard_watcher:
                     raise
-            finally:
-                self._sync_clipboard_runtime_aliases(runtime)
 
     async def _close_clipboard_runtime(self) -> None:
         async with self._get_clipboard_watcher_lock():
             runtime = self._clipboard_runtime
             if runtime is None:
-                self._sync_clipboard_runtime_aliases(None)
                 return
             try:
                 await runtime.close()
@@ -5000,8 +4749,6 @@ class GuiController:
                 self._log_error("Clipboard runtime failed to close")
                 if self._strict_runtime_errors_for_clipboard_watcher:
                     raise
-            finally:
-                self._sync_clipboard_runtime_aliases(runtime)
 
     def _on_clipboard_text_from_thread(self, text: str) -> None:
         self._get_clipboard_runtime().on_text_from_thread(text)
@@ -7133,7 +6880,7 @@ class GuiController:
     @property
     def microphone_test_active(self) -> bool:
         runtime = self._microphone_test_runtime
-        task = runtime.session_task if runtime is not None else self._microphone_test_task
+        task = runtime.session_task if runtime is not None else None
         return task is not None and not task.done()
 
     def _get_microphone_test_lifecycle_lock(self) -> asyncio.Lock:
@@ -7143,24 +6890,8 @@ class GuiController:
 
     def _get_microphone_test_runtime(self) -> MicTestRuntime:
         if self._microphone_test_runtime is None:
-            self._microphone_test_runtime = MicTestRuntime(
-                state_changed=self._sync_microphone_test_runtime_aliases,
-            )
-            if self._microphone_test_task is not None:
-                self._microphone_test_runtime.adopt_legacy_state(
-                    task=self._microphone_test_task,
-                )
+            self._microphone_test_runtime = MicTestRuntime()
         return self._microphone_test_runtime
-
-    def _sync_microphone_test_runtime_aliases(
-        self,
-        runtime: MicTestRuntime | None = None,
-    ) -> None:
-        owner = runtime or self._microphone_test_runtime
-        if owner is None:
-            self._microphone_test_task = None
-            return
-        self._microphone_test_task = owner.session_task
 
     @staticmethod
     def _microphone_test_audio_settings_signature(
@@ -7255,7 +6986,6 @@ class GuiController:
                 if not task.done():
                     return False
                 await asyncio.gather(task, return_exceptions=True)
-                self._sync_microphone_test_runtime_aliases(runtime)
 
             if not await self._recover_microphone_test_runtime_before_start(runtime):
                 return False
@@ -7272,9 +7002,7 @@ class GuiController:
                     )
                 )
             except RuntimeError:
-                self._sync_microphone_test_runtime_aliases(runtime)
                 return False
-            self._sync_microphone_test_runtime_aliases(runtime)
             return True
 
     async def _run_microphone_test_session(
@@ -7294,8 +7022,6 @@ class GuiController:
             raise
         except Exception as exc:
             self._log_error(f"Microphone test error: {exc}")
-        finally:
-            self._sync_microphone_test_runtime_aliases()
 
     async def stop_microphone_test(self) -> None:
         async with self._get_microphone_test_lifecycle_lock():
@@ -7303,17 +7029,7 @@ class GuiController:
             if runtime is not None:
                 await runtime.stop()
                 self._microphone_test_meter_level = 0.0
-                self._sync_microphone_test_runtime_aliases(runtime)
                 return
-
-            task = self._microphone_test_task
-            if task is None:
-                return
-            if not task.done():
-                task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            if self._microphone_test_task is task:
-                self._microphone_test_task = None
             self._microphone_test_meter_level = 0.0
 
     async def stop_microphone_test_for_audio_settings_change(self) -> None:
@@ -7333,9 +7049,7 @@ class GuiController:
             await runtime.stop()
         except Exception as exc:
             self._log_error(f"Microphone test cleanup retry failed: {exc}")
-            self._sync_microphone_test_runtime_aliases(runtime)
             return False
-        self._sync_microphone_test_runtime_aliases(runtime)
         return runtime.source is None and runtime.pending_frame_task is None
 
     async def _close_microphone_test_runtime_for_release(
@@ -7343,8 +7057,6 @@ class GuiController:
         cleanup_failures: list[Exception],
     ) -> None:
         runtime = self._microphone_test_runtime
-        if runtime is None and self._microphone_test_task is not None:
-            runtime = self._get_microphone_test_runtime()
         if runtime is None:
             return
         try:
@@ -7353,7 +7065,6 @@ class GuiController:
             cleanup_failures.append(exc)
         finally:
             self._microphone_test_meter_level = 0.0
-            self._sync_microphone_test_runtime_aliases(runtime)
 
     async def _set_microphone_test_meter_level(
         self,

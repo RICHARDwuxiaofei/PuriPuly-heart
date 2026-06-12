@@ -94,7 +94,7 @@ def test_output_runtime_exposes_lifecycle_inventory_and_policy() -> None:
     snapshot = owner.lifecycle_owner_snapshot()
 
     assert snapshot["owner"] == "OutputRuntime"
-    assert "_osc_flush_task" in snapshot["resource_fields"]
+    assert "_chatbox_flush_task" in snapshot["resource_fields"]
     assert "overlay_event_adapter" in snapshot["resource_fields"]
     assert "UIEventBridge.run task" in snapshot["resource_fields"]
     assert "conversation adapter" in snapshot["resource_fields"]

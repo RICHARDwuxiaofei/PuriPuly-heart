@@ -76,19 +76,6 @@ class ClipboardRuntime:
             "late_callback_rule": self.late_callback_rule,
         }
 
-    def adopt_legacy_state(
-        self,
-        *,
-        watcher: object | None,
-        loop: asyncio.AbstractEventLoop | None,
-    ) -> None:
-        self._generation += 1
-        self._watcher = watcher
-        self._loop = loop
-        self._closed = False
-        self._closing = False
-        self._notify_state_changed()
-
     async def sync(self, *, enabled: bool, strict_runtime_errors: bool = False) -> None:
         if not enabled:
             await self.stop(strict_runtime_errors=strict_runtime_errors)

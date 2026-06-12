@@ -179,7 +179,6 @@ class ClientHub:
     _speech_ended_ids: set[UUID] = field(default_factory=set)  # Track SpeechEnd arrivals
     _stt_task: asyncio.Task[None] | None = None
     _peer_stt_task: asyncio.Task[None] | None = None
-    _osc_flush_task: asyncio.Task[None] | None = None
     _running: bool = False
     _last_promo_time: float | None = None
     _promo_eligible: bool = False
@@ -871,7 +870,6 @@ class ClientHub:
             self._running = False
             raise
         self._running = True
-        self._osc_flush_task = self.output_runtime.chatbox_flush_task
         await self._self_stt_provider_runtime.start()
         await self._peer_stt_provider_runtime.start()
         self._sync_provider_runtime_aliases()
@@ -892,7 +890,6 @@ class ClientHub:
             await self.output_runtime.close()
         except Exception as exc:
             cleanup_failures.append(exc)
-        self._osc_flush_task = self.output_runtime.chatbox_flush_task
 
         if was_running:
             await self._stop_stt_event_loop()
@@ -3379,14 +3376,6 @@ class ClientHub:
             fallback_level=logging.INFO,
         )
         self.output_runtime.publish_system_disclosure_chatbox(text=text)
-
-    async def _run_osc_flush_loop(self) -> None:
-        try:
-            while True:
-                self.osc.process_due()
-                await asyncio.sleep(0.1)
-        except asyncio.CancelledError:
-            raise
 
 
 def _raise_provider_runtime_close_failures(failures: list[Exception]) -> None:

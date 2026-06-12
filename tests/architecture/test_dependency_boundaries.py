@@ -761,7 +761,7 @@ def test_ui_controller_active_overlay_logic_avoids_legacy_resource_mirrors() -> 
         "_desktop_renderer_events",
         "_desktop_renderer_events_task",
     }
-    allowed_private_alias_shims = legacy_mirror_fields | {
+    removed_private_alias_shims = legacy_mirror_fields | {
         "_overlay_runtime_for_private_alias",
     }
     offenders: list[str] = []
@@ -769,8 +769,8 @@ def test_ui_controller_active_overlay_logic_avoids_legacy_resource_mirrors() -> 
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
-        if node.name in allowed_private_alias_shims:
-            continue
+        if node.name in removed_private_alias_shims:
+            offenders.append(f"{node.name}:{node.lineno}:definition")
         for child in ast.walk(node):
             if (
                 isinstance(child, ast.Attribute)
@@ -847,6 +847,93 @@ def test_current_runtime_owner_imports_are_allowlist_synchronization_only() -> N
 
     assert inherited_runtime_owner_violations <= _dependency_violations()
     assert inherited_runtime_owner_violations <= KNOWN_ALLOWED_VIOLATIONS
+
+
+def test_gate1_existing_replacement_private_shims_are_removed() -> None:
+    controller_overlay_alias_shims = {
+        "_overlay_presenter",
+        "_overlay_bridge",
+        "_overlay_manager",
+        "_overlay_diagnostics",
+        "_overlay_start_task",
+        "_overlay_monitor_task",
+        "_desktop_renderer_events",
+        "_desktop_renderer_events_task",
+    }
+    disallowed_private_shims = {
+        "src/puripuly_heart/ui/controller.py": (
+            "_overlay_runtime_for_private_alias",
+            "def _sync_github_star_prompt_runtime_aliases",
+            "def _sync_local_stt_download_runtime_aliases",
+            "def _sync_clipboard_runtime_aliases",
+            "def _sync_microphone_test_runtime_aliases",
+            "_github_star_prompt_translation_success_task",
+            "_local_stt_download_task",
+            "_local_stt_download_cancel_event",
+            "_local_stt_download_origin",
+            "_clipboard_watcher: ClipboardWatcherRuntime",
+            "_clipboard_loop: asyncio.AbstractEventLoop",
+            "_microphone_test_task",
+        ),
+        "src/puripuly_heart/ui/app.py": (
+            "def _sync_github_star_prompt_runtime_aliases",
+            "_github_star_prompt_launch_task",
+        ),
+        "src/puripuly_heart/core/orchestrator/hub.py": (
+            "_osc_flush_task",
+            "def _run_osc_flush_loop",
+        ),
+        "src/puripuly_heart/core/runtime/local_stt_download.py": ("def adopt_legacy_state",),
+        "src/puripuly_heart/core/runtime/clipboard.py": ("def adopt_legacy_state",),
+        "src/puripuly_heart/core/runtime/mic_test.py": ("def adopt_legacy_state",),
+        "src/puripuly_heart/core/runtime/output.py": ("_osc_flush_task",),
+        "src/puripuly_heart/core/runtime/overlay.py": (
+            "_overlay_presenter",
+            "_overlay_bridge",
+            "_overlay_manager",
+            "_overlay_start_task",
+            "_overlay_monitor_task",
+            "_desktop_renderer_events",
+            "_desktop_renderer_events_task",
+        ),
+    }
+
+    offenders: list[str] = []
+    for relative_path, forbidden_tokens in disallowed_private_shims.items():
+        source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        offenders.extend(
+            f"{relative_path}: {token}" for token in forbidden_tokens if token in source
+        )
+
+    controller_path = REPO_ROOT / "src/puripuly_heart/ui/controller.py"
+    controller_tree = ast.parse(controller_path.read_text(encoding="utf-8"))
+    for node in ast.walk(controller_tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            if node.name in controller_overlay_alias_shims:
+                offenders.append(
+                    f"src/puripuly_heart/ui/controller.py: def {node.name} "
+                    f"at line {node.lineno}"
+                )
+            continue
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr in controller_overlay_alias_shims
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+        ):
+            offenders.append(
+                f"src/puripuly_heart/ui/controller.py: self.{node.attr} " f"at line {node.lineno}"
+            )
+        if isinstance(node, ast.Assign | ast.AnnAssign):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id in controller_overlay_alias_shims:
+                    offenders.append(
+                        "src/puripuly_heart/ui/controller.py: "
+                        f"field {target.id} at line {target.lineno}"
+                    )
+
+    assert offenders == []
 
 
 def test_absolute_from_import_resolves_layer_root_namespace_candidates(

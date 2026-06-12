@@ -82,12 +82,6 @@ class MicTestRuntime:
             "late_callback_rule": self.late_callback_rule,
         }
 
-    def adopt_legacy_state(self, *, task: asyncio.Task[None] | None) -> None:
-        self._session_task = task
-        if task is not None:
-            task.add_done_callback(self._on_session_task_done)
-        self._notify_state_changed()
-
     def start(self, run_session: MicTestSessionRunner) -> asyncio.Task[None]:
         if self._closing or self._closed:
             state = "closing" if self._closing else "closed"

@@ -137,9 +137,7 @@ class TranslatorApp:
         self._github_star_prompt_launch_pending = True
         self._github_star_prompt_runtime = GithubStarPromptRuntime(
             diagnostics_sink=self._github_star_prompt_runtime_diagnostics_sink,
-            state_changed=self._sync_github_star_prompt_runtime_aliases,
         )
-        self._github_star_prompt_launch_task: asyncio.Task[bool] | None = None
         self._launch_high_priority_feedback_shown = False
         self._launch_high_priority_feedback_reason: str | None = None
         self._launch_high_priority_snackbar = None
@@ -365,20 +363,9 @@ class TranslatorApp:
         if runtime is None:
             runtime = GithubStarPromptRuntime(
                 diagnostics_sink=self._github_star_prompt_runtime_diagnostics_sink,
-                state_changed=self._sync_github_star_prompt_runtime_aliases,
             )
             self._github_star_prompt_runtime = runtime
-            self._github_star_prompt_launch_task = runtime.launch_prompt_task
         return runtime
-
-    def _sync_github_star_prompt_runtime_aliases(
-        self,
-        runtime: GithubStarPromptRuntime | None = None,
-    ) -> None:
-        owner = runtime or getattr(self, "_github_star_prompt_runtime", None)
-        self._github_star_prompt_launch_task = (
-            owner.launch_prompt_task if owner is not None else None
-        )
 
     def _is_current_github_star_prompt_generation(self, generation: int) -> bool:
         runtime = getattr(self, "_github_star_prompt_runtime", None)
@@ -400,7 +387,6 @@ class TranslatorApp:
             return
         await runtime.close()
         self._github_star_prompt_launch_pending = False
-        self._sync_github_star_prompt_runtime_aliases(runtime)
 
     async def _open_github_star_prompt_snackbar(self, *, should_open=None) -> bool:  # noqa: ANN001
         if getattr(self, "_github_star_prompt_shown_this_launch", False):

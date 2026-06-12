@@ -66,7 +66,7 @@ class OutputRuntime:
     _routing_decisions: list[OutputRoutingDecision] = field(default_factory=list)
 
     resource_fields = (
-        "_osc_flush_task",
+        "_chatbox_flush_task",
         "ChatboxPaginator._pending_pages",
         "ChatboxPaginator._pending_messages",
         "overlay_event_adapter",

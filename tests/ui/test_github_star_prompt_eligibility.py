@@ -421,10 +421,10 @@ async def test_apply_providers_drains_pending_observation_before_settings_replac
     monkeypatch.setattr(GuiController, "_replace_runtime_stt_provider", _async_noop)
     monkeypatch.setattr(GuiController, "_rebuild_stt_provider", _async_noop)
 
-    persist_task = asyncio.create_task(
+    runtime = controller._get_github_star_prompt_runtime()
+    persist_task = runtime.start_translation_success_observation(
         controller.persist_github_star_prompt_translation_success_observed()
     )
-    controller._github_star_prompt_translation_success_task = persist_task  # noqa: SLF001
     await asyncio.wait_for(first_to_thread_started.wait(), timeout=1.0)
 
     apply_task = asyncio.create_task(controller.apply_providers(replacement_settings))
@@ -450,7 +450,7 @@ async def test_apply_providers_drains_pending_observation_before_settings_replac
 
 
 @pytest.mark.asyncio
-async def test_stop_drains_pending_github_star_observation_task(
+async def test_stop_cancels_pending_github_star_observation_via_runtime_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = _settings_for_connection(TranslationConnection.OPENROUTER)
@@ -471,10 +471,10 @@ async def test_stop_drains_pending_github_star_observation_task(
     monkeypatch.setattr(controller_module.asyncio, "to_thread", delayed_to_thread)
     _patch_stop_side_effects(monkeypatch)
 
-    persist_task = asyncio.create_task(
+    runtime = controller._get_github_star_prompt_runtime()
+    persist_task = runtime.start_translation_success_observation(
         controller.persist_github_star_prompt_translation_success_observed()
     )
-    controller._github_star_prompt_translation_success_task = persist_task  # noqa: SLF001
     await asyncio.wait_for(first_to_thread_started.wait(), timeout=1.0)
 
     stop_task = asyncio.create_task(controller.stop())
@@ -487,11 +487,11 @@ async def test_stop_drains_pending_github_star_observation_task(
     try:
         await asyncio.wait_for(stop_task, timeout=1.0)
 
-        assert await asyncio.wait_for(persist_task, timeout=1.0) is True
-        assert not persist_task.cancelled()
-        assert controller._github_star_prompt_translation_success_task is None  # noqa: SLF001
-        assert settings.ui.github_star_prompt_translation_success_observed is True
-        assert saved_payloads[-1]["ui"]["github_star_prompt_translation_success_observed"] is True
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(persist_task, timeout=1.0)
+        assert runtime.translation_success_task is None
+        assert settings.ui.github_star_prompt_translation_success_observed is False
+        assert saved_payloads == []
     finally:
         if not stop_task.done():
             stop_task.cancel()

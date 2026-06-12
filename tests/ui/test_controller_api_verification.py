@@ -86,6 +86,11 @@ class DummyHub:
         self.start_calls.append(auto_flush_osc)
 
 
+def _local_stt_download_task(controller: GuiController) -> asyncio.Task[object] | None:
+    runtime = controller._local_stt_download_runtime
+    return runtime.download_task if runtime is not None else None
+
+
 async def _start_controller_with_inspected_stt_state(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -651,7 +656,9 @@ async def test_set_stt_enabled_starts_local_qwen_runtime_install_when_model_is_m
     assert install_calls == ["install"]
 
     release.done = True
-    await controller._local_stt_download_task
+    download_task = _local_stt_download_task(controller)
+    assert download_task is not None
+    await download_task
 
 
 @pytest.mark.asyncio
@@ -705,7 +712,9 @@ async def test_set_stt_enabled_starts_local_qwen_runtime_install_when_model_load
     assert install_calls == ["install"]
 
     release.done = True
-    await controller._local_stt_download_task
+    download_task = _local_stt_download_task(controller)
+    assert download_task is not None
+    await download_task
 
 
 @pytest.mark.asyncio
@@ -750,7 +759,9 @@ async def test_set_stt_enabled_retries_runtime_install_after_download_failed_sta
     assert install_calls == ["install"]
 
     release.done = True
-    await controller._local_stt_download_task
+    download_task = _local_stt_download_task(controller)
+    assert download_task is not None
+    await download_task
 
 
 @pytest.mark.asyncio
@@ -804,7 +815,9 @@ async def test_local_qwen_repeated_enable_during_runtime_install_is_single_fligh
     assert controller_module.t("local_stt.download_in_progress") in status_messages
 
     release.done = True
-    await controller._local_stt_download_task
+    download_task = _local_stt_download_task(controller)
+    assert download_task is not None
+    await download_task
 
 
 @pytest.mark.asyncio
@@ -840,9 +853,9 @@ async def test_local_stt_download_uses_named_runtime_owner_and_ignores_stale_pro
     owner = controller._local_stt_download_runtime
     assert owner is not None
     assert owner.lifecycle_owner_snapshot()["owner"] == "LocalSTTDownloadRuntime"
-    assert controller._local_stt_download_task is owner.download_task
-    assert controller._local_stt_download_cancel_event is owner.cancel_event
-    assert controller._local_stt_download_origin == "manual"
+    assert owner.download_task is not None
+    assert owner.cancel_event is not None
+    assert owner.origin == "manual"
 
     on_status = captured_status_callbacks[0]
     await on_status(controller_module.RuntimeLocalSTTStatusUpdate("downloading", percent=42))
@@ -858,8 +871,8 @@ async def test_local_stt_download_uses_named_runtime_owner_and_ignores_stale_pro
     release_install.set()
     assert controller._local_stt_runtime_status == "ready"
     assert controller._local_stt_download_percent is None
-    assert controller._local_stt_download_task is None
-    assert controller._local_stt_download_cancel_event is None
+    assert owner.download_task is None
+    assert owner.cancel_event is None
 
 
 @pytest.mark.asyncio
@@ -874,7 +887,7 @@ async def test_local_stt_download_rejects_new_start_after_runtime_close() -> Non
     await owner.close()
 
     assert controller._start_local_stt_download(origin="manual") is False
-    assert controller._local_stt_download_task is None
+    assert owner.download_task is None
 
 
 @pytest.mark.asyncio
@@ -908,11 +921,16 @@ async def test_stop_cancels_active_local_stt_download_task(
         fake_shutdown_overlay_runtime,
     )
 
-    controller._local_stt_download_task = asyncio.create_task(asyncio.sleep(3600))
+    owner = controller._get_local_stt_download_runtime()
+    active_download = owner.start(
+        origin="manual",
+        run_download=lambda _cancel_event, _generation: asyncio.sleep(3600),
+    )
 
     await controller.stop()
 
-    assert controller._local_stt_download_task is None
+    assert active_download.done()
+    assert owner.download_task is None
 
 
 @pytest.mark.asyncio
@@ -959,7 +977,9 @@ async def test_local_qwen_successful_runtime_install_retries_enable_once(
     controller._local_stt_install_state = LocalSTTInstallState(status="missing")
 
     await controller.set_stt_enabled(True)
-    await controller._local_stt_download_task
+    download_task = _local_stt_download_task(controller)
+    assert download_task is not None
+    await download_task
 
     assert rebuild_calls == ["rebuild"]
     assert switch_calls == [True]
@@ -1012,7 +1032,9 @@ async def test_local_qwen_runtime_install_does_not_auto_enable_after_provider_sw
 
     controller.settings.provider.stt = STTProviderName.DEEPGRAM
     release.done = True
-    await controller._local_stt_download_task
+    download_task = _local_stt_download_task(controller)
+    assert download_task is not None
+    await download_task
 
     assert switch_calls == []
 
@@ -1072,7 +1094,9 @@ async def test_local_qwen_explicit_disable_during_runtime_install_clears_pending
     assert controller._local_stt_pending_enable_after_install is False
 
     release.done = True
-    await controller._local_stt_download_task
+    download_task = _local_stt_download_task(controller)
+    assert download_task is not None
+    await download_task
 
     assert rebuild_calls == []
     assert switch_calls == [False]
@@ -1137,7 +1161,9 @@ async def test_local_qwen_reenable_during_runtime_install_rearms_pending_auto_en
     assert controller_module.t("local_stt.download_in_progress") in status_messages
 
     release.done = True
-    await controller._local_stt_download_task
+    download_task = _local_stt_download_task(controller)
+    assert download_task is not None
+    await download_task
 
     assert rebuild_calls == ["rebuild"]
     assert switch_calls == [False, True]
@@ -1176,7 +1202,7 @@ async def test_start_with_local_qwen_inspects_runtime_read_only(
 
     assert inspect_calls == ["inspect"]
     assert install_calls == []
-    assert controller._local_stt_download_task is None
+    assert _local_stt_download_task(controller) is None
     assert dash.stt_enabled is False
     assert dash.local_stt_notice_status == expected_notice
     assert dash.local_stt_notice_percent is None
@@ -1238,7 +1264,9 @@ async def test_set_stt_enabled_local_qwen_download_path_does_not_prepare_managed
     assert controller.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
 
     release.done = True
-    await controller._local_stt_download_task
+    download_task = _local_stt_download_task(controller)
+    assert download_task is not None
+    await download_task
 
     assert controller._managed_openrouter_release_service.prepare_calls == 0
     assert controller.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
@@ -1261,6 +1289,6 @@ async def test_start_inspects_local_stt_without_auto_download_for_non_local_prov
 
     assert inspect_calls == ["inspect"]
     assert install_calls == []
-    assert controller._local_stt_download_task is None
+    assert _local_stt_download_task(controller) is None
     assert dash.local_stt_notice_status is None
     assert dash.local_stt_notice_percent is None

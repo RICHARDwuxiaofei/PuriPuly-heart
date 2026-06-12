@@ -78,6 +78,7 @@ from puripuly_heart.core.overlay.sink import (
     SelfTranscriptFinal,
     TranslationFinal,
 )
+from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
 from puripuly_heart.core.runtime.peer_channel import PeerRuntimeConfig
 from puripuly_heart.core.runtime_logging import (
     RuntimeLoggingSinks,
@@ -767,6 +768,45 @@ def _patch_overlay_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(controller_module, "OverlayProcessManager", FakeOverlayProcessManager)
 
 
+def _overlay_runtime(controller: GuiController) -> OverlayRuntimeHandle:
+    runtime = controller._overlay_runtime
+    assert runtime is not None
+    return runtime
+
+
+def _attach_overlay_presenter(controller: GuiController, presenter: object | None) -> None:
+    controller._ensure_overlay_runtime_handle().attach_presenter(presenter)
+
+
+def _attach_overlay_bridge(controller: GuiController, bridge: object | None) -> None:
+    if bridge is None:
+        runtime = controller._overlay_runtime
+        if runtime is not None:
+            runtime.attach_bridge(None)
+        return
+    controller._ensure_overlay_runtime_handle().attach_bridge(bridge)
+
+
+def _attach_overlay_manager(controller: GuiController, manager: object | None) -> None:
+    controller._ensure_overlay_runtime_handle().attach_process_manager(manager)
+
+
+def _attach_overlay_diagnostics(controller: GuiController, diagnostics: object | None) -> None:
+    controller._ensure_overlay_runtime_handle().attach_diagnostics(diagnostics)
+
+
+def _attach_desktop_renderer_events(
+    controller: GuiController,
+    renderer_events: asyncio.Queue[dict[str, object]] | None,
+) -> None:
+    controller._ensure_overlay_runtime_handle().attach_renderer_events(renderer_events)
+
+
+def _microphone_test_task(controller: GuiController) -> asyncio.Task[None] | None:
+    runtime = controller._microphone_test_runtime
+    return runtime.session_task if runtime is not None else None
+
+
 @pytest.mark.parametrize(
     "failure_reason",
     [
@@ -1153,7 +1193,7 @@ async def test_clipboard_watcher_not_started_on_non_windows(
     await controller._sync_clipboard_watcher()
 
     assert called is False
-    assert controller._clipboard_watcher is None
+    assert controller._clipboard_runtime is None
 
 
 @pytest.mark.asyncio
@@ -3390,7 +3430,7 @@ async def test_apply_settings_routes_peer_activation_toggles_through_peer_runtim
     controller.settings = settings
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
     controller.overlay_state = "connected"
-    controller._overlay_bridge = object()
+    _attach_overlay_bridge(controller, object())
     controller._peer_runtime = DummyPeerRuntime()
     controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
         settings
@@ -3461,7 +3501,7 @@ async def test_apply_settings_keeps_peer_translation_effective_flags_off_until_e
     controller.settings = settings
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
     controller.overlay_state = "connected"
-    controller._overlay_bridge = object()
+    _attach_overlay_bridge(controller, object())
     controller._peer_runtime = DummyPeerRuntime()
     controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
         settings
@@ -3501,7 +3541,7 @@ async def test_apply_settings_deactivates_peer_runtime_when_eula_acceptance_is_r
     controller.hub.peer_translation_enabled = True
     controller.hub.integrated_context_enabled = True
     controller.overlay_state = "connected"
-    controller._overlay_bridge = object()
+    _attach_overlay_bridge(controller, object())
     controller._peer_runtime = DummyPeerRuntime()
     controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
         settings
@@ -3538,7 +3578,7 @@ async def test_apply_settings_deactivates_peer_runtime_when_eula_flag_mutates_cu
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
     controller.hub.peer_translation_enabled = True
     controller.overlay_state = "connected"
-    controller._overlay_bridge = object()
+    _attach_overlay_bridge(controller, object())
     controller._peer_runtime = DummyPeerRuntime()
     controller._sync_signature_caches(settings)
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
@@ -3862,7 +3902,7 @@ async def test_rebuild_pipeline_rebinds_overlay_presenter_to_new_hub(
     old_hub = DummyHub(llm=object(), stt=object())
     old_hub.overlay_sink = presenter
     controller.hub = old_hub
-    controller._overlay_presenter = presenter
+    _attach_overlay_presenter(controller, presenter)
 
     new_hub = DummyHub(llm=object(), stt=object())
 
@@ -3916,7 +3956,7 @@ async def test_rebuild_pipeline_keeps_preserved_presenter_detached_when_overlay_
     old_hub = DummyHub(llm=object(), stt=object())
     old_hub.overlay_sink = presenter
     controller.hub = old_hub
-    controller._overlay_presenter = presenter
+    _attach_overlay_presenter(controller, presenter)
     runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
     runtime.attach_presenter(presenter)
     controller._overlay_runtime = runtime
@@ -3971,7 +4011,7 @@ async def test_rebuild_pipeline_refreshes_overlay_dependencies_without_overlay_r
     old_hub = DummyHub(llm=object(), stt=object())
     old_hub.overlay_sink = presenter
     controller.hub = old_hub
-    controller._overlay_presenter = presenter
+    _attach_overlay_presenter(controller, presenter)
 
     new_hub = DummyHub(llm=object(), stt=object())
     events: list[tuple[str, object]] = []
@@ -4095,7 +4135,7 @@ async def test_refresh_peer_stt_runtime_returns_without_runtime(
     controller.settings.ui.peer_translation_enabled = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
     controller.overlay_state = "connected"
-    controller._overlay_bridge = object()
+    _attach_overlay_bridge(controller, object())
 
     await controller._refresh_peer_stt_runtime()
 
@@ -4112,7 +4152,7 @@ async def test_refresh_peer_stt_runtime_does_not_warm_peer_runtime() -> None:
     controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
     controller.overlay_state = "connected"
-    controller._overlay_bridge = object()
+    _attach_overlay_bridge(controller, object())
     controller._peer_runtime = DummyPeerRuntime()
 
     await controller._refresh_peer_stt_runtime()
@@ -4134,7 +4174,7 @@ async def test_refresh_peer_stt_runtime_blocks_peer_local_qwen_until_local_runti
     controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
     controller.overlay_state = "connected"
-    controller._overlay_bridge = object()
+    _attach_overlay_bridge(controller, object())
     controller._peer_runtime = DummyPeerRuntime()
     controller._local_stt_install_state = controller_module.LocalSTTInstallState(status="missing")
 
@@ -4168,7 +4208,7 @@ async def test_peer_local_qwen_download_completion_resumes_peer_runtime_after_re
     controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
     controller.overlay_state = "connected"
-    controller._overlay_bridge = object()
+    _attach_overlay_bridge(controller, object())
     controller._peer_runtime = DummyPeerRuntime()
     controller._local_stt_install_state = controller_module.LocalSTTInstallState(status="missing")
 
@@ -4227,7 +4267,7 @@ async def test_refresh_peer_stt_runtime_blocks_peer_local_qwen_when_probe_load_f
     controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
     controller.overlay_state = "connected"
-    controller._overlay_bridge = object()
+    _attach_overlay_bridge(controller, object())
     controller._peer_runtime = DummyPeerRuntime()
     controller._local_stt_install_state = controller_module.LocalSTTInstallState(status="ready")
 
@@ -4412,7 +4452,7 @@ async def test_refresh_overlay_runtime_dependencies_applies_peer_runtime_policy(
     controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
     controller.overlay_state = "connected"
-    controller._overlay_bridge = object()
+    _attach_overlay_bridge(controller, object())
 
     peer_runtime = DummyPeerRuntime()
     controller._peer_runtime = peer_runtime
@@ -4433,7 +4473,7 @@ async def test_refresh_overlay_runtime_dependencies_disables_peer_runtime_when_o
     controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
     controller.overlay_state = "failed"
-    controller._overlay_bridge = None
+    _attach_overlay_bridge(controller, None)
 
     peer_runtime = DummyPeerRuntime()
     controller._peer_runtime = peer_runtime
@@ -4532,7 +4572,7 @@ async def test_overlay_toggle_starts_and_stops_overlay_runtime(
 
     assert controller.settings.ui.overlay_enabled is True
     assert controller.overlay_state == "starting"
-    assert controller.hub.overlay_sink is controller._overlay_presenter
+    assert controller.hub.overlay_sink is _overlay_runtime(controller).presenter
     assert bridge.started is True
 
     manager.complete_startup()
@@ -4567,7 +4607,7 @@ async def test_overlay_start_task_is_owned_by_overlay_runtime_handle(
 
     runtime = controller._overlay_runtime  # noqa: SLF001 - order35 ownership assertion
     assert isinstance(runtime, OverlayRuntimeHandle)
-    assert runtime.start_task is controller._overlay_start_task
+    assert runtime.start_task is _overlay_runtime(controller).start_task
     assert runtime.start_task is not None
     assert runtime.start_task.get_name() == "OverlayRuntimeHandle:start"
 
@@ -4575,15 +4615,15 @@ async def test_overlay_start_task_is_owned_by_overlay_runtime_handle(
     manager.complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
 
-    assert runtime.process_manager is controller._overlay_manager
-    assert runtime.bridge is controller._overlay_bridge
-    assert runtime.presenter is controller._overlay_presenter
-    assert runtime.monitor_task is controller._overlay_monitor_task
+    assert runtime.process_manager is _overlay_runtime(controller).process_manager
+    assert runtime.bridge is _overlay_runtime(controller).bridge
+    assert runtime.presenter is _overlay_runtime(controller).presenter
+    assert runtime.monitor_task is _overlay_runtime(controller).monitor_task
 
     await controller.set_overlay_enabled(False)
 
 
-def test_overlay_private_resource_aliases_delegate_to_runtime_owner() -> None:
+def test_overlay_runtime_handle_exposes_resources_without_controller_aliases() -> None:
     from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
 
     controller = _make_controller(app=SimpleNamespace())
@@ -4593,13 +4633,13 @@ def test_overlay_private_resource_aliases_delegate_to_runtime_owner() -> None:
     diagnostics = object()
     renderer_events: asyncio.Queue[dict[str, object]] = asyncio.Queue()
 
-    controller._overlay_presenter = presenter  # type: ignore[assignment]
-    controller._overlay_bridge = bridge  # type: ignore[assignment]
-    controller._overlay_manager = manager  # type: ignore[assignment]
-    controller._overlay_diagnostics = diagnostics  # type: ignore[assignment]
-    controller._desktop_renderer_events = renderer_events
+    _attach_overlay_presenter(controller, presenter)
+    _attach_overlay_bridge(controller, bridge)
+    _attach_overlay_manager(controller, manager)
+    _attach_overlay_diagnostics(controller, diagnostics)
+    _attach_desktop_renderer_events(controller, renderer_events)
 
-    runtime = controller._overlay_runtime  # noqa: SLF001 - compatibility shim assertion
+    runtime = controller._overlay_runtime  # noqa: SLF001 - runtime owner assertion
     assert isinstance(runtime, OverlayRuntimeHandle)
     assert runtime.presenter is presenter
     assert runtime.bridge is bridge
@@ -4610,7 +4650,7 @@ def test_overlay_private_resource_aliases_delegate_to_runtime_owner() -> None:
     replacement_bridge = object()
     runtime.attach_bridge(replacement_bridge)
 
-    assert controller._overlay_bridge is replacement_bridge
+    assert _overlay_runtime(controller).bridge is replacement_bridge
 
 
 @pytest.mark.asyncio
@@ -4738,7 +4778,7 @@ async def test_closing_desktop_overlay_runtime_rejects_direct_bridge_commands() 
     runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
     runtime.attach_bridge(bridge)
     controller._overlay_runtime = runtime
-    controller._overlay_bridge = bridge
+    _attach_overlay_bridge(controller, bridge)
 
     close_task = asyncio.create_task(
         runtime.close(
@@ -4751,7 +4791,7 @@ async def test_closing_desktop_overlay_runtime_rejects_direct_bridge_commands() 
 
     try:
         assert runtime.is_closing is True
-        assert controller._overlay_bridge is bridge
+        assert _overlay_runtime(controller).bridge is bridge
 
         sent = await controller._broadcast_desktop_runtime_control(
             {"command": "set_interaction_mode", "mode": "edit"}
@@ -4822,7 +4862,7 @@ async def test_closing_overlay_runtime_rejects_direct_presenter_commands() -> No
     runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
     runtime.attach_presenter(presenter)
     controller._overlay_runtime = runtime
-    controller._overlay_presenter = presenter  # type: ignore[assignment]
+    _attach_overlay_presenter(controller, presenter)
 
     close_task = asyncio.create_task(
         runtime.close(
@@ -4835,7 +4875,7 @@ async def test_closing_overlay_runtime_rejects_direct_presenter_commands() -> No
 
     try:
         assert runtime.is_closing is True
-        assert controller._overlay_presenter is presenter
+        assert _overlay_runtime(controller).presenter is presenter
 
         controller._schedule_overlay_calibration_emit()
 
@@ -4942,7 +4982,7 @@ async def test_overlay_shutdown_keeps_failed_state_when_cleanup_fails_with_resou
     assert controller.failure_reason == "unknown"
     assert controller._overlay_runtime is runtime
     assert runtime.process_manager is manager
-    assert controller._overlay_manager is manager
+    assert _overlay_runtime(controller).process_manager is manager
 
 
 @pytest.mark.asyncio
@@ -4974,8 +5014,8 @@ async def test_overlay_restart_aborts_when_preserve_teardown_close_fails(
 
     assert controller._overlay_runtime is runtime
     assert runtime.process_manager is manager
-    assert controller._overlay_manager is manager
-    assert controller._overlay_start_task is None
+    assert _overlay_runtime(controller).process_manager is manager
+    assert _overlay_runtime(controller).start_task is None
     assert controller.overlay_state == "failed"
 
 
@@ -4987,7 +5027,7 @@ async def test_stale_desktop_renderer_event_is_ignored_after_overlay_instance_ch
     controller.settings = AppSettings()
     controller.settings.overlay.target = OVERLAY_TARGET_DESKTOP
     controller._active_overlay_target = OVERLAY_TARGET_DESKTOP
-    controller._overlay_bridge = FakeOverlayBridge(session_token="token")
+    _attach_overlay_bridge(controller, FakeOverlayBridge(session_token="token"))
     controller._overlay_runtime = OverlayRuntimeHandle(overlay_instance_id="overlay-new")
 
     await controller._handle_desktop_renderer_event(
@@ -5598,11 +5638,12 @@ async def test_desktop_size_preset_change_drains_queued_pre_resize_user_bounds(
     manager.complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
 
-    event_task = controller._desktop_renderer_events_task  # noqa: SLF001 - freeze queue
+    runtime = _overlay_runtime(controller)
+    event_task = runtime.renderer_event_task
     assert event_task is not None
     event_task.cancel()
     await asyncio.gather(event_task, return_exceptions=True)
-    controller._desktop_renderer_events_task = None  # noqa: SLF001
+    runtime._renderer_event_task = None  # noqa: SLF001 - freeze owner queue
 
     renderer_events = manager.renderer_events
     assert isinstance(renderer_events, asyncio.Queue)
@@ -5993,7 +6034,7 @@ async def test_desktop_reset_keeps_runtime_state_when_order23_commit_fails(
     controller.settings.overlay.desktop_flet.position.y = 90
     controller.settings.overlay.desktop_flet.locked = True
     controller._active_overlay_target = OVERLAY_TARGET_DESKTOP
-    controller._overlay_bridge = object()  # type: ignore[assignment]
+    _attach_overlay_bridge(controller, object())
     controller._set_desktop_overlay_interaction_mode("pass_through")
     failed_result = messages.TransactionResult(
         status=messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED,
@@ -6127,11 +6168,12 @@ async def test_desktop_reset_drains_queued_pre_reset_user_bounds(
     manager.complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
 
-    event_task = controller._desktop_renderer_events_task  # noqa: SLF001 - freeze queue
+    runtime = _overlay_runtime(controller)
+    event_task = runtime.renderer_event_task
     assert event_task is not None
     event_task.cancel()
     await asyncio.gather(event_task, return_exceptions=True)
-    controller._desktop_renderer_events_task = None  # noqa: SLF001
+    runtime._renderer_event_task = None  # noqa: SLF001 - freeze owner queue
 
     renderer_events = manager.renderer_events
     assert isinstance(renderer_events, asyncio.Queue)
@@ -6473,7 +6515,7 @@ async def test_desktop_apply_settings_broadcasts_visual_config_for_background_al
     controller.settings.overlay.desktop_flet.visual.background_alpha = 0.5
     controller._active_overlay_target = "desktop"
     bridge = FakeOverlayBridge(session_token="desktop")
-    controller._overlay_bridge = bridge
+    _attach_overlay_bridge(controller, bridge)
 
     updated = copy.deepcopy(controller.settings)
     updated.overlay.desktop_flet.visual.background_alpha = 0.7
@@ -6508,7 +6550,7 @@ async def test_desktop_apply_settings_preserves_runtime_lock_without_persisting_
     controller._active_overlay_target = "desktop"
     controller.overlay_state = "connected"
     bridge = FakeOverlayBridge(session_token="desktop")
-    controller._overlay_bridge = bridge
+    _attach_overlay_bridge(controller, bridge)
     await controller.set_desktop_overlay_captions_locked(True)
     serialized_desktop.clear()
     bridge.desktop_runtime_control_payloads.clear()
@@ -6587,7 +6629,7 @@ async def test_desktop_interaction_mode_controls_are_desktop_only_and_update_loc
     steam_controller.settings.overlay.target = "steamvr"
     steam_controller._active_overlay_target = "steamvr"
     steam_bridge = FakeOverlayBridge(session_token="steamvr")
-    steam_controller._overlay_bridge = steam_bridge
+    _attach_overlay_bridge(steam_controller, steam_bridge)
 
     await steam_controller.set_desktop_overlay_captions_locked(True)
 
@@ -6637,7 +6679,7 @@ async def test_desktop_lock_request_is_ignored_until_desktop_renderer_connected(
     controller.settings = AppSettings()
     controller.settings.overlay.target = "desktop"
     controller._active_overlay_target = "desktop"
-    controller._overlay_bridge = FakeOverlayBridge(session_token="desktop")
+    _attach_overlay_bridge(controller, FakeOverlayBridge(session_token="desktop"))
     controller.overlay_state = "starting"
 
     await controller.set_desktop_overlay_captions_locked(True)
@@ -6645,7 +6687,7 @@ async def test_desktop_lock_request_is_ignored_until_desktop_renderer_connected(
     assert controller.desktop_overlay_captions_locked is False
     assert controller.desktop_overlay_interaction_mode == "edit"
     assert controller.settings.overlay.desktop_flet.locked is False
-    assert controller._overlay_bridge.desktop_runtime_control_payloads == []
+    assert _overlay_runtime(controller).bridge.desktop_runtime_control_payloads == []
     assert saved_locked == []
 
 
@@ -6788,9 +6830,9 @@ async def test_overlay_start_enables_peer_presentation_refresh_for_new_presenter
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
 
-    assert controller._overlay_presenter is not None
-    assert controller._overlay_presenter.peer_presentation_refresh_burst is True
-    assert controller._overlay_presenter.self_presentation_refresh_burst is True
+    assert _overlay_runtime(controller).presenter is not None
+    assert _overlay_runtime(controller).presenter.peer_presentation_refresh_burst is True
+    assert _overlay_runtime(controller).presenter.self_presentation_refresh_burst is True
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
     await controller.set_overlay_enabled(False)
@@ -6835,18 +6877,21 @@ async def test_overlay_start_product_enables_existing_peer_presentation_refresh_
     )
     controller.settings = AppSettings()
     controller.hub = DummyHub()
-    controller._overlay_presenter = OverlayPresenter(
-        calibration=controller.overlay_calibration.copy(),
-        clock=controller.clock,
-        peer_presentation_refresh_burst=False,
-        self_presentation_refresh_burst=False,
+    _attach_overlay_presenter(
+        controller,
+        OverlayPresenter(
+            calibration=controller.overlay_calibration.copy(),
+            clock=controller.clock,
+            peer_presentation_refresh_burst=False,
+            self_presentation_refresh_burst=False,
+        ),
     )
 
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
 
-    assert controller._overlay_presenter.peer_presentation_refresh_burst is True
-    assert controller._overlay_presenter.self_presentation_refresh_burst is True
+    assert _overlay_runtime(controller).presenter.peer_presentation_refresh_burst is True
+    assert _overlay_runtime(controller).presenter.self_presentation_refresh_burst is True
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
     await controller.set_overlay_enabled(False)
@@ -6867,11 +6912,14 @@ async def test_desktop_overlay_start_disables_existing_peer_presentation_refresh
     controller.settings = AppSettings()
     controller.settings.overlay.target = OVERLAY_TARGET_DESKTOP
     controller.hub = DummyHub()
-    controller._overlay_presenter = OverlayPresenter(
-        calibration=controller.overlay_calibration.copy(),
-        clock=controller.clock,
-        peer_presentation_refresh_burst=True,
-        self_presentation_refresh_burst=True,
+    _attach_overlay_presenter(
+        controller,
+        OverlayPresenter(
+            calibration=controller.overlay_calibration.copy(),
+            clock=controller.clock,
+            peer_presentation_refresh_burst=True,
+            self_presentation_refresh_burst=True,
+        ),
     )
 
     await controller.set_overlay_enabled(True)
@@ -7150,7 +7198,7 @@ async def test_overlay_toggle_off_sends_shutdown_event_before_teardown(
     manager.complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
 
-    presenter = controller._overlay_presenter
+    presenter = _overlay_runtime(controller).presenter
     assert presenter is not None
     await presenter.emit(
         SelfTranscriptFinal(
@@ -7174,7 +7222,7 @@ async def test_overlay_toggle_off_sends_shutdown_event_before_teardown(
 
 
 @pytest.mark.asyncio
-async def test_begin_overlay_start_does_not_preserve_empty_runtime_from_legacy_mirror(
+async def test_begin_overlay_start_uses_empty_runtime_without_owned_presenter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
@@ -7200,24 +7248,6 @@ async def test_begin_overlay_start_does_not_preserve_empty_runtime_from_legacy_m
     controller.hub = DummyHub()
     controller.overlay_state = "failed"
 
-    stale_presenter = OverlayPresenter(
-        calibration=controller.overlay_calibration.copy(),
-        clock=controller.clock,
-    )
-    await stale_presenter.emit(
-        SelfTranscriptFinal(
-            event_id="stale-self-final",
-            seq=1,
-            utterance_id=uuid4(),
-            channel="self",
-            created_at=10.0,
-            text="legacy mirror must not seed production start",
-            source_language="ko",
-            target_language="en",
-            is_final=True,
-        )
-    )
-    controller._overlay_presenter = stale_presenter
     controller._overlay_runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
 
     try:
@@ -7227,7 +7257,6 @@ async def test_begin_overlay_start_does_not_preserve_empty_runtime_from_legacy_m
 
         runtime = controller._overlay_runtime
         assert runtime is not None
-        assert runtime.presenter is not stale_presenter
         assert controller.hub.overlay_sink is runtime.presenter
         assert FakeOverlayBridge.instances[0].initial_snapshot.blocks == []
     finally:
@@ -7235,7 +7264,7 @@ async def test_begin_overlay_start_does_not_preserve_empty_runtime_from_legacy_m
 
 
 @pytest.mark.asyncio
-async def test_overlay_start_creates_presenter_from_runtime_when_legacy_mirror_is_stale(
+async def test_overlay_start_uses_presenter_owned_by_runtime_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
@@ -7277,17 +7306,16 @@ async def test_overlay_start_creates_presenter_from_runtime_when_legacy_mirror_i
             is_final=True,
         )
     )
-    controller._overlay_presenter = stale_presenter
-
     runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
+    runtime.attach_presenter(stale_presenter)
     controller._overlay_runtime = runtime
 
     try:
         await controller._run_overlay_start(runtime)
 
-        assert runtime.presenter is not stale_presenter
+        assert runtime.presenter is stale_presenter
         assert controller.hub.overlay_sink is runtime.presenter
-        assert FakeOverlayBridge.instances[0].initial_snapshot.blocks == []
+        assert FakeOverlayBridge.instances[0].initial_snapshot.blocks != []
     finally:
         await controller._teardown_overlay_runtime(preserve_presenter_state=False)
 
@@ -7328,7 +7356,7 @@ async def test_stale_overlay_start_after_hub_ingress_closes_runtime_without_lega
     )
 
     await controller._begin_overlay_start()
-    start_task = controller._overlay_start_task
+    start_task = _overlay_runtime(controller).start_task
     assert start_task is not None
     await start_task
 
@@ -7342,9 +7370,9 @@ async def test_stale_overlay_start_after_hub_ingress_closes_runtime_without_lega
     assert controller.hub.overlay_sink is None
     assert stale_runtime.bridge is None
     assert stale_runtime.process_manager is None
-    assert controller._overlay_bridge is not stale_bridge
-    assert controller._overlay_manager is not stale_manager
-    assert controller._overlay_start_task is not start_task
+    assert _overlay_runtime(controller).bridge is not stale_bridge
+    assert _overlay_runtime(controller).process_manager is not stale_manager
+    assert _overlay_runtime(controller).start_task is not start_task
 
 
 @pytest.mark.asyncio
@@ -7412,7 +7440,7 @@ async def test_overlay_restart_reuses_presenter_scene_for_new_bridge(
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
 
-    presenter = controller._overlay_presenter
+    presenter = _overlay_runtime(controller).presenter
     assert presenter is not None
 
     utterance_id = uuid4()
@@ -7433,7 +7461,7 @@ async def test_overlay_restart_reuses_presenter_scene_for_new_bridge(
 
     await controller._teardown_overlay_runtime(preserve_presenter_state=True)
 
-    assert controller._overlay_presenter is presenter
+    assert _overlay_runtime(controller).presenter is presenter
     assert controller.hub.overlay_sink is None
 
     controller.overlay_state = "failed"
@@ -7441,7 +7469,7 @@ async def test_overlay_restart_reuses_presenter_scene_for_new_bridge(
     await _wait_until(lambda: len(FakeOverlayBridge.instances) == 2)
 
     assert FakeOverlayBridge.instances[1].initial_snapshot == saved_snapshot
-    assert controller._overlay_presenter is presenter
+    assert _overlay_runtime(controller).presenter is presenter
 
 
 @pytest.mark.asyncio
@@ -7460,7 +7488,7 @@ async def test_preserved_overlay_presenter_detaches_from_hub_ingress_until_resta
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
 
-    presenter = controller._overlay_presenter
+    presenter = _overlay_runtime(controller).presenter
     assert presenter is not None
 
     await presenter.emit(
@@ -7480,14 +7508,14 @@ async def test_preserved_overlay_presenter_detaches_from_hub_ingress_until_resta
 
     await controller._teardown_overlay_runtime(preserve_presenter_state=True)
 
-    assert controller._overlay_presenter is presenter
+    assert _overlay_runtime(controller).presenter is presenter
     assert controller.hub.overlay_sink is None
 
     controller.overlay_state = "failed"
     await controller._begin_overlay_start()
     await _wait_until(lambda: len(FakeOverlayBridge.instances) == 2)
 
-    assert controller._overlay_presenter is presenter
+    assert _overlay_runtime(controller).presenter is presenter
     assert FakeOverlayBridge.instances[1].initial_snapshot == saved_snapshot
 
 
@@ -7507,7 +7535,7 @@ async def test_overlay_restart_detaches_preserved_presenter_from_old_runtime_bef
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
 
-    presenter = controller._overlay_presenter
+    presenter = _overlay_runtime(controller).presenter
     assert presenter is not None
     await presenter.emit(
         SelfTranscriptFinal(
@@ -7565,7 +7593,7 @@ async def test_overlay_restart_applies_current_preferences_before_bridge_initial
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
 
-    presenter = controller._overlay_presenter
+    presenter = _overlay_runtime(controller).presenter
     assert presenter is not None
     await presenter.emit(
         SelfTranscriptFinal(
@@ -7622,7 +7650,7 @@ async def test_explicit_overlay_disable_resets_presenter_scene_for_next_session(
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
 
-    presenter = controller._overlay_presenter
+    presenter = _overlay_runtime(controller).presenter
     assert presenter is not None
     await presenter.emit(
         SelfTranscriptFinal(
@@ -7640,7 +7668,7 @@ async def test_explicit_overlay_disable_resets_presenter_scene_for_next_session(
 
     await controller.set_overlay_enabled(False)
 
-    assert controller._overlay_presenter is None
+    assert controller._overlay_runtime is None
     assert FakeOverlayBridge.instances[0].snapshots[-1].blocks == []
 
     await controller.set_overlay_enabled(True)
@@ -7665,7 +7693,7 @@ async def test_refresh_overlay_runtime_dependencies_does_not_clear_overlay_scene
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
 
-    presenter = controller._overlay_presenter
+    presenter = _overlay_runtime(controller).presenter
     bridge = FakeOverlayBridge.instances[0]
     assert presenter is not None
 
@@ -7868,9 +7896,9 @@ def test_overlay_runtime_crash_logs_state_transition() -> None:
     controller = _make_controller(app=SimpleNamespace())
     controller._runtime_logging = RuntimeLoggingSpy()
     controller.overlay_state = "connected"
-    controller._overlay_manager = SimpleNamespace(state="failed")
-    controller._overlay_presenter = object()  # type: ignore[assignment]
-    controller._overlay_bridge = object()  # type: ignore[assignment]
+    _attach_overlay_manager(controller, SimpleNamespace(state="failed"))
+    _attach_overlay_presenter(controller, object())
+    _attach_overlay_bridge(controller, object())
 
     controller.on_overlay_runtime_crashed()
 
@@ -8434,9 +8462,9 @@ def test_overlay_state_transition_routes_snapshot_details_to_detailed_log() -> N
     controller = _make_controller(app=SimpleNamespace())
     controller._runtime_logging = RuntimeLoggingSpy()
     controller.failure_reason = "runtime_crashed"
-    controller._overlay_presenter = object()
-    controller._overlay_bridge = object()
-    controller._overlay_manager = SimpleNamespace(state="failed")
+    _attach_overlay_presenter(controller, object())
+    _attach_overlay_bridge(controller, object())
+    _attach_overlay_manager(controller, SimpleNamespace(state="failed"))
 
     controller._log_overlay_state_transition("connected", "failed")
 
@@ -9215,7 +9243,7 @@ async def test_start_microphone_test_when_stt_already_off_logs_neutral_auto_off(
     monkeypatch.setattr(GuiController, "run_microphone_test_capture", fake_capture)
 
     started = await controller.start_microphone_test()
-    await _wait_until(lambda: controller._microphone_test_task is None)
+    await _wait_until(lambda: _microphone_test_task(controller) is None)
 
     messages = _mic_test_basic_messages(controller)
     assert started is True
@@ -9247,7 +9275,7 @@ async def test_start_microphone_test_clears_pending_self_stt_desire_before_captu
     monkeypatch.setattr(GuiController, "run_microphone_test_capture", fake_capture)
 
     started = await controller.start_microphone_test()
-    await _wait_until(lambda: controller._microphone_test_task is None)
+    await _wait_until(lambda: _microphone_test_task(controller) is None)
 
     messages = _mic_test_basic_messages(controller)
     assert started is True
@@ -9287,7 +9315,7 @@ async def test_start_microphone_test_stop_exception_logs_and_skips_capture(
     messages = _mic_test_basic_messages(controller)
     assert started is False
     assert capture_calls == []
-    assert controller._microphone_test_task is None
+    assert _microphone_test_task(controller) is None
     assert any(
         message.startswith("[MicTest] stt_auto_off ")
         and "requested=True" in message
@@ -9345,7 +9373,7 @@ async def test_start_microphone_test_source_close_exception_retains_source_until
     )
 
     second_started = await controller.start_microphone_test()
-    await _wait_until(lambda: controller._microphone_test_task is None)
+    await _wait_until(lambda: _microphone_test_task(controller) is None)
 
     assert second_started is True
     assert close_calls == ["close", "close"]
@@ -9391,7 +9419,7 @@ async def test_start_microphone_test_retry_after_source_close_exception_still_sk
         assert second_started is False
         assert close_calls == ["close", "close"]
         assert capture_calls == []
-        assert controller._microphone_test_task is None
+        assert _microphone_test_task(controller) is None
         assert controller._audio_source is source
         assert isinstance(controller._last_mic_loop_close_exception, RuntimeError)
         assert any(
@@ -9432,7 +9460,7 @@ async def test_start_microphone_test_rejects_duplicate_start_without_duplicate_r
     assert first_started is True
     assert duplicate_started is False
     assert capture_calls == ["captured"]
-    assert controller._microphone_test_task is None
+    assert _microphone_test_task(controller) is None
 
 
 @pytest.mark.asyncio
@@ -9465,7 +9493,7 @@ async def test_start_microphone_test_registers_named_mic_test_runtime_owner(
         "_direct_capture_generation",
         "_generation",
     )
-    assert controller._microphone_test_task is owner.session_task
+    assert _microphone_test_task(controller) is owner.session_task
 
     await controller.stop_microphone_test()
 
@@ -9575,7 +9603,6 @@ async def test_direct_microphone_capture_rejects_overlap_without_invalidating_ac
         await asyncio.sleep(3600)
 
     runtime.start(active_session)
-    controller._sync_microphone_test_runtime_aliases(runtime)
     await session_started.wait()
     active_generation = runtime.generation
 
@@ -9676,7 +9703,7 @@ async def test_start_microphone_test_does_not_preempt_active_direct_capture(
         assert pending_frame.done() is False
         assert direct_source.close_calls == 0
         assert direct_source.frame_cancelled.is_set() is False
-        assert controller._microphone_test_task is None
+        assert _microphone_test_task(controller) is None
         assert len(sources) == 1
     finally:
         for source in sources:
@@ -9725,7 +9752,7 @@ async def test_direct_microphone_capture_releases_direct_generation_when_initial
 
     monkeypatch.setattr(GuiController, "run_microphone_test_capture", fake_capture)
     assert await controller.start_microphone_test() is True
-    await _wait_until(lambda: controller._microphone_test_task is None)
+    await _wait_until(lambda: _microphone_test_task(controller) is None)
 
 
 @pytest.mark.asyncio
@@ -9754,7 +9781,7 @@ async def test_direct_microphone_capture_releases_direct_generation_when_route_o
 
     monkeypatch.setattr(GuiController, "run_microphone_test_capture", fake_capture)
     assert await controller.start_microphone_test() is True
-    await _wait_until(lambda: controller._microphone_test_task is None)
+    await _wait_until(lambda: _microphone_test_task(controller) is None)
 
 
 @pytest.mark.asyncio
@@ -9875,7 +9902,7 @@ async def test_start_microphone_test_recovers_retained_source_after_capture_clos
     monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", fake_source)
 
     assert await controller.start_microphone_test() is True
-    await _wait_until(lambda: controller._microphone_test_task is None)
+    await _wait_until(lambda: _microphone_test_task(controller) is None)
 
     runtime = controller._microphone_test_runtime
     assert runtime is not None
@@ -9887,7 +9914,7 @@ async def test_start_microphone_test_recovers_retained_source_after_capture_clos
     )
 
     assert await controller.start_microphone_test() is True
-    await _wait_until(lambda: controller._microphone_test_task is None)
+    await _wait_until(lambda: _microphone_test_task(controller) is None)
 
     assert sources[0].close_calls == 2
     assert len(sources) == 2
@@ -9930,7 +9957,7 @@ async def test_audio_settings_change_stops_active_microphone_test_and_next_start
     updated.audio.input_device = "New Mic"
     await controller.apply_settings(updated)
 
-    assert controller._microphone_test_task is None
+    assert _microphone_test_task(controller) is None
     assert capture_devices == ["Old Mic"]
     assert capture_cancelled == ["Old Mic"]
 
@@ -9974,7 +10001,7 @@ async def test_audio_settings_change_stops_active_microphone_test_after_in_place
     try:
         await controller.apply_settings(controller.settings)
 
-        assert controller._microphone_test_task is None
+        assert _microphone_test_task(controller) is None
         assert capture_cancelled == ["Old Mic"]
     finally:
         await controller.stop_microphone_test()
@@ -10006,7 +10033,7 @@ async def test_stop_microphone_test_is_idempotent_and_cleans_active_session(
     await controller.stop_microphone_test()
 
     assert capture_cancelled == ["cancelled"]
-    assert controller._microphone_test_task is None
+    assert _microphone_test_task(controller) is None
     assert controller._stt_desired is False
 
 
@@ -10035,7 +10062,7 @@ async def test_controller_stop_cancels_active_microphone_test(
     await controller.stop()
 
     assert capture_cancelled == ["cancelled"]
-    assert controller._microphone_test_task is None
+    assert _microphone_test_task(controller) is None
 
 
 @pytest.mark.asyncio
@@ -11086,7 +11113,6 @@ async def test_controller_stop_uses_bounded_prompt_runtime_close_and_still_stops
     task = runtime.start_translation_success_observation(suppress_cancellation())
     await started.wait()
     controller._github_star_prompt_runtime = runtime
-    controller._sync_github_star_prompt_runtime_aliases(runtime)
 
     class FakeHub:
         async def stop(self) -> None:
@@ -11156,14 +11182,11 @@ async def test_schedule_github_star_prompt_translation_success_uses_runtime_owne
     assert controller.schedule_github_star_prompt_translation_success_observed() is True
     runtime = controller._github_star_prompt_runtime
     assert runtime is not None
-    assert (
-        controller._github_star_prompt_translation_success_task is runtime.translation_success_task
-    )
+    assert runtime.translation_success_task is not None
 
     await observed.wait()
-    await controller._drain_github_star_prompt_translation_success_task()
+    await controller._drain_github_star_prompt_translation_success_observation()
 
-    assert controller._github_star_prompt_translation_success_task is None
     assert runtime.translation_success_task is None
 
 
@@ -11377,9 +11400,9 @@ async def test_set_runtime_logging_mode_updates_overlay_runtime_contract() -> No
     page = FakePage()
     controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
     controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
-    controller._overlay_bridge = FakeOverlayBridge(session_token="token")
+    _attach_overlay_bridge(controller, FakeOverlayBridge(session_token="token"))
     manager = OverlayManagerSpy()
-    controller._overlay_manager = manager  # type: ignore[assignment]
+    _attach_overlay_manager(controller, manager)
 
     controller.set_runtime_logging_mode("detailed")
 
@@ -11389,7 +11412,7 @@ async def test_set_runtime_logging_mode_updates_overlay_runtime_contract() -> No
 
     await page.tasks[0]()
 
-    assert controller._overlay_bridge.runtime_control_messages == ["detailed"]
+    assert _overlay_runtime(controller).bridge.runtime_control_messages == ["detailed"]
 
 
 @pytest.mark.asyncio
@@ -13528,7 +13551,8 @@ async def test_order24_clipboard_start_failure_degrades_without_raw_exception_te
     assert [settings.ui.clipboard_auto_translate_enabled for settings in saved_settings] == [True]
     assert controller.settings is not None
     assert controller.settings.ui.clipboard_auto_translate_enabled is True
-    assert controller._clipboard_watcher is None
+    assert controller._clipboard_runtime is not None
+    assert controller._clipboard_runtime.watcher is None
     logged_text = "\n".join(
         message
         for _level, message in (
@@ -13548,6 +13572,9 @@ async def test_order24_clipboard_stop_failure_degrades_without_raw_exception_tex
     saved_settings: list[AppSettings] = []
 
     class FailingStopClipboardWatcher:
+        def start(self) -> None:
+            return None
+
         def stop(self) -> None:
             raise RuntimeError(raw_failure_text)
 
@@ -13555,7 +13582,13 @@ async def test_order24_clipboard_stop_failure_degrades_without_raw_exception_tex
     controller._runtime_logging = RuntimeLoggingSpy()
     controller.settings = AppSettings()
     controller.settings.ui.clipboard_auto_translate_enabled = True
-    controller._clipboard_watcher = FailingStopClipboardWatcher()
+    monkeypatch.setattr(controller_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        controller_module,
+        "create_clipboard_watcher",
+        lambda _on_text: FailingStopClipboardWatcher(),
+    )
+    await controller._sync_clipboard_watcher()
     pending = copy.deepcopy(controller.settings)
     pending.ui.clipboard_auto_translate_enabled = False
 
@@ -13584,7 +13617,8 @@ async def test_order24_clipboard_stop_failure_degrades_without_raw_exception_tex
     assert [settings.ui.clipboard_auto_translate_enabled for settings in saved_settings] == [False]
     assert controller.settings is not None
     assert controller.settings.ui.clipboard_auto_translate_enabled is False
-    assert controller._clipboard_watcher is None
+    assert controller._clipboard_runtime is not None
+    assert controller._clipboard_runtime.watcher is None
     logged_text = "\n".join(
         message
         for _level, message in (
@@ -16699,7 +16733,7 @@ async def test_order23_apply_settings_runtime_failure_degrades_without_rollback_
     controller.settings = AppSettings()
     controller.hub = DummyHub()
     controller.overlay_state = "connected"
-    controller._overlay_presenter = FailingOverlayPresenter()  # type: ignore[assignment]
+    _attach_overlay_presenter(controller, FailingOverlayPresenter())
     pending = copy.deepcopy(controller.settings)
     pending.overlay.show_translation = False
     saved_settings: list[AppSettings] = []
@@ -17952,11 +17986,15 @@ def test_apply_overlay_calibration_uses_page_run_task_when_available(
     controller.overlay_state = "connected"
     service = RecordingSettingsMutationService()
     controller.settings_mutation_service = service
-    controller._overlay_bridge = FakeOverlayBridge(session_token="token")
-    controller._overlay_presenter = OverlayPresenter(
-        bridge=controller._overlay_bridge,
-        calibration=controller.overlay_calibration.copy(),
-        clock=controller.clock,
+    bridge = FakeOverlayBridge(session_token="token")
+    _attach_overlay_bridge(controller, bridge)
+    _attach_overlay_presenter(
+        controller,
+        OverlayPresenter(
+            bridge=bridge,
+            calibration=controller.overlay_calibration.copy(),
+            clock=controller.clock,
+        ),
     )
 
     controller.begin_overlay_calibration_for_test()
@@ -18024,7 +18062,7 @@ def test_schedule_overlay_calibration_emit_preserves_traceback_in_detailed_log()
     )
     controller._runtime_logging = RuntimeLoggingSpy()
     controller.overlay_state = "connected"
-    controller._overlay_presenter = object()  # type: ignore[assignment]
+    _attach_overlay_presenter(controller, object())
 
     controller._schedule_overlay_calibration_emit()
 
@@ -18059,11 +18097,15 @@ async def test_apply_overlay_calibration_persists_settings_and_emits_overlay_eve
     controller.overlay_state = "connected"
     service = RecordingSettingsMutationService()
     controller.settings_mutation_service = service
-    controller._overlay_bridge = FakeOverlayBridge(session_token="token")
-    controller._overlay_presenter = OverlayPresenter(
-        bridge=controller._overlay_bridge,
-        calibration=controller.overlay_calibration.copy(),
-        clock=controller.clock,
+    bridge = FakeOverlayBridge(session_token="token")
+    _attach_overlay_bridge(controller, bridge)
+    _attach_overlay_presenter(
+        controller,
+        OverlayPresenter(
+            bridge=bridge,
+            calibration=controller.overlay_calibration.copy(),
+            clock=controller.clock,
+        ),
     )
 
     controller.begin_overlay_calibration_for_test()
@@ -18089,12 +18131,16 @@ async def test_apply_settings_updates_overlay_presenter_display_preferences() ->
     controller.settings = AppSettings()
     controller.hub = DummyHub()
     controller.overlay_state = "connected"
-    controller._overlay_bridge = FakeOverlayBridge(session_token="token")
-    controller._overlay_presenter = OverlayPresenter(
-        bridge=controller._overlay_bridge,
-        calibration=controller.overlay_calibration.copy(),
-        clock=controller.clock,
-        peer_presentation_refresh_burst=True,
+    bridge = FakeOverlayBridge(session_token="token")
+    _attach_overlay_bridge(controller, bridge)
+    _attach_overlay_presenter(
+        controller,
+        OverlayPresenter(
+            bridge=bridge,
+            calibration=controller.overlay_calibration.copy(),
+            clock=controller.clock,
+            peer_presentation_refresh_burst=True,
+        ),
     )
 
     updated = AppSettings()
@@ -18129,7 +18175,7 @@ async def test_apply_settings_pushes_updated_overlay_snapshot_to_bridge_and_rest
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
 
-    presenter = controller._overlay_presenter
+    presenter = _overlay_runtime(controller).presenter
     assert presenter is not None
 
     utterance_id = uuid4()
@@ -18185,7 +18231,7 @@ async def test_apply_settings_pushes_peer_overlay_snapshot_preferences_to_bridge
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
 
-    presenter = controller._overlay_presenter
+    presenter = _overlay_runtime(controller).presenter
     assert presenter is not None
 
     utterance_id = uuid4()

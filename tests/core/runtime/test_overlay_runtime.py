@@ -125,13 +125,13 @@ def test_overlay_runtime_handle_exposes_lifecycle_inventory_and_policy() -> None
     assert snapshot["owner"] == "OverlayRuntimeHandle"
     assert snapshot["resource_fields"] == OverlayRuntimeHandle.resource_fields
     for field_name in (
-        "_overlay_presenter",
-        "_overlay_bridge",
-        "_overlay_manager",
-        "_overlay_start_task",
-        "_overlay_monitor_task",
-        "_desktop_renderer_events",
-        "_desktop_renderer_events_task",
+        "_presenter",
+        "_bridge",
+        "_process_manager",
+        "_start_task",
+        "_monitor_task",
+        "_renderer_events",
+        "_renderer_event_task",
         "OverlayBridge._heartbeat_task",
         "_AsyncioOverlayProcess._reader_tasks",
         "OverlayProcessManager._monitor_task",
