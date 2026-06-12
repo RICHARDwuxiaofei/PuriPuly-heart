@@ -2663,15 +2663,19 @@ class GuiController:
 
     def _new_overlay_runtime_handle(self) -> OverlayRuntimeHandle:
         runtime = OverlayRuntimeHandle(shutdown_grace_s=OVERLAY_SHUTDOWN_GRACE_S)
-        runtime.attach_presenter(self._overlay_presenter)
         self._overlay_runtime = runtime
         return runtime
 
-    def _ensure_overlay_runtime_handle(self) -> OverlayRuntimeHandle:
+    def _ensure_overlay_runtime_handle(
+        self,
+        *,
+        adopt_legacy_presenter_mirror: bool = True,
+    ) -> OverlayRuntimeHandle:
         runtime = self._overlay_runtime
         if runtime is None:
             runtime = OverlayRuntimeHandle(shutdown_grace_s=OVERLAY_SHUTDOWN_GRACE_S)
-            runtime.attach_presenter(self._overlay_presenter)
+            if adopt_legacy_presenter_mirror:
+                runtime.attach_presenter(self._overlay_presenter)
             runtime.attach_bridge(self._overlay_bridge)
             runtime.attach_process_manager(self._overlay_manager)
             runtime.attach_diagnostics(self._overlay_diagnostics)
@@ -2736,6 +2740,54 @@ class GuiController:
                 runtime.renderer_event_task,
             )
         )
+
+    async def _close_stale_overlay_start_runtime(
+        self,
+        runtime: OverlayRuntimeHandle,
+    ) -> None:
+        stale_presenter = runtime.presenter
+        stale_bridge = runtime.bridge
+        stale_manager = runtime.process_manager
+        stale_diagnostics = runtime.diagnostics
+        stale_renderer_events = runtime.renderer_events
+        stale_start_task = runtime.start_task
+        stale_monitor_task = runtime.monitor_task
+        stale_renderer_event_task = runtime.renderer_event_task
+        try:
+            await runtime.close(
+                preserve_presenter_state=True,
+                hub=self.hub,
+                emit_shutdown=False,
+            )
+        except Exception as exc:
+            self.log_detailed(
+                "[Overlay] Stale overlay start cleanup reported failure",
+                level=logging.WARNING,
+                exception=exc,
+            )
+        if self.hub is not None:
+            if getattr(self.hub, "overlay_sink", None) is stale_presenter:
+                self.hub.overlay_sink = None
+            if getattr(self.hub, "overlay_diagnostics", None) is stale_diagnostics:
+                self.hub.overlay_diagnostics = None
+        current_runtime = self._overlay_runtime
+        current_presenter = current_runtime.presenter if current_runtime is not None else None
+        if self._overlay_presenter is stale_presenter and current_presenter is not stale_presenter:
+            self._overlay_presenter = None
+        if self._overlay_bridge is stale_bridge:
+            self._overlay_bridge = None
+        if self._overlay_manager is stale_manager:
+            self._overlay_manager = None
+        if self._overlay_diagnostics is stale_diagnostics:
+            self._overlay_diagnostics = None
+        if self._desktop_renderer_events is stale_renderer_events:
+            self._desktop_renderer_events = None
+        if self._overlay_start_task is stale_start_task:
+            self._overlay_start_task = None
+        if self._overlay_monitor_task is stale_monitor_task:
+            self._overlay_monitor_task = None
+        if self._desktop_renderer_events_task is stale_renderer_event_task:
+            self._desktop_renderer_events_task = None
 
     def _overlay_runtime_is_active(self) -> bool:
         runtime = self._overlay_runtime
@@ -3759,10 +3811,22 @@ class GuiController:
             if self.overlay_state in {"starting", "connected"}:
                 return
 
-            teardown_succeeded = await self._teardown_overlay_runtime(preserve_presenter_state=True)
+            previous_runtime = self._overlay_runtime
+            teardown_succeeded = await self._teardown_overlay_runtime(
+                preserve_presenter_state=True,
+                adopt_legacy_presenter_mirror=False,
+            )
             if not teardown_succeeded:
                 return
+            preserved_presenter = None
+            if previous_runtime is not None and previous_runtime.is_closed:
+                preserved_presenter = cast(
+                    OverlayPresenter | None,
+                    previous_runtime.detach_preserved_presenter(),
+                )
             runtime = self._new_overlay_runtime_handle()
+            if preserved_presenter is not None:
+                runtime.adopt_presenter(preserved_presenter)
             self._active_overlay_target = self._overlay_target_for_settings(self.settings)
             previous_state = self.overlay_state
             self.overlay_state = "starting"
@@ -3773,8 +3837,11 @@ class GuiController:
 
     async def _run_overlay_start(self, runtime: OverlayRuntimeHandle | None = None) -> None:
         if runtime is None:
-            runtime = self._ensure_overlay_runtime_handle()
+            runtime = self._overlay_runtime
+            if runtime is None:
+                runtime = self._new_overlay_runtime_handle()
         current_task = asyncio.current_task()
+        overlay_instance_id: str | None = None
         try:
             if self.settings is None or self.hub is None:
                 self._active_overlay_target = None
@@ -3782,7 +3849,7 @@ class GuiController:
                     self.on_overlay_start_failed("unknown")
                 return
 
-            presenter = cast(OverlayPresenter | None, runtime.presenter) or self._overlay_presenter
+            presenter = cast(OverlayPresenter | None, runtime.presenter)
             overlay_instance_id = f"overlay-{secrets.token_hex(8)}"
             runtime.set_overlay_instance_id(overlay_instance_id)
             diagnostics = OverlayDiagnosticsRecorder(overlay_instance_id=overlay_instance_id)
@@ -3815,19 +3882,18 @@ class GuiController:
                     peer_presentation_refresh_burst=peer_presentation_refresh_burst,
                     self_presentation_refresh_burst=self_presentation_refresh_burst,
                 )
-                self._overlay_presenter = presenter
-                runtime.attach_presenter(presenter)
             else:
-                presenter.diagnostics = diagnostics
                 presenter.runtime_log_detailed = self.log_detailed
-                presenter.task_factory = runtime.create_child_task
-                await presenter.update_peer_presentation_refresh_burst(
-                    peer_presentation_refresh_burst
-                )
-                await presenter.update_self_presentation_refresh_burst(
-                    self_presentation_refresh_burst
-                )
-                runtime.attach_presenter(presenter)
+            presenter = cast(OverlayPresenter, runtime.adopt_presenter(presenter))
+            presenter.runtime_log_detailed = self.log_detailed
+            await presenter.update_calibration(self.overlay_calibration.copy())
+            await presenter.update_display_preferences(
+                show_translation=resolved_overlay_config.show_translation,
+                show_peer_original=resolved_overlay_config.show_peer_original,
+            )
+            await presenter.update_peer_presentation_refresh_burst(peer_presentation_refresh_burst)
+            await presenter.update_self_presentation_refresh_burst(self_presentation_refresh_burst)
+            self._overlay_presenter = presenter
             bridge = OverlayBridge(
                 session_token=secrets.token_urlsafe(16),
                 initial_snapshot=presenter.snapshot(),
@@ -3854,9 +3920,16 @@ class GuiController:
                 runtime,
                 overlay_instance_id=overlay_instance_id,
             ):
-                with contextlib.suppress(Exception):
-                    await bridge.stop()
+                await self._close_stale_overlay_start_runtime(runtime)
                 return
+            current_presenter = cast(
+                OverlayPresenter | None,
+                runtime.current_presenter_for_ingress(),
+            )
+            if current_presenter is not presenter:
+                await self._close_stale_overlay_start_runtime(runtime)
+                return
+            presenter = current_presenter
             presenter.attach_bridge(bridge)
             latest_snapshot = presenter.snapshot()
             if bridge.snapshot() != latest_snapshot:
@@ -3905,8 +3978,7 @@ class GuiController:
                 runtime,
                 overlay_instance_id=overlay_instance_id,
             ):
-                with contextlib.suppress(Exception):
-                    await manager.stop()
+                await self._close_stale_overlay_start_runtime(runtime)
                 return
 
             if self._overlay_manager is not manager:
@@ -3940,7 +4012,10 @@ class GuiController:
         finally:
             if self._overlay_start_task is current_task:
                 self._overlay_start_task = None
-            if runtime.start_task is current_task:
+            if runtime.start_task is current_task and self._overlay_runtime_is_current(
+                runtime,
+                overlay_instance_id=overlay_instance_id,
+            ):
                 self._sync_overlay_legacy_fields_from_runtime(runtime)
 
     async def _watch_overlay_runtime(
@@ -4056,9 +4131,16 @@ class GuiController:
         *,
         preserve_presenter_state: bool,
         emit_shutdown: bool = False,
+        adopt_legacy_presenter_mirror: bool = True,
     ) -> bool:
-        runtime = self._ensure_overlay_runtime_handle()
-        if self._overlay_presenter is not None and runtime.presenter is None:
+        runtime = self._ensure_overlay_runtime_handle(
+            adopt_legacy_presenter_mirror=adopt_legacy_presenter_mirror,
+        )
+        if (
+            adopt_legacy_presenter_mirror
+            and self._overlay_presenter is not None
+            and runtime.presenter is None
+        ):
             runtime.attach_presenter(self._overlay_presenter)
         if self._overlay_bridge is not None and runtime.bridge is None:
             runtime.attach_bridge(self._overlay_bridge)

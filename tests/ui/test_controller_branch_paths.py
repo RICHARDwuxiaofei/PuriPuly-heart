@@ -6899,9 +6899,10 @@ async def test_overlay_start_syncs_bridge_after_preserved_presenter_cleans_refre
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.hub = DummyHub()
-    controller._overlay_presenter = presenter
+    runtime = controller._new_overlay_runtime_handle()
+    runtime.adopt_presenter(presenter)
 
-    await controller._run_overlay_start()
+    await controller._run_overlay_start(runtime)
 
     bridge = CleaningDuringStartOverlayBridge.instances[0]
     assert bridge_start_released_burst is True
@@ -6980,10 +6981,11 @@ async def test_desktop_overlay_start_cleans_preserved_self_refresh_marker_before
     controller.settings = AppSettings()
     controller.settings.overlay.target = OVERLAY_TARGET_DESKTOP
     controller.hub = DummyHub()
-    controller._overlay_presenter = presenter
+    runtime = controller._new_overlay_runtime_handle()
+    runtime.adopt_presenter(presenter)
 
     try:
-        await controller._run_overlay_start()
+        await controller._run_overlay_start(runtime)
 
         bridge = FakeOverlayBridge.instances[0]
         assert presenter.self_presentation_refresh_burst is False
@@ -7090,6 +7092,180 @@ async def test_overlay_toggle_off_sends_shutdown_event_before_teardown(
 
 
 @pytest.mark.asyncio
+async def test_begin_overlay_start_does_not_preserve_empty_runtime_from_legacy_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
+
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    class ImmediateConnectedOverlayProcessManager(FakeOverlayProcessManager):
+        instances: list["ImmediateConnectedOverlayProcessManager"] = []
+
+        async def start(self) -> None:
+            self.state = "connected"
+            self.failure_reason = None
+
+    monkeypatch.setattr(
+        controller_module,
+        "OverlayProcessManager",
+        ImmediateConnectedOverlayProcessManager,
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+    controller.overlay_state = "failed"
+
+    stale_presenter = OverlayPresenter(
+        calibration=controller.overlay_calibration.copy(),
+        clock=controller.clock,
+    )
+    await stale_presenter.emit(
+        SelfTranscriptFinal(
+            event_id="stale-self-final",
+            seq=1,
+            utterance_id=uuid4(),
+            channel="self",
+            created_at=10.0,
+            text="legacy mirror must not seed production start",
+            source_language="ko",
+            target_language="en",
+            is_final=True,
+        )
+    )
+    controller._overlay_presenter = stale_presenter
+    controller._overlay_runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
+
+    try:
+        await controller._begin_overlay_start()
+        await _wait_until(lambda: len(FakeOverlayBridge.instances) == 1)
+        await _wait_until(lambda: controller.overlay_state == "connected")
+
+        runtime = controller._overlay_runtime
+        assert runtime is not None
+        assert runtime.presenter is not stale_presenter
+        assert controller.hub.overlay_sink is runtime.presenter
+        assert FakeOverlayBridge.instances[0].initial_snapshot.blocks == []
+    finally:
+        await controller._teardown_overlay_runtime(preserve_presenter_state=False)
+
+
+@pytest.mark.asyncio
+async def test_overlay_start_creates_presenter_from_runtime_when_legacy_mirror_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
+
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    class ImmediateConnectedOverlayProcessManager(FakeOverlayProcessManager):
+        instances: list["ImmediateConnectedOverlayProcessManager"] = []
+
+        async def start(self) -> None:
+            self.state = "connected"
+            self.failure_reason = None
+
+    monkeypatch.setattr(
+        controller_module,
+        "OverlayProcessManager",
+        ImmediateConnectedOverlayProcessManager,
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    stale_presenter = OverlayPresenter(
+        calibration=controller.overlay_calibration.copy(),
+        clock=controller.clock,
+    )
+    await stale_presenter.emit(
+        SelfTranscriptFinal(
+            event_id="stale-self-final",
+            seq=1,
+            utterance_id=uuid4(),
+            channel="self",
+            created_at=10.0,
+            text="stale mirror should not seed new runtime",
+            source_language="ko",
+            target_language="en",
+            is_final=True,
+        )
+    )
+    controller._overlay_presenter = stale_presenter
+
+    runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
+    controller._overlay_runtime = runtime
+
+    try:
+        await controller._run_overlay_start(runtime)
+
+        assert runtime.presenter is not stale_presenter
+        assert controller.hub.overlay_sink is runtime.presenter
+        assert FakeOverlayBridge.instances[0].initial_snapshot.blocks == []
+    finally:
+        await controller._teardown_overlay_runtime(preserve_presenter_state=False)
+
+
+@pytest.mark.asyncio
+async def test_stale_overlay_start_after_hub_ingress_closes_runtime_without_legacy_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
+
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    class StalingAfterIngressOverlayProcessManager(FakeOverlayProcessManager):
+        instances: list["StalingAfterIngressOverlayProcessManager"] = []
+
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.stale_runtime: OverlayRuntimeHandle | None = None
+
+        async def start(self) -> None:
+            self.state = "connected"
+            self.failure_reason = None
+            stale_runtime = controller._overlay_runtime
+            assert isinstance(stale_runtime, OverlayRuntimeHandle)
+            assert controller.hub.overlay_sink is stale_runtime.presenter
+            self.stale_runtime = stale_runtime
+            controller._overlay_runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
+
+    monkeypatch.setattr(
+        controller_module,
+        "OverlayProcessManager",
+        StalingAfterIngressOverlayProcessManager,
+    )
+
+    await controller._begin_overlay_start()
+    start_task = controller._overlay_start_task
+    assert start_task is not None
+    await start_task
+
+    stale_bridge = FakeOverlayBridge.instances[0]
+    stale_manager = StalingAfterIngressOverlayProcessManager.instances[0]
+    stale_runtime = stale_manager.stale_runtime
+    assert stale_runtime is not None
+
+    assert stale_bridge.stopped is True
+    assert stale_manager.stop_calls == 1
+    assert controller.hub.overlay_sink is None
+    assert stale_runtime.bridge is None
+    assert stale_runtime.process_manager is None
+    assert controller._overlay_bridge is not stale_bridge
+    assert controller._overlay_manager is not stale_manager
+    assert controller._overlay_start_task is not start_task
+
+
+@pytest.mark.asyncio
 async def test_overlay_restart_reuses_presenter_scene_for_new_bridge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7182,6 +7358,125 @@ async def test_preserved_overlay_presenter_detaches_from_hub_ingress_until_resta
 
     assert controller._overlay_presenter is presenter
     assert FakeOverlayBridge.instances[1].initial_snapshot == saved_snapshot
+
+
+@pytest.mark.asyncio
+async def test_overlay_restart_detaches_preserved_presenter_from_old_runtime_before_adoption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    FakeOverlayProcessManager.instances[0].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    presenter = controller._overlay_presenter
+    assert presenter is not None
+    await presenter.emit(
+        SelfTranscriptFinal(
+            event_id="self-final",
+            seq=1,
+            utterance_id=uuid4(),
+            channel="self",
+            created_at=10.0,
+            text="preserve through runtime owner",
+            source_language="ko",
+            target_language="en",
+            is_final=True,
+        )
+    )
+    saved_snapshot = presenter.snapshot()
+
+    await controller._teardown_overlay_runtime(preserve_presenter_state=True)
+    old_runtime = controller._overlay_runtime
+    assert old_runtime is not None
+    assert old_runtime.presenter is presenter
+
+    controller._overlay_presenter = OverlayPresenter(
+        calibration=controller.overlay_calibration.copy(),
+        clock=controller.clock,
+    )
+    controller.overlay_state = "failed"
+
+    try:
+        await controller._begin_overlay_start()
+        await _wait_until(lambda: len(FakeOverlayBridge.instances) == 2)
+
+        new_runtime = controller._overlay_runtime
+        assert new_runtime is not None
+        assert new_runtime is not old_runtime
+        assert old_runtime.presenter is None
+        assert new_runtime.presenter is presenter
+        assert FakeOverlayBridge.instances[1].initial_snapshot == saved_snapshot
+    finally:
+        if len(FakeOverlayProcessManager.instances) >= 2:
+            FakeOverlayProcessManager.instances[1].complete_startup()
+            with contextlib.suppress(AssertionError):
+                await _wait_until(lambda: controller.overlay_state == "connected")
+        await controller._teardown_overlay_runtime(preserve_presenter_state=False)
+
+
+@pytest.mark.asyncio
+async def test_overlay_restart_applies_current_preferences_before_bridge_initial_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    FakeOverlayProcessManager.instances[0].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    presenter = controller._overlay_presenter
+    assert presenter is not None
+    await presenter.emit(
+        SelfTranscriptFinal(
+            event_id="self-final",
+            seq=1,
+            utterance_id=uuid4(),
+            channel="self",
+            created_at=10.0,
+            text="current preferences must seed restart bridge",
+            source_language="ko",
+            target_language="en",
+            is_final=True,
+        )
+    )
+    assert FakeOverlayBridge.instances[0].snapshots[-1].blocks[0].secondary_enabled is True
+
+    await controller._teardown_overlay_runtime(preserve_presenter_state=True)
+
+    controller.settings.overlay.show_translation = False
+    controller.settings.overlay.show_peer_original = False
+    controller.settings.overlay.calibration = OverlayCalibration(distance=1.7, offset_x=0.4)
+    controller.overlay_calibration = controller.settings.overlay.calibration.copy()
+    controller.overlay_state = "failed"
+
+    try:
+        await controller._begin_overlay_start()
+        await _wait_until(lambda: len(FakeOverlayBridge.instances) == 2)
+
+        restarted_bridge = FakeOverlayBridge.instances[1]
+        assert restarted_bridge.initial_snapshot.blocks[0].secondary_enabled is False
+        assert restarted_bridge.initial_snapshot.calibration.distance == 1.7
+        assert restarted_bridge.initial_snapshot.calibration.offset_x == 0.4
+    finally:
+        if len(FakeOverlayProcessManager.instances) >= 2:
+            FakeOverlayProcessManager.instances[1].complete_startup()
+            with contextlib.suppress(AssertionError):
+                await _wait_until(lambda: controller.overlay_state == "connected")
+        await controller._teardown_overlay_runtime(preserve_presenter_state=False)
 
 
 @pytest.mark.asyncio
