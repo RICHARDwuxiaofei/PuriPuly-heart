@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import base64
 import importlib
 import inspect
@@ -46,10 +47,12 @@ from puripuly_heart.core.managed_openrouter_release import (
     TalkTogetherPassStatus,
 )
 from puripuly_heart.core.overlay import manifest as overlay_manifest_module
+from puripuly_heart.core.overlay import process as overlay_process_module
 from puripuly_heart.core.overlay.manifest import OVERLAY_CONTRACT_VERSION
 from puripuly_heart.core.overlay.protocol import (
     OverlayPresentationBlock,
     OverlayPresentationCalibration,
+    OverlayPresentationSnapshot,
 )
 from puripuly_heart.core.storage.secrets import (
     EncryptedFileSecretStore,
@@ -71,6 +74,7 @@ REQUIRED_SURFACES = (
     "secret_store",
     "broker_v1",
     "overlay",
+    "installer_identity",
     "prompts",
     "provider_aliases",
     "provider_runtime_public_config",
@@ -235,6 +239,20 @@ def _load_snapshot() -> dict[str, Any]:
 
 def _load_inventory() -> dict[str, Any]:
     return json.loads(INVENTORY_PATH.read_text(encoding="utf-8"))
+
+
+def _render_command_template(parts: list[str], **values: str) -> tuple[str, ...]:
+    return tuple(part.format(**values) for part in parts)
+
+
+def _inno_define_literals(script: str) -> dict[str, str]:
+    return dict(re.findall(r'^\s*#define\s+([A-Za-z0-9_]+)\s+"([^"]*)"', script, re.M))
+
+
+def _powershell_string_variable(script: str, variable_name: str) -> str:
+    match = re.search(rf'^\s*\${re.escape(variable_name)}\s*=\s+"([^"]*)"', script, re.M)
+    assert match is not None, variable_name
+    return match.group(1)
 
 
 def _test_function_names(path: Path) -> set[str]:
@@ -818,6 +836,25 @@ def test_guard_coverage_references_existing_tests_for_every_surface() -> None:
             assert test_name in _test_function_names(test_path), ref
 
 
+def test_guard_coverage_includes_overlay_rust_and_installer_freeze_refs() -> None:
+    coverage = _load_snapshot()["guard_coverage"]
+
+    assert (
+        "tests/config/test_public_compatibility_surfaces.py::"
+        "test_overlay_startup_contract_snapshot_matches_python_runners_and_manifest_handoff"
+        in coverage["overlay"]
+    )
+    assert (
+        "tests/config/test_public_compatibility_surfaces.py::"
+        "test_rust_overlay_startup_contract_snapshot_matches_native_sources" in coverage["overlay"]
+    )
+    assert (
+        "tests/config/test_public_compatibility_surfaces.py::"
+        "test_installer_identity_snapshot_matches_inno_and_smoke_guard_contract"
+        in coverage["packaging"]
+    )
+
+
 def test_secret_store_key_registry_snapshot_matches_current_public_keys() -> None:
     snapshot = _load_snapshot()["secret_store"]
     registry_keys = tuple(snapshot["registry_keys"])
@@ -1154,17 +1191,193 @@ def test_overlay_contract_snapshot_matches_manifest_and_protocol_wire_shape() ->
         source_text_len=5,
         logical_turn_key="self:1",
     )
+    presentation_snapshot = OverlayPresentationSnapshot(blocks=[block]).to_dict()
 
     assert OVERLAY_CONTRACT_VERSION == snapshot["contract_version"]
     assert tuple(sorted(overlay_manifest_module._MANIFEST_FIELDS)) == tuple(
         snapshot["manifest_fields"]
     )
+    assert tuple(presentation_snapshot) == tuple(snapshot["presentation_snapshot_fields"])
     assert tuple(OverlayPresentationCalibration().to_dict()) == tuple(
         snapshot["calibration_fields"]
     )
-    assert tuple(block.to_dict()) == tuple(snapshot["presentation_block_fields"])
+    assert tuple(presentation_snapshot["blocks"][0]) == tuple(snapshot["presentation_block_fields"])
     assert tuple(snapshot["channels"]) == ("self", "peer")
     assert tuple(snapshot["block_variants"]) == ("active_self", "active_peer", "finalized")
+
+
+@pytest.mark.asyncio
+async def test_overlay_startup_contract_snapshot_matches_python_runners_and_manifest_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    startup = _load_snapshot()["overlay"]["startup_contract"]
+    manifest_path = tmp_path / "overlay-manifest.json"
+    python_executable = tmp_path / "python.exe"
+    app_executable = tmp_path / "PuriPulyHeart.exe"
+    overlay_executable = tmp_path / "PuriPulyHeartOverlay.exe"
+
+    source_runner = overlay_process_module.DesktopFletOverlayRunner(
+        frozen=False,
+        python_executable=python_executable,
+    )
+    frozen_runner = overlay_process_module.DesktopFletOverlayRunner(
+        frozen=True,
+        app_executable=app_executable,
+    )
+
+    assert source_runner.build_command(manifest_path) == _render_command_template(
+        startup["desktop_source_runner_command"],
+        python_executable=str(python_executable),
+        manifest_path=str(manifest_path),
+    )
+    assert frozen_runner.build_command(manifest_path) == _render_command_template(
+        startup["desktop_frozen_runner_command"],
+        app_executable=str(app_executable),
+        manifest_path=str(manifest_path),
+    )
+
+    captured_command: tuple[str, ...] | None = None
+    captured_stdio: tuple[object, object] | None = None
+
+    class FakeSubprocess:
+        stdout = None
+        stderr = None
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    async def fake_create_subprocess_exec(
+        *args: str,
+        stdout: object | None = None,
+        stderr: object | None = None,
+    ) -> FakeSubprocess:
+        nonlocal captured_command, captured_stdio
+        captured_command = tuple(args)
+        captured_stdio = (stdout, stderr)
+        return FakeSubprocess()
+
+    monkeypatch.setattr(
+        overlay_process_module.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    await overlay_process_module.DefaultOverlayProcessRunner().spawn(
+        overlay_executable,
+        manifest_path,
+    )
+
+    assert captured_command == _render_command_template(
+        startup["native_runner_command"],
+        overlay_executable=str(overlay_executable),
+        manifest_path=str(manifest_path),
+    )
+    assert captured_stdio == (asyncio.subprocess.PIPE, asyncio.subprocess.PIPE)
+
+    manifest = overlay_manifest_module.OverlayLaunchManifest(
+        contract_version=OVERLAY_CONTRACT_VERSION,
+        app_version="test",
+        overlay_instance_id="overlay-test",
+        bridge_url="ws://127.0.0.1:8765",
+        session_token="session-token",
+        parent_pid=1234,
+        startup_deadline_ms=3000,
+        log_dir="logs",
+        log_level="INFO",
+        locale="en",
+        logging_mode="basic",
+    )
+    manager = overlay_process_module.OverlayProcessManager()
+    written_manifest_path = manager._write_manifest(manifest)
+    try:
+        assert written_manifest_path.name.startswith(startup["manifest_temp_prefix"])
+        assert written_manifest_path.name.endswith(startup["manifest_temp_suffix"])
+        assert json.loads(written_manifest_path.read_text(encoding="utf-8")) == manifest.to_dict()
+    finally:
+        written_manifest_path.unlink(missing_ok=True)
+
+    manager_handler_source = inspect.getsource(
+        overlay_process_module.OverlayProcessManager._handle_lifecycle_event
+    )
+    for key in (
+        "ready_event_type",
+        "startup_failure_event_type",
+        "runtime_failure_event_type",
+        "renderer_event_type",
+    ):
+        assert f'"{startup[key]}"' in manager_handler_source
+
+    default_spawn_source = inspect.getsource(
+        overlay_process_module.DefaultOverlayProcessRunner.spawn
+    )
+    desktop_spawn_source = inspect.getsource(overlay_process_module.DesktopFletOverlayRunner.spawn)
+    assert startup["explicit_env_overrides"] == []
+    assert "env=" not in default_spawn_source
+    assert "env=" not in desktop_spawn_source
+
+
+def test_rust_overlay_startup_contract_snapshot_matches_native_sources() -> None:
+    rust_startup = _load_snapshot()["overlay"]["rust_startup_behavior"]
+    manifest_source = (REPO_ROOT / "native" / "overlay" / "src" / "manifest.rs").read_text(
+        encoding="utf-8"
+    )
+    runtime_source = (REPO_ROOT / "native" / "overlay" / "src" / "runtime.rs").read_text(
+        encoding="utf-8"
+    )
+    runtime_tests = (REPO_ROOT / "native" / "overlay" / "tests" / "runtime.rs").read_text(
+        encoding="utf-8"
+    )
+    startup_check_match = re.search(
+        r'args\[1\] == "--check-startup-contract".*?json!\(\{(?P<body>.*?)\}\)',
+        runtime_source,
+        re.S,
+    )
+    assert startup_check_match is not None
+    startup_output_fields = tuple(
+        re.findall(r'"([A-Za-z0-9_]+)"\s*:', startup_check_match.group("body"))
+    )
+
+    assert (
+        f"pub const EXPECTED_CONTRACT_VERSION: u32 = {rust_startup['expected_contract_version']};"
+        in manifest_source
+    )
+    assert f'.arg("{rust_startup["startup_check_arg"]}")' in runtime_tests
+    assert tuple(rust_startup["startup_check_output_fields"]) == startup_output_fields
+    assert 'payload["contract_version"]' in runtime_tests
+    assert f'event["type"] == "{rust_startup["startup_error_event_type"]}"' in runtime_tests
+    assert (
+        rust_startup["startup_error_event_type"]
+        == _load_snapshot()["overlay"]["startup_contract"]["startup_failure_event_type"]
+    )
+
+
+def test_installer_identity_snapshot_matches_inno_and_smoke_guard_contract() -> None:
+    snapshot = _load_snapshot()["installer_identity"]
+    installer_script = (REPO_ROOT / "installer.iss").read_text(encoding="utf-8")
+    release_script = (REPO_ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(
+        encoding="utf-8"
+    )
+    defines = _inno_define_literals(installer_script)
+
+    for name, value in snapshot["defines"].items():
+        assert defines[name] == value
+    for setup_line in snapshot["setup_lines"]:
+        assert setup_line in installer_script
+
+    assert snapshot["production_installer_build"] in release_script
+    assert (
+        _powershell_string_variable(release_script, "InstallerTestAppId")
+        == snapshot["smoke_alternate_app_id"]
+    )
+    for guard_line in snapshot["smoke_guard_lines"]:
+        assert guard_line in release_script
 
 
 def test_prompt_loader_snapshot_freezes_fallback_order_and_translation_prompt_requirement(
