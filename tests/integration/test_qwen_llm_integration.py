@@ -6,11 +6,15 @@ from uuid import uuid4
 import pytest
 
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
+from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 from tests.integration.helpers import (
+    get_async_qwen_base_url,
     get_qwen_base_url,
     integration_mark,
     require_env,
     require_module,
+    run_llm_smoke,
+    suppressed_runtime_logger,
 )
 
 pytestmark = integration_mark()
@@ -41,3 +45,17 @@ async def test_qwen_llm_translation_smoke() -> None:
     )
 
     assert translation.text
+
+
+@pytest.mark.asyncio
+async def test_async_qwen_llm_translation_smoke() -> None:
+    api_key = require_env("ALIBABA_API_KEY")
+
+    provider = AsyncQwenLLMProvider(
+        api_key=api_key,
+        base_url=get_async_qwen_base_url(),
+        model=os.getenv("QWEN_LLM_MODEL", "qwen3.5-plus"),
+        runtime_logging=suppressed_runtime_logger(),
+    )
+
+    await run_llm_smoke(provider)
