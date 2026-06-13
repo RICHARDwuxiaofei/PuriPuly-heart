@@ -395,6 +395,24 @@ def _only_item(items: list[Any], *, label: str) -> Any:
     return items[0]
 
 
+def _provider_verification_entry(
+    values: Mapping[str, object],
+    provider: str,
+    *,
+    label: str = "values",
+) -> Mapping[str, object]:
+    state = values.get("state")
+    if not isinstance(state, Mapping):
+        pytest.fail(f"{label} missing nested 'state' mapping")
+    provider_verification = state.get("provider_verification")
+    if not isinstance(provider_verification, Mapping):
+        pytest.fail(f"{label} missing nested 'state.provider_verification' mapping")
+    entry = provider_verification.get(provider)
+    if not isinstance(entry, Mapping):
+        pytest.fail(f"{label} missing nested 'state.provider_verification.{provider}' mapping")
+    return entry
+
+
 def _assert_secret_snapshot_matches(
     snapshot: secret_store.SecretSnapshot,
     *,
@@ -506,9 +524,9 @@ async def test_verify_provider_secret_commits_bound_evidence_after_verifier_succ
     assert len(repository.saved_requests) == 1
     saved_request = repository.saved_requests[0]
     _assert_no_raw_secret_values(saved_request, label="verification settings commit request")
-    entry = saved_request.values["state.provider_verification.openrouter"]
-    if not isinstance(entry, Mapping):
-        pytest.fail("verification evidence entry should be a mapping")
+    entry = _provider_verification_entry(
+        saved_request.values, "openrouter", label="verification settings commit request"
+    )
     assert entry["status"] == "verified"
     assert entry["provider"] == "openrouter"
     assert entry["secret_key"] == "openrouter_api_key"
@@ -590,9 +608,9 @@ async def test_verify_provider_secret_strips_raw_secret_material_from_context_an
     assert set(verifier_request.context) == {"flow"}
     saved_request = _only_item(repository.saved_requests, label="verification settings saves")
     _assert_no_raw_secret_values(saved_request, label="raw-key settings commit request")
-    entry = saved_request.values["state.provider_verification.openrouter"]
-    if not isinstance(entry, Mapping):
-        pytest.fail("raw-key verification evidence entry should be a mapping")
+    entry = _provider_verification_entry(
+        saved_request.values, "openrouter", label="raw-key verification settings commit request"
+    )
     _assert_no_raw_secret_values(entry, label="raw-key verification evidence entry")
     assert set(entry["verifier_context"]) == {"flow"}  # type: ignore[arg-type]
     assert set(entry["verifier_evidence"]) == {"verifier"}  # type: ignore[arg-type]
@@ -680,9 +698,9 @@ async def test_verify_provider_secret_failure_commits_failed_evidence_without_ra
     assert events == [("verify", "openrouter"), ("save", "api_key_verify")]
     saved_request = _only_item(repository.saved_requests, label="verification settings saves")
     _assert_no_raw_secret_values(saved_request, label="failed verification settings commit request")
-    entry = saved_request.values["state.provider_verification.openrouter"]
-    if not isinstance(entry, Mapping):
-        pytest.fail("failed verification evidence entry should be a mapping")
+    entry = _provider_verification_entry(
+        saved_request.values, "openrouter", label="failed verification settings commit request"
+    )
     assert entry["status"] == "failed"
     evidence = entry["verifier_evidence"]
     if not isinstance(evidence, Mapping):
@@ -794,14 +812,14 @@ async def test_successful_set_snapshots_writes_commits_then_publishes_dashboard_
         events=events,
     )
     repository = RecordingSettingsRepository(
-        _commit_success({"api_key_verified": {"openrouter": False}}),
+        _commit_success({"caller_marker": {"openrouter": False}}),
         events=events,
     )
     publisher = RecordingDashboardNeedsKeyPublisher(events=events)
     request = secret_settings.SecretSetRequest(
         secret_key="openrouter_api_key",
         secret_value=RAW_SET_SECRET,
-        settings_values={"api_key_verified": {"openrouter": False}},
+        settings_values={"caller_marker": {"openrouter": False}},
         expected_settings_revision="settings-r1",
         reason="secret_set",
         correlation_id="corr-set-success",
@@ -846,7 +864,7 @@ async def test_successful_set_snapshots_writes_commits_then_publishes_dashboard_
     _assert_no_raw_secret_values(saved_request, label="settings commit request")
     assert saved_request.expected_revision == "settings-r1"
     assert saved_request.reason == "secret_set"
-    assert saved_request.values["api_key_verified"]["openrouter"] is False  # type: ignore[index]
+    assert saved_request.values["caller_marker"]["openrouter"] is False  # type: ignore[index]
     assert publisher.publications == [
         (
             secret_settings.DashboardNeedsKeySnapshot(
@@ -865,7 +883,7 @@ async def test_dashboard_publish_failure_does_not_change_successful_transaction_
     events: list[tuple[str, str]] = []
     store = RecordingSecretStore(events=events)
     repository = RecordingSettingsRepository(
-        _commit_success({"api_key_verified": {"openrouter": False}}),
+        _commit_success({"caller_marker": {"openrouter": False}}),
         events=events,
     )
     publisher = RecordingDashboardNeedsKeyPublisher(events=events, fail_publish=True)
@@ -878,7 +896,7 @@ async def test_dashboard_publish_failure_does_not_change_successful_transaction_
         secret_settings.SecretSetRequest(
             secret_key="openrouter_api_key",
             secret_value=RAW_SET_SECRET,
-            settings_values={"api_key_verified": {"openrouter": False}},
+            settings_values={"caller_marker": {"openrouter": False}},
             expected_settings_revision="settings-r1",
             reason="secret_set",
             correlation_id="corr-set-publish-failed",
@@ -927,7 +945,7 @@ async def test_settings_commit_failure_after_set_restores_previous_secret_withou
         secret_settings.SecretSetRequest(
             secret_key="openrouter_api_key",
             secret_value=RAW_SET_SECRET,
-            settings_values={"api_key_verified": {"openrouter": False}},
+            settings_values={"caller_marker": {"openrouter": False}},
             expected_settings_revision="settings-r1",
             reason="secret_set",
             correlation_id="corr-set-commit-failed",
@@ -978,7 +996,7 @@ async def test_settings_save_exception_after_set_restores_previous_secret() -> N
         events=events,
     )
     repository = RecordingSettingsRepository(
-        _commit_success({"api_key_verified": {"openrouter": False}}),
+        _commit_success({"caller_marker": {"openrouter": False}}),
         events=events,
         raise_on_save=True,
     )
@@ -992,7 +1010,7 @@ async def test_settings_save_exception_after_set_restores_previous_secret() -> N
         secret_settings.SecretSetRequest(
             secret_key="openrouter_api_key",
             secret_value=RAW_SET_SECRET,
-            settings_values={"api_key_verified": {"openrouter": False}},
+            settings_values={"caller_marker": {"openrouter": False}},
             expected_settings_revision="settings-r1",
             reason="secret_set",
             correlation_id="corr-set-save-raised",
@@ -1051,7 +1069,7 @@ async def test_absent_secret_set_commit_failure_clears_newly_written_secret_on_r
         secret_settings.SecretSetRequest(
             secret_key="openrouter_api_key",
             secret_value=RAW_SET_SECRET,
-            settings_values={"api_key_verified": {"openrouter": False}},
+            settings_values={"caller_marker": {"openrouter": False}},
             expected_settings_revision="settings-r1",
             reason="secret_set",
             correlation_id="corr-set-absent-commit-failed",
@@ -1116,7 +1134,7 @@ async def test_restore_failure_after_settings_commit_failure_reports_compensatio
         secret_settings.SecretSetRequest(
             secret_key="openrouter_api_key",
             secret_value=RAW_SET_SECRET,
-            settings_values={"api_key_verified": {"openrouter": False}},
+            settings_values={"caller_marker": {"openrouter": False}},
             expected_settings_revision="settings-r1",
             reason="secret_set",
             correlation_id="corr-set-restore-failed",
@@ -1170,7 +1188,7 @@ async def test_successful_clear_snapshots_clears_commits_then_publishes_dashboar
         events=events,
     )
     repository = RecordingSettingsRepository(
-        _commit_success({"api_key_verified": {"deepgram": False}}, revision="settings-r-clear"),
+        _commit_success({"caller_marker": {"deepgram": False}}, revision="settings-r-clear"),
         events=events,
     )
     publisher = RecordingDashboardNeedsKeyPublisher(events=events)
@@ -1182,7 +1200,7 @@ async def test_successful_clear_snapshots_clears_commits_then_publishes_dashboar
     ).clear_provider_secret(
         secret_settings.SecretClearRequest(
             secret_key="deepgram_api_key",
-            settings_values={"api_key_verified": {"deepgram": False}},
+            settings_values={"caller_marker": {"deepgram": False}},
             expected_settings_revision="settings-r-before-clear",
             reason="secret_clear",
             correlation_id="corr-clear-success",
@@ -1210,7 +1228,7 @@ async def test_successful_clear_snapshots_clears_commits_then_publishes_dashboar
         repository.saved_requests[0],
         label="clear settings commit request",
     )
-    assert repository.saved_requests[0].values["api_key_verified"]["deepgram"] is False  # type: ignore[index]
+    assert repository.saved_requests[0].values["caller_marker"]["deepgram"] is False  # type: ignore[index]
     assert publisher.publications == [
         (
             secret_settings.DashboardNeedsKeySnapshot(
@@ -1238,7 +1256,7 @@ async def test_clear_absent_secret_commit_failure_restores_absent_snapshot_by_cl
     ).clear_provider_secret(
         secret_settings.SecretClearRequest(
             secret_key="soniox_api_key",
-            settings_values={"api_key_verified": {"soniox": False}},
+            settings_values={"caller_marker": {"soniox": False}},
             expected_settings_revision="settings-r-before-clear",
             reason="secret_clear",
             correlation_id="corr-clear-absent-failed",
@@ -1301,7 +1319,7 @@ async def test_clear_write_failure_returns_secret_write_failed_without_settings_
     ).clear_provider_secret(
         secret_settings.SecretClearRequest(
             secret_key="deepgram_api_key",
-            settings_values={"api_key_verified": {"deepgram": False}},
+            settings_values={"caller_marker": {"deepgram": False}},
             expected_settings_revision="settings-r-before-clear",
             reason="secret_clear",
             correlation_id="corr-clear-write-failed",
@@ -1346,7 +1364,7 @@ async def test_secret_write_failure_returns_secret_write_failed_without_settings
         secret_settings.SecretSetRequest(
             secret_key="openrouter_api_key",
             secret_value=RAW_SET_SECRET,
-            settings_values={"api_key_verified": {"openrouter": False}},
+            settings_values={"caller_marker": {"openrouter": False}},
             expected_settings_revision="settings-r1",
             reason="secret_set",
             correlation_id="corr-set-write-failed",

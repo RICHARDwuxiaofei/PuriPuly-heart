@@ -13,6 +13,10 @@ from puripuly_heart.app.ports.provider_verifier import (
     ProviderVerifierPort,
 )
 from puripuly_heart.app.ports.runtime_apply import RuntimeApplyPort, RuntimeApplyRequest
+from puripuly_heart.app.services.operational_state_payloads import (
+    ProviderVerificationEvidence,
+    provider_verification_state_values,
+)
 from puripuly_heart.app.services.secret_settings_transaction import (
     SecretSetRequest,
     SecretSettingsTransaction,
@@ -191,12 +195,58 @@ def _settings_values_with_verification_evidence(
     request: OpenRouterPkceHandoffRequest,
     verification_result: ProviderVerificationResult,
 ) -> Mapping[str, object]:
-    values = dict(request.settings_values)
-    values[f"state.provider_verification.{request.provider}"] = _verification_entry_values(
-        request=request,
-        result=verification_result,
+    values = _merge_nested_settings_values(
+        request.settings_values,
+        provider_verification_state_values(
+            ProviderVerificationEvidence(
+                status=verification_result.status,
+                provider=request.provider,
+                secret_key=request.secret_key,
+                secret_revision=verification_result.secret_revision,
+                secret_fingerprint=_secret_fingerprint(request.transient_api_key),
+                verifier_context=dict(request.verifier_context),
+                verifier_evidence=_sanitize_verification_fields(
+                    verification_result.evidence,
+                    secret_value=request.transient_api_key,
+                ),
+            )
+        ),
     )
     return freeze_settings_values(values)
+
+
+def _merge_nested_settings_values(
+    base: Mapping[str, object],
+    overlay: Mapping[str, object],
+    *,
+    path: tuple[str, ...] = (),
+) -> dict[str, object]:
+    merged = {str(key): _copy_settings_value(value) for key, value in base.items()}
+    for raw_key, overlay_value in overlay.items():
+        key = str(raw_key)
+        existing_value = merged.get(key)
+        next_path = (*path, key)
+        if path == ("state", "provider_verification"):
+            merged[key] = _copy_settings_value(overlay_value)
+        elif isinstance(existing_value, Mapping) and isinstance(overlay_value, Mapping):
+            merged[key] = _merge_nested_settings_values(
+                existing_value,
+                overlay_value,
+                path=next_path,
+            )
+        else:
+            merged[key] = _copy_settings_value(overlay_value)
+    return merged
+
+
+def _copy_settings_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _copy_settings_value(nested) for key, nested in value.items()}
+    if isinstance(value, tuple):
+        return [_copy_settings_value(item) for item in value]
+    if isinstance(value, list):
+        return [_copy_settings_value(item) for item in value]
+    return value
 
 
 def _normalized_evidence_key(key: str) -> str:
@@ -270,25 +320,6 @@ def _sanitize_verification_fields(
 def _secret_fingerprint(secret_value: str) -> str:
     digest = hashlib.sha256(secret_value.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
-
-
-def _verification_entry_values(
-    *,
-    request: OpenRouterPkceHandoffRequest,
-    result: ProviderVerificationResult,
-) -> dict[str, object]:
-    return {
-        "status": result.status,
-        "provider": request.provider,
-        "secret_key": request.secret_key,
-        "secret_revision": result.secret_revision,
-        "secret_fingerprint": _secret_fingerprint(request.transient_api_key),
-        "verifier_context": dict(request.verifier_context),
-        "verifier_evidence": _sanitize_verification_fields(
-            result.evidence,
-            secret_value=request.transient_api_key,
-        ),
-    }
 
 
 def _provider_verification_failed_result(

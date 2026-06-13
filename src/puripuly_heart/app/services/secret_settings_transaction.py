@@ -10,13 +10,16 @@ from puripuly_heart.app.ports._settings_values import freeze_settings_values
 from puripuly_heart.app.ports.provider_verifier import (
     PROVIDER_VERIFICATION_STATUS_VERIFIED,
     ProviderVerificationRequest,
-    ProviderVerificationResult,
     ProviderVerifierPort,
 )
 from puripuly_heart.app.ports.secret_store import SecretSnapshot, SecretStorePort
 from puripuly_heart.app.ports.settings_repository import (
     SettingsCommitRequest,
     SettingsRepositoryPort,
+)
+from puripuly_heart.app.services.operational_state_payloads import (
+    ProviderVerificationEvidence,
+    provider_verification_state_values,
 )
 from puripuly_heart.core.messages import (
     CONTENT_POLICY_METADATA_ONLY,
@@ -241,12 +244,20 @@ class SecretSettingsTransaction:
                 verifier_status=verification_result.status,
             )
 
-        settings_values = {
-            f"state.provider_verification.{request.provider}": _verification_entry_values(
-                request=request,
-                result=verification_result,
+        settings_values = provider_verification_state_values(
+            ProviderVerificationEvidence(
+                status=verification_result.status,
+                provider=request.provider,
+                secret_key=request.secret_key,
+                secret_revision=verification_result.secret_revision or request.secret_revision,
+                secret_fingerprint=_secret_fingerprint(request.secret_value),
+                verifier_context=dict(request.verifier_context),
+                verifier_evidence=_sanitize_verification_fields(
+                    verification_result.evidence,
+                    secret_value=request.secret_value,
+                ),
             )
-        }
+        )
         try:
             commit_result = await self.settings_repository.save(
                 SettingsCommitRequest(
@@ -451,25 +462,6 @@ def _sanitize_verification_fields(
 def _secret_fingerprint(secret_value: str) -> str:
     digest = hashlib.sha256(secret_value.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
-
-
-def _verification_entry_values(
-    *,
-    request: ProviderSecretVerificationRequest,
-    result: ProviderVerificationResult,
-) -> dict[str, object]:
-    return {
-        "status": result.status,
-        "provider": request.provider,
-        "secret_key": request.secret_key,
-        "secret_revision": result.secret_revision or request.secret_revision,
-        "secret_fingerprint": _secret_fingerprint(request.secret_value),
-        "verifier_context": dict(request.verifier_context),
-        "verifier_evidence": _sanitize_verification_fields(
-            result.evidence,
-            secret_value=request.secret_value,
-        ),
-    }
 
 
 def _provider_verification_failed_result(

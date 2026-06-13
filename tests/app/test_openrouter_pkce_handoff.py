@@ -235,7 +235,7 @@ def _commit_success() -> settings_repository.SettingsCommitResult:
     return settings_repository.SettingsCommitResult(
         succeeded=True,
         snapshot=settings_repository.SettingsSnapshot(
-            values={"provider.llm": "openrouter"},
+            values={"intent": {"translation": {"connection": "byok"}}},
             revision="settings-r2",
         ),
         message=None,
@@ -287,10 +287,12 @@ def _runtime_result(status: messages.RuntimeApplyStatus) -> messages.RuntimeAppl
 def _request() -> Any:
     return _request_with_settings(
         {
-            "provider.llm": "openrouter",
-            "openrouter.selected_source": "byok",
-            "openrouter.selection_alias": "gemma4:byok",
-            "openrouter.llm_model": "google/gemma-3-27b-it",
+            "intent": {
+                "translation": {
+                    "connection": "byok",
+                    "model": "gemma4",
+                }
+            }
         }
     )
 
@@ -376,6 +378,24 @@ def _assert_no_items(items: list[Any], *, label: str) -> None:
         pytest.fail(f"{label} count mismatch: actual={len(items)}, expected=0")
 
 
+def _provider_verification_entry(
+    values: Mapping[str, object],
+    provider: str,
+    *,
+    label: str = "values",
+) -> Mapping[str, object]:
+    state = values.get("state")
+    if not isinstance(state, Mapping):
+        pytest.fail(f"{label} missing nested 'state' mapping")
+    provider_verification = state.get("provider_verification")
+    if not isinstance(provider_verification, Mapping):
+        pytest.fail(f"{label} missing nested 'state.provider_verification' mapping")
+    entry = provider_verification.get(provider)
+    if not isinstance(entry, Mapping):
+        pytest.fail(f"{label} missing nested 'state.provider_verification.{provider}' mapping")
+    return entry
+
+
 def _assert_rejected_unsafe_settings_before_side_effects(
     *,
     result: messages.TransactionResult,
@@ -428,9 +448,9 @@ def test_openrouter_pkce_handoff_service_has_no_ui_or_concrete_store_imports() -
 def test_request_repr_does_not_expose_raw_bad_settings_values() -> None:
     request = _request_with_settings(
         {
-            "provider.llm": "openrouter",
+            "selection": "openrouter",
             "nested": {"value": ["safe", (RAW_PKCE_SECRET,)]},
-            f"openrouter.{RAW_PKCE_SECRET}.model": "safe-value",
+            f"models.{RAW_PKCE_SECRET}.id": "safe-value",
         }
     )
 
@@ -456,8 +476,8 @@ async def test_raw_transient_key_in_settings_value_is_rejected_before_side_effec
     ).complete_handoff(
         _request_with_settings(
             {
-                "provider.llm": "openrouter",
-                "openrouter.routing": {"fallbacks": ["safe", (RAW_PKCE_SECRET,)]},
+                "selection": "openrouter",
+                "routing": {"fallbacks": ["safe", (RAW_PKCE_SECRET,)]},
             }
         )
     )
@@ -491,8 +511,8 @@ async def test_raw_transient_key_in_settings_key_is_rejected_before_side_effects
     ).complete_handoff(
         _request_with_settings(
             {
-                "provider.llm": "openrouter",
-                f"openrouter.{RAW_PKCE_SECRET}.model": "safe-value",
+                "selection": "openrouter",
+                f"models.{RAW_PKCE_SECRET}.id": "safe-value",
             }
         )
     )
@@ -526,8 +546,8 @@ async def test_secret_bearing_settings_path_is_rejected_before_side_effects() ->
     ).complete_handoff(
         _request_with_settings(
             {
-                "provider.llm": "openrouter",
-                "openrouter.api_key": "configured-by-service-boundary",
+                "selection": "openrouter",
+                "credentials.api_key": "configured-by-service-boundary",
             }
         )
     )
@@ -585,9 +605,9 @@ async def test_success_verifies_saves_secret_and_settings_then_applies_runtime()
     saved_request = _only_item(repository.saved_requests, label="settings saves")
     _assert_no_raw_secret_values(saved_request, label="handoff settings commit request")
     assert saved_request.expected_revision == "settings-r1"
-    entry = saved_request.values["state.provider_verification.openrouter"]
-    if not isinstance(entry, Mapping):
-        pytest.fail("verification evidence entry should be a mapping")
+    entry = _provider_verification_entry(
+        saved_request.values, "openrouter", label="handoff settings commit request"
+    )
     _assert_no_raw_secret_values(entry, label="handoff verification evidence entry")
     assert entry["status"] == "verified"
     assert entry["provider"] == "openrouter"
@@ -604,8 +624,114 @@ async def test_success_verifies_saves_secret_and_settings_then_applies_runtime()
     assert "api_key" not in evidence
     runtime_request = _only_item(runtime.requests, label="runtime apply requests")
     _assert_no_raw_secret_values(runtime_request, label="runtime apply request")
-    assert runtime_request.settings_values["provider.llm"] == "openrouter"
-    assert runtime_request.settings_values["state.provider_verification.openrouter"] == entry
+    assert runtime_request.settings_values["intent"]["translation"]["connection"] == "byok"  # type: ignore[index]
+    assert (
+        _provider_verification_entry(
+            runtime_request.settings_values, "openrouter", label="runtime apply request"
+        )
+        == entry
+    )
+
+
+@pytest.mark.asyncio
+async def test_success_preserves_existing_nested_operational_state_payloads() -> None:
+    events: list[tuple[str, str]] = []
+    verifier = RecordingProviderVerifier(_verification_result(), events=events)
+    store = RecordingSecretStore(
+        {"openrouter_api_key": RAW_PREVIOUS_SECRET},
+        events=events,
+    )
+    repository = RecordingSettingsRepository(_commit_success(), events=events)
+    runtime = RecordingRuntimeApply(events=events)
+    existing_settings_values = {
+        "intent": {"translation": {"connection": "byok"}},
+        "state": {
+            "managed_connection": {"enabled": True},
+            "provider_verification": {
+                "google": {
+                    "status": "verified",
+                    "provider": "google",
+                }
+            },
+        },
+    }
+
+    result = await _service(
+        verifier=verifier,
+        store=store,
+        repository=repository,
+        runtime=runtime,
+    ).complete_handoff(_request_with_settings(existing_settings_values))
+
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    saved_request = _only_item(repository.saved_requests, label="settings saves")
+    state = saved_request.values["state"]
+    assert isinstance(state, Mapping)
+    assert state["managed_connection"] == {"enabled": True}
+    provider_verification = state["provider_verification"]
+    assert isinstance(provider_verification, Mapping)
+    assert provider_verification["google"] == {
+        "status": "verified",
+        "provider": "google",
+    }
+    assert _provider_verification_entry(saved_request.values, "openrouter")["status"] == "verified"
+    runtime_request = _only_item(runtime.requests, label="runtime apply requests")
+    assert runtime_request.settings_values == saved_request.values
+    assert "openrouter" not in existing_settings_values["state"]["provider_verification"]
+
+
+@pytest.mark.asyncio
+async def test_success_replaces_existing_same_provider_verification_entry() -> None:
+    events: list[tuple[str, str]] = []
+    verifier = RecordingProviderVerifier(_verification_result(), events=events)
+    store = RecordingSecretStore(
+        {"openrouter_api_key": RAW_PREVIOUS_SECRET},
+        events=events,
+    )
+    repository = RecordingSettingsRepository(_commit_success(), events=events)
+    runtime = RecordingRuntimeApply(events=events)
+    existing_settings_values = {
+        "intent": {"translation": {"connection": "byok"}},
+        "state": {
+            "managed_connection": {"enabled": True},
+            "provider_verification": {
+                "openrouter": {
+                    "status": "failed",
+                    "provider": "openrouter",
+                    "stale_top_level": "removed",
+                    "verifier_context": {"stale_context": "removed"},
+                    "verifier_evidence": {"stale_evidence": "removed"},
+                },
+                "google": {"status": "verified", "provider": "google"},
+            },
+        },
+    }
+
+    result = await _service(
+        verifier=verifier,
+        store=store,
+        repository=repository,
+        runtime=runtime,
+    ).complete_handoff(_request_with_settings(existing_settings_values))
+
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    saved_request = _only_item(repository.saved_requests, label="settings saves")
+    state = saved_request.values["state"]
+    assert isinstance(state, Mapping)
+    assert state["managed_connection"] == {"enabled": True}
+    provider_verification = state["provider_verification"]
+    assert isinstance(provider_verification, Mapping)
+    assert provider_verification["google"] == {"status": "verified", "provider": "google"}
+    entry = _provider_verification_entry(saved_request.values, "openrouter")
+    assert "stale_top_level" not in entry
+    assert entry["status"] == "verified"
+    assert set(entry["verifier_context"]) == {"flow", "launch_source"}  # type: ignore[arg-type]
+    evidence = entry["verifier_evidence"]
+    if not isinstance(evidence, Mapping):
+        pytest.fail("verification evidence details should be a mapping")
+    assert "stale_evidence" not in evidence
+    runtime_request = _only_item(runtime.requests, label="runtime apply requests")
+    assert runtime_request.settings_values == saved_request.values
 
 
 @pytest.mark.asyncio

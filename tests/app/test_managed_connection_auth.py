@@ -251,10 +251,17 @@ def _request(settings_values: Mapping[str, object] | None = None) -> Any:
         local_secret_key=LOCAL_SECRET_KEY,
         settings_values=settings_values
         or {
-            "provider.llm": "openrouter",
-            "openrouter.selected_source": "managed",
-            "state.managed_connection.enabled": True,
-            "state.managed_identity.active_managed_credential_ref": "hash_123",
+            "intent": {
+                "translation": {
+                    "connection": "managed",
+                    "model": "gemma4",
+                }
+            },
+            "state": {
+                "managed_connection": {
+                    "active_managed_credential_ref": "hash_123",
+                }
+            },
         },
         expected_settings_revision="settings-r1",
         reason="managed_connection_auth",
@@ -333,7 +340,7 @@ def _commit_success() -> settings_repository.SettingsCommitResult:
     return settings_repository.SettingsCommitResult(
         succeeded=True,
         snapshot=settings_repository.SettingsSnapshot(
-            values={"provider.llm": "openrouter", "openrouter.selected_source": "managed"},
+            values={"intent": {"translation": {"connection": "managed"}}},
             revision="settings-r2",
         ),
         message=None,
@@ -531,9 +538,9 @@ def test_request_and_port_dtos_are_frozen_slotted_and_repr_safe() -> None:
 @pytest.mark.parametrize(
     "unsafe_path",
     (
-        "openrouter.api_key",
-        "state.managed_connection.credential_value",
-        "state.managedConnection.privateKey",
+        "credentials.api_key",
+        "credentials.credential_value",
+        "credentials.privateKey",
     ),
 )
 async def test_secret_bearing_settings_path_is_rejected_before_side_effects(
@@ -555,7 +562,7 @@ async def test_secret_bearing_settings_path_is_rejected_before_side_effects(
     ).authorize(
         _request(
             {
-                "provider.llm": "openrouter",
+                "connection": "managed",
                 unsafe_path: "configured-by-caller-bug",
             }
         )
@@ -577,14 +584,12 @@ async def test_secret_bearing_settings_path_is_rejected_before_side_effects(
     "settings_values",
     (
         {
-            "provider.llm": "openrouter",
-            f"state.managed_connection.{RAW_MANAGED_CREDENTIAL}.debug": "safe-value",
+            "connection": "managed",
+            f"credentials.{RAW_MANAGED_CREDENTIAL}.debug": "safe-value",
         },
         {
-            "provider.llm": "openrouter",
-            "state.managed_connection.debug": {
-                "nested": ["safe", (f"prefix:{RAW_MANAGED_CREDENTIAL}:suffix",)]
-            },
+            "connection": "managed",
+            "credentials.debug": {"nested": ["safe", (f"prefix:{RAW_MANAGED_CREDENTIAL}:suffix",)]},
         },
     ),
     ids=("raw-secret-in-key", "raw-secret-in-nested-value"),
@@ -666,7 +671,7 @@ async def test_success_preflights_identity_then_discord_auth_then_broker_issue_a
     _assert_no_raw_values(saved_request, label="settings commit request")
     assert saved_request.expected_revision == "settings-r1"
     assert saved_request.reason == "managed_connection_auth"
-    assert saved_request.values["openrouter.selected_source"] == "managed"
+    assert saved_request.values["intent"]["translation"]["connection"] == "managed"  # type: ignore[index]
 
 
 @pytest.mark.asyncio

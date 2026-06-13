@@ -673,18 +673,6 @@ KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementVio
             "TranslatorApp._build_managed_openrouter_byok_target_settings",
             "UI app managed-auth flow still reads controller.settings pending controller/service request DTOs",
         ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-value-payload-key",
-            "src/puripuly_heart/app/services/openrouter_pkce_handoff.py",
-            "state.provider_verification.*",
-            "PKCE handoff still writes provider verification via flat settings payload pending operational-state DTO persistence",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-value-payload-key",
-            "src/puripuly_heart/app/services/secret_settings_transaction.py",
-            "state.provider_verification.*",
-            "secret verification still writes provider verification via flat settings payload pending operational-state DTO persistence",
-        ),
     }
 )
 
