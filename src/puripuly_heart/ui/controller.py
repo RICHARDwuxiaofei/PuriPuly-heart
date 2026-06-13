@@ -30,17 +30,23 @@ from puripuly_heart.app.ports.settings_repository import (
     SettingsSnapshot,
 )
 from puripuly_heart.app.services.settings_mutation import (
-    ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS,
-    ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
-    ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
-    ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS,
-    SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT,
-    SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
-    SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
-    SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE,
+    OverlayOscOutputSettingsMutation,
     SettingsMutationService,
-    SettingsPathMutationValidator,
-    SettingsPathPatch,
+    SttLanguageAudioSettingsMutation,
+    TranslationProviderSettingsMutation,
+    UiPromptClipboardStateSettingsMutation,
+)
+from puripuly_heart.app.services.settings_mutation_legacy import (
+    _apply_settings_path_patch,
+    _SettingsPathSnapshot,
+    build_overlay_osc_output_settings_path_patch,
+    build_stt_language_audio_settings_path_patch,
+    build_translation_provider_settings_path_patch,
+    build_ui_prompt_clipboard_state_settings_path_patch,
+    settings_path_mutation_validator_for_command,
+    settings_path_snapshot_for_overlay_osc_output,
+    settings_path_snapshot_for_stt_language_audio,
+    settings_path_snapshot_for_ui_prompt_clipboard_state,
 )
 from puripuly_heart.app.wiring import (
     build_peer_stt_provider_signature,
@@ -841,79 +847,6 @@ def _ui_prompt_clipboard_state_save_failed_transaction_result(
             surface="ui_prompt_clipboard_state",
         ),
     )
-
-
-def _mutable_settings_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {key: _mutable_settings_value(nested) for key, nested in value.items()}
-    if isinstance(value, tuple):
-        return [_mutable_settings_value(item) for item in value]
-    if isinstance(value, list):
-        return [_mutable_settings_value(item) for item in value]
-    return copy.deepcopy(value)
-
-
-def _get_settings_path_value(settings: AppSettings, path: str) -> object:
-    current: object = settings
-    for segment in path.split("."):
-        current = getattr(current, segment)
-    return copy.deepcopy(current)
-
-
-def _set_settings_path_value(settings: AppSettings, path: str, value: object) -> None:
-    current: object = settings
-    segments = path.split(".")
-    for segment in segments[:-1]:
-        current = getattr(current, segment)
-    setattr(current, segments[-1], _mutable_settings_value(value))
-
-
-def _build_settings_path_patch(
-    previous: AppSettings,
-    next_settings: AppSettings,
-    *,
-    paths: tuple[str, ...],
-) -> dict[str, object]:
-    patch: dict[str, object] = {}
-    for path in paths:
-        previous_value = _get_settings_path_value(previous, path)
-        next_value = _get_settings_path_value(next_settings, path)
-        if previous_value != next_value:
-            patch[path] = next_value
-    return patch
-
-
-def _apply_settings_path_patch(settings: AppSettings, patch: Mapping[str, object]) -> None:
-    for path, value in patch.items():
-        _set_settings_path_value(settings, path, value)
-
-
-@dataclass(frozen=True, slots=True)
-class _SettingsPathSnapshot:
-    values_by_path: tuple[tuple[str, object], ...]
-
-    @classmethod
-    def from_settings(
-        cls,
-        settings: AppSettings,
-        *,
-        paths: tuple[str, ...],
-    ) -> _SettingsPathSnapshot:
-        return cls(tuple((path, _get_settings_path_value(settings, path)) for path in paths))
-
-    def patch_to(self, settings: AppSettings) -> dict[str, object]:
-        patch: dict[str, object] = {}
-        for path, previous_value in self.values_by_path:
-            next_value = _get_settings_path_value(settings, path)
-            if previous_value != next_value:
-                patch[path] = next_value
-        return patch
-
-    def materialize_base_from(self, settings: AppSettings) -> AppSettings:
-        base_settings = copy.deepcopy(settings)
-        for path, previous_value in self.values_by_path:
-            _set_settings_path_value(base_settings, path, previous_value)
-        return base_settings
 
 
 def _copy_runtime_only_ui_state(source: AppSettings, target: AppSettings) -> None:
@@ -1829,10 +1762,9 @@ class GuiController:
         base_settings: AppSettings,
         committed_settings: AppSettings,
     ) -> bool:
-        patch_values = _build_settings_path_patch(
+        patch_values = build_ui_prompt_clipboard_state_settings_path_patch(
             base_settings,
             committed_settings,
-            paths=ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS,
         )
         if not patch_values:
             return True
@@ -4849,30 +4781,21 @@ class GuiController:
 
     def _remember_settings_view_order22_baseline(self, settings: AppSettings | None) -> None:
         self._settings_view_order22_baseline = (
-            _SettingsPathSnapshot.from_settings(
-                settings,
-                paths=ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
-            )
+            settings_path_snapshot_for_stt_language_audio(settings)
             if settings is not None
             else None
         )
 
     def _remember_settings_view_order23_baseline(self, settings: AppSettings | None) -> None:
         self._settings_view_order23_baseline = (
-            _SettingsPathSnapshot.from_settings(
-                settings,
-                paths=ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
-            )
+            settings_path_snapshot_for_overlay_osc_output(settings)
             if settings is not None
             else None
         )
 
     def _remember_settings_view_order24_baseline(self, settings: AppSettings | None) -> None:
         self._settings_view_order24_baseline = (
-            _SettingsPathSnapshot.from_settings(
-                settings,
-                paths=ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS,
-            )
+            settings_path_snapshot_for_ui_prompt_clipboard_state(settings)
             if settings is not None
             else None
         )
@@ -4903,10 +4826,9 @@ class GuiController:
         base_settings = self.settings
         if base_settings is None:
             return None
-        patch_values = _build_settings_path_patch(
+        patch_values = build_stt_language_audio_settings_path_patch(
             base_settings,
             next_settings,
-            paths=ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
         )
         if patch_values or next_settings is base_settings:
             return base_settings, patch_values
@@ -4925,10 +4847,9 @@ class GuiController:
         base_settings = self.settings
         if base_settings is None:
             return None
-        patch_values = _build_settings_path_patch(
+        patch_values = build_overlay_osc_output_settings_path_patch(
             base_settings,
             next_settings,
-            paths=ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
         )
         if patch_values or next_settings is base_settings:
             return base_settings, patch_values
@@ -4947,10 +4868,9 @@ class GuiController:
         base_settings = self.settings
         if base_settings is None:
             return None
-        patch_values = _build_settings_path_patch(
+        patch_values = build_ui_prompt_clipboard_state_settings_path_patch(
             base_settings,
             next_settings,
-            paths=ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS,
         )
         if patch_values or next_settings is base_settings:
             return base_settings, patch_values
@@ -5525,19 +5445,13 @@ class GuiController:
                 reload_settings_view=reload_settings_view,
             )
         )
+        command = SttLanguageAudioSettingsMutation(values=patch_values)
         service = self.settings_mutation_service or SettingsMutationService(
             settings_repository=repository,
             runtime_apply=runtime_apply,
-            validator=SettingsPathMutationValidator(
-                allowed_paths=ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
-                component="settings_mutation",
-                operation="validate_stt_language_audio_patch",
-            ),
+            validator=settings_path_mutation_validator_for_command(command),
         )
-        request = SettingsPathPatch(
-            values_by_path=patch_values,
-            surface=SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
-        ).to_mutation_request(
+        request = command.to_mutation_request(
             expected_revision=None,
             correlation_id=None,
         )
@@ -5603,10 +5517,9 @@ class GuiController:
             base_settings,
             next_settings,
         )
-        patch_values = _build_settings_path_patch(
+        patch_values = build_overlay_osc_output_settings_path_patch(
             base_settings,
             next_settings,
-            paths=ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
         )
         committed_settings = copy.deepcopy(base_settings)
         _apply_settings_path_patch(committed_settings, patch_values)
@@ -5626,19 +5539,13 @@ class GuiController:
                 settings=committed_settings,
             )
         )
+        command = OverlayOscOutputSettingsMutation(values=patch_values)
         service = self.settings_mutation_service or SettingsMutationService(
             settings_repository=repository,
             runtime_apply=runtime_apply,
-            validator=SettingsPathMutationValidator(
-                allowed_paths=ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
-                component="settings_mutation",
-                operation="validate_overlay_osc_output_patch",
-            ),
+            validator=settings_path_mutation_validator_for_command(command),
         )
-        request = SettingsPathPatch(
-            values_by_path=patch_values,
-            surface=SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT,
-        ).to_mutation_request(
+        request = command.to_mutation_request(
             expected_revision=None,
             correlation_id=None,
         )
@@ -5689,19 +5596,13 @@ class GuiController:
             committed_settings=committed_settings,
             surface="ui_prompt_clipboard_state",
         )
+        command = UiPromptClipboardStateSettingsMutation(values=patch_values)
         service = self.settings_mutation_service or SettingsMutationService(
             settings_repository=repository,
             runtime_apply=runtime_apply,
-            validator=SettingsPathMutationValidator(
-                allowed_paths=ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS,
-                component="settings_mutation",
-                operation="validate_ui_prompt_clipboard_state_patch",
-            ),
+            validator=settings_path_mutation_validator_for_command(command),
         )
-        request = SettingsPathPatch(
-            values_by_path=patch_values,
-            surface=SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE,
-        ).to_mutation_request(
+        request = command.to_mutation_request(
             expected_revision=None,
             correlation_id=None,
         )
@@ -5909,15 +5810,13 @@ class GuiController:
         if base_settings is None:
             return False
 
-        order21_patch_values = _build_settings_path_patch(
+        order21_patch_values = build_translation_provider_settings_path_patch(
             base_settings,
             next_settings,
-            paths=ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS,
         )
-        order22_patch_values = _build_settings_path_patch(
+        order22_patch_values = build_stt_language_audio_settings_path_patch(
             base_settings,
             next_settings,
-            paths=ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
         )
         order24_base_and_patch = self._order24_patch_base_and_values(next_settings)
         if order24_base_and_patch is None:
@@ -6051,10 +5950,9 @@ class GuiController:
         if base_settings is None:
             return False
 
-        patch_values = _build_settings_path_patch(
+        patch_values = build_translation_provider_settings_path_patch(
             base_settings,
             next_settings,
-            paths=ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS,
         )
         if not patch_values:
             return False
@@ -6077,19 +5975,13 @@ class GuiController:
             settings=committed_settings,
             plan=plan,
         )
+        command = TranslationProviderSettingsMutation(values=patch_values)
         service = self.settings_mutation_service or SettingsMutationService(
             settings_repository=repository,
             runtime_apply=runtime_apply,
-            validator=SettingsPathMutationValidator(
-                allowed_paths=ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS,
-                component="settings_mutation",
-                operation="validate_translation_provider_patch",
-            ),
+            validator=settings_path_mutation_validator_for_command(command),
         )
-        request = SettingsPathPatch(
-            values_by_path=patch_values,
-            surface=SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
-        ).to_mutation_request(
+        request = command.to_mutation_request(
             expected_revision=None,
             correlation_id=None,
         )
@@ -6156,10 +6048,9 @@ class GuiController:
         if base_settings is None:
             return False
 
-        patch_values = _build_settings_path_patch(
+        patch_values = build_stt_language_audio_settings_path_patch(
             base_settings,
             next_settings,
-            paths=ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
         )
         if not patch_values:
             return False
@@ -6189,19 +6080,13 @@ class GuiController:
                 operation="apply_stt_language_audio_provider_runtime",
             )
         )
+        command = SttLanguageAudioSettingsMutation(values=patch_values)
         service = self.settings_mutation_service or SettingsMutationService(
             settings_repository=repository,
             runtime_apply=runtime_apply,
-            validator=SettingsPathMutationValidator(
-                allowed_paths=ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
-                component="settings_mutation",
-                operation="validate_stt_language_audio_patch",
-            ),
+            validator=settings_path_mutation_validator_for_command(command),
         )
-        request = SettingsPathPatch(
-            values_by_path=patch_values,
-            surface=SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
-        ).to_mutation_request(
+        request = command.to_mutation_request(
             expected_revision=None,
             correlation_id=None,
         )

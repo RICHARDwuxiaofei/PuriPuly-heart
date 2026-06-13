@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Final, Protocol
+from typing import ClassVar, Final, Protocol
 
 from puripuly_heart.app.ports._settings_values import freeze_settings_values
 from puripuly_heart.app.ports.runtime_apply import RuntimeApplyPort, RuntimeApplyRequest
@@ -15,7 +15,6 @@ from puripuly_heart.app.ports.settings_repository import (
 from puripuly_heart.core.messages import (
     CONTENT_POLICY_METADATA_ONLY,
     DIAGNOSTIC_CATEGORY_LIFECYCLE,
-    DIAGNOSTIC_CATEGORY_TRANSACTION,
     DIAGNOSTIC_VISIBILITY_BASIC,
     RUNTIME_APPLY_STATUS_APPLIED,
     SEVERITY_WARNING,
@@ -32,103 +31,6 @@ SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER: Final = "settings.translation_pr
 SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO: Final = "settings.stt_language_audio"
 SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT: Final = "settings.overlay_osc_output"
 SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE: Final = "settings.ui_prompt_clipboard_state"
-
-ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS: Final[tuple[str, ...]] = (
-    "translation.model",
-    "translation.connection",
-    "translation.connection_history",
-    "provider.llm",
-    "gemini.llm_model",
-    "openrouter.llm_model",
-    "openrouter.routing_mode",
-    "openrouter.provider_routing",
-    "openrouter.selected_source",
-    "openrouter.selection_alias",
-    "openrouter.fallback_selection_alias",
-    "openrouter.broker_base_url",
-    "qwen.llm_model",
-    "qwen.region",
-    "deepseek.llm_model",
-    "local_llm.backend",
-    "local_llm.base_url",
-    "local_llm.model",
-    "local_llm.extra_body",
-    "llm.concurrency_limit",
-)
-
-ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS: Final[tuple[str, ...]] = (
-    "provider.stt",
-    "provider.peer_stt",
-    "languages.source_language",
-    "languages.target_language",
-    "languages.peer_source_language",
-    "languages.peer_target_language",
-    "languages.recent_source_languages",
-    "languages.recent_target_languages",
-    "audio.internal_sample_rate_hz",
-    "audio.internal_channels",
-    "audio.ring_buffer_ms",
-    "audio.input_host_api",
-    "audio.input_device",
-    "desktop_audio.output_device",
-    "desktop_audio.vad_speech_threshold",
-    "desktop_audio.vad_hangover_ms",
-    "desktop_audio.vad_pre_roll_ms",
-    "stt.drain_timeout_s",
-    "stt.vad_speech_threshold",
-    "stt.low_latency_mode",
-    "stt.low_latency_vad_hangover_ms",
-    "stt.low_latency_merge_gap_ms",
-    "stt.low_latency_spec_retry_max",
-    "stt.custom_vocabulary_enabled",
-    "stt.custom_terms",
-    "deepgram_stt.model",
-    "qwen_asr_stt.model",
-    "soniox_stt.model",
-    "soniox_stt.endpoint",
-    "soniox_stt.keepalive_interval_s",
-    "soniox_stt.trailing_silence_ms",
-)
-
-ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS: Final[tuple[str, ...]] = (
-    "overlay.target",
-    "overlay.show_translation",
-    "overlay.show_peer_original",
-    "overlay.calibration.anchor",
-    "overlay.calibration.offset_x",
-    "overlay.calibration.offset_y",
-    "overlay.calibration.distance",
-    "overlay.calibration.text_scale",
-    "overlay.calibration.background_alpha",
-    "overlay.desktop_flet.size_preset",
-    "overlay.desktop_flet.position.x",
-    "overlay.desktop_flet.position.y",
-    "overlay.desktop_flet.visual.background_alpha",
-    "osc.host",
-    "osc.port",
-    "osc.chatbox_address",
-    "osc.chatbox_send",
-    "osc.chatbox_clear",
-    "osc.chatbox_max_chars",
-    "osc.vrc_mic_intercept",
-    "osc.chatbox_include_source",
-)
-
-ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS: Final[tuple[str, ...]] = (
-    "secrets.backend",
-    "secrets.encrypted_file_path",
-    "ui.locale",
-    "ui.peer_translation_eula_accepted",
-    "ui.integrated_context_enabled",
-    "ui.integrated_context_bootstrapped",
-    "ui.clipboard_auto_translate_enabled",
-    "ui.github_star_prompt_clicked",
-    "ui.github_star_prompt_last_shown_at",
-    "ui.github_star_prompt_show_count",
-    "ui.github_star_prompt_translation_success_observed",
-    "ui.github_star_prompt_eligible_launch_count",
-    "system_prompt",
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,17 +51,25 @@ class SettingsMutationValidationResult:
     diagnostics: ErrorDiagnostics | None
 
 
+class SettingsMutationCommand(Protocol):
+    values: Mapping[str, object]
+    surface: ClassVar[str]
+
+    def to_mutation_request(
+        self,
+        *,
+        expected_revision: str | None,
+        correlation_id: str | None,
+    ) -> SettingsMutationRequest: ...
+
+
 @dataclass(frozen=True, slots=True)
-class SettingsPathPatch:
-    values_by_path: Mapping[str, object]
-    surface: str
+class TranslationProviderSettingsMutation:
+    values: Mapping[str, object]
+    surface: ClassVar[str] = SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "values_by_path",
-            freeze_settings_values(self.values_by_path),
-        )
+        object.__setattr__(self, "values", freeze_settings_values(self.values))
 
     def to_mutation_request(
         self,
@@ -168,58 +78,76 @@ class SettingsPathPatch:
         correlation_id: str | None,
     ) -> SettingsMutationRequest:
         return SettingsMutationRequest(
-            values=self.values_by_path,
+            values=self.values,
             expected_revision=expected_revision,
-            reason=self.surface,
+            reason=SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
             correlation_id=correlation_id,
         )
 
 
 @dataclass(frozen=True, slots=True)
-class SettingsPathMutationValidator:
-    allowed_paths: tuple[str, ...]
-    component: str
-    operation: str | None
+class SttLanguageAudioSettingsMutation:
+    values: Mapping[str, object]
+    surface: ClassVar[str] = SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO
 
-    def __init__(
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "values", freeze_settings_values(self.values))
+
+    def to_mutation_request(
         self,
         *,
-        allowed_paths: tuple[str, ...],
-        component: str,
-        operation: str | None,
-    ) -> None:
-        object.__setattr__(self, "allowed_paths", tuple(allowed_paths))
-        object.__setattr__(self, "component", component)
-        object.__setattr__(self, "operation", operation)
-
-    async def validate(
-        self,
-        request: SettingsMutationRequest,
-    ) -> SettingsMutationValidationResult:
-        allowed = frozenset(self.allowed_paths)
-        disallowed_paths = sorted(
-            str(path) for path in request.values if not isinstance(path, str) or path not in allowed
+        expected_revision: str | None,
+        correlation_id: str | None,
+    ) -> SettingsMutationRequest:
+        return SettingsMutationRequest(
+            values=self.values,
+            expected_revision=expected_revision,
+            reason=SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO,
+            correlation_id=correlation_id,
         )
-        if disallowed_paths:
-            return SettingsMutationValidationResult(
-                succeeded=False,
-                message=None,
-                diagnostics=ErrorDiagnostics(
-                    component=self.component,
-                    operation=self.operation,
-                    code="settings_path_not_covered",
-                    category=DIAGNOSTIC_CATEGORY_TRANSACTION,
-                    visibility=DIAGNOSTIC_VISIBILITY_BASIC,
-                    content_policy=CONTENT_POLICY_METADATA_ONLY,
-                    status_code=None,
-                    retry_after_ms=None,
-                    fields={"path": disallowed_paths[0]},
-                ),
-            )
-        return SettingsMutationValidationResult(
-            succeeded=True,
-            message=None,
-            diagnostics=None,
+
+
+@dataclass(frozen=True, slots=True)
+class OverlayOscOutputSettingsMutation:
+    values: Mapping[str, object]
+    surface: ClassVar[str] = SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "values", freeze_settings_values(self.values))
+
+    def to_mutation_request(
+        self,
+        *,
+        expected_revision: str | None,
+        correlation_id: str | None,
+    ) -> SettingsMutationRequest:
+        return SettingsMutationRequest(
+            values=self.values,
+            expected_revision=expected_revision,
+            reason=SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT,
+            correlation_id=correlation_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class UiPromptClipboardStateSettingsMutation:
+    values: Mapping[str, object]
+    surface: ClassVar[str] = SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "values", freeze_settings_values(self.values))
+
+    def to_mutation_request(
+        self,
+        *,
+        expected_revision: str | None,
+        correlation_id: str | None,
+    ) -> SettingsMutationRequest:
+        return SettingsMutationRequest(
+            values=self.values,
+            expected_revision=expected_revision,
+            reason=SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE,
+            correlation_id=correlation_id,
         )
 
 
@@ -362,20 +290,19 @@ def _runtime_apply_exception_transaction_result() -> TransactionResult:
 
 
 __all__ = [
-    "ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS",
-    "ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS",
-    "ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS",
-    "ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS",
+    "OverlayOscOutputSettingsMutation",
     "RuntimeApplyResultPublisher",
     "SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT",
     "SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO",
     "SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER",
     "SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE",
+    "SettingsMutationCommand",
     "SettingsMutationRequest",
     "SettingsMutationService",
-    "SettingsPathMutationValidator",
-    "SettingsPathPatch",
     "SettingsMutationValidationResult",
     "SettingsMutationValidator",
     "SettingsSnapshotPublisher",
+    "SttLanguageAudioSettingsMutation",
+    "TranslationProviderSettingsMutation",
+    "UiPromptClipboardStateSettingsMutation",
 ]

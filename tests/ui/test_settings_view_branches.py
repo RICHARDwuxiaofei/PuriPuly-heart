@@ -35,6 +35,7 @@ from puripuly_heart.config.settings import (
     TranslationSettings,
     to_dict,
 )
+from puripuly_heart.core import messages
 from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 from puripuly_heart.ui import controller as controller_module
 from puripuly_heart.ui import i18n as i18n_module
@@ -1542,7 +1543,7 @@ async def test_order22_live_settings_view_audio_change_save_failure_restores_con
         component="settings_repository",
         operation="save",
         code="settings_save_failed",
-        category=settings_mutation.DIAGNOSTIC_CATEGORY_TRANSACTION,
+        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
         visibility=settings_mutation.DIAGNOSTIC_VISIBILITY_BASIC,
         content_policy=settings_mutation.CONTENT_POLICY_METADATA_ONLY,
         status_code=None,

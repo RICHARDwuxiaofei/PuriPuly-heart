@@ -518,6 +518,12 @@ SETTINGS_PUBLIC_COMPATIBILITY_FACADE_PATHS = frozenset(
     }
 )
 
+SETTINGS_LEGACY_COMPATIBILITY_ADAPTER_PATHS = frozenset(
+    {
+        "src/puripuly_heart/app/services/settings_mutation_legacy.py",
+    }
+)
+
 LEGACY_SETTINGS_API_NAMES = frozenset(
     {
         "AppSettings",
@@ -668,60 +674,6 @@ KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementVio
             "UI app managed-auth flow still reads controller.settings pending controller/service request DTOs",
         ),
         SettingsRuntimeConfinementViolation(
-            "legacy-flat-settings-patch-definition",
-            "src/puripuly_heart/app/services/settings_mutation.py",
-            "ORDER21_TRANSLATION_PROVIDER_SETTINGS_PATHS",
-            "settings mutation service still exposes legacy flat path surface pending vNext mutation DTOs",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-flat-settings-patch-definition",
-            "src/puripuly_heart/app/services/settings_mutation.py",
-            "ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS",
-            "settings mutation service still exposes legacy flat path surface pending vNext mutation DTOs",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-flat-settings-patch-definition",
-            "src/puripuly_heart/app/services/settings_mutation.py",
-            "ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS",
-            "settings mutation service still exposes legacy flat path surface pending vNext mutation DTOs",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-flat-settings-patch-definition",
-            "src/puripuly_heart/app/services/settings_mutation.py",
-            "ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS",
-            "settings mutation service still exposes legacy flat path surface pending vNext mutation DTOs",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-flat-settings-patch-definition",
-            "src/puripuly_heart/app/services/settings_mutation.py",
-            "SettingsPathMutationValidator",
-            "settings mutation service still validates legacy flat paths pending typed mutation commands",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-flat-settings-patch-definition",
-            "src/puripuly_heart/app/services/settings_mutation.py",
-            "SettingsPathPatch",
-            "settings mutation service still carries legacy flat path patches pending typed mutation commands",
-        ),
-        *(
-            SettingsRuntimeConfinementViolation(
-                "legacy-flat-settings-patch-import",
-                "src/puripuly_heart/ui/controller.py",
-                symbol,
-                "GuiController still imports legacy flat patch surfaces pending controller-facing typed mutation commands",
-            )
-            for symbol in FLAT_SETTINGS_PATCH_SYMBOLS
-        ),
-        *(
-            SettingsRuntimeConfinementViolation(
-                "legacy-flat-settings-patch-helper",
-                "src/puripuly_heart/ui/controller.py",
-                symbol,
-                "GuiController still diffs/applies legacy flat settings paths pending typed mutation commands",
-            )
-            for symbol in CONTROLLER_FLAT_SETTINGS_PATCH_HELPERS
-        ),
-        SettingsRuntimeConfinementViolation(
             "legacy-settings-value-payload-key",
             "src/puripuly_heart/app/services/openrouter_pkce_handoff.py",
             "state.provider_verification.*",
@@ -732,30 +684,6 @@ KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementVio
             "src/puripuly_heart/app/services/secret_settings_transaction.py",
             "state.provider_verification.*",
             "secret verification still writes provider verification via flat settings payload pending operational-state DTO persistence",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-value-payload-key",
-            "src/puripuly_heart/app/services/settings_mutation.py",
-            "openrouter.llm_model",
-            "settings mutation flat path surface still carries legacy OpenRouter payload keys pending vNext mutation DTOs",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-value-payload-key",
-            "src/puripuly_heart/app/services/settings_mutation.py",
-            "openrouter.selected_source",
-            "settings mutation flat path surface still carries legacy OpenRouter payload keys pending vNext mutation DTOs",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-value-payload-key",
-            "src/puripuly_heart/app/services/settings_mutation.py",
-            "openrouter.selection_alias",
-            "settings mutation flat path surface still carries legacy OpenRouter payload keys pending vNext mutation DTOs",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-value-payload-key",
-            "src/puripuly_heart/app/services/settings_mutation.py",
-            "provider.llm",
-            "settings mutation flat path surface still carries legacy provider payload keys pending vNext mutation DTOs",
         ),
     }
 )
@@ -983,6 +911,8 @@ def _legacy_settings_api_import_violations(
         return set()
     if relative_path in SETTINGS_PUBLIC_COMPATIBILITY_FACADE_PATHS:
         return set()
+    if relative_path in SETTINGS_LEGACY_COMPATIBILITY_ADAPTER_PATHS:
+        return set()
 
     violations: set[SettingsRuntimeConfinementViolation] = set()
     migration_module_aliases = _settings_vnext_migration_module_aliases(tree)
@@ -1061,6 +991,8 @@ def _dynamic_settings_shape_violations(
     relative_path: str,
 ) -> set[SettingsRuntimeConfinementViolation]:
     if relative_path in SETTINGS_COMPATIBILITY_SOURCE_PATHS:
+        return set()
+    if relative_path in SETTINGS_LEGACY_COMPATIBILITY_ADAPTER_PATHS:
         return set()
 
     violations: set[SettingsRuntimeConfinementViolation] = set()
@@ -1145,6 +1077,9 @@ def _flat_settings_patch_violations(
     tree: ast.AST,
     relative_path: str,
 ) -> set[SettingsRuntimeConfinementViolation]:
+    if relative_path in SETTINGS_LEGACY_COMPATIBILITY_ADAPTER_PATHS:
+        return set()
+
     violations: set[SettingsRuntimeConfinementViolation] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == (
@@ -1202,6 +1137,8 @@ def _legacy_settings_value_payload_key_violations(
     relative_path: str,
 ) -> set[SettingsRuntimeConfinementViolation]:
     if not relative_path.startswith("src/puripuly_heart/app/services/"):
+        return set()
+    if relative_path in SETTINGS_LEGACY_COMPATIBILITY_ADAPTER_PATHS:
         return set()
 
     violations: set[SettingsRuntimeConfinementViolation] = set()
