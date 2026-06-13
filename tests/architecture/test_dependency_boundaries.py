@@ -657,12 +657,6 @@ KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementVio
         ),
         SettingsRuntimeConfinementViolation(
             "legacy-settings-api-import",
-            "src/puripuly_heart/ui/controller.py",
-            "to_dict",
-            "GuiController still snapshots legacy settings pending vNext serialization snapshots or typed equality",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
             "src/puripuly_heart/ui/views/settings.py",
             "AppSettings",
             "SettingsView still edits legacy settings drafts pending settings view-model DTO adoption",

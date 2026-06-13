@@ -14,10 +14,11 @@ import sys
 import threading
 import traceback
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import flet as ft
 import numpy as np
@@ -78,7 +79,6 @@ from puripuly_heart.config.settings import (
     new_settings_for_first_run,
     normalize_owned_referral_id,
     save_settings,
-    to_dict,
 )
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
 from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
@@ -325,6 +325,24 @@ def _canonical_json_signature(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _settings_snapshot_value(value: object) -> object:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Mapping):
+        return {
+            str(key): _settings_snapshot_value(nested_value) for key, nested_value in value.items()
+        }
+    if isinstance(value, tuple):
+        return [_settings_snapshot_value(item) for item in value]
+    if isinstance(value, list):
+        return [_settings_snapshot_value(item) for item in value]
+    return copy.deepcopy(value)
+
+
+def _settings_snapshot_values(settings: AppSettings) -> dict[str, Any]:
+    return cast(dict[str, Any], _settings_snapshot_value(asdict(settings)))
+
+
 def _callable_accepts_keyword(callable_obj: object, keyword: str) -> bool:
     try:
         parameters = inspect.signature(callable_obj).parameters
@@ -416,7 +434,7 @@ class _ControllerSettingsPatchRepository:
 
     async def load(self) -> SettingsSnapshot:
         settings = self.controller.settings or self.committed_settings
-        return SettingsSnapshot(values=to_dict(settings), revision=None)
+        return SettingsSnapshot(values=_settings_snapshot_values(settings), revision=None)
 
     async def save(self, request: SettingsCommitRequest) -> SettingsCommitResult:
         _ = request
@@ -441,7 +459,10 @@ class _ControllerSettingsPatchRepository:
             )
         return SettingsCommitResult(
             succeeded=True,
-            snapshot=SettingsSnapshot(values=to_dict(self.committed_settings), revision=None),
+            snapshot=SettingsSnapshot(
+                values=_settings_snapshot_values(self.committed_settings),
+                revision=None,
+            ),
             message=None,
             diagnostics=None,
         )
@@ -867,6 +888,34 @@ def _apply_settings_path_patch(settings: AppSettings, patch: Mapping[str, object
         _set_settings_path_value(settings, path, value)
 
 
+@dataclass(frozen=True, slots=True)
+class _SettingsPathSnapshot:
+    values_by_path: tuple[tuple[str, object], ...]
+
+    @classmethod
+    def from_settings(
+        cls,
+        settings: AppSettings,
+        *,
+        paths: tuple[str, ...],
+    ) -> _SettingsPathSnapshot:
+        return cls(tuple((path, _get_settings_path_value(settings, path)) for path in paths))
+
+    def patch_to(self, settings: AppSettings) -> dict[str, object]:
+        patch: dict[str, object] = {}
+        for path, previous_value in self.values_by_path:
+            next_value = _get_settings_path_value(settings, path)
+            if previous_value != next_value:
+                patch[path] = next_value
+        return patch
+
+    def materialize_base_from(self, settings: AppSettings) -> AppSettings:
+        base_settings = copy.deepcopy(settings)
+        for path, previous_value in self.values_by_path:
+            _set_settings_path_value(base_settings, path, previous_value)
+        return base_settings
+
+
 def _copy_runtime_only_ui_state(source: AppSettings, target: AppSettings) -> None:
     target.ui.overlay_enabled = bool(source.ui.overlay_enabled)
     target.ui.peer_translation_enabled = bool(source.ui.peer_translation_enabled)
@@ -1005,17 +1054,17 @@ class GuiController:
     _last_peer_translation_enabled: bool | None = None
     _last_peer_translation_activation_requested: bool | None = None
     _last_vrc_mic_sync_enabled: bool | None = None
-    _settings_view_order22_baseline: AppSettings | None = field(
+    _settings_view_order22_baseline: _SettingsPathSnapshot | None = field(
         init=False,
         default=None,
         repr=False,
     )
-    _settings_view_order23_baseline: AppSettings | None = field(
+    _settings_view_order23_baseline: _SettingsPathSnapshot | None = field(
         init=False,
         default=None,
         repr=False,
     )
-    _settings_view_order24_baseline: AppSettings | None = field(
+    _settings_view_order24_baseline: _SettingsPathSnapshot | None = field(
         init=False,
         default=None,
         repr=False,
@@ -4800,17 +4849,32 @@ class GuiController:
 
     def _remember_settings_view_order22_baseline(self, settings: AppSettings | None) -> None:
         self._settings_view_order22_baseline = (
-            copy.deepcopy(settings) if settings is not None else None
+            _SettingsPathSnapshot.from_settings(
+                settings,
+                paths=ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
+            )
+            if settings is not None
+            else None
         )
 
     def _remember_settings_view_order23_baseline(self, settings: AppSettings | None) -> None:
         self._settings_view_order23_baseline = (
-            copy.deepcopy(settings) if settings is not None else None
+            _SettingsPathSnapshot.from_settings(
+                settings,
+                paths=ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
+            )
+            if settings is not None
+            else None
         )
 
     def _remember_settings_view_order24_baseline(self, settings: AppSettings | None) -> None:
         self._settings_view_order24_baseline = (
-            copy.deepcopy(settings) if settings is not None else None
+            _SettingsPathSnapshot.from_settings(
+                settings,
+                paths=ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS,
+            )
+            if settings is not None
+            else None
         )
 
     def _reload_settings_view_from_settings(
@@ -4849,13 +4913,9 @@ class GuiController:
 
         baseline = self._settings_view_order22_baseline
         if baseline is not None:
-            baseline_patch_values = _build_settings_path_patch(
-                baseline,
-                next_settings,
-                paths=ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS,
-            )
+            baseline_patch_values = baseline.patch_to(next_settings)
             if baseline_patch_values:
-                return baseline, baseline_patch_values
+                return baseline.materialize_base_from(base_settings), baseline_patch_values
         return base_settings, patch_values
 
     def _order23_patch_base_and_values(
@@ -4875,13 +4935,9 @@ class GuiController:
 
         baseline = self._settings_view_order23_baseline
         if baseline is not None:
-            baseline_patch_values = _build_settings_path_patch(
-                baseline,
-                next_settings,
-                paths=ORDER23_OVERLAY_OSC_OUTPUT_SETTINGS_PATHS,
-            )
+            baseline_patch_values = baseline.patch_to(next_settings)
             if baseline_patch_values:
-                return baseline, baseline_patch_values
+                return baseline.materialize_base_from(base_settings), baseline_patch_values
         return base_settings, patch_values
 
     def _order24_patch_base_and_values(
@@ -4901,13 +4957,9 @@ class GuiController:
 
         baseline = self._settings_view_order24_baseline
         if baseline is not None:
-            baseline_patch_values = _build_settings_path_patch(
-                baseline,
-                next_settings,
-                paths=ORDER24_UI_PROMPT_CLIPBOARD_STATE_SETTINGS_PATHS,
-            )
+            baseline_patch_values = baseline.patch_to(next_settings)
             if baseline_patch_values:
-                return baseline, baseline_patch_values
+                return baseline.materialize_base_from(base_settings), baseline_patch_values
         return base_settings, patch_values
 
     def _sync_memory_runtime_fields_from_settings(self, settings: AppSettings) -> None:
@@ -5393,7 +5445,9 @@ class GuiController:
         committed_settings_before_full_draft = (
             copy.deepcopy(self.settings) if self.settings is not None else None
         )
-        if self.settings is not None and to_dict(self.settings) != to_dict(next_settings):
+        if self.settings is not None and _settings_snapshot_values(
+            self.settings
+        ) != _settings_snapshot_values(next_settings):
             try:
                 await self._apply_settings_direct(
                     next_settings,
@@ -5454,7 +5508,9 @@ class GuiController:
 
         committed_settings = copy.deepcopy(base_settings)
         _apply_settings_path_patch(committed_settings, patch_values)
-        has_out_of_scope_draft = to_dict(committed_settings) != to_dict(next_settings)
+        has_out_of_scope_draft = _settings_snapshot_values(
+            committed_settings
+        ) != _settings_snapshot_values(next_settings)
         repository = _ControllerSettingsPatchRepository(
             controller=self,
             committed_settings=committed_settings,
@@ -5554,7 +5610,9 @@ class GuiController:
         )
         committed_settings = copy.deepcopy(base_settings)
         _apply_settings_path_patch(committed_settings, patch_values)
-        has_out_of_scope_draft = to_dict(committed_settings) != to_dict(next_settings)
+        has_out_of_scope_draft = _settings_snapshot_values(
+            committed_settings
+        ) != _settings_snapshot_values(next_settings)
         repository = _ControllerSettingsPatchRepository(
             controller=self,
             committed_settings=committed_settings,
@@ -5662,7 +5720,9 @@ class GuiController:
 
         committed_settings = copy.deepcopy(base_settings)
         _apply_settings_path_patch(committed_settings, patch_values)
-        has_out_of_scope_draft = to_dict(committed_settings) != to_dict(next_settings)
+        has_out_of_scope_draft = _settings_snapshot_values(
+            committed_settings
+        ) != _settings_snapshot_values(next_settings)
         runtime_settings = copy.deepcopy(next_settings)
         runtime_apply = (
             _ControllerNoopRuntimeApply()
@@ -5936,7 +5996,9 @@ class GuiController:
         committed_settings_before_full_draft = (
             copy.deepcopy(self.settings) if self.settings is not None else None
         )
-        if self.settings is not None and to_dict(self.settings) != to_dict(next_settings):
+        if self.settings is not None and _settings_snapshot_values(
+            self.settings
+        ) != _settings_snapshot_values(next_settings):
             try:
                 await self._apply_providers_direct(
                     next_settings,
@@ -5999,7 +6061,9 @@ class GuiController:
 
         committed_settings = copy.deepcopy(base_settings)
         _apply_settings_path_patch(committed_settings, patch_values)
-        has_out_of_scope_draft = to_dict(committed_settings) != to_dict(next_settings)
+        has_out_of_scope_draft = _settings_snapshot_values(
+            committed_settings
+        ) != _settings_snapshot_values(next_settings)
         plan = self._build_provider_runtime_apply_plan(
             committed_settings,
             force_rebuild_llm=False,
@@ -6102,7 +6166,9 @@ class GuiController:
 
         committed_settings = copy.deepcopy(base_settings)
         _apply_settings_path_patch(committed_settings, patch_values)
-        has_out_of_scope_draft = to_dict(committed_settings) != to_dict(next_settings)
+        has_out_of_scope_draft = _settings_snapshot_values(
+            committed_settings
+        ) != _settings_snapshot_values(next_settings)
         plan = self._build_provider_runtime_apply_plan(
             committed_settings,
             force_rebuild_llm=False,

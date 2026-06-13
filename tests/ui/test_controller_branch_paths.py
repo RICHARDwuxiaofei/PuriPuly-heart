@@ -807,6 +807,28 @@ def _microphone_test_task(controller: GuiController) -> asyncio.Task[None] | Non
     return runtime.session_task if runtime is not None else None
 
 
+def test_settings_view_order22_baseline_uses_path_snapshot_not_legacy_settings() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    baseline = AppSettings()
+    baseline.languages.source_language = "ko"
+    controller._remember_settings_view_order22_baseline(baseline)
+
+    assert not isinstance(controller._settings_view_order22_baseline, AppSettings)
+
+    current = AppSettings()
+    current.languages.source_language = "ja"
+    current.provider.llm = LLMProviderName.DEEPSEEK
+    controller.settings = current
+    pending = copy.deepcopy(current)
+
+    base_settings, patch_values = controller._order22_patch_base_and_values(pending)
+
+    assert patch_values == {"languages.source_language": "ja"}
+    assert base_settings is not current
+    assert base_settings.languages.source_language == "ko"
+    assert base_settings.provider.llm == LLMProviderName.DEEPSEEK
+
+
 @pytest.mark.parametrize(
     "failure_reason",
     [
