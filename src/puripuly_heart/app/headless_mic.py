@@ -9,17 +9,14 @@ from pathlib import Path
 
 import numpy as np
 
+from puripuly_heart.app.headless_runtime_config import HeadlessMicRuntimeConfig
 from puripuly_heart.app.wiring import (
-    build_peer_stt_provider_signature,
-    create_llm_provider,
-    create_peer_stt_backend,
-    create_secret_store,
-    create_stt_backend,
-    resolve_peer_stt_runtime_config,
+    create_llm_provider_from_resolved_config,
+    create_peer_stt_backend_from_resolved_config,
+    create_stt_backend_from_resolved_config,
 )
 from puripuly_heart.config.audio_host_api import normalize_input_host_api
 from puripuly_heart.config.paths import default_vad_model_path
-from puripuly_heart.config.settings import AppSettings
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
 from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
 from puripuly_heart.core.audio.diagnostics import compute_audio_frame_metrics
@@ -32,7 +29,6 @@ from puripuly_heart.core.audio.source import (
 )
 from puripuly_heart.core.audio.streaming_resampler import MonoFirstStreamingResampler
 from puripuly_heart.core.clock import SystemClock
-from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
 from puripuly_heart.core.osc.receiver import VrcMicState, VrcOscReceiver
@@ -40,7 +36,6 @@ from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
 from puripuly_heart.core.runtime.receiver import VrcMicReceiverRuntime
 from puripuly_heart.core.runtime.self_audio import SelfAudioRuntime
-from puripuly_heart.core.storage.secrets import SecretStore
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
 from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
@@ -57,9 +52,21 @@ class HeadlessMicInitializationError(Exception):
     pass
 
 
-def _create_headless_llm_provider(*, settings: AppSettings, secrets: SecretStore) -> LLMProvider:
+def _create_headless_llm_provider(
+    *,
+    runtime_config: HeadlessMicRuntimeConfig,
+) -> object:
+    if runtime_config.llm_config is None:
+        raise HeadlessMicInitializationError(
+            "Headless mic LLM requested but no resolved LLM config was provided"
+        )
     try:
-        return create_llm_provider(settings, secrets=secrets)
+        return create_llm_provider_from_resolved_config(
+            runtime_config.llm_config,
+            secrets=runtime_config.secrets,
+            compatibility_settings=None,
+            qwen_low_latency_mode=runtime_config.stt.low_latency_mode,
+        )
     except ValueError as exc:
         raise HeadlessMicInitializationError(
             f"Headless mic LLM initialization failed: {exc}"
@@ -72,27 +79,6 @@ class _HubVadSink:
 
     async def handle_vad_event(self, event) -> None:  # noqa: ANN001
         await self.hub.handle_vad_event(event)
-
-
-def _build_headless_peer_runtime_config(settings: AppSettings) -> PeerRuntimeConfig:
-    backend = resolve_peer_stt_runtime_config(settings)
-    provider_signature = build_peer_stt_provider_signature(settings)
-    return PeerRuntimeConfig(
-        backend=backend,
-        output_device=settings.desktop_audio.output_device,
-        vad_threshold=settings.desktop_audio.vad_speech_threshold,
-        vad_hangover_ms=settings.desktop_audio.vad_hangover_ms,
-        vad_pre_roll_ms=settings.desktop_audio.vad_pre_roll_ms,
-        provider_signature=provider_signature,
-        runtime_signature=(
-            backend.source_language,
-            settings.desktop_audio.output_device,
-            settings.desktop_audio.vad_speech_threshold,
-            settings.desktop_audio.vad_hangover_ms,
-            settings.desktop_audio.vad_pre_roll_ms,
-            provider_signature,
-        ),
-    )
 
 
 def _raise_lifecycle_cleanup_failures(message: str, failures: list[Exception]) -> None:
@@ -120,41 +106,41 @@ def _headless_vrc_mic_receiver_runtime_diagnostics_sink(
 
 @dataclass(slots=True)
 class HeadlessMicRunner:
-    settings: AppSettings
-    config_path: Path
-    vad_model_path: Path
-    use_llm: bool = True
+    runtime_config: HeadlessMicRuntimeConfig
     clock: SystemClock = SystemClock()
 
     async def run(self) -> int:
-        secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+        secrets = self.runtime_config.secrets
         llm = (
-            _create_headless_llm_provider(settings=self.settings, secrets=secrets)
-            if self.use_llm
+            _create_headless_llm_provider(runtime_config=self.runtime_config)
+            if self.runtime_config.use_llm
             else None
         )
 
-        backend = create_stt_backend(self.settings, secrets=secrets)
+        backend = create_stt_backend_from_resolved_config(
+            self.runtime_config.stt_config,
+            secrets=secrets,
+        )
         stt = ManagedSTTProvider(
             backend=backend,
-            sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-            stt_provider_name=self.settings.provider.stt,
+            sample_rate_hz=self.runtime_config.audio.internal_sample_rate_hz,
+            stt_provider_name=self.runtime_config.stt.provider,
             clock=self.clock,
             reset_deadline_s=STT_RESET_DEADLINE_S,
-            drain_timeout_s=self.settings.stt.drain_timeout_s,
-            bridging_ms=self.settings.audio.ring_buffer_ms,
+            drain_timeout_s=self.runtime_config.stt.drain_timeout_s,
+            bridging_ms=self.runtime_config.audio.ring_buffer_ms,
         )
         sender = VrchatOscUdpSender(
-            host=self.settings.osc.host,
-            port=self.settings.osc.port,
-            chatbox_address=self.settings.osc.chatbox_address,
-            chatbox_send=self.settings.osc.chatbox_send,
-            chatbox_clear=self.settings.osc.chatbox_clear,
+            host=self.runtime_config.osc.host,
+            port=self.runtime_config.osc.port,
+            chatbox_address=self.runtime_config.osc.chatbox_address,
+            chatbox_send=self.runtime_config.osc.chatbox_send,
+            chatbox_clear=self.runtime_config.osc.chatbox_clear,
         )
         osc = ChatboxPaginator(
             sender=sender,
             clock=self.clock,
-            max_chars=self.settings.osc.chatbox_max_chars,
+            max_chars=self.runtime_config.osc.chatbox_max_chars,
         )
 
         hub = ClientHub(
@@ -163,41 +149,42 @@ class HeadlessMicRunner:
             osc=osc,
             peer_stt=None,
             clock=self.clock,
-            source_language=self.settings.languages.source_language,
-            target_language=self.settings.languages.target_language,
-            system_prompt=self.settings.system_prompt,
-            fallback_transcript_only=not self.use_llm,
+            source_language=self.runtime_config.languages.source_language,
+            target_language=self.runtime_config.languages.target_language,
+            system_prompt=self.runtime_config.system_prompt,
+            fallback_transcript_only=not self.runtime_config.use_llm,
             peer_translation_enabled=False,
             integrated_context_enabled=False,
-            low_latency_mode=self.settings.stt.low_latency_mode,
-            low_latency_merge_gap_ms=self.settings.stt.low_latency_merge_gap_ms,
-            low_latency_spec_retry_max=self.settings.stt.low_latency_spec_retry_max,
+            low_latency_mode=self.runtime_config.stt.low_latency_mode,
+            low_latency_merge_gap_ms=self.runtime_config.stt.low_latency_merge_gap_ms,
+            low_latency_spec_retry_max=self.runtime_config.stt.low_latency_spec_retry_max,
             hangover_s=(
-                self.settings.stt.low_latency_vad_hangover_ms / 1000.0
-                if self.settings.stt.low_latency_mode
+                self.runtime_config.stt.low_latency_vad_hangover_ms / 1000.0
+                if self.runtime_config.stt.low_latency_mode
                 else 1.1
             ),
         )
 
-        if self.vad_model_path == default_vad_model_path():
+        vad_model_path = self.runtime_config.vad_model_path
+        if vad_model_path == default_vad_model_path():
             try:
-                self.vad_model_path = ensure_silero_vad_onnx(target_path=self.vad_model_path)
+                vad_model_path = ensure_silero_vad_onnx(target_path=vad_model_path)
             except Exception as exc:
                 logger.error("Failed to prepare Silero VAD model (%s): %s", SILERO_VAD_VERSION, exc)
                 return 2
 
-        if not self.vad_model_path.exists():
-            logger.error("VAD model file not found: %s", self.vad_model_path)
+        if not vad_model_path.exists():
+            logger.error("VAD model file not found: %s", vad_model_path)
             return 2
 
         vad = VadGating(
-            engine=SileroVadOnnx(model_path=self.vad_model_path),
-            sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-            ring_buffer_ms=self.settings.audio.ring_buffer_ms,
-            speech_threshold=self.settings.stt.vad_speech_threshold,
+            engine=SileroVadOnnx(model_path=vad_model_path),
+            sample_rate_hz=self.runtime_config.audio.internal_sample_rate_hz,
+            ring_buffer_ms=self.runtime_config.audio.ring_buffer_ms,
+            speech_threshold=self.runtime_config.stt.vad_speech_threshold,
             hangover_ms=(
-                self.settings.stt.low_latency_vad_hangover_ms
-                if self.settings.stt.low_latency_mode
+                self.runtime_config.stt.low_latency_vad_hangover_ms
+                if self.runtime_config.stt.low_latency_mode
                 else 1100
             ),
         )
@@ -219,19 +206,19 @@ class HeadlessMicRunner:
         ) -> SoundDeviceAudioSource:
             return SoundDeviceAudioSource(
                 sample_rate_hz=None,
-                channels=self.settings.audio.internal_channels,
+                channels=self.runtime_config.audio.internal_channels,
                 device=dev_idx,
                 wasapi_auto_convert=wasapi_auto_convert,
                 wasapi_exclusive=wasapi_exclusive,
             )
 
-        saved_host_api = self.settings.audio.input_host_api
+        saved_host_api = self.runtime_config.audio.input_host_api
         host_api_profile = normalize_input_host_api(saved_host_api)
         host_api = host_api_profile.actual_host_api
         first_open_used_wasapi_flags = (
             host_api_profile.wasapi_auto_convert or host_api_profile.wasapi_exclusive
         )
-        device_name = self.settings.audio.input_device
+        device_name = self.runtime_config.audio.input_device
 
         # 1차 시도: 설정된 Host API + 마이크
         device_idx = _resolve_device(host_api, device_name)
@@ -292,10 +279,10 @@ class HeadlessMicRunner:
         vrc_mic_state = VrcMicState()
         vrc_mic_audio_gate = VrcMicAudioGate(
             state=vrc_mic_state,
-            enabled=self.settings.osc.vrc_mic_intercept,
+            enabled=self.runtime_config.osc.vrc_mic_intercept,
         )
         vrc_mic_receiver_runtime: VrcMicReceiverRuntime | None = None
-        if self.settings.osc.vrc_mic_intercept:
+        if self.runtime_config.osc.vrc_mic_intercept:
             vrc_mic_receiver_runtime = VrcMicReceiverRuntime(
                 state=vrc_mic_state,
                 receiver_factory=_create_headless_vrc_osc_receiver,
@@ -320,18 +307,21 @@ class HeadlessMicRunner:
             on_terminal_failure,
         ) -> ManagedSTTProvider:  # noqa: ANN001
             try:
-                peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
+                peer_backend = create_peer_stt_backend_from_resolved_config(
+                    self.runtime_config.peer_stt_config,
+                    secrets=secrets,
+                )
             except Exception as exc:
                 logger.warning("Peer STT backend unavailable: %s", exc)
                 raise
             return ManagedSTTProvider(
                 backend=peer_backend,
                 sample_rate_hz=config.backend.sample_rate_hz,
-                stt_provider_name=self.settings.provider.peer_stt,
+                stt_provider_name=self.runtime_config.peer_stt.provider,
                 channel="peer",
                 clock=self.clock,
                 reset_deadline_s=STT_RESET_DEADLINE_S,
-                drain_timeout_s=self.settings.stt.drain_timeout_s,
+                drain_timeout_s=self.runtime_config.stt.drain_timeout_s,
                 bridging_ms=max(1, config.vad_pre_roll_ms),
                 on_terminal_failure=on_terminal_failure,
             )
@@ -381,7 +371,7 @@ class HeadlessMicRunner:
                     source=source,
                     vad=vad,
                     sink=self_audio_runtime.guard_vad_sink(_HubVadSink(hub=hub)),
-                    target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                    target_sample_rate_hz=self.runtime_config.audio.internal_sample_rate_hz,
                     audio_gate=vrc_mic_audio_gate,
                 )
 
@@ -391,21 +381,22 @@ class HeadlessMicRunner:
                 run_loop=_run_self_audio_loop,
             )
 
-            if self.settings.ui.peer_translation_enabled:
+            if self.runtime_config.ui.peer_translation_enabled:
                 peer_runtime = PeerChannelRuntime(
                     hub=hub,
                     clock=self.clock,
                     stt_factory=_create_peer_stt_provider_from_runtime_config,
                     source_factory=_create_peer_audio_source_from_runtime_config,
                     vad_factory=_create_peer_vad_from_runtime_config,
-                    vad_model_resolver=lambda: self.vad_model_path,
+                    vad_model_resolver=lambda: vad_model_path,
                     run_audio_loop=_run_headless_peer_audio_loop,
                 )
-                peer_config = _build_headless_peer_runtime_config(self.settings)
+                peer_config = self.runtime_config.peer_runtime_config
                 await peer_runtime.apply_policy(config=peer_config, desired_active=True)
                 hub.peer_translation_enabled = hub.peer_stt is not None
                 hub.integrated_context_enabled = (
-                    self.settings.ui.integrated_context_enabled and hub.peer_translation_enabled
+                    self.runtime_config.ui.integrated_context_enabled
+                    and hub.peer_translation_enabled
                 )
 
             loops = [

@@ -5,7 +5,7 @@ import sys
 from dataclasses import dataclass
 from uuid import uuid4
 
-from puripuly_heart.config.settings import AppSettings
+from puripuly_heart.app.headless_runtime_config import HeadlessStdinRuntimeConfig
 from puripuly_heart.core.clock import SystemClock
 from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
@@ -15,22 +15,22 @@ from puripuly_heart.domain.models import OSCMessage
 
 @dataclass(slots=True)
 class HeadlessStdinRunner:
-    settings: AppSettings
+    runtime_config: HeadlessStdinRuntimeConfig
     llm: LLMProvider | None = None
     clock: SystemClock = SystemClock()
 
     async def run(self) -> int:
         sender = VrchatOscUdpSender(
-            host=self.settings.osc.host,
-            port=self.settings.osc.port,
-            chatbox_address=self.settings.osc.chatbox_address,
-            chatbox_send=self.settings.osc.chatbox_send,
-            chatbox_clear=self.settings.osc.chatbox_clear,
+            host=self.runtime_config.osc.host,
+            port=self.runtime_config.osc.port,
+            chatbox_address=self.runtime_config.osc.chatbox_address,
+            chatbox_send=self.runtime_config.osc.chatbox_send,
+            chatbox_clear=self.runtime_config.osc.chatbox_clear,
         )
         osc = ChatboxPaginator(
             sender=sender,
             clock=self.clock,
-            max_chars=self.settings.osc.chatbox_max_chars,
+            max_chars=self.runtime_config.osc.chatbox_max_chars,
         )
 
         flush_task = asyncio.create_task(self._flush_loop(osc))
@@ -60,11 +60,11 @@ class HeadlessStdinRunner:
                 translation = await self.llm.translate(
                     utterance_id=utterance_id,
                     text=text,
-                    system_prompt=self.settings.system_prompt,
-                    source_language=self.settings.languages.source_language,
-                    target_language=self.settings.languages.target_language,
+                    system_prompt=self.runtime_config.system_prompt,
+                    source_language=self.runtime_config.languages.source_language,
+                    target_language=self.runtime_config.languages.target_language,
                 )
-                if self.settings.osc.chatbox_include_source:
+                if self.runtime_config.chatbox_include_source:
                     merged = f"{text} ({translation.text})"
                 else:
                     merged = translation.text

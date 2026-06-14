@@ -579,18 +579,6 @@ KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementVio
     {
         SettingsRuntimeConfinementViolation(
             "legacy-settings-api-import",
-            "src/puripuly_heart/app/headless_mic.py",
-            "AppSettings",
-            "headless mic runner still consumes legacy settings until a resolved runtime config slice replaces startup inputs",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
-            "src/puripuly_heart/app/headless_stdin.py",
-            "AppSettings",
-            "headless stdin runner still consumes legacy settings until a resolved runtime config slice replaces startup inputs",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
             "src/puripuly_heart/core/managed_identity.py",
             "AppSettings",
             "managed identity persistence still accepts legacy settings pending managed-identity state port extraction",
@@ -618,18 +606,6 @@ KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementVio
             "src/puripuly_heart/core/stt/custom_vocab.py",
             "AppSettings",
             "custom vocabulary helpers still derive runtime values from legacy settings pending STT intent DTO adoption",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
-            "src/puripuly_heart/main.py",
-            "AppSettings",
-            "CLI/headless entrypoints still load legacy settings until startup resolves vNext DTOs before runtime",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
-            "src/puripuly_heart/main.py",
-            "load_settings",
-            "CLI/headless entrypoints still call the public legacy load facade until startup cutover lands",
         ),
         SettingsRuntimeConfinementViolation(
             "legacy-settings-api-import",

@@ -9,8 +9,7 @@ from puripuly_heart.config.paths import default_settings_path, default_vad_model
 from puripuly_heart.core.runtime_logging import configure_main_logging
 
 if TYPE_CHECKING:
-    from puripuly_heart.config.settings import AppSettings
-
+    from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 
 HeadlessStdinRunner: Any | None = None
 VrchatOscUdpSender: Any | None = None
@@ -157,30 +156,6 @@ def run_soxr_runtime_check() -> int:
     return run()
 
 
-def create_secret_store(*args, **kwargs):
-    from puripuly_heart.app.wiring import create_secret_store as create
-
-    return create(*args, **kwargs)
-
-
-def create_llm_provider(*args, **kwargs):
-    from puripuly_heart.app.wiring import create_llm_provider as create
-
-    return create(*args, **kwargs)
-
-
-def load_settings(path: Path):
-    from puripuly_heart.config.settings import load_settings as load
-
-    return load(path)
-
-
-def new_settings_for_first_run():
-    from puripuly_heart.config.settings import new_settings_for_first_run as make_settings
-
-    return make_settings()
-
-
 def _requires_soxr_runtime_startup_check(args: argparse.Namespace) -> bool:
     return args.command == "run-mic"
 
@@ -212,6 +187,47 @@ def _run_desktop_overlay_preview() -> int:
     from puripuly_heart.ui.desktop_overlay import main as desktop_overlay_main
 
     return desktop_overlay_main(["--preview"])
+
+
+def _load_settings_or_default(path: Path) -> AppSettingsVNext:
+    from dataclasses import replace
+
+    from puripuly_heart.config.settings import (
+        detect_system_locale,
+        resolve_first_run_ui_locale,
+    )
+    from puripuly_heart.config.settings_vnext.facade import load_vnext_settings
+    from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
+
+    if path.exists():
+        result = load_vnext_settings(path)
+        if result.settings is None:
+            raise RuntimeError(
+                result.error.message if result.error is not None else str(result.status)
+            )
+        return result.settings
+
+    settings = AppSettingsVNext()
+    locale_value = resolve_first_run_ui_locale(detect_system_locale())
+    if locale_value:
+        settings = replace(
+            settings,
+            intent=replace(settings.intent, ui=replace(settings.intent.ui, locale=locale_value)),
+        )
+
+    if not settings.intent.prompts.system_prompt:
+        from puripuly_heart.config.prompts import load_prompt_for_provider
+        from puripuly_heart.config.settings import LLMProviderName
+
+        default_prompt = load_prompt_for_provider(LLMProviderName.GEMINI.value)
+        settings = replace(
+            settings,
+            intent=replace(
+                settings.intent,
+                prompts=replace(settings.intent.prompts, system_prompt=default_prompt),
+            ),
+        )
+    return settings
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -255,11 +271,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "osc-send":
             sender_cls = _load_vrchat_osc_udp_sender()
             sender = sender_cls(
-                host=settings.osc.host,
-                port=settings.osc.port,
-                chatbox_address=settings.osc.chatbox_address,
-                chatbox_send=settings.osc.chatbox_send,
-                chatbox_clear=settings.osc.chatbox_clear,
+                host=settings.intent.osc.host,
+                port=settings.intent.osc.port,
+                chatbox_address=settings.intent.osc.chatbox_address,
+                chatbox_send=settings.intent.osc.chatbox_send,
+                chatbox_clear=settings.intent.osc.chatbox_clear,
             )
             try:
                 sender.send_chatbox(args.text)
@@ -268,26 +284,55 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "run-stdin":
+            from puripuly_heart.app.headless_runtime_config import (
+                build_headless_stdin_runtime_config,
+                create_secret_store_from_vnext_intent,
+                resolve_llm_config_from_vnext_settings,
+            )
+
             llm = None
             if args.use_llm:
+                from puripuly_heart.app.wiring import create_llm_provider_from_resolved_config
+
                 try:
-                    secrets = create_secret_store(settings.secrets, config_path=args.config)
-                    llm = create_llm_provider(settings, secrets=secrets)
+                    secrets = create_secret_store_from_vnext_intent(
+                        settings, config_path=args.config
+                    )
+                    llm_config = resolve_llm_config_from_vnext_settings(settings)
+                    llm = create_llm_provider_from_resolved_config(
+                        llm_config,
+                        secrets=secrets,
+                        compatibility_settings=None,
+                        qwen_low_latency_mode=settings.intent.stt.low_latency_mode,
+                    )
                 except Exception as exc:
                     return _print_initialization_error("LLM provider", exc)
 
             runner_cls = _load_headless_stdin_runner()
-            runner = runner_cls(settings=settings, llm=llm)
+            runtime_config = build_headless_stdin_runtime_config(settings)
+            runner = runner_cls(runtime_config=runtime_config, llm=llm)
             return asyncio.run(runner.run())
 
         if args.command == "run-mic":
-            HeadlessMicRunner, HeadlessMicInitializationError = _load_headless_mic_types()
-            runner = HeadlessMicRunner(
-                settings=settings,
-                config_path=args.config,
-                vad_model_path=args.vad_model,
-                use_llm=args.use_llm,
+            from puripuly_heart.app.headless_runtime_config import (
+                build_headless_mic_runtime_config,
+                create_secret_store_from_vnext_intent,
             )
+
+            HeadlessMicRunner, HeadlessMicInitializationError = _load_headless_mic_types()
+            try:
+                secrets = create_secret_store_from_vnext_intent(settings, config_path=args.config)
+                runtime_config = build_headless_mic_runtime_config(
+                    settings,
+                    config_path=args.config,
+                    vad_model_path=args.vad_model,
+                    use_llm=args.use_llm,
+                    secret_store=secrets,
+                )
+            except Exception as exc:
+                return _print_initialization_error("headless mic runner", exc)
+
+            runner = HeadlessMicRunner(runtime_config=runtime_config)
             try:
                 return asyncio.run(runner.run())
             except HeadlessMicInitializationError as exc:
@@ -304,12 +349,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     finally:
         logging_sinks.close(force=True)
-
-
-def _load_settings_or_default(path: Path) -> AppSettings:
-    if path.exists():
-        return load_settings(path)
-    return new_settings_for_first_run()
 
 
 if __name__ == "__main__":

@@ -170,5 +170,20 @@ def test_main_first_run_uses_detected_system_locale(
 
     loaded = _load_settings_or_default(path)
 
-    assert loaded.ui.locale == "zh-CN"
+    assert loaded.intent.ui.locale == "zh-CN"
+    assert not path.exists()
+
+
+def test_main_first_run_populates_default_system_prompt(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings_module, "detect_system_locale", lambda: None, raising=False)
+    path = tmp_path / "settings.json"
+
+    loaded = _load_settings_or_default(path)
+
+    expected = load_prompt_for_provider(LLMProviderName.GEMINI.value)
+    assert loaded.intent.prompts.system_prompt == expected
+    assert loaded.intent.prompts.system_prompt != ""
     assert not path.exists()

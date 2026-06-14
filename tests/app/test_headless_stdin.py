@@ -6,8 +6,12 @@ from dataclasses import dataclass
 import pytest
 
 import puripuly_heart.app.headless_stdin as headless_stdin
+from puripuly_heart.app.headless_runtime_config import (
+    HeadlessLanguageRuntimeConfig,
+    HeadlessOSCRuntimeConfig,
+    HeadlessStdinRuntimeConfig,
+)
 from puripuly_heart.app.headless_stdin import HeadlessStdinRunner
-from puripuly_heart.config.settings import AppSettings
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.domain.models import OSCMessage, Translation
 
@@ -52,12 +56,39 @@ class FakeLLM:
         return
 
 
+def _stdin_config(
+    *,
+    chatbox_include_source: bool = False,
+    source_language: str = "ko",
+    target_language: str = "en",
+) -> HeadlessStdinRuntimeConfig:
+    return HeadlessStdinRuntimeConfig(
+        osc=HeadlessOSCRuntimeConfig(
+            host="127.0.0.1",
+            port=9000,
+            chatbox_address="/chatbox/input",
+            chatbox_send=True,
+            chatbox_clear=False,
+            chatbox_max_chars=144,
+            chatbox_include_source=chatbox_include_source,
+            vrc_mic_intercept=False,
+        ),
+        languages=HeadlessLanguageRuntimeConfig(
+            source_language=source_language,
+            target_language=target_language,
+            peer_source_language="en",
+        ),
+        system_prompt="",
+        chatbox_include_source=chatbox_include_source,
+    )
+
+
 @pytest.mark.asyncio
 async def test_headless_stdin_enqueues_plain_text(monkeypatch):
     loop = FakeLoop(lines=["hello\n", ""])
     monkeypatch.setattr(asyncio, "get_running_loop", lambda: loop)
 
-    runner = HeadlessStdinRunner(settings=AppSettings(), llm=None, clock=FakeClock())
+    runner = HeadlessStdinRunner(runtime_config=_stdin_config(), llm=None, clock=FakeClock())
     osc = FakeOscQueue()
 
     await runner._stdin_loop(osc)
@@ -70,7 +101,7 @@ async def test_headless_stdin_enqueues_translated_text(monkeypatch):
     loop = FakeLoop(lines=["hello\n", ""])
     monkeypatch.setattr(asyncio, "get_running_loop", lambda: loop)
 
-    runner = HeadlessStdinRunner(settings=AppSettings(), llm=FakeLLM(), clock=FakeClock())
+    runner = HeadlessStdinRunner(runtime_config=_stdin_config(), llm=FakeLLM(), clock=FakeClock())
     osc = FakeOscQueue()
 
     await runner._stdin_loop(osc)
@@ -83,9 +114,11 @@ async def test_headless_stdin_includes_source_when_configured(monkeypatch):
     loop = FakeLoop(lines=["hello\n", ""])
     monkeypatch.setattr(asyncio, "get_running_loop", lambda: loop)
 
-    settings = AppSettings()
-    settings.osc.chatbox_include_source = True
-    runner = HeadlessStdinRunner(settings=settings, llm=FakeLLM(), clock=FakeClock())
+    runner = HeadlessStdinRunner(
+        runtime_config=_stdin_config(chatbox_include_source=True),
+        llm=FakeLLM(),
+        clock=FakeClock(),
+    )
     osc = FakeOscQueue()
 
     await runner._stdin_loop(osc)
@@ -125,7 +158,7 @@ async def test_headless_stdin_run_handles_keyboard_interrupt(monkeypatch):
     monkeypatch.setattr(HeadlessStdinRunner, "_stdin_loop", fake_stdin_loop)
     monkeypatch.setattr(HeadlessStdinRunner, "_flush_loop", fake_flush_loop)
 
-    runner = HeadlessStdinRunner(settings=AppSettings(), llm=None, clock=FakeClock())
+    runner = HeadlessStdinRunner(runtime_config=_stdin_config(), llm=None, clock=FakeClock())
     result = await runner.run()
 
     assert result == 0

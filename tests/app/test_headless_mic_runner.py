@@ -2,23 +2,210 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 import puripuly_heart.app.headless_mic as headless_mic
+from puripuly_heart.app.headless_runtime_config import (
+    HeadlessMicRuntimeConfig,
+    _resolved_stt_keyterms,
+    build_headless_mic_runtime_config,
+)
 from puripuly_heart.config.audio_host_api import (
     WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
     WINDOWS_WASAPI_HOST_API,
 )
-from puripuly_heart.config.settings import (
-    AppSettings,
-    LLMProviderName,
-    OpenRouterCredentialSource,
-    OpenRouterSettings,
-    ProviderSettings,
-    STTProviderName,
-)
+from puripuly_heart.config.resolved import ResolvedSTTConfig
+from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
+
+
+def _replace_osc(settings: AppSettingsVNext, **kwargs) -> AppSettingsVNext:
+    return replace(
+        settings,
+        intent=replace(settings.intent, osc=replace(settings.intent.osc, **kwargs)),
+    )
+
+
+def _replace_audio(settings: AppSettingsVNext, **kwargs) -> AppSettingsVNext:
+    return replace(
+        settings,
+        intent=replace(settings.intent, audio=replace(settings.intent.audio, **kwargs)),
+    )
+
+
+def _replace_desktop_audio(settings: AppSettingsVNext, **kwargs) -> AppSettingsVNext:
+    return replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            desktop_audio=replace(settings.intent.desktop_audio, **kwargs),
+        ),
+    )
+
+
+def _replace_translation(settings: AppSettingsVNext, **kwargs) -> AppSettingsVNext:
+    return replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            translation=replace(settings.intent.translation, **kwargs),
+        ),
+    )
+
+
+def _replace_peer_translation_state(settings: AppSettingsVNext, **kwargs) -> AppSettingsVNext:
+    return replace(
+        settings,
+        state=replace(
+            settings.state,
+            peer_translation=replace(settings.state.peer_translation, **kwargs),
+        ),
+    )
+
+
+def _replace_stt(settings: AppSettingsVNext, **kwargs) -> AppSettingsVNext:
+    return replace(
+        settings,
+        intent=replace(settings.intent, stt=replace(settings.intent.stt, **kwargs)),
+    )
+
+
+def _replace_peer_stt(settings: AppSettingsVNext, **kwargs) -> AppSettingsVNext:
+    return replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            peer_stt=replace(settings.intent.peer_stt, **kwargs),
+        ),
+    )
+
+
+def _replace_language(settings: AppSettingsVNext, **kwargs) -> AppSettingsVNext:
+    return replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            languages=replace(settings.intent.languages, **kwargs),
+        ),
+    )
+
+
+def _default_mic_runtime_config(
+    settings: AppSettingsVNext | None = None,
+    *,
+    config_path=None,
+    vad_path=None,
+    use_llm: bool = True,
+) -> HeadlessMicRuntimeConfig:
+    settings = settings if settings is not None else AppSettingsVNext()
+    return build_headless_mic_runtime_config(
+        settings,
+        config_path=config_path if config_path is not None else Path("settings.json"),
+        vad_model_path=vad_path if vad_path is not None else Path("vad.onnx"),
+        use_llm=use_llm,
+        secret_store=InMemorySecretStore(),
+    )
+
+
+def test_headless_mic_runtime_config_repr_does_not_expose_raw_secrets() -> None:
+    secret_store = InMemorySecretStore()
+    secret_store.set("openrouter_api_key", "super-secret-key")
+    runtime_config = build_headless_mic_runtime_config(
+        AppSettingsVNext(),
+        config_path=Path("settings.json"),
+        vad_model_path=Path("vad.onnx"),
+        use_llm=True,
+        secret_store=secret_store,
+    )
+
+    representation = repr(runtime_config)
+
+    assert "super-secret-key" not in representation
+    assert "openrouter_api_key" not in representation
+
+
+def test_headless_mic_llm_provider_receives_low_latency_mode(monkeypatch) -> None:
+    settings = _replace_stt(AppSettingsVNext(), low_latency_mode=False)
+    runtime_config = _default_mic_runtime_config(settings)
+    captured: dict[str, object] = {}
+
+    def fake_create_llm_provider(*args, **kwargs):
+        captured["qwen_low_latency_mode"] = kwargs.get("qwen_low_latency_mode")
+        return "llm"
+
+    monkeypatch.setattr(
+        headless_mic,
+        "create_llm_provider_from_resolved_config",
+        fake_create_llm_provider,
+    )
+
+    result = headless_mic._create_headless_llm_provider(
+        runtime_config=runtime_config,
+    )
+
+    assert result == "llm"
+    assert captured["qwen_low_latency_mode"] is False
+
+
+def test_headless_mic_runtime_config_peer_fields_are_non_optional() -> None:
+    runtime_config = _default_mic_runtime_config()
+
+    assert runtime_config.peer_stt_config is not None
+    assert isinstance(runtime_config.peer_stt_config, ResolvedSTTConfig)
+    assert runtime_config.peer_runtime_config is not None
+
+
+def _enable_peer_runtime_for_test(
+    runtime_config: HeadlessMicRuntimeConfig,
+) -> HeadlessMicRuntimeConfig:
+    # Explicit test-only activation until headless peer runtime activation
+    # intent is defined.
+    return replace(
+        runtime_config,
+        ui=replace(runtime_config.ui, peer_translation_enabled=True),
+    )
+
+
+def test_headless_mic_peer_runtime_disabled_despite_eula_accepted() -> None:
+    settings = _replace_peer_translation_state(AppSettingsVNext(), eula_accepted=True)
+    runtime_config = _default_mic_runtime_config(settings)
+
+    assert runtime_config.ui.peer_translation_enabled is False
+
+
+def test_headless_mic_stt_custom_terms_are_normalized() -> None:
+    many_terms = [f"term{i:03d}" for i in range(110)]
+    raw_terms = ["  spaced  ", "duplicate", "duplicate", ""] + many_terms
+    settings = _replace_stt(
+        AppSettingsVNext(),
+        custom_terms={"ko": raw_terms},
+    )
+    runtime_config = _default_mic_runtime_config(settings)
+
+    ko_terms = runtime_config.stt_config.custom_terms["ko"]
+    assert "spaced" in ko_terms
+    assert "" not in ko_terms
+    assert ko_terms.count("duplicate") == 1
+    assert len(ko_terms) <= 100
+    assert ko_terms[0] == "spaced"
+
+
+def test_headless_mic_stt_custom_terms_exact_empty_language_does_not_fall_back() -> None:
+    settings = _replace_language(
+        _replace_stt(
+            AppSettingsVNext(),
+            custom_terms={"en-US": ["  ", ""], "en": ["base-term"]},
+        ),
+        source_language="en-US",
+    )
+    runtime_config = _default_mic_runtime_config(settings)
+
+    assert runtime_config.stt_config.custom_terms.get("en-US") == ()
+    assert runtime_config.stt_config.custom_terms.get("en") == ("base-term",)
+    assert _resolved_stt_keyterms(runtime_config.stt_config) == ()
 
 
 def _patch_headless_mic_startup(
@@ -47,9 +234,21 @@ def _patch_headless_mic_startup(
 
     monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
     monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
-    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
-    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
-    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
+    monkeypatch.setattr(
+        headless_mic,
+        "create_llm_provider_from_resolved_config",
+        lambda *_a, **_k: "llm",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "backend",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_peer_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "peer-backend",
+    )
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
     monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
@@ -66,8 +265,8 @@ async def test_headless_mic_runner_uses_named_self_audio_runtime_owner(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    settings = AppSettings()
-    settings.osc.vrc_mic_intercept = False
+    settings = AppSettingsVNext()
+    settings = _replace_osc(settings, vrc_mic_intercept=False)
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
@@ -107,10 +306,12 @@ async def test_headless_mic_runner_uses_named_self_audio_runtime_owner(
     )
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_default_mic_runtime_config(
+            settings=settings,
+            config_path=config_path,
+            vad_path=vad_path,
+            use_llm=True,
+        ),
     )
     result = await runner.run()
 
@@ -127,9 +328,8 @@ async def test_headless_mic_runner_closes_self_source_when_peer_setup_raises_bef
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    settings = AppSettings()
-    settings.osc.vrc_mic_intercept = False
-    settings.ui.peer_translation_enabled = True
+    settings = AppSettingsVNext()
+    settings = _replace_osc(settings, vrc_mic_intercept=False)
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
@@ -187,10 +387,14 @@ async def test_headless_mic_runner_closes_self_source_when_peer_setup_raises_bef
     )
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_enable_peer_runtime_for_test(
+            _default_mic_runtime_config(
+                settings=settings,
+                config_path=config_path,
+                vad_path=vad_path,
+                use_llm=True,
+            )
+        ),
     )
 
     with pytest.raises(RuntimeError, match="peer setup failed"):
@@ -203,8 +407,8 @@ async def test_headless_mic_runner_closes_self_source_when_peer_setup_raises_bef
 
 @pytest.mark.asyncio
 async def test_headless_mic_runner_handles_keyboard_interrupt(monkeypatch, tmp_path) -> None:
-    settings = AppSettings()
-    settings.osc.vrc_mic_intercept = False
+    settings = AppSettingsVNext()
+    settings = _replace_osc(settings, vrc_mic_intercept=False)
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
@@ -238,9 +442,16 @@ async def test_headless_mic_runner_handles_keyboard_interrupt(monkeypatch, tmp_p
 
     monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
     monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
-    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
-    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
-    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
+    monkeypatch.setattr(
+        headless_mic,
+        "create_llm_provider_from_resolved_config",
+        lambda *_a, **_k: "llm",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "backend",
+    )
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", FakeSender)
     monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
@@ -252,10 +463,12 @@ async def test_headless_mic_runner_handles_keyboard_interrupt(monkeypatch, tmp_p
     monkeypatch.setattr(headless_mic, "resolve_sounddevice_input_device", lambda *a, **k: None)
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_default_mic_runtime_config(
+            settings=settings,
+            config_path=config_path,
+            vad_path=vad_path,
+            use_llm=True,
+        ),
     )
     result = await runner.run()
 
@@ -268,10 +481,13 @@ async def test_headless_mic_runner_normalizes_wasapi_compatibility_mode(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    settings = AppSettings()
-    settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
-    settings.audio.input_device = "Compat Mic"
-    settings.osc.vrc_mic_intercept = False
+    settings = AppSettingsVNext()
+    settings = _replace_audio(
+        settings,
+        input_host_api=WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
+        input_device="Compat Mic",
+    )
+    settings = _replace_osc(settings, vrc_mic_intercept=False)
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
@@ -298,10 +514,12 @@ async def test_headless_mic_runner_normalizes_wasapi_compatibility_mode(
     )
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_default_mic_runtime_config(
+            settings=settings,
+            config_path=config_path,
+            vad_path=vad_path,
+            use_llm=True,
+        ),
     )
     result = await runner.run()
 
@@ -317,10 +535,13 @@ async def test_headless_mic_runner_does_not_apply_wasapi_flags_to_name_fallback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    settings = AppSettings()
-    settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
-    settings.audio.input_device = "Compat Mic"
-    settings.osc.vrc_mic_intercept = False
+    settings = AppSettingsVNext()
+    settings = _replace_audio(
+        settings,
+        input_host_api=WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
+        input_device="Compat Mic",
+    )
+    settings = _replace_osc(settings, vrc_mic_intercept=False)
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
@@ -353,10 +574,12 @@ async def test_headless_mic_runner_does_not_apply_wasapi_flags_to_name_fallback(
     )
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_default_mic_runtime_config(
+            settings=settings,
+            config_path=config_path,
+            vad_path=vad_path,
+            use_llm=True,
+        ),
     )
     result = await runner.run()
 
@@ -376,10 +599,13 @@ async def test_headless_mic_runner_retries_same_device_name_fallback_without_was
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    settings = AppSettings()
-    settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
-    settings.audio.input_device = "Compat Mic"
-    settings.osc.vrc_mic_intercept = False
+    settings = AppSettingsVNext()
+    settings = _replace_audio(
+        settings,
+        input_host_api=WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
+        input_device="Compat Mic",
+    )
+    settings = _replace_osc(settings, vrc_mic_intercept=False)
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
@@ -408,10 +634,12 @@ async def test_headless_mic_runner_retries_same_device_name_fallback_without_was
     )
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_default_mic_runtime_config(
+            settings=settings,
+            config_path=config_path,
+            vad_path=vad_path,
+            use_llm=True,
+        ),
     )
     result = await runner.run()
 
@@ -434,10 +662,13 @@ async def test_headless_mic_runner_does_not_apply_wasapi_flags_to_system_default
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    settings = AppSettings()
-    settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
-    settings.audio.input_device = ""
-    settings.osc.vrc_mic_intercept = False
+    settings = AppSettingsVNext()
+    settings = _replace_audio(
+        settings,
+        input_host_api=WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
+        input_device="",
+    )
+    settings = _replace_osc(settings, vrc_mic_intercept=False)
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
@@ -468,10 +699,12 @@ async def test_headless_mic_runner_does_not_apply_wasapi_flags_to_system_default
     )
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_default_mic_runtime_config(
+            settings=settings,
+            config_path=config_path,
+            vad_path=vad_path,
+            use_llm=True,
+        ),
     )
     result = await runner.run()
 
@@ -488,30 +721,25 @@ async def test_headless_mic_runner_rejects_managed_openrouter_without_release_se
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    settings = AppSettings(
-        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
-        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.MANAGED),
-    )
+    settings = AppSettingsVNext()
+    settings = _replace_translation(settings, model="gemma4", connection="managed")
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
 
     monkeypatch.setattr(
         headless_mic,
-        "create_secret_store",
-        lambda *_a, **_k: InMemorySecretStore(),
-    )
-    monkeypatch.setattr(
-        headless_mic,
-        "create_stt_backend",
+        "create_stt_backend_from_resolved_config",
         lambda *_a, **_k: pytest.fail("STT backend should not initialize"),
     )
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_default_mic_runtime_config(
+            settings=settings,
+            config_path=config_path,
+            vad_path=vad_path,
+            use_llm=True,
+        ),
     )
 
     with pytest.raises(
@@ -525,8 +753,8 @@ async def test_headless_mic_runner_closes_vrc_receiver_runtime_before_hub_stop(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    settings = AppSettings()
-    settings.osc.vrc_mic_intercept = True
+    settings = AppSettingsVNext()
+    settings = _replace_osc(settings, vrc_mic_intercept=True)
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
@@ -567,14 +795,18 @@ async def test_headless_mic_runner_closes_vrc_receiver_runtime_before_hub_stop(
     async def fake_run_audio_vad_loop(*_args, **_kwargs):
         return None
 
-    def fail_direct_receiver(*_args, **_kwargs):
-        pytest.fail("headless VRC mic sync must be routed through VrcMicReceiverRuntime")
-
     monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
     monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
-    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
-    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
-    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
+    monkeypatch.setattr(
+        headless_mic,
+        "create_llm_provider_from_resolved_config",
+        lambda *_a, **_k: "llm",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "backend",
+    )
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
     monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
@@ -584,14 +816,22 @@ async def test_headless_mic_runner_closes_vrc_receiver_runtime_before_hub_stop(
     monkeypatch.setattr(headless_mic, "SoundDeviceAudioSource", lambda *a, **k: FakeSource())
     monkeypatch.setattr(headless_mic, "run_audio_vad_loop", fake_run_audio_vad_loop)
     monkeypatch.setattr(headless_mic, "resolve_sounddevice_input_device", lambda *a, **k: None)
-    monkeypatch.setattr(headless_mic, "VrcOscReceiver", fail_direct_receiver)
+    monkeypatch.setattr(
+        headless_mic,
+        "VrcOscReceiver",
+        lambda *_a, **_k: pytest.fail(
+            "headless VRC mic sync must be routed through VrcMicReceiverRuntime"
+        ),
+    )
     monkeypatch.setattr(headless_mic, "VrcMicReceiverRuntime", FakeReceiverRuntime, raising=False)
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_default_mic_runtime_config(
+            settings=settings,
+            config_path=config_path,
+            vad_path=vad_path,
+            use_llm=True,
+        ),
     )
     result = await runner.run()
 
@@ -604,8 +844,8 @@ async def test_headless_mic_runner_closes_vrc_receiver_runtime_before_hub_stop(
 async def test_headless_mic_runner_starts_and_stops_vrc_receiver_when_enabled(
     monkeypatch, tmp_path
 ) -> None:
-    settings = AppSettings()
-    settings.osc.vrc_mic_intercept = True
+    settings = AppSettingsVNext()
+    settings = _replace_osc(settings, vrc_mic_intercept=True)
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
@@ -647,9 +887,16 @@ async def test_headless_mic_runner_starts_and_stops_vrc_receiver_when_enabled(
 
     monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
     monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
-    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
-    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
-    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
+    monkeypatch.setattr(
+        headless_mic,
+        "create_llm_provider_from_resolved_config",
+        lambda *_a, **_k: "llm",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "backend",
+    )
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
     monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
@@ -662,10 +909,12 @@ async def test_headless_mic_runner_starts_and_stops_vrc_receiver_when_enabled(
     monkeypatch.setattr(headless_mic, "VrcOscReceiver", FakeReceiver)
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_default_mic_runtime_config(
+            settings=settings,
+            config_path=config_path,
+            vad_path=vad_path,
+            use_llm=True,
+        ),
     )
     result = await runner.run()
 
@@ -680,8 +929,8 @@ async def test_headless_mic_runner_continues_when_vrc_receiver_start_raises_oser
     tmp_path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    settings = AppSettings()
-    settings.osc.vrc_mic_intercept = True
+    settings = AppSettingsVNext()
+    settings = _replace_osc(settings, vrc_mic_intercept=True)
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
@@ -724,9 +973,16 @@ async def test_headless_mic_runner_continues_when_vrc_receiver_start_raises_oser
 
     monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
     monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
-    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
-    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
-    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
+    monkeypatch.setattr(
+        headless_mic,
+        "create_llm_provider_from_resolved_config",
+        lambda *_a, **_k: "llm",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "backend",
+    )
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
     monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
@@ -739,10 +995,12 @@ async def test_headless_mic_runner_continues_when_vrc_receiver_start_raises_oser
     monkeypatch.setattr(headless_mic, "VrcOscReceiver", FakeReceiver)
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_default_mic_runtime_config(
+            settings=settings,
+            config_path=config_path,
+            vad_path=vad_path,
+            use_llm=True,
+        ),
     )
 
     with caplog.at_level(logging.WARNING, logger="puripuly_heart.app.headless_mic"):
@@ -761,10 +1019,8 @@ async def test_headless_mic_runner_starts_peer_desktop_loop_when_peer_translatio
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    settings = AppSettings()
-    settings.ui.peer_translation_enabled = True
-    settings.ui.integrated_context_enabled = True
-    settings.desktop_audio.output_device = "Headphones (Loopback)"
+    settings = AppSettingsVNext()
+    settings = _replace_desktop_audio(settings, output_device="Headphones (Loopback)")
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
@@ -807,10 +1063,21 @@ async def test_headless_mic_runner_starts_peer_desktop_loop_when_peer_translatio
 
     monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
     monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
-    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
-    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
-    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
-    monkeypatch.setattr(headless_mic, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend")
+    monkeypatch.setattr(
+        headless_mic,
+        "create_llm_provider_from_resolved_config",
+        lambda *_a, **_k: "llm",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "backend",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_peer_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "peer-backend",
+    )
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
     monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
@@ -832,10 +1099,14 @@ async def test_headless_mic_runner_starts_peer_desktop_loop_when_peer_translatio
     monkeypatch.setattr(headless_mic, "resolve_sounddevice_input_device", lambda *a, **k: None)
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_enable_peer_runtime_for_test(
+            _default_mic_runtime_config(
+                settings=settings,
+                config_path=config_path,
+                vad_path=vad_path,
+                use_llm=True,
+            )
+        ),
     )
     result = await runner.run()
 
@@ -858,9 +1129,8 @@ async def test_headless_mic_runner_isolates_peer_loop_runtime_failures(
     tmp_path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    settings = AppSettings()
-    settings.ui.peer_translation_enabled = True
-    settings.desktop_audio.output_device = "Headphones (Loopback)"
+    settings = AppSettingsVNext()
+    settings = _replace_desktop_audio(settings, output_device="Headphones (Loopback)")
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
@@ -897,10 +1167,21 @@ async def test_headless_mic_runner_isolates_peer_loop_runtime_failures(
 
     monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
     monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
-    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
-    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
-    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
-    monkeypatch.setattr(headless_mic, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend")
+    monkeypatch.setattr(
+        headless_mic,
+        "create_llm_provider_from_resolved_config",
+        lambda *_a, **_k: "llm",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "backend",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_peer_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "peer-backend",
+    )
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
     monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
@@ -922,10 +1203,14 @@ async def test_headless_mic_runner_isolates_peer_loop_runtime_failures(
     monkeypatch.setattr(headless_mic, "resolve_sounddevice_input_device", lambda *a, **k: None)
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_enable_peer_runtime_for_test(
+            _default_mic_runtime_config(
+                settings=settings,
+                config_path=config_path,
+                vad_path=vad_path,
+                use_llm=True,
+            )
+        ),
     )
 
     with caplog.at_level(logging.ERROR, logger="puripuly_heart.app.headless_mic"):
@@ -941,9 +1226,8 @@ async def test_headless_mic_runner_logs_peer_runtime_startup_failures(
     tmp_path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    settings = AppSettings()
-    settings.ui.peer_translation_enabled = True
-    settings.desktop_audio.output_device = "Headphones (Loopback)"
+    settings = AppSettingsVNext()
+    settings = _replace_desktop_audio(settings, output_device="Headphones (Loopback)")
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
@@ -977,10 +1261,21 @@ async def test_headless_mic_runner_logs_peer_runtime_startup_failures(
 
     monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
     monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
-    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
-    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
-    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
-    monkeypatch.setattr(headless_mic, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend")
+    monkeypatch.setattr(
+        headless_mic,
+        "create_llm_provider_from_resolved_config",
+        lambda *_a, **_k: "llm",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "backend",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_peer_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "peer-backend",
+    )
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
     monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
@@ -993,10 +1288,14 @@ async def test_headless_mic_runner_logs_peer_runtime_startup_failures(
     monkeypatch.setattr(headless_mic, "resolve_sounddevice_input_device", lambda *a, **k: None)
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_enable_peer_runtime_for_test(
+            _default_mic_runtime_config(
+                settings=settings,
+                config_path=config_path,
+                vad_path=vad_path,
+                use_llm=True,
+            )
+        ),
     )
 
     with caplog.at_level(logging.WARNING, logger="puripuly_heart.app.headless_mic"):
@@ -1011,9 +1310,8 @@ async def test_headless_mic_runner_surfaces_peer_runtime_close_failure_after_hub
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    settings = AppSettings()
-    settings.osc.vrc_mic_intercept = False
-    settings.ui.peer_translation_enabled = True
+    settings = AppSettingsVNext()
+    settings = _replace_osc(settings, vrc_mic_intercept=False)
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
@@ -1055,9 +1353,16 @@ async def test_headless_mic_runner_surfaces_peer_runtime_close_failure_after_hub
 
     monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
     monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
-    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
-    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
-    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
+    monkeypatch.setattr(
+        headless_mic,
+        "create_llm_provider_from_resolved_config",
+        lambda *_a, **_k: "llm",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "backend",
+    )
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
     monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
@@ -1070,10 +1375,14 @@ async def test_headless_mic_runner_surfaces_peer_runtime_close_failure_after_hub
     monkeypatch.setattr(headless_mic, "resolve_sounddevice_input_device", lambda *a, **k: None)
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_enable_peer_runtime_for_test(
+            _default_mic_runtime_config(
+                settings=settings,
+                config_path=config_path,
+                vad_path=vad_path,
+                use_llm=True,
+            )
+        ),
     )
 
     with pytest.raises(RuntimeError, match="peer runtime close failed"):
@@ -1087,12 +1396,14 @@ async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    settings = AppSettings()
-    settings.ui.peer_translation_enabled = True
-    settings.desktop_audio.output_device = "Headphones (Loopback)"
-    settings.desktop_audio.vad_speech_threshold = 0.72
-    settings.desktop_audio.vad_hangover_ms = 950
-    settings.desktop_audio.vad_pre_roll_ms = 420
+    settings = AppSettingsVNext()
+    settings = _replace_desktop_audio(
+        settings,
+        output_device="Headphones (Loopback)",
+        vad_speech_threshold=0.72,
+        vad_hangover_ms=950,
+        vad_pre_roll_ms=420,
+    )
     config_path = tmp_path / "settings.json"
     vad_path = tmp_path / "vad.onnx"
     vad_path.write_text("dummy", encoding="utf-8")
@@ -1148,10 +1459,21 @@ async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
 
     monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
     monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
-    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
-    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
-    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
-    monkeypatch.setattr(headless_mic, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend")
+    monkeypatch.setattr(
+        headless_mic,
+        "create_llm_provider_from_resolved_config",
+        lambda *_a, **_k: "llm",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "backend",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_peer_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "peer-backend",
+    )
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
     monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
@@ -1174,10 +1496,14 @@ async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
     monkeypatch.setattr(headless_mic, "resolve_sounddevice_input_device", lambda *a, **k: None)
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=True,
+        runtime_config=_enable_peer_runtime_for_test(
+            _default_mic_runtime_config(
+                settings=settings,
+                config_path=config_path,
+                vad_path=vad_path,
+                use_llm=True,
+            )
+        ),
     )
     result = await runner.run()
 
@@ -1199,14 +1525,18 @@ async def test_headless_runner_uses_selected_peer_provider_configuration(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    settings = AppSettings()
-    settings.ui.peer_translation_enabled = True
-    settings.provider.peer_stt = STTProviderName.SONIOX
-    settings.peer_soniox_stt.model = "peer-soniox"
-    settings.peer_soniox_stt.endpoint = "wss://peer-soniox.example/realtime"
-    settings.peer_soniox_stt.keepalive_interval_s = 8.0
-    settings.peer_soniox_stt.trailing_silence_ms = 300
-    calls: list[AppSettings] = []
+    settings = AppSettingsVNext()
+    settings = _replace_peer_stt(settings, provider="soniox")
+    settings = _replace_stt(
+        settings,
+        soniox=replace(
+            settings.intent.stt.soniox,
+            model="peer-soniox",
+            endpoint="wss://peer-soniox.example/realtime",
+            keepalive_interval_s=8.0,
+            trailing_silence_ms=300,
+        ),
+    )
     created_hub: dict[str, object] = {}
     peer_backend = object()
     config_path = tmp_path / "settings.json"
@@ -1220,9 +1550,9 @@ async def test_headless_runner_uses_selected_peer_provider_configuration(
             self.channel = channel
             self.kwargs = kwargs
 
-    def fake_create_peer_stt_backend(settings: AppSettings, *, secrets):
+    def fake_create_peer_stt_backend(config: ResolvedSTTConfig, *, secrets):
         _ = secrets
-        calls.append(settings)
+        assert config.provider == "soniox"
         return peer_backend
 
     class FakeHub:
@@ -1253,10 +1583,21 @@ async def test_headless_runner_uses_selected_peer_provider_configuration(
     async def fake_run_audio_vad_loop(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(headless_mic, "create_peer_stt_backend", fake_create_peer_stt_backend)
-    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
-    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
-    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
+    monkeypatch.setattr(
+        headless_mic,
+        "create_peer_stt_backend_from_resolved_config",
+        fake_create_peer_stt_backend,
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_llm_provider_from_resolved_config",
+        lambda *_a, **_k: "llm",
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "backend",
+    )
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", FakeManagedSTTProvider)
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
     monkeypatch.setattr(headless_mic, "ClientHub", FakeHub)
@@ -1269,24 +1610,21 @@ async def test_headless_runner_uses_selected_peer_provider_configuration(
     monkeypatch.setattr(headless_mic, "resolve_sounddevice_input_device", lambda *a, **k: None)
 
     runner = headless_mic.HeadlessMicRunner(
-        settings=settings,
-        config_path=config_path,
-        vad_model_path=vad_path,
-        use_llm=False,
+        runtime_config=_enable_peer_runtime_for_test(
+            _default_mic_runtime_config(
+                settings=settings,
+                config_path=config_path,
+                vad_path=vad_path,
+                use_llm=False,
+            )
+        ),
     )
 
     result = await runner.run()
 
     assert result == 0
-    assert len(calls) == 1
-    peer_settings = calls[0]
-    assert peer_settings.provider.peer_stt == STTProviderName.SONIOX
-    assert peer_settings.peer_soniox_stt.model == "peer-soniox"
-    assert peer_settings.peer_soniox_stt.endpoint == "wss://peer-soniox.example/realtime"
-    assert peer_settings.peer_soniox_stt.keepalive_interval_s == 8.0
-    assert peer_settings.peer_soniox_stt.trailing_silence_ms == 300
     assert isinstance(created_hub["stt"], FakeManagedSTTProvider)
-    assert created_hub["stt"].kwargs["stt_provider_name"] == settings.provider.stt
+    assert created_hub["stt"].kwargs["stt_provider_name"] == settings.intent.stt.provider
     peer_stt = next(
         peer_stt
         for peer_stt in created_hub["instance"].replace_peer_stt_calls
@@ -1295,4 +1633,4 @@ async def test_headless_runner_uses_selected_peer_provider_configuration(
     assert isinstance(peer_stt, FakeManagedSTTProvider)
     assert peer_stt.backend is peer_backend
     assert peer_stt.channel == "peer"
-    assert peer_stt.kwargs["stt_provider_name"] == STTProviderName.SONIOX
+    assert peer_stt.kwargs["stt_provider_name"] == "soniox"

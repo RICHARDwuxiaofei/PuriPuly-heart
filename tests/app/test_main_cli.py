@@ -12,16 +12,16 @@ from types import ModuleType
 
 import pytest
 
+import puripuly_heart.app.headless_runtime_config as runtime_config_module
+import puripuly_heart.app.wiring as wiring_module
 import puripuly_heart.main as main_module
 from puripuly_heart import __version__
-from puripuly_heart.config.settings import (
-    AppSettings,
-    LLMProviderName,
-    OpenRouterCredentialSource,
-    OpenRouterSettings,
-    ProviderSettings,
+from puripuly_heart.app.headless_runtime_config import HeadlessMicRuntimeConfig
+from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
+from puripuly_heart.core.runtime_logging import (
+    SessionRuntimeLoggingService,
+    configure_main_logging,
 )
-from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService, configure_main_logging
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
 
 
@@ -156,12 +156,16 @@ def test_main_run_mic_still_aborts_when_soxr_runtime_startup_check_fails(
 
 
 def test_main_run_stdin_llm_error(monkeypatch, tmp_path, capsys) -> None:
-    monkeypatch.setattr(main_module, "create_secret_store", lambda *a, **k: "secrets")
+    monkeypatch.setattr(
+        runtime_config_module,
+        "create_secret_store_from_vnext_intent",
+        lambda *a, **k: InMemorySecretStore(),
+    )
 
     def raise_llm(*_args, **_kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(main_module, "create_llm_provider", raise_llm)
+    monkeypatch.setattr(wiring_module, "create_llm_provider_from_resolved_config", raise_llm)
 
     config_path = tmp_path / "settings.json"
     result = main_module.main(["--config", str(config_path), "run-stdin", "--use-llm"])
@@ -173,14 +177,11 @@ def test_main_run_stdin_llm_error(monkeypatch, tmp_path, capsys) -> None:
 def test_main_run_stdin_managed_openrouter_without_release_service_reports_clear_error(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    settings = AppSettings(
-        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
-        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.MANAGED),
-    )
+    settings = AppSettingsVNext()
     monkeypatch.setattr(main_module, "_load_settings_or_default", lambda _path: settings)
     monkeypatch.setattr(
-        main_module,
-        "create_secret_store",
+        runtime_config_module,
+        "create_secret_store_from_vnext_intent",
         lambda *a, **k: InMemorySecretStore(),
     )
 
@@ -240,18 +241,16 @@ def test_main_run_mic_invokes_runner(monkeypatch, tmp_path) -> None:
 def test_main_run_mic_managed_openrouter_without_release_service_reports_clear_error(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    settings = AppSettings(
-        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
-        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.MANAGED),
-    )
+    settings = AppSettingsVNext()
 
     class FakeHeadlessMicInitializationError(Exception):
         pass
 
     class FakeRunner:
         def __init__(self, *args, **kwargs):
-            assert kwargs["settings"] is settings
-            assert kwargs["use_llm"] is True
+            runtime_config = kwargs["runtime_config"]
+            assert isinstance(runtime_config, HeadlessMicRuntimeConfig)
+            assert runtime_config.use_llm is True
 
         async def run(self):
             raise FakeHeadlessMicInitializationError(
@@ -919,6 +918,16 @@ def test_load_settings_or_default_loads_when_exists(monkeypatch, tmp_path) -> No
     settings_path.write_text("{}", encoding="utf-8")
 
     sentinel = object()
-    monkeypatch.setattr(main_module, "load_settings", lambda _path: sentinel)
+
+    class FakeLoadResult:
+        settings = sentinel
+        status = "ok"
+        error = None
+        warnings = []
+
+    monkeypatch.setattr(
+        "puripuly_heart.config.settings_vnext.facade.load_vnext_settings",
+        lambda _path: FakeLoadResult(),
+    )
 
     assert main_module._load_settings_or_default(settings_path) is sentinel
