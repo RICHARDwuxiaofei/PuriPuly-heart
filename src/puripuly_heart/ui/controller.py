@@ -34,6 +34,26 @@ from puripuly_heart.app.ports.settings_repository import (
     SettingsCommitResult,
     SettingsSnapshot,
 )
+from puripuly_heart.app.services.provider_runtime_apply import (
+    _ControllerNoopRuntimeApply,
+    _ControllerOverlayOscOutputRuntimeApply,
+    _ControllerProviderRuntimeApply,
+    _ControllerSttLanguageAudioRuntimeApply,
+    _ControllerUiPromptClipboardStateRuntimeApply,
+    _overlay_osc_output_runtime_degraded_transaction_result,
+    _overlay_osc_output_save_failed_transaction_result,
+    _provider_runtime_apply_unavailable_result,
+    _ProviderRuntimeApplyPlan,
+    _runtime_apply_failed_result,
+    _runtime_apply_result_as_degraded_transaction,
+    _settings_mutation_diagnostics,
+    _stt_language_audio_runtime_degraded_transaction_result,
+    _stt_language_audio_runtime_unavailable_result,
+    _stt_language_audio_save_failed_transaction_result,
+    _translation_provider_save_failed_transaction_result,
+    _ui_prompt_clipboard_state_runtime_degraded_transaction_result,
+    _ui_prompt_clipboard_state_save_failed_transaction_result,
+)
 from puripuly_heart.app.services.secret_settings_transaction import (
     SecretSetRequest,
     SecretSettingsTransaction,
@@ -144,19 +164,10 @@ from puripuly_heart.core.managed_openrouter_release import (
     format_managed_openrouter_diagnostics,
 )
 from puripuly_heart.core.messages import (
-    CONTENT_POLICY_METADATA_ONLY,
-    DIAGNOSTIC_CATEGORY_LIFECYCLE,
-    DIAGNOSTIC_CATEGORY_TRANSACTION,
-    DIAGNOSTIC_VISIBILITY_BASIC,
     RUNTIME_APPLY_STATUS_APPLIED,
-    RUNTIME_APPLY_STATUS_FAILED,
-    SEVERITY_WARNING,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
-    ErrorDiagnostics,
-    RuntimeApplyResult,
     TransactionResult,
-    UserMessageRef,
 )
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_BYOK_API_KEY_SECRET,
@@ -432,13 +443,6 @@ def _github_star_prompt_latest_timestamp(*values: str | None) -> str | None:
     return latest[1] if latest is not None else None
 
 
-@dataclass(frozen=True, slots=True)
-class _ProviderRuntimeApplyPlan:
-    should_rebuild_llm: bool
-    should_refresh_peer: bool
-    should_refresh_self_stt: bool
-
-
 def _validate_and_save_settings(config_path: Path, settings: AppSettings) -> None:
     settings.validate()
     save_settings(config_path, settings)
@@ -485,157 +489,6 @@ class _ControllerSettingsPatchRepository:
                 values=_settings_snapshot_values(self.committed_settings),
                 revision=None,
             ),
-            message=None,
-            diagnostics=None,
-        )
-
-
-@dataclass(slots=True)
-class _ControllerProviderRuntimeApply:
-    controller: GuiController
-    settings: AppSettings
-    plan: _ProviderRuntimeApplyPlan
-    surface: str = "translation_provider"
-    operation: str = "apply_provider_runtime"
-
-    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
-        _ = request
-        try:
-            await self.controller._apply_provider_runtime_plan(self.settings, self.plan)
-        except Exception:
-            return RuntimeApplyResult(
-                status=RUNTIME_APPLY_STATUS_FAILED,
-                message=UserMessageRef(
-                    key="settings.mutation.runtime_apply_failed",
-                    params={"phase": "runtime_apply"},
-                    severity=SEVERITY_WARNING,
-                ),
-                diagnostics=_settings_mutation_diagnostics(
-                    component="gui_controller",
-                    operation=self.operation,
-                    code="provider_runtime_apply_exception",
-                    category=DIAGNOSTIC_CATEGORY_LIFECYCLE,
-                    surface=self.surface,
-                ),
-            )
-        unavailable_result = _provider_runtime_apply_unavailable_result(
-            controller=self.controller,
-            settings=self.settings,
-            plan=self.plan,
-            operation=self.operation,
-            surface=self.surface,
-        )
-        if unavailable_result is not None:
-            return unavailable_result
-        return RuntimeApplyResult(
-            status=RUNTIME_APPLY_STATUS_APPLIED,
-            message=None,
-            diagnostics=None,
-        )
-
-
-@dataclass(slots=True)
-class _ControllerSttLanguageAudioRuntimeApply:
-    controller: GuiController
-    settings: AppSettings
-    reload_settings_view: bool = True
-
-    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
-        _ = request
-        try:
-            await self.controller._apply_settings_direct(
-                self.settings,
-                persist=False,
-                strict_runtime_errors=True,
-                reload_settings_view=self.reload_settings_view,
-            )
-        except Exception:
-            return RuntimeApplyResult(
-                status=RUNTIME_APPLY_STATUS_FAILED,
-                message=UserMessageRef(
-                    key="settings.mutation.runtime_apply_failed",
-                    params={"phase": "runtime_apply"},
-                    severity=SEVERITY_WARNING,
-                ),
-                diagnostics=_settings_mutation_diagnostics(
-                    component="gui_controller",
-                    operation="apply_stt_language_audio_runtime",
-                    code="stt_language_audio_runtime_apply_exception",
-                    category=DIAGNOSTIC_CATEGORY_LIFECYCLE,
-                    surface="stt_language_audio",
-                ),
-            )
-        unavailable_result = _stt_language_audio_runtime_unavailable_result(
-            controller=self.controller,
-            settings=self.settings,
-        )
-        if unavailable_result is not None:
-            return unavailable_result
-        return RuntimeApplyResult(
-            status=RUNTIME_APPLY_STATUS_APPLIED,
-            message=None,
-            diagnostics=None,
-        )
-
-
-@dataclass(slots=True)
-class _ControllerOverlayOscOutputRuntimeApply:
-    controller: GuiController
-    settings: AppSettings
-
-    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
-        _ = request
-        try:
-            await self.controller._apply_settings_direct(
-                self.settings,
-                persist=False,
-                strict_runtime_errors=True,
-            )
-        except Exception:
-            return _runtime_apply_failed_result(
-                operation="apply_overlay_osc_output_runtime",
-                code="overlay_osc_output_runtime_apply_exception",
-                surface="overlay_osc_output",
-            )
-        return RuntimeApplyResult(
-            status=RUNTIME_APPLY_STATUS_APPLIED,
-            message=None,
-            diagnostics=None,
-        )
-
-
-@dataclass(slots=True)
-class _ControllerUiPromptClipboardStateRuntimeApply:
-    controller: GuiController
-    settings: AppSettings
-
-    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
-        _ = request
-        try:
-            await self.controller._apply_settings_direct(
-                self.settings,
-                persist=False,
-                strict_runtime_errors=True,
-            )
-        except Exception:
-            return _runtime_apply_failed_result(
-                operation="apply_ui_prompt_clipboard_state_runtime",
-                code="ui_prompt_clipboard_state_runtime_apply_exception",
-                surface="ui_prompt_clipboard_state",
-            )
-        return RuntimeApplyResult(
-            status=RUNTIME_APPLY_STATUS_APPLIED,
-            message=None,
-            diagnostics=None,
-        )
-
-
-@dataclass(slots=True)
-class _ControllerNoopRuntimeApply:
-    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
-        _ = request
-        return RuntimeApplyResult(
-            status=RUNTIME_APPLY_STATUS_APPLIED,
             message=None,
             diagnostics=None,
         )
@@ -704,230 +557,6 @@ class _ControllerSecretStorePortAdapter:
             message=None,
             diagnostics=None,
         )
-
-
-def _settings_mutation_diagnostics(
-    *,
-    component: str,
-    operation: str,
-    code: str,
-    category=DIAGNOSTIC_CATEGORY_TRANSACTION,
-    surface: str = "translation_provider",
-) -> ErrorDiagnostics:
-    return ErrorDiagnostics(
-        component=component,
-        operation=operation,
-        code=code,
-        category=category,
-        visibility=DIAGNOSTIC_VISIBILITY_BASIC,
-        content_policy=CONTENT_POLICY_METADATA_ONLY,
-        status_code=None,
-        retry_after_ms=None,
-        fields={"surface": surface},
-    )
-
-
-def _runtime_apply_failed_result(
-    *,
-    operation: str,
-    code: str,
-    surface: str,
-) -> RuntimeApplyResult:
-    return RuntimeApplyResult(
-        status=RUNTIME_APPLY_STATUS_FAILED,
-        message=UserMessageRef(
-            key="settings.mutation.runtime_apply_failed",
-            params={"phase": "runtime_apply"},
-            severity=SEVERITY_WARNING,
-        ),
-        diagnostics=_settings_mutation_diagnostics(
-            component="gui_controller",
-            operation=operation,
-            code=code,
-            category=DIAGNOSTIC_CATEGORY_LIFECYCLE,
-            surface=surface,
-        ),
-    )
-
-
-def _runtime_apply_result_as_degraded_transaction(
-    runtime_result: RuntimeApplyResult,
-) -> TransactionResult:
-    return TransactionResult(
-        status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
-        message=runtime_result.message,
-        diagnostics=runtime_result.diagnostics,
-    )
-
-
-def _provider_runtime_apply_unavailable_result(
-    *,
-    controller: GuiController,
-    settings: AppSettings,
-    plan: _ProviderRuntimeApplyPlan,
-    operation: str,
-    surface: str,
-) -> RuntimeApplyResult | None:
-    if controller.hub is None:
-        return None
-    if plan.should_rebuild_llm and controller.hub.llm is None:
-        return _runtime_apply_failed_result(
-            operation=operation,
-            code="provider_runtime_apply_unavailable",
-            surface=surface,
-        )
-    if plan.should_refresh_self_stt and controller._stt_desired and controller.hub.stt is None:
-        return _runtime_apply_failed_result(
-            operation=operation,
-            code="stt_runtime_apply_unavailable",
-            surface=surface,
-        )
-    if (
-        plan.should_refresh_peer
-        and controller._peer_runtime_should_be_active(settings)
-        and getattr(controller.hub, "peer_stt", None) is None
-    ):
-        return _runtime_apply_failed_result(
-            operation=operation,
-            code="peer_stt_runtime_apply_unavailable",
-            surface=surface,
-        )
-    return None
-
-
-def _stt_language_audio_runtime_unavailable_result(
-    *,
-    controller: GuiController,
-    settings: AppSettings,
-) -> RuntimeApplyResult | None:
-    if controller.hub is None:
-        return None
-    if controller._stt_desired and controller.hub.stt is None:
-        return _runtime_apply_failed_result(
-            operation="apply_stt_language_audio_runtime",
-            code="stt_language_audio_runtime_unavailable",
-            surface="stt_language_audio",
-        )
-    if (
-        controller._peer_runtime_should_be_active(settings)
-        and getattr(controller.hub, "peer_stt", None) is None
-    ):
-        return _runtime_apply_failed_result(
-            operation="apply_stt_language_audio_runtime",
-            code="peer_stt_language_audio_runtime_unavailable",
-            surface="stt_language_audio",
-        )
-    if settings.provider.llm == LLMProviderName.QWEN and controller.hub.llm is None:
-        return _runtime_apply_failed_result(
-            operation="apply_stt_language_audio_runtime",
-            code="llm_stt_language_audio_runtime_unavailable",
-            surface="stt_language_audio",
-        )
-    return None
-
-
-def _stt_language_audio_runtime_degraded_transaction_result() -> TransactionResult:
-    return _runtime_apply_result_as_degraded_transaction(
-        _runtime_apply_failed_result(
-            operation="apply_stt_language_audio_runtime",
-            code="stt_language_audio_runtime_apply_exception",
-            surface="stt_language_audio",
-        )
-    )
-
-
-def _translation_provider_save_failed_transaction_result(*, operation: str) -> TransactionResult:
-    return TransactionResult(
-        status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
-        message=UserMessageRef(
-            key="settings.mutation.runtime_apply_failed",
-            params={"phase": "settings_save"},
-            severity=SEVERITY_WARNING,
-        ),
-        diagnostics=_settings_mutation_diagnostics(
-            component="gui_controller",
-            operation=operation,
-            code="settings_save_failed",
-            category=DIAGNOSTIC_CATEGORY_TRANSACTION,
-            surface="translation_provider",
-        ),
-    )
-
-
-def _stt_language_audio_save_failed_transaction_result(*, operation: str) -> TransactionResult:
-    return TransactionResult(
-        status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
-        message=UserMessageRef(
-            key="settings.mutation.runtime_apply_failed",
-            params={"phase": "settings_save"},
-            severity=SEVERITY_WARNING,
-        ),
-        diagnostics=_settings_mutation_diagnostics(
-            component="gui_controller",
-            operation=operation,
-            code="settings_save_failed",
-            category=DIAGNOSTIC_CATEGORY_TRANSACTION,
-            surface="stt_language_audio",
-        ),
-    )
-
-
-def _overlay_osc_output_runtime_degraded_transaction_result() -> TransactionResult:
-    return _runtime_apply_result_as_degraded_transaction(
-        _runtime_apply_failed_result(
-            operation="apply_overlay_osc_output_runtime",
-            code="overlay_osc_output_runtime_apply_exception",
-            surface="overlay_osc_output",
-        )
-    )
-
-
-def _overlay_osc_output_save_failed_transaction_result(*, operation: str) -> TransactionResult:
-    return TransactionResult(
-        status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
-        message=UserMessageRef(
-            key="settings.mutation.runtime_apply_failed",
-            params={"phase": "settings_save"},
-            severity=SEVERITY_WARNING,
-        ),
-        diagnostics=_settings_mutation_diagnostics(
-            component="gui_controller",
-            operation=operation,
-            code="settings_save_failed",
-            category=DIAGNOSTIC_CATEGORY_TRANSACTION,
-            surface="overlay_osc_output",
-        ),
-    )
-
-
-def _ui_prompt_clipboard_state_runtime_degraded_transaction_result() -> TransactionResult:
-    return _runtime_apply_result_as_degraded_transaction(
-        _runtime_apply_failed_result(
-            operation="apply_ui_prompt_clipboard_state_runtime",
-            code="ui_prompt_clipboard_state_runtime_apply_exception",
-            surface="ui_prompt_clipboard_state",
-        )
-    )
-
-
-def _ui_prompt_clipboard_state_save_failed_transaction_result(
-    *, operation: str
-) -> TransactionResult:
-    return TransactionResult(
-        status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
-        message=UserMessageRef(
-            key="settings.mutation.runtime_apply_failed",
-            params={"phase": "settings_save"},
-            severity=SEVERITY_WARNING,
-        ),
-        diagnostics=_settings_mutation_diagnostics(
-            component="gui_controller",
-            operation=operation,
-            code="settings_save_failed",
-            category=DIAGNOSTIC_CATEGORY_TRANSACTION,
-            surface="ui_prompt_clipboard_state",
-        ),
-    )
 
 
 def _copy_runtime_only_ui_state(source: AppSettings, target: AppSettings) -> None:
@@ -2667,6 +2296,14 @@ class GuiController:
             and self._effective_peer_overlay_enabled_for(settings)
             and self.hub is not None
             and self._current_overlay_bridge_for_direct_runtime_command() is not None
+        )
+
+    def _is_qwen_llm(self, settings: object) -> bool:
+        # Boundary accessor used by the app-service runtime-apply adapters to
+        # keep ``LLMProviderName`` settings-shape knowledge inside the
+        # controller instead of leaking it across the app-service boundary.
+        return bool(
+            isinstance(settings, AppSettings) and settings.provider.llm == LLMProviderName.QWEN
         )
 
     @staticmethod

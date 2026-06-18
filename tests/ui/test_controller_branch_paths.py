@@ -17,6 +17,7 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.app.services import provider_runtime_apply as provider_runtime_apply_module
 from puripuly_heart.app.services import settings_mutation
 from puripuly_heart.config.audio_host_api import (
     WINDOWS_MME_HOST_API,
@@ -14999,7 +15000,7 @@ async def test_order21_snapshot_full_default_service_runtime_adapter_receives_co
 
     monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        controller_module._ControllerProviderRuntimeApply,
+        provider_runtime_apply_module._ControllerProviderRuntimeApply,
         "apply_runtime",
         capture_apply_runtime,
     )
