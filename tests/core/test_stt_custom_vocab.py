@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import puripuly_heart.core.stt.custom_vocab as custom_vocab_module
 from puripuly_heart.config.settings import AppSettings
-from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
+from puripuly_heart.core.stt.custom_vocab import (
+    CustomVocabularyRuntimeConfig,
+    get_effective_custom_terms,
+)
+
+
+def _vocab_config(settings: AppSettings) -> CustomVocabularyRuntimeConfig:
+    return CustomVocabularyRuntimeConfig(
+        enabled=settings.stt.custom_vocabulary_enabled,
+        terms=settings.stt.custom_terms,
+    )
 
 
 def test_get_effective_custom_terms_uses_seeded_defaults_for_fresh_settings() -> None:
     settings = AppSettings()
 
-    assert get_effective_custom_terms(settings, "ko") == ["아이리", "시나노"]
-    assert get_effective_custom_terms(settings, "en") == ["airi", "shinano"]
-    assert get_effective_custom_terms(settings, "zh-CN") == ["airi", "shinano"]
+    assert get_effective_custom_terms(_vocab_config(settings), "ko") == ["아이리", "시나노"]
+    assert get_effective_custom_terms(_vocab_config(settings), "en") == ["airi", "shinano"]
+    assert get_effective_custom_terms(_vocab_config(settings), "zh-CN") == ["airi", "shinano"]
 
 
 def test_get_effective_custom_terms_reads_current_language_bucket_only() -> None:
@@ -21,7 +31,7 @@ def test_get_effective_custom_terms_reads_current_language_bucket_only() -> None
         "en": ["Soniox", "OSC"],
     }
 
-    assert get_effective_custom_terms(settings, "ko") == ["Puripuly", "VRChat"]
+    assert get_effective_custom_terms(_vocab_config(settings), "ko") == ["Puripuly", "VRChat"]
 
 
 def test_get_effective_custom_terms_preserves_first_occurrence_order_when_deduping() -> None:
@@ -31,7 +41,12 @@ def test_get_effective_custom_terms_preserves_first_occurrence_order_when_dedupi
         "ko": ["VRChat", "Puripuly", "VRChat", "OSC", "Puripuly", "Soniox"],
     }
 
-    assert get_effective_custom_terms(settings, "ko") == ["VRChat", "Puripuly", "OSC", "Soniox"]
+    assert get_effective_custom_terms(_vocab_config(settings), "ko") == [
+        "VRChat",
+        "Puripuly",
+        "OSC",
+        "Soniox",
+    ]
 
 
 def test_get_effective_custom_terms_trims_whitespace_and_drops_empty_values() -> None:
@@ -41,7 +56,12 @@ def test_get_effective_custom_terms_trims_whitespace_and_drops_empty_values() ->
         "ko": ["  Puripuly  ", "", "   ", "\tVRChat\t", "\nSoniox\n", "OSC"],
     }
 
-    assert get_effective_custom_terms(settings, "ko") == ["Puripuly", "VRChat", "Soniox", "OSC"]
+    assert get_effective_custom_terms(_vocab_config(settings), "ko") == [
+        "Puripuly",
+        "VRChat",
+        "Soniox",
+        "OSC",
+    ]
 
 
 def test_get_effective_custom_terms_is_stable_and_respects_disabled_flag() -> None:
@@ -52,8 +72,8 @@ def test_get_effective_custom_terms_is_stable_and_respects_disabled_flag() -> No
         "en": ["Ignored"],
     }
 
-    first = get_effective_custom_terms(settings, "ko")
-    second = get_effective_custom_terms(settings, "ko")
+    first = get_effective_custom_terms(_vocab_config(settings), "ko")
+    second = get_effective_custom_terms(_vocab_config(settings), "ko")
 
     assert first == ["VRChat", "Puripuly", "OSC"]
     assert second == first
@@ -61,7 +81,7 @@ def test_get_effective_custom_terms_is_stable_and_respects_disabled_flag() -> No
 
     settings.stt.custom_vocabulary_enabled = False
 
-    assert get_effective_custom_terms(settings, "ko") == []
+    assert get_effective_custom_terms(_vocab_config(settings), "ko") == []
 
 
 def test_get_effective_custom_terms_caps_to_100_terms() -> None:
@@ -71,7 +91,7 @@ def test_get_effective_custom_terms_caps_to_100_terms() -> None:
         "ko": [f"term-{i:03d}" for i in range(120)],
     }
 
-    effective_terms = get_effective_custom_terms(settings, "ko")
+    effective_terms = get_effective_custom_terms(_vocab_config(settings), "ko")
 
     assert len(effective_terms) == 100
     assert effective_terms[0] == "term-000"
@@ -93,7 +113,7 @@ def test_get_effective_local_qwen_hotwords_uses_smaller_cap_and_sanitizes_commas
     assert hasattr(custom_vocab_module, "LOCAL_QWEN_MAX_HOTWORDS")
     assert hasattr(custom_vocab_module, "get_effective_local_qwen_hotwords")
 
-    hotwords = custom_vocab_module.get_effective_local_qwen_hotwords(settings, "ko")
+    hotwords = custom_vocab_module.get_effective_local_qwen_hotwords(_vocab_config(settings), "ko")
 
     assert hotwords[:2] == ["Puripuly", "VRChat Japan"]
     assert len(hotwords) == custom_vocab_module.LOCAL_QWEN_MAX_HOTWORDS

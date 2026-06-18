@@ -7,7 +7,6 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
@@ -17,7 +16,7 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
-from puripuly_heart.config.settings import AppSettings
+from puripuly_heart.app.ports.managed_identity_state import ManagedIdentityStatePort
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_MANAGED_API_KEY_SECRET,
     OPENROUTER_MANAGED_USER_ID_SECRET,
@@ -30,7 +29,6 @@ MANAGED_DEVICE_PUBLIC_KEY_SECRET = "managed_device_public_key"
 MANAGED_IDENTITY_BINDING_SECRET = "managed_identity_binding"
 DISCORD_OPENROUTER_ISSUE_METHOD = "POST"
 DISCORD_OPENROUTER_ISSUE_PATH = "/v1/providers/openrouter/discord/issue"
-PersistSettings = Callable[[AppSettings], None]
 
 
 def encode_base64url(value: bytes) -> str:
@@ -259,51 +257,36 @@ def canonical_discord_issue_payload(
 
 
 def ensure_managed_identity_bundle(
-    settings: AppSettings,
+    state: ManagedIdentityStatePort,
     secret_store: SecretStore,
     *,
-    persist_settings: PersistSettings | None = None,
     broker_installation_id: str | None = None,
     broker_device_public_key: str | None = None,
 ) -> ManagedIdentityBundle:
-    existing = _load_existing_bundle(settings, secret_store)
+    existing = _load_existing_bundle(state, secret_store)
     if existing is not None and _bundle_matches_broker(
         existing,
         broker_installation_id=broker_installation_id,
         broker_device_public_key=broker_device_public_key,
     ):
         return existing
-    if persist_settings is None:
-        raise ValueError(
-            "persist_settings callback is required when generating or regenerating managed identity"
-        )
-    return _replace_managed_identity_bundle(
-        settings,
-        secret_store,
-        persist_settings=persist_settings,
-    )
+    return _replace_managed_identity_bundle(state, secret_store)
 
 
 def load_existing_managed_identity_bundle(
-    settings: AppSettings,
+    state: ManagedIdentityStatePort,
     secret_store: SecretStore,
 ) -> ManagedIdentityBundle | None:
     """Load a valid persisted managed identity bundle without creating or repairing it."""
 
-    return _load_existing_bundle(settings, secret_store)
+    return _load_existing_bundle(state, secret_store)
 
 
 def regenerate_managed_identity_bundle(
-    settings: AppSettings,
+    state: ManagedIdentityStatePort,
     secret_store: SecretStore,
-    *,
-    persist_settings: PersistSettings,
 ) -> ManagedIdentityBundle:
-    return _replace_managed_identity_bundle(
-        settings,
-        secret_store,
-        persist_settings=persist_settings,
-    )
+    return _replace_managed_identity_bundle(state, secret_store)
 
 
 def _bundle_matches_broker(
@@ -329,10 +312,10 @@ def _bundle_matches_broker(
 
 
 def _load_existing_bundle(
-    settings: AppSettings,
+    state: ManagedIdentityStatePort,
     secret_store: SecretStore,
 ) -> ManagedIdentityBundle | None:
-    installation_id = settings.managed_identity.installation_id.strip()
+    installation_id = state.installation_id.strip()
     if not _is_uuid7(installation_id):
         return None
 
@@ -363,18 +346,10 @@ def _load_existing_bundle(
 
 
 def _replace_managed_identity_bundle(
-    settings: AppSettings,
+    state: ManagedIdentityStatePort,
     secret_store: SecretStore,
-    *,
-    persist_settings: PersistSettings,
 ) -> ManagedIdentityBundle:
-    previous_installation_id = settings.managed_identity.installation_id
-    previous_release_token = settings.managed_identity.release_token
-    previous_release_token_expires_at = settings.managed_identity.release_token_expires_at
-    previous_verified_hardware_hash = settings.managed_identity.verified_hardware_hash
-    previous_verified_hardware_hash_salt_version = (
-        settings.managed_identity.verified_hardware_hash_salt_version
-    )
+    previous = state.snapshot()
     previous_managed_api_key = secret_store.get(OPENROUTER_MANAGED_API_KEY_SECRET)
     previous_managed_user_id = secret_store.get(OPENROUTER_MANAGED_USER_ID_SECRET)
     previous_managed_user_installation_id = secret_store.get(
@@ -401,20 +376,14 @@ def _replace_managed_identity_bundle(
         secret_store.set(MANAGED_DEVICE_PRIVATE_KEY_SECRET, private_key_value)
         secret_store.set(MANAGED_DEVICE_PUBLIC_KEY_SECRET, public_key_value)
         secret_store.set(MANAGED_IDENTITY_BINDING_SECRET, binding_value)
-        settings.managed_identity.installation_id = installation_id
-        settings.managed_identity.release_token = None
-        settings.managed_identity.release_token_expires_at = None
-        settings.managed_identity.verified_hardware_hash = None
-        settings.managed_identity.verified_hardware_hash_salt_version = None
-        persist_settings(settings)
+        state.installation_id = installation_id
+        state.release_token = None
+        state.release_token_expires_at = None
+        state.verified_hardware_hash = None
+        state.verified_hardware_hash_salt_version = None
+        state.persist()
     except Exception as exc:
-        settings.managed_identity.installation_id = previous_installation_id
-        settings.managed_identity.release_token = previous_release_token
-        settings.managed_identity.release_token_expires_at = previous_release_token_expires_at
-        settings.managed_identity.verified_hardware_hash = previous_verified_hardware_hash
-        settings.managed_identity.verified_hardware_hash_salt_version = (
-            previous_verified_hardware_hash_salt_version
-        )
+        state.restore(previous)
         rollback_error = _restore_secret_state(
             secret_store,
             managed_api_key=previous_managed_api_key,

@@ -49,6 +49,10 @@ from puripuly_heart.app.services.settings_mutation_legacy import (
     settings_path_snapshot_for_ui_prompt_clipboard_state,
 )
 from puripuly_heart.app.wiring import (
+    build_custom_vocabulary_runtime_config,
+    build_managed_identity_state_port,
+    build_openrouter_credential_runtime_config,
+    build_openrouter_release_runtime_config,
     build_peer_stt_provider_signature,
     create_llm_provider,
     create_peer_stt_backend,
@@ -1330,12 +1334,20 @@ class GuiController:
             return (
                 settings.stt.custom_vocabulary_enabled,
                 tuple(
-                    get_effective_local_qwen_hotwords(settings, settings.languages.source_language)
+                    get_effective_local_qwen_hotwords(
+                        build_custom_vocabulary_runtime_config(settings),
+                        settings.languages.source_language,
+                    )
                 ),
             )
         return (
             settings.stt.custom_vocabulary_enabled,
-            tuple(get_effective_custom_terms(settings, settings.languages.source_language)),
+            tuple(
+                get_effective_custom_terms(
+                    build_custom_vocabulary_runtime_config(settings),
+                    settings.languages.source_language,
+                )
+            ),
         )
 
     def _peer_stt_runtime_custom_vocabulary_signature(
@@ -1482,7 +1494,7 @@ class GuiController:
         try:
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
             resolution = resolve_openrouter_credentials(
-                self.settings,
+                build_openrouter_credential_runtime_config(self.settings),
                 secrets=secrets,
                 request_intent="TRANS",
             )
@@ -1503,7 +1515,7 @@ class GuiController:
         try:
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
             resolution = resolve_openrouter_credentials(
-                self.settings,
+                build_openrouter_credential_runtime_config(self.settings),
                 secrets=secrets,
                 request_intent="TRANS",
             )
@@ -2378,7 +2390,9 @@ class GuiController:
 
         try:
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-            resolution = resolve_openrouter_credentials(self.settings, secrets=secrets)
+            resolution = resolve_openrouter_credentials(
+                build_openrouter_credential_runtime_config(self.settings), secrets=secrets
+            )
         except Exception:
             resolution = None
 
@@ -2404,7 +2418,13 @@ class GuiController:
 
         if auto_show_founder_letter and is_effectively_exhausted(usage_metadata):
             self._disable_translation_for_managed_exhaustion(
-                reopen_founder_letter=should_auto_show_founder_letter(self.settings, usage_metadata)
+                reopen_founder_letter=should_auto_show_founder_letter(
+                    build_managed_identity_state_port(
+                        self.settings,
+                        lambda _settings: None,
+                    ),
+                    usage_metadata,
+                )
             )
 
         self._schedule_owned_referral_id_status_refresh(
@@ -2420,7 +2440,12 @@ class GuiController:
         if not callable(show_founder_letter_dialog):
             return
         show_founder_letter_dialog()
-        mark_founder_letter_shown(self.settings)
+        mark_founder_letter_shown(
+            build_managed_identity_state_port(
+                self.settings,
+                lambda _settings: None,
+            )
+        )
         with contextlib.suppress(Exception):
             self._save_settings()
 
@@ -6787,10 +6812,13 @@ class GuiController:
             client = UnavailableManagedOpenRouterReleaseClient()
 
         return ManagedOpenRouterReleaseService(
-            settings=self.settings,
+            openrouter_config=build_openrouter_release_runtime_config(self.settings),
+            managed_state=build_managed_identity_state_port(
+                self.settings,
+                lambda updated: save_settings(self.config_path, updated),
+            ),
             secrets=secrets,
             client=client,
-            persist_settings=lambda updated: save_settings(self.config_path, updated),
             raw_hardware_fingerprint_provider=get_raw_hardware_fingerprint,
             app_version=__version__,
             on_discord_callback_received=self._on_discord_managed_auth_callback_received,
@@ -8254,7 +8282,10 @@ class GuiController:
                     )
                 elif provider_name == LLMProviderName.OPENROUTER:
                     resolution = (
-                        resolve_openrouter_credentials(self.settings, secrets=secrets)
+                        resolve_openrouter_credentials(
+                            build_openrouter_credential_runtime_config(self.settings),
+                            secrets=secrets,
+                        )
                         if secrets is not None
                         else None
                     )

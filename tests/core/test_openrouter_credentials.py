@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from puripuly_heart.app.wiring import ManagedIdentityStateAdapter
 from puripuly_heart.config.settings import AppSettings, OpenRouterCredentialSource
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_BYOK_API_KEY_SECRET,
@@ -9,6 +10,7 @@ from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_MANAGED_USER_ID_MAX_LENGTH,
     OPENROUTER_MANAGED_USER_ID_SECRET,
     OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+    OpenRouterCredentialRuntimeConfig,
     OpenRouterManagedRecoveryAction,
     clear_temporary_managed_release_state,
     handle_managed_availability,
@@ -20,6 +22,17 @@ from puripuly_heart.core.openrouter_credentials import (
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
 
 
+def _credential_config(settings: AppSettings) -> OpenRouterCredentialRuntimeConfig:
+    return OpenRouterCredentialRuntimeConfig(
+        selected_source=settings.openrouter.selected_source,
+        installation_id=settings.managed_identity.installation_id,
+    )
+
+
+def _managed_state(settings: AppSettings) -> ManagedIdentityStateAdapter:
+    return ManagedIdentityStateAdapter(settings, lambda _updated: None)
+
+
 def test_resolve_openrouter_credentials_respects_explicit_none_selection_even_with_stored_keys() -> (
     None
 ):
@@ -29,7 +42,7 @@ def test_resolve_openrouter_credentials_respects_explicit_none_selection_even_wi
     store.set(OPENROUTER_BYOK_API_KEY_SECRET, "byok-key")
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")
 
-    resolution = resolve_openrouter_credentials(settings, secrets=store)
+    resolution = resolve_openrouter_credentials(_credential_config(settings), secrets=store)
 
     assert resolution.selected_source == OpenRouterCredentialSource.NONE
     assert resolution.api_key is None
@@ -43,7 +56,7 @@ def test_resolve_openrouter_credentials_uses_selected_byok_key_without_managed_f
     store.set(OPENROUTER_BYOK_API_KEY_SECRET, "byok-key")
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")
 
-    resolution = resolve_openrouter_credentials(settings, secrets=store)
+    resolution = resolve_openrouter_credentials(_credential_config(settings), secrets=store)
 
     assert resolution.selected_source == OpenRouterCredentialSource.BYOK
     assert resolution.api_key == "byok-key"
@@ -57,7 +70,7 @@ def test_resolve_openrouter_credentials_uses_selected_managed_key_without_byok_f
     store.set(OPENROUTER_BYOK_API_KEY_SECRET, "byok-key")
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")
 
-    resolution = resolve_openrouter_credentials(settings, secrets=store)
+    resolution = resolve_openrouter_credentials(_credential_config(settings), secrets=store)
 
     assert resolution.selected_source == OpenRouterCredentialSource.MANAGED
     assert resolution.api_key == "managed-key"
@@ -72,9 +85,10 @@ def test_resolve_openrouter_credentials_requires_explicit_trans_intent_before_ma
     store = InMemorySecretStore()
     store.set(OPENROUTER_BYOK_API_KEY_SECRET, "byok-key")
 
-    resolution = resolve_openrouter_credentials(settings, secrets=store)
+    config = _credential_config(settings)
+    resolution = resolve_openrouter_credentials(config, secrets=store)
     trans_resolution = resolve_openrouter_credentials(
-        settings,
+        config,
         secrets=store,
         request_intent="TRANS",
     )
@@ -113,7 +127,10 @@ def test_load_managed_openrouter_user_identifier_returns_cached_user_for_matchin
     store.set(OPENROUTER_MANAGED_USER_ID_SECRET, " user-123 ")
     store.set(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET, " install-123 ")
 
-    assert load_managed_openrouter_user_identifier(settings, secrets=store) == "user-123"
+    assert (
+        load_managed_openrouter_user_identifier(_credential_config(settings), secrets=store)
+        == "user-123"
+    )
 
 
 @pytest.mark.parametrize(
@@ -141,7 +158,9 @@ def test_load_managed_openrouter_user_identifier_returns_none_without_matching_v
     store.set(OPENROUTER_MANAGED_USER_ID_SECRET, cached_user_id)
     store.set(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET, cached_installation_id)
 
-    assert load_managed_openrouter_user_identifier(settings, secrets=store) is None
+    assert (
+        load_managed_openrouter_user_identifier(_credential_config(settings), secrets=store) is None
+    )
 
 
 def test_load_managed_openrouter_user_identifier_fails_open_when_secret_store_raises() -> None:
@@ -152,7 +171,12 @@ def test_load_managed_openrouter_user_identifier_fails_open_when_secret_store_ra
     settings = AppSettings()
     settings.managed_identity.installation_id = "install-123"
 
-    assert load_managed_openrouter_user_identifier(settings, secrets=BrokenSecretStore()) is None
+    assert (
+        load_managed_openrouter_user_identifier(
+            _credential_config(settings), secrets=BrokenSecretStore()
+        )
+        is None
+    )
 
 
 def test_clear_temporary_managed_release_state_clears_verified_snapshot_fields() -> None:
@@ -162,7 +186,7 @@ def test_clear_temporary_managed_release_state_clears_verified_snapshot_fields()
     settings.managed_identity.verified_hardware_hash = "hardware-hash-1"
     settings.managed_identity.verified_hardware_hash_salt_version = 7
 
-    clear_temporary_managed_release_state(settings)
+    clear_temporary_managed_release_state(_managed_state(settings))
 
     assert settings.managed_identity.release_token is None
     assert settings.managed_identity.release_token_expires_at is None
@@ -187,8 +211,9 @@ def test_handle_managed_availability_stops_flow_without_switching_sources(
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:00:45.000Z"
 
     result = handle_managed_availability(
-        settings,
+        _managed_state(settings),
         managed_availability=managed_availability,
+        selected_source=selected_source,
     )
 
     assert result.action == OpenRouterManagedRecoveryAction.STOP
@@ -216,7 +241,11 @@ def test_handle_managed_release_error_restarts_from_challenge_without_switching_
     settings.managed_identity.release_token = "release-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:00:45.000Z"
 
-    result = handle_managed_release_error(settings, error_code=error_code)
+    result = handle_managed_release_error(
+        _managed_state(settings),
+        error_code=error_code,
+        selected_source=selected_source,
+    )
 
     assert result.action == OpenRouterManagedRecoveryAction.RESTART_CHALLENGE
     assert result.reason == error_code

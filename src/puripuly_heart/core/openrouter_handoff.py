@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from puripuly_heart.config.settings import AppSettings
+from puripuly_heart.app.ports.managed_identity_state import ManagedIdentityStatePort
 from puripuly_heart.core.openrouter_metadata import OpenRouterKeyMetadata
 
 MANAGED_EFFECTIVE_EXHAUSTION_USD = 0.0007
@@ -15,38 +15,36 @@ def is_effectively_exhausted(metadata: OpenRouterKeyMetadata | None) -> bool:
 
 
 def store_managed_entitlement_snapshot(
-    settings: AppSettings,
+    state: ManagedIdentityStatePort,
     *,
     managed_credential_ref: str | None,
     expires_at: str | None,
 ) -> None:
-    existing_ref = settings.managed_identity.active_managed_credential_ref
+    existing_ref = state.active_managed_credential_ref
     normalized_ref = (
         (managed_credential_ref or "").strip()
         or existing_ref
         or (expires_at or "").strip()
-        or settings.managed_identity.installation_id
+        or state.installation_id
         or "managed-entitlement"
     )
-    if settings.managed_identity.active_managed_credential_ref != normalized_ref:
-        settings.managed_identity.founder_letter_seen_credential_ref = None
-    settings.managed_identity.active_managed_credential_ref = normalized_ref
-    settings.managed_identity.active_managed_expires_at = (expires_at or "").strip() or None
+    if state.active_managed_credential_ref != normalized_ref:
+        state.founder_letter_seen_credential_ref = None
+    state.active_managed_credential_ref = normalized_ref
+    state.active_managed_expires_at = (expires_at or "").strip() or None
 
 
 def should_auto_show_founder_letter(
-    settings: AppSettings,
+    state: ManagedIdentityStatePort,
     metadata: OpenRouterKeyMetadata | None,
 ) -> bool:
-    active_ref = settings.managed_identity.active_managed_credential_ref
+    active_ref = state.active_managed_credential_ref
     return bool(
         active_ref
         and is_effectively_exhausted(metadata)
-        and settings.managed_identity.founder_letter_seen_credential_ref != active_ref
+        and state.founder_letter_seen_credential_ref != active_ref
     )
 
 
-def mark_founder_letter_shown(settings: AppSettings) -> None:
-    settings.managed_identity.founder_letter_seen_credential_ref = (
-        settings.managed_identity.active_managed_credential_ref
-    )
+def mark_founder_letter_shown(state: ManagedIdentityStatePort) -> None:
+    state.founder_letter_seen_credential_ref = state.active_managed_credential_ref

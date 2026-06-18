@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
+from puripuly_heart.app.wiring import ManagedIdentityStateAdapter
 from puripuly_heart.config.settings import (
     AppSettings,
     load_settings,
@@ -38,6 +39,7 @@ from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_MANAGED_API_KEY_SECRET,
     OPENROUTER_MANAGED_USER_ID_SECRET,
     OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+    OpenRouterCredentialRuntimeConfig,
     load_managed_openrouter_user_identifier,
 )
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
@@ -54,6 +56,20 @@ def _raise_persist_failed(_: AppSettings) -> None:
     raise RuntimeError("persist failed")
 
 
+def _managed_state(
+    settings: AppSettings,
+    persist=None,
+) -> ManagedIdentityStateAdapter:
+    return ManagedIdentityStateAdapter(settings, persist if persist is not None else lambda _: None)
+
+
+def _credential_config(settings: AppSettings) -> OpenRouterCredentialRuntimeConfig:
+    return OpenRouterCredentialRuntimeConfig(
+        selected_source=settings.openrouter.selected_source,
+        installation_id=settings.managed_identity.installation_id,
+    )
+
+
 def test_ensure_managed_identity_bundle_generates_uuid7_and_keeps_secret_boundary() -> None:
     settings = AppSettings()
     store = InMemorySecretStore()
@@ -62,7 +78,7 @@ def test_ensure_managed_identity_bundle_generates_uuid7_and_keeps_secret_boundar
     def persist(updated: AppSettings) -> None:
         persisted_snapshots.append(to_dict(updated))
 
-    bundle = ensure_managed_identity_bundle(settings, store, persist_settings=persist)
+    bundle = ensure_managed_identity_bundle(_managed_state(settings, persist), store)
     persisted = to_dict(settings)
 
     assert uuid.UUID(bundle.installation_id).version == 7
@@ -96,29 +112,34 @@ def test_ensure_managed_identity_bundle_reuses_existing_valid_bundle() -> None:
     settings = AppSettings()
     store = InMemorySecretStore()
 
-    first = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    first = ensure_managed_identity_bundle(_managed_state(settings), store)
     private_before = store.get(MANAGED_DEVICE_PRIVATE_KEY_SECRET)
 
-    second = ensure_managed_identity_bundle(settings, store)
+    second = ensure_managed_identity_bundle(_managed_state(settings), store)
 
     assert second.installation_id == first.installation_id
     assert second.device_public_key == first.device_public_key
     assert store.get(MANAGED_DEVICE_PRIVATE_KEY_SECRET) == private_before
 
 
-def test_ensure_managed_identity_bundle_requires_persistence_callback_for_generation() -> None:
+def test_ensure_managed_identity_bundle_generates_when_port_persistence_is_available() -> None:
     settings = AppSettings()
     store = InMemorySecretStore()
+    persist_calls: list[AppSettings] = []
 
-    with pytest.raises(ValueError, match="persist_settings"):
-        ensure_managed_identity_bundle(settings, store)
+    bundle = ensure_managed_identity_bundle(_managed_state(settings, persist_calls.append), store)
+
+    assert uuid.UUID(bundle.installation_id).version == 7
+    assert settings.managed_identity.installation_id == bundle.installation_id
+    assert len(persist_calls) == 1
+    assert persist_calls[0] is settings
 
 
 def test_missing_installation_id_regenerates_bundle_and_clears_release_state() -> None:
     settings = AppSettings()
     store = InMemorySecretStore()
 
-    first = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    first = ensure_managed_identity_bundle(_managed_state(settings), store)
     private_before = store.get(MANAGED_DEVICE_PRIVATE_KEY_SECRET)
     settings.managed_identity.installation_id = ""
     settings.managed_identity.release_token = "release-1"
@@ -126,7 +147,7 @@ def test_missing_installation_id_regenerates_bundle_and_clears_release_state() -
     settings.managed_identity.verified_hardware_hash = "hardware-hash-1"
     settings.managed_identity.verified_hardware_hash_salt_version = 7
 
-    second = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    second = ensure_managed_identity_bundle(_managed_state(settings), store)
 
     assert second.installation_id != first.installation_id
     assert second.device_public_key != first.device_public_key
@@ -143,7 +164,7 @@ def test_regenerate_managed_identity_bundle_rotates_bundle_and_clears_managed_re
     settings = AppSettings()
     store = InMemorySecretStore()
 
-    first = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    first = ensure_managed_identity_bundle(_managed_state(settings), store)
     settings.managed_identity.release_token = "release-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:00:45.000Z"
     settings.managed_identity.verified_hardware_hash = "hardware-hash-1"
@@ -153,7 +174,7 @@ def test_regenerate_managed_identity_bundle_rotates_bundle_and_clears_managed_re
     store.set(OPENROUTER_MANAGED_USER_ID_SECRET, "user-123")
     store.set(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET, first.installation_id)
 
-    second = regenerate_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    second = regenerate_managed_identity_bundle(_managed_state(settings), store)
 
     assert second.installation_id != first.installation_id
     assert second.device_public_key != first.device_public_key
@@ -165,14 +186,16 @@ def test_regenerate_managed_identity_bundle_rotates_bundle_and_clears_managed_re
     assert store.get(OPENROUTER_MANAGED_API_KEY_SECRET) is None
     assert store.get(OPENROUTER_MANAGED_USER_ID_SECRET) is None
     assert store.get(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET) is None
-    assert load_managed_openrouter_user_identifier(settings, secrets=store) is None
+    assert (
+        load_managed_openrouter_user_identifier(_credential_config(settings), secrets=store) is None
+    )
 
 
 def test_corrupted_secret_material_regenerates_bundle_and_clears_release_state() -> None:
     settings = AppSettings()
     store = InMemorySecretStore()
 
-    first = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    first = ensure_managed_identity_bundle(_managed_state(settings), store)
     settings.managed_identity.release_token = "release-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:00:45.000Z"
     store.set(OPENROUTER_BYOK_API_KEY_SECRET, "byok-key")
@@ -182,7 +205,7 @@ def test_corrupted_secret_material_regenerates_bundle_and_clears_release_state()
         base64.urlsafe_b64encode(b"\x01" * 32).decode("ascii").rstrip("="),
     )
 
-    second = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    second = ensure_managed_identity_bundle(_managed_state(settings), store)
 
     assert second.installation_id != first.installation_id
     assert second.device_public_key != first.device_public_key
@@ -196,16 +219,15 @@ def test_broker_public_key_mismatch_regenerates_bundle_atomically() -> None:
     settings = AppSettings()
     store = InMemorySecretStore()
 
-    first = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    first = ensure_managed_identity_bundle(_managed_state(settings), store)
     settings.managed_identity.release_token = "release-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:00:45.000Z"
     store.set(OPENROUTER_BYOK_API_KEY_SECRET, "byok-key")
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")
 
     second = ensure_managed_identity_bundle(
-        settings,
+        _managed_state(settings),
         store,
-        persist_settings=lambda _: None,
         broker_device_public_key="broker-mismatch-public-key",
     )
 
@@ -221,16 +243,15 @@ def test_broker_installation_id_mismatch_regenerates_bundle_atomically() -> None
     settings = AppSettings()
     store = InMemorySecretStore()
 
-    first = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    first = ensure_managed_identity_bundle(_managed_state(settings), store)
     settings.managed_identity.release_token = "release-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:00:45.000Z"
     store.set(OPENROUTER_BYOK_API_KEY_SECRET, "byok-key")
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")
 
     second = ensure_managed_identity_bundle(
-        settings,
+        _managed_state(settings),
         store,
-        persist_settings=lambda _: None,
         broker_installation_id="01961ad7-a7c1-7000-8000-aaaaaaaaaaaa",
     )
 
@@ -246,7 +267,7 @@ def test_mixed_state_secret_overwrite_does_not_reuse_old_installation_id() -> No
     settings = AppSettings()
     store = InMemorySecretStore()
 
-    first = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    first = ensure_managed_identity_bundle(_managed_state(settings), store)
     settings.managed_identity.release_token = "release-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:00:45.000Z"
 
@@ -268,7 +289,7 @@ def test_mixed_state_secret_overwrite_does_not_reuse_old_installation_id() -> No
     store.set(MANAGED_DEVICE_PRIVATE_KEY_SECRET, overwritten_private_value)
     store.set(MANAGED_DEVICE_PUBLIC_KEY_SECRET, overwritten_public_value)
 
-    second = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    second = ensure_managed_identity_bundle(_managed_state(settings), store)
 
     assert second.installation_id != first.installation_id
     assert second.device_public_key != overwritten_public_value
@@ -282,9 +303,8 @@ def test_regeneration_rolls_back_secret_and_settings_when_persist_fails(tmp_path
     store = InMemorySecretStore()
 
     first = ensure_managed_identity_bundle(
-        settings,
+        _managed_state(settings, _persisted_settings_writer(path)),
         store,
-        persist_settings=_persisted_settings_writer(path),
     )
     old_private_key = store.get(MANAGED_DEVICE_PRIVATE_KEY_SECRET)
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")
@@ -297,9 +317,8 @@ def test_regeneration_rolls_back_secret_and_settings_when_persist_fails(tmp_path
 
     with pytest.raises(RuntimeError, match="persist failed"):
         ensure_managed_identity_bundle(
-            settings,
+            _managed_state(settings, _raise_persist_failed),
             store,
-            persist_settings=_raise_persist_failed,
             broker_device_public_key="broker-mismatch-public-key",
         )
 
@@ -310,13 +329,19 @@ def test_regeneration_rolls_back_secret_and_settings_when_persist_fails(tmp_path
     assert store.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
     assert store.get(OPENROUTER_MANAGED_USER_ID_SECRET) == "user-123"
     assert store.get(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET) == first.installation_id
-    assert load_managed_openrouter_user_identifier(settings, secrets=store) == "user-123"
+    assert (
+        load_managed_openrouter_user_identifier(_credential_config(settings), secrets=store)
+        == "user-123"
+    )
     assert json.loads(path.read_text(encoding="utf-8")) == persisted_before
     restored = load_settings(path)
-    restored_bundle = ensure_managed_identity_bundle(restored, store)
+    restored_bundle = ensure_managed_identity_bundle(_managed_state(restored), store)
     assert restored_bundle.installation_id == first.installation_id
     assert restored_bundle.device_public_key == first.device_public_key
-    assert load_managed_openrouter_user_identifier(restored, secrets=store) == "user-123"
+    assert (
+        load_managed_openrouter_user_identifier(_credential_config(restored), secrets=store)
+        == "user-123"
+    )
 
 
 @pytest.mark.parametrize(
@@ -424,7 +449,7 @@ def test_discord_issue_payload_matches_landed_broker_field_order_and_hashes_code
 def test_bundle_signing_matches_canonical_payload_contracts() -> None:
     settings = AppSettings()
     store = InMemorySecretStore()
-    bundle = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    bundle = ensure_managed_identity_bundle(_managed_state(settings), store)
     public_key = Ed25519PublicKey.from_public_bytes(decode_base64url(bundle.device_public_key))
 
     verify_payload = canonical_verify_payload(
@@ -506,7 +531,7 @@ def test_bundle_signing_matches_canonical_payload_contracts() -> None:
 def test_bundle_signs_discord_issue_request_without_sending_code_hash_field() -> None:
     settings = AppSettings()
     store = InMemorySecretStore()
-    bundle = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    bundle = ensure_managed_identity_bundle(_managed_state(settings), store)
     public_key = Ed25519PublicKey.from_public_bytes(decode_base64url(bundle.device_public_key))
 
     payload = canonical_discord_issue_payload(

@@ -13,6 +13,11 @@ from uuid import uuid4
 
 import pytest
 
+from puripuly_heart.app.wiring import (
+    ManagedIdentityStateAdapter,
+    build_openrouter_credential_runtime_config,
+    build_openrouter_release_runtime_config,
+)
 from puripuly_heart.config.settings import (
     AppSettings,
     OpenRouterCredentialSource,
@@ -229,10 +234,10 @@ def _make_service(
         )
 
     service_kwargs: dict[str, Any] = {
-        "settings": resolved_settings,
+        "openrouter_config": build_openrouter_release_runtime_config(resolved_settings),
+        "managed_state": ManagedIdentityStateAdapter(resolved_settings, persist),
         "secrets": resolved_secrets,
         "client": client,
-        "persist_settings": persist,
         "app_version": "2.0.0",
         "raw_hardware_fingerprint_provider": (
             raw_hardware_fingerprint_provider
@@ -842,9 +847,8 @@ async def test_status_refresh_signs_existing_identity_request_and_persists_owned
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
     bundle = ensure_managed_identity_bundle(
-        settings,
+        ManagedIdentityStateAdapter(settings, lambda _updated: None),
         secrets,
-        persist_settings=lambda _updated: None,
     )
     client = FakeManagedReleaseClient(
         trial_status_result=ManagedOpenRouterTrialStatusSuccess(referral_id=" 7kq9m2 "),
@@ -885,9 +889,8 @@ async def test_managed_status_refresh_returns_pass_status_without_persisting_it(
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
     bundle = ensure_managed_identity_bundle(
-        settings,
+        ManagedIdentityStateAdapter(settings, lambda _updated: None),
         secrets,
-        persist_settings=lambda _updated: None,
     )
     pass_status = TalkTogetherPassStatus(
         pass_id="7KQ9M2",
@@ -920,7 +923,9 @@ async def test_managed_status_refresh_failure_is_distinguishable_from_absent_pas
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     settings.managed_identity.referral_id = "8H3J4N"
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     client = FakeManagedReleaseClient(
         trial_status_result=ManagedOpenRouterReleaseError(
             code="trial_unavailable",
@@ -946,9 +951,8 @@ async def test_status_refresh_preserves_known_owned_referral_id_when_old_broker_
     settings.managed_identity.referral_id = "8H3J4N"
     secrets = InMemorySecretStore()
     ensure_managed_identity_bundle(
-        settings,
+        ManagedIdentityStateAdapter(settings, lambda _updated: None),
         secrets,
-        persist_settings=lambda _updated: None,
     )
     client = FakeManagedReleaseClient(
         trial_status_result=ManagedOpenRouterTrialStatusSuccess(referral_id=None),
@@ -976,9 +980,8 @@ async def test_status_refresh_preserves_known_owned_referral_id_when_broker_stat
     settings.managed_identity.referral_id = "8H3J4N"
     secrets = InMemorySecretStore()
     ensure_managed_identity_bundle(
-        settings,
+        ManagedIdentityStateAdapter(settings, lambda _updated: None),
         secrets,
-        persist_settings=lambda _updated: None,
     )
     client = FakeManagedReleaseClient(
         trial_status_result=ManagedOpenRouterReleaseError(
@@ -1010,9 +1013,8 @@ async def test_status_refresh_preserves_newer_owned_referral_id_persisted_while_
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
     ensure_managed_identity_bundle(
-        settings,
+        ManagedIdentityStateAdapter(settings, lambda _updated: None),
         secrets,
-        persist_settings=lambda _updated: None,
     )
     status_gate = asyncio.Event()
     status_started = asyncio.Event()
@@ -1127,9 +1129,8 @@ async def test_status_refresh_close_cancels_in_flight_status_without_persisting_
     settings.managed_identity.referral_id = "8H3J4N"
     secrets = InMemorySecretStore()
     ensure_managed_identity_bundle(
-        settings,
+        ManagedIdentityStateAdapter(settings, lambda _updated: None),
         secrets,
-        persist_settings=lambda _updated: None,
     )
     status_gate = asyncio.Event()
     status_started = asyncio.Event()
@@ -1167,7 +1168,9 @@ async def test_issue_persists_managed_user_identifier_after_managed_key_success(
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     _set_verified_snapshot(settings)
@@ -1189,7 +1192,12 @@ async def test_issue_persists_managed_user_identifier_after_managed_key_success(
         secrets.get(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET)
         == settings.managed_identity.installation_id
     )
-    assert load_managed_openrouter_user_identifier(settings, secrets=secrets) == "user-123"
+    assert (
+        load_managed_openrouter_user_identifier(
+            build_openrouter_credential_runtime_config(settings), secrets=secrets
+        )
+        == "user-123"
+    )
 
 
 @pytest.mark.asyncio
@@ -1201,7 +1209,9 @@ async def test_issue_keeps_ready_and_cleans_managed_user_identifier_cache_on_sec
     secrets = FailingManagedKeySecretStore(
         fail_on_key=OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET
     )
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     secrets.set_attempts.clear()
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
@@ -1222,7 +1232,12 @@ async def test_issue_keeps_ready_and_cleans_managed_user_identifier_cache_on_sec
     assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
     assert secrets.get(OPENROUTER_MANAGED_USER_ID_SECRET) is None
     assert secrets.get(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET) is None
-    assert load_managed_openrouter_user_identifier(settings, secrets=secrets) is None
+    assert (
+        load_managed_openrouter_user_identifier(
+            build_openrouter_credential_runtime_config(settings), secrets=secrets
+        )
+        is None
+    )
     assert secrets.set_attempts == [
         (OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key"),
         (OPENROUTER_MANAGED_USER_ID_SECRET, "user-123"),
@@ -1241,7 +1256,9 @@ async def test_issue_omission_or_invalid_user_id_preserves_existing_managed_user
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     secrets.set(OPENROUTER_MANAGED_USER_ID_SECRET, "cached-user-1")
     secrets.set(
         OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
@@ -1268,7 +1285,12 @@ async def test_issue_omission_or_invalid_user_id_preserves_existing_managed_user
         secrets.get(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET)
         == settings.managed_identity.installation_id
     )
-    assert load_managed_openrouter_user_identifier(settings, secrets=secrets) == "cached-user-1"
+    assert (
+        load_managed_openrouter_user_identifier(
+            build_openrouter_credential_runtime_config(settings), secrets=secrets
+        )
+        == "cached-user-1"
+    )
 
 
 @pytest.mark.asyncio
@@ -1278,7 +1300,9 @@ async def test_prepare_for_translation_reuses_verified_pending_release_state_and
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     expected_hardware_hash = _expected_hardware_hash(
@@ -1314,7 +1338,9 @@ async def test_prepare_for_translation_and_ensure_key_for_llm_start_share_single
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     _set_verified_snapshot(settings)
@@ -1352,7 +1378,9 @@ async def test_issue_uses_qwen_managed_model_from_selection_alias() -> None:
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     settings.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     _set_verified_snapshot(settings)
@@ -1376,7 +1404,9 @@ async def test_prepare_for_translation_restarts_when_legacy_release_token_lacks_
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     client = FakeManagedReleaseClient()
@@ -1412,10 +1442,10 @@ async def test_prepare_for_translation_preserves_legacy_hardware_hash_provider_s
     secrets = InMemorySecretStore()
 
     service = ManagedOpenRouterReleaseService(
-        settings=settings,
+        openrouter_config=build_openrouter_release_runtime_config(settings),
+        managed_state=ManagedIdentityStateAdapter(settings, lambda _updated: None),
         secrets=secrets,
         client=client,
-        persist_settings=lambda _updated: None,
         app_version="2.0.0",
         hardware_hash_provider=lambda: "precomputed-hardware-hash-123",
         signed_at_provider=lambda: "2026-04-08T06:00:45.000Z",
@@ -1521,9 +1551,8 @@ async def test_close_continues_status_and_client_cleanup_when_oauth_close_fails(
     settings.managed_identity.referral_id = "8H3J4N"
     secrets = InMemorySecretStore()
     ensure_managed_identity_bundle(
-        settings,
+        ManagedIdentityStateAdapter(settings, lambda _updated: None),
         secrets,
-        persist_settings=lambda _updated: None,
     )
     status_gate = asyncio.Event()
     status_started = asyncio.Event()
@@ -1630,7 +1659,9 @@ async def test_issue_honors_retry_after_without_starting_parallel_retries() -> N
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     _set_verified_snapshot(settings)
@@ -1645,10 +1676,10 @@ async def test_issue_honors_retry_after_without_starting_parallel_retries() -> N
     monotonic_now = {"value": 1_000}
 
     service = ManagedOpenRouterReleaseService(
-        settings=settings,
+        openrouter_config=build_openrouter_release_runtime_config(settings),
+        managed_state=ManagedIdentityStateAdapter(settings, lambda _updated: None),
         secrets=secrets,
         client=client,
-        persist_settings=lambda _updated: None,
         app_version="2.0.0",
         raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
         signed_at_provider=lambda: "2026-04-08T06:00:45.000Z",
@@ -1686,7 +1717,9 @@ async def test_prepare_for_translation_honors_retry_after_while_pending_release_
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     _set_verified_snapshot(settings)
@@ -1699,10 +1732,10 @@ async def test_prepare_for_translation_honors_retry_after_while_pending_release_
         )
     )
     service = ManagedOpenRouterReleaseService(
-        settings=settings,
+        openrouter_config=build_openrouter_release_runtime_config(settings),
+        managed_state=ManagedIdentityStateAdapter(settings, lambda _updated: None),
         secrets=secrets,
         client=client,
-        persist_settings=lambda _updated: None,
         app_version="2.0.0",
         raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
         signed_at_provider=lambda: "2026-04-08T06:00:45.000Z",
@@ -1740,7 +1773,9 @@ async def test_issue_restart_clears_release_state_without_switching_sources() ->
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     _set_verified_snapshot(settings)
@@ -1769,7 +1804,9 @@ async def test_issue_challenge_expired_subcode_restarts_and_clears_state() -> No
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     _set_verified_snapshot(settings)
@@ -1799,7 +1836,9 @@ async def test_issue_trial_not_eligible_managed_key_unrecoverable_stops_as_not_e
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     _set_verified_snapshot(settings)
@@ -1839,7 +1878,9 @@ async def test_issue_issuance_suspended_retries_with_brake_copy() -> None:
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     _set_verified_snapshot(settings)
@@ -1881,7 +1922,9 @@ async def test_issue_issuance_suspended_with_revoked_lifecycle_stops_with_contac
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     _set_verified_snapshot(settings)
@@ -1922,7 +1965,9 @@ async def test_issue_trial_not_eligible_with_revoked_lifecycle_stops_with_contac
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     _set_verified_snapshot(settings)
@@ -1963,7 +2008,9 @@ async def test_issue_non_trial_code_with_revoked_lifecycle_stops_with_contact_co
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     _set_verified_snapshot(settings)
@@ -2011,10 +2058,10 @@ async def test_issue_restarts_when_identity_bundle_regenerates_before_issue() ->
         issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key")
     )
     service = ManagedOpenRouterReleaseService(
-        settings=settings,
+        openrouter_config=build_openrouter_release_runtime_config(settings),
+        managed_state=ManagedIdentityStateAdapter(settings, lambda _updated: None),
         secrets=InMemorySecretStore(),
         client=client,
-        persist_settings=lambda _updated: None,
         app_version="2.0.0",
         raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
         signed_at_provider=lambda: "2026-04-08T06:00:45.000Z",
@@ -2034,7 +2081,9 @@ async def test_issue_stops_cleanly_when_managed_key_persistence_fails_after_succ
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = FailingManagedKeySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     secrets.set_attempts.clear()
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
@@ -2069,7 +2118,9 @@ async def test_issue_stops_and_restores_pending_release_state_when_cleanup_persi
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = FailingManagedKeySecretStore()
-    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    ensure_managed_identity_bundle(
+        ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
+    )
     secrets.set_attempts.clear()
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
@@ -2089,10 +2140,10 @@ async def test_issue_stops_and_restores_pending_release_state_when_cleanup_persi
         raise RuntimeError("settings persistence failed")
 
     service = ManagedOpenRouterReleaseService(
-        settings=settings,
+        openrouter_config=build_openrouter_release_runtime_config(settings),
+        managed_state=ManagedIdentityStateAdapter(settings, persist_and_fail),
         secrets=secrets,
         client=client,
-        persist_settings=persist_and_fail,
         app_version="2.0.0",
         raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
         signed_at_provider=lambda: "2026-04-08T06:00:45.000Z",
@@ -2202,9 +2253,8 @@ async def test_prepare_for_translation_regenerates_identity_on_binding_mismatch_
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
     first_bundle = ensure_managed_identity_bundle(
-        settings,
+        ManagedIdentityStateAdapter(settings, lambda _updated: None),
         secrets,
-        persist_settings=lambda _updated: None,
     )
 
     if stage == "discord_start":

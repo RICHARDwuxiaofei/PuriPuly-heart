@@ -1,22 +1,39 @@
 from __future__ import annotations
 
-from puripuly_heart.config.settings import MAX_CUSTOM_VOCAB_TERMS, AppSettings
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+from puripuly_heart.config.settings import MAX_CUSTOM_VOCAB_TERMS
 
 LOCAL_QWEN_MAX_HOTWORDS = 12
 
 
-def _raw_terms_for_language(settings: AppSettings, source_language: str) -> list[str]:
-    if source_language in settings.stt.custom_terms:
-        return settings.stt.custom_terms[source_language]
+@dataclass(frozen=True, slots=True)
+class CustomVocabularyRuntimeConfig:
+    """Narrow read-only runtime DTO for custom-vocabulary effective-term resolution."""
+
+    enabled: bool
+    terms: Mapping[str, list[str]]
+
+
+def _raw_terms_for_language(
+    config: CustomVocabularyRuntimeConfig,
+    source_language: str,
+) -> list[str]:
+    if source_language in config.terms:
+        return config.terms[source_language]
     base_language = source_language.split("-")[0].lower()
-    return settings.stt.custom_terms.get(base_language, [])
+    return config.terms.get(base_language, [])
 
 
-def get_effective_custom_terms(settings: AppSettings, source_language: str) -> list[str]:
-    if not settings.stt.custom_vocabulary_enabled:
+def get_effective_custom_terms(
+    config: CustomVocabularyRuntimeConfig,
+    source_language: str,
+) -> list[str]:
+    if not config.enabled:
         return []
 
-    raw_terms = _raw_terms_for_language(settings, source_language)
+    raw_terms = _raw_terms_for_language(config, source_language)
     effective_terms: list[str] = []
     seen_terms: set[str] = set()
     for term in raw_terms:
@@ -34,11 +51,14 @@ def _normalize_local_qwen_hotword(term: str) -> str:
     return " ".join(term.replace(",", " ").split())
 
 
-def get_effective_local_qwen_hotwords(settings: AppSettings, source_language: str) -> list[str]:
-    if not settings.stt.custom_vocabulary_enabled:
+def get_effective_local_qwen_hotwords(
+    config: CustomVocabularyRuntimeConfig,
+    source_language: str,
+) -> list[str]:
+    if not config.enabled:
         return []
 
-    raw_terms = _raw_terms_for_language(settings, source_language)
+    raw_terms = _raw_terms_for_language(config, source_language)
     effective_terms: list[str] = []
     seen_terms: set[str] = set()
     for term in raw_terms:
@@ -50,3 +70,11 @@ def get_effective_local_qwen_hotwords(settings: AppSettings, source_language: st
         seen_terms.add(normalized_term)
         effective_terms.append(normalized_term)
     return effective_terms
+
+
+__all__ = [
+    "LOCAL_QWEN_MAX_HOTWORDS",
+    "CustomVocabularyRuntimeConfig",
+    "get_effective_custom_terms",
+    "get_effective_local_qwen_hotwords",
+]

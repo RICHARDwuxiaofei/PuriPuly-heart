@@ -579,36 +579,6 @@ KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementVio
     {
         SettingsRuntimeConfinementViolation(
             "legacy-settings-api-import",
-            "src/puripuly_heart/core/managed_identity.py",
-            "AppSettings",
-            "managed identity persistence still accepts legacy settings pending managed-identity state port extraction",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
-            "src/puripuly_heart/core/managed_openrouter_release.py",
-            "AppSettings",
-            "managed OpenRouter release still owns legacy settings pending explicit managed state and intent contracts",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
-            "src/puripuly_heart/core/openrouter_credentials.py",
-            "AppSettings",
-            "OpenRouter credential resolution still accepts legacy settings pending OpenRouter runtime intent adoption",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
-            "src/puripuly_heart/core/openrouter_handoff.py",
-            "AppSettings",
-            "OpenRouter handoff still mutates legacy managed state pending managed connection state service extraction",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
-            "src/puripuly_heart/core/stt/custom_vocab.py",
-            "AppSettings",
-            "custom vocabulary helpers still derive runtime values from legacy settings pending STT intent DTO adoption",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
             "src/puripuly_heart/ui/app.py",
             "AppSettings",
             "UI app managed OpenRouter flows still build legacy settings drafts pending controller/service request DTOs",

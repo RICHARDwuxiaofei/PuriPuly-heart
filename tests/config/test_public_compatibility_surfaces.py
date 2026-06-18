@@ -673,8 +673,12 @@ def _assert_openrouter_byok_env_lookup(
     _clear_entry_env(monkeypatch, entry)
     monkeypatch.setenv(env_var, "fake-env-openrouter")
 
+    credential_config = openrouter_credentials.OpenRouterCredentialRuntimeConfig(
+        selected_source=settings.openrouter.selected_source,
+        installation_id=settings.managed_identity.installation_id,
+    )
     env_resolution = openrouter_credentials.resolve_openrouter_credentials(
-        settings,
+        credential_config,
         secrets=InMemorySecretStore(),
     )
     assert env_resolution.api_key == "fake-env-openrouter"
@@ -682,7 +686,7 @@ def _assert_openrouter_byok_env_lookup(
     store = InMemorySecretStore()
     store.set(entry["key"], "fake-store-openrouter")
     store_resolution = openrouter_credentials.resolve_openrouter_credentials(
-        settings, secrets=store
+        credential_config, secrets=store
     )
     assert store_resolution.api_key == "fake-store-openrouter"
 

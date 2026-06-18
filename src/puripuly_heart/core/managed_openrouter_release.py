@@ -11,13 +11,15 @@ from enum import Enum
 from typing import Protocol
 from uuid import UUID
 
+from puripuly_heart.app.ports.managed_identity_state import ManagedIdentityStatePort
 from puripuly_heart.config.llm_profiles import (
     get_openrouter_llm_profile,
     openrouter_alias_for_fields,
 )
 from puripuly_heart.config.settings import (
-    AppSettings,
     OpenRouterCredentialSource,
+    OpenRouterLLMModel,
+    OpenRouterSelectionAlias,
     normalize_owned_referral_id,
 )
 from puripuly_heart.core.discord_managed_oauth import run_discord_oauth_callback_flow
@@ -36,6 +38,7 @@ from puripuly_heart.core.managed_identity import (
 )
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_MANAGED_API_KEY_SECRET,
+    OpenRouterCredentialRuntimeConfig,
     best_effort_store_managed_openrouter_user_identifier,
     clear_temporary_managed_release_state,
     resolve_openrouter_credentials,
@@ -56,6 +59,20 @@ DiscordOAuthCallbackRunner = Callable[
     [DiscordOAuthLoopbackListener, str, str],
     Awaitable[tuple[str, str]],
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class OpenRouterReleaseRuntimeConfig:
+    """Narrow read-only runtime DTO for managed OpenRouter release flows.
+
+    Carries only the OpenRouter selection fields the release service reads:
+    the resolved model, credential source, and selection alias. The service
+    never imports ``AppSettings``; the wiring boundary builds this DTO.
+    """
+
+    llm_model: OpenRouterLLMModel
+    selected_source: OpenRouterCredentialSource
+    selection_alias: OpenRouterSelectionAlias | None
 
 
 def _default_signed_at() -> str:
@@ -348,10 +365,10 @@ class UnavailableManagedOpenRouterReleaseClient:
 
 @dataclass(slots=True)
 class ManagedOpenRouterReleaseService:
-    settings: AppSettings
+    openrouter_config: OpenRouterReleaseRuntimeConfig
+    managed_state: ManagedIdentityStatePort
     secrets: SecretStore
     client: ManagedOpenRouterReleaseClient
-    persist_settings: Callable[[AppSettings], None]
     app_version: str
     raw_hardware_fingerprint_provider: HardwareFingerprintProvider | None = None
     hardware_hash_provider: InitVar[HardwareFingerprintProvider | None] = None
@@ -394,11 +411,17 @@ class ManagedOpenRouterReleaseService:
 
     @property
     def model(self) -> object | None:
-        return self.settings.openrouter.llm_model
+        return self.openrouter_config.llm_model
 
     @property
     def selected_source(self) -> object | None:
-        return self.settings.openrouter.selected_source
+        return self.openrouter_config.selected_source
+
+    def _credential_runtime_config(self) -> OpenRouterCredentialRuntimeConfig:
+        return OpenRouterCredentialRuntimeConfig(
+            selected_source=self.openrouter_config.selected_source,
+            installation_id=self.managed_state.installation_id,
+        )
 
     def _start_shared_task(
         self,
@@ -446,7 +469,9 @@ class ManagedOpenRouterReleaseService:
         return await self._await_shared_task(task, single_flight_reused=False)
 
     async def ensure_key_for_llm_start(self) -> ManagedOpenRouterReleaseResult:
-        resolution = resolve_openrouter_credentials(self.settings, secrets=self.secrets)
+        resolution = resolve_openrouter_credentials(
+            self._credential_runtime_config(), secrets=self.secrets
+        )
         if resolution.selected_source != OpenRouterCredentialSource.MANAGED:
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.STOP,
@@ -474,7 +499,7 @@ class ManagedOpenRouterReleaseService:
         if self._issue_task is not None and not self._issue_task.done():
             return await self._await_shared_task(self._issue_task, single_flight_reused=True)
 
-        if _normalize_optional_text(self.settings.managed_identity.release_token) is None:
+        if _normalize_optional_text(self.managed_state.release_token) is None:
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.RESTART,
                 message_key="managed_release.restart",
@@ -489,15 +514,13 @@ class ManagedOpenRouterReleaseService:
     async def refresh_managed_status(self) -> ManagedOpenRouterStatusRefreshResult:
         """Best-effort signed-request status refresh for owned Pass ID and live pass status."""
 
-        observed_referral_id = normalize_owned_referral_id(
-            self.settings.managed_identity.referral_id
-        )
+        observed_referral_id = normalize_owned_referral_id(self.managed_state.referral_id)
         if self._closed:
             return ManagedOpenRouterStatusRefreshResult(
                 referral_id=observed_referral_id,
                 succeeded=False,
             )
-        if self.settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED:
+        if self.openrouter_config.selected_source != OpenRouterCredentialSource.MANAGED:
             return ManagedOpenRouterStatusRefreshResult(
                 referral_id=observed_referral_id,
                 succeeded=False,
@@ -508,7 +531,7 @@ class ManagedOpenRouterReleaseService:
             self._status_refresh_tasks.add(current_task)
         try:
             try:
-                bundle = load_existing_managed_identity_bundle(self.settings, self.secrets)
+                bundle = load_existing_managed_identity_bundle(self.managed_state, self.secrets)
             except Exception:
                 return ManagedOpenRouterStatusRefreshResult(
                     referral_id=observed_referral_id,
@@ -529,25 +552,19 @@ class ManagedOpenRouterReleaseService:
                 )
             except Exception:
                 return ManagedOpenRouterStatusRefreshResult(
-                    referral_id=normalize_owned_referral_id(
-                        self.settings.managed_identity.referral_id
-                    ),
+                    referral_id=normalize_owned_referral_id(self.managed_state.referral_id),
                     succeeded=False,
                 )
 
             if self._closed:
                 return ManagedOpenRouterStatusRefreshResult(
-                    referral_id=normalize_owned_referral_id(
-                        self.settings.managed_identity.referral_id
-                    ),
+                    referral_id=normalize_owned_referral_id(self.managed_state.referral_id),
                     succeeded=False,
                 )
             returned_referral_id = normalize_owned_referral_id(
                 getattr(status_response, "referral_id", None)
             )
-            latest_referral_id = normalize_owned_referral_id(
-                self.settings.managed_identity.referral_id
-            )
+            latest_referral_id = normalize_owned_referral_id(self.managed_state.referral_id)
             pass_status = getattr(status_response, "pass_status", None)
             if returned_referral_id is None:
                 return ManagedOpenRouterStatusRefreshResult(
@@ -564,20 +581,18 @@ class ManagedOpenRouterReleaseService:
                     succeeded=True,
                 )
             if returned_referral_id != latest_referral_id:
-                previous_referral_id = self.settings.managed_identity.referral_id
-                self.settings.managed_identity.referral_id = returned_referral_id
+                previous_referral_id = self.managed_state.referral_id
+                self.managed_state.referral_id = returned_referral_id
                 try:
-                    self.persist_settings(self.settings)
+                    self.managed_state.persist()
                 except Exception:
-                    self.settings.managed_identity.referral_id = previous_referral_id
+                    self.managed_state.referral_id = previous_referral_id
                     return ManagedOpenRouterStatusRefreshResult(
                         referral_id=latest_referral_id,
                         succeeded=False,
                     )
 
-            final_referral_id = normalize_owned_referral_id(
-                self.settings.managed_identity.referral_id
-            )
+            final_referral_id = normalize_owned_referral_id(self.managed_state.referral_id)
             if pass_status is not None and pass_status.pass_id != final_referral_id:
                 pass_status = None
             return ManagedOpenRouterStatusRefreshResult(
@@ -600,7 +615,7 @@ class ManagedOpenRouterReleaseService:
         referral_id: str | None = None,
     ) -> ManagedOpenRouterReleaseResult:
         resolution = resolve_openrouter_credentials(
-            self.settings,
+            self._credential_runtime_config(),
             secrets=self.secrets,
             request_intent="TRANS",
         )
@@ -619,17 +634,16 @@ class ManagedOpenRouterReleaseService:
             )
 
         bundle = ensure_managed_identity_bundle(
-            self.settings,
+            self.managed_state,
             self.secrets,
-            persist_settings=self.persist_settings,
         )
         retry_result = self._result_for_retry_after_window()
         if retry_result is not None:
             return retry_result
-        if _normalize_optional_text(self.settings.managed_identity.release_token) is not None:
+        if _normalize_optional_text(self.managed_state.release_token) is not None:
             if self._verified_snapshot() is None:
-                clear_temporary_managed_release_state(self.settings)
-                self.persist_settings(self.settings)
+                clear_temporary_managed_release_state(self.managed_state)
+                self.managed_state.persist()
                 return ManagedOpenRouterReleaseResult(
                     behavior=ManagedOpenRouterReleaseBehavior.RESTART,
                     message_key="managed_release.restart",
@@ -713,7 +727,7 @@ class ManagedOpenRouterReleaseService:
                 app_version=self.app_version,
                 reason="llm_start",
                 budget_usd=MANAGED_OPENROUTER_TRIAL_BUDGET_USD,
-                model=_resolve_managed_issue_model(self.settings),
+                model=_resolve_managed_issue_model(self.openrouter_config),
                 issue_nonce=start_response.issue_nonce,
                 signed_at=self.signed_at_provider(),
             )
@@ -738,7 +752,7 @@ class ManagedOpenRouterReleaseService:
 
     async def _await_or_start_issue_flow(self) -> ManagedOpenRouterReleaseResult:
         resolution = resolve_openrouter_credentials(
-            self.settings,
+            self._credential_runtime_config(),
             secrets=self.secrets,
             request_intent="TRANS",
         )
@@ -763,11 +777,10 @@ class ManagedOpenRouterReleaseService:
 
     async def _run_issue_flow(self) -> ManagedOpenRouterReleaseResult:
         bundle = ensure_managed_identity_bundle(
-            self.settings,
+            self.managed_state,
             self.secrets,
-            persist_settings=self.persist_settings,
         )
-        release_token = _normalize_optional_text(self.settings.managed_identity.release_token)
+        release_token = _normalize_optional_text(self.managed_state.release_token)
         if release_token is None:
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.RESTART,
@@ -775,8 +788,8 @@ class ManagedOpenRouterReleaseService:
             )
         verified_snapshot = self._verified_snapshot()
         if verified_snapshot is None:
-            clear_temporary_managed_release_state(self.settings)
-            self.persist_settings(self.settings)
+            clear_temporary_managed_release_state(self.managed_state)
+            self.managed_state.persist()
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.RESTART,
                 message_key="managed_release.restart",
@@ -787,7 +800,7 @@ class ManagedOpenRouterReleaseService:
             reason="llm_start",
             hardware_hash=verified_hardware_hash,
             budget_usd=MANAGED_OPENROUTER_TRIAL_BUDGET_USD,
-            model=_resolve_managed_issue_model(self.settings),
+            model=_resolve_managed_issue_model(self.openrouter_config),
             signed_at=self.signed_at_provider(),
         )
         try:
@@ -804,30 +817,24 @@ class ManagedOpenRouterReleaseService:
         try:
             self.secrets.set(OPENROUTER_MANAGED_API_KEY_SECRET, issue_response.openrouter_api_key)
         except Exception:
-            previous_release_token = self.settings.managed_identity.release_token
-            previous_release_token_expires_at = (
-                self.settings.managed_identity.release_token_expires_at
-            )
-            previous_verified_hardware_hash = self.settings.managed_identity.verified_hardware_hash
+            previous_release_token = self.managed_state.release_token
+            previous_release_token_expires_at = self.managed_state.release_token_expires_at
+            previous_verified_hardware_hash = self.managed_state.verified_hardware_hash
             previous_verified_hardware_hash_salt_version = (
-                self.settings.managed_identity.verified_hardware_hash_salt_version
+                self.managed_state.verified_hardware_hash_salt_version
             )
             try:
                 self.secrets.delete(OPENROUTER_MANAGED_API_KEY_SECRET)
             except Exception:
                 pass
-            clear_temporary_managed_release_state(self.settings)
+            clear_temporary_managed_release_state(self.managed_state)
             try:
-                self.persist_settings(self.settings)
+                self.managed_state.persist()
             except Exception:
-                self.settings.managed_identity.release_token = previous_release_token
-                self.settings.managed_identity.release_token_expires_at = (
-                    previous_release_token_expires_at
-                )
-                self.settings.managed_identity.verified_hardware_hash = (
-                    previous_verified_hardware_hash
-                )
-                self.settings.managed_identity.verified_hardware_hash_salt_version = (
+                self.managed_state.release_token = previous_release_token
+                self.managed_state.release_token_expires_at = previous_release_token_expires_at
+                self.managed_state.verified_hardware_hash = previous_verified_hardware_hash
+                self.managed_state.verified_hardware_hash_salt_version = (
                     previous_verified_hardware_hash_salt_version
                 )
             self._clear_retry_after()
@@ -836,24 +843,24 @@ class ManagedOpenRouterReleaseService:
                 message_key="managed_release.stop",
             )
         best_effort_store_managed_openrouter_user_identifier(
-            self.settings,
+            self._credential_runtime_config(),
             secrets=self.secrets,
             openrouter_user_id=issue_response.openrouter_user_id,
         )
         store_managed_entitlement_snapshot(
-            self.settings,
+            self.managed_state,
             managed_credential_ref=issue_response.managed_credential_ref,
             expires_at=issue_response.expires_at,
         )
         returned_referral_id = normalize_owned_referral_id(issue_response.referral_id)
         if returned_referral_id is not None:
-            self.settings.managed_identity.referral_id = returned_referral_id
-        final_referral_id = normalize_owned_referral_id(self.settings.managed_identity.referral_id)
+            self.managed_state.referral_id = returned_referral_id
+        final_referral_id = normalize_owned_referral_id(self.managed_state.referral_id)
         pass_status = issue_response.pass_status
         if pass_status is not None and pass_status.pass_id != final_referral_id:
             pass_status = None
-        clear_temporary_managed_release_state(self.settings)
-        self.persist_settings(self.settings)
+        clear_temporary_managed_release_state(self.managed_state)
+        self.managed_state.persist()
         self._clear_retry_after()
         return ManagedOpenRouterReleaseResult(
             behavior=ManagedOpenRouterReleaseBehavior.READY,
@@ -877,9 +884,8 @@ class ManagedOpenRouterReleaseService:
         if error.error_class == "security_fail" and error.subcode in BINDING_MISMATCH_SUBCODES:
             try:
                 regenerate_managed_identity_bundle(
-                    self.settings,
+                    self.managed_state,
                     self.secrets,
-                    persist_settings=self.persist_settings,
                 )
             except Exception:
                 self._clear_retry_after()
@@ -896,8 +902,8 @@ class ManagedOpenRouterReleaseService:
             )
 
         if error.managed_lifecycle == "revoked":
-            clear_temporary_managed_release_state(self.settings)
-            self.persist_settings(self.settings)
+            clear_temporary_managed_release_state(self.managed_state)
+            self.managed_state.persist()
             self._clear_retry_after()
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.STOP,
@@ -927,8 +933,8 @@ class ManagedOpenRouterReleaseService:
             }
             or error.subcode == "release_token_expired"
         ):
-            clear_temporary_managed_release_state(self.settings)
-            self.persist_settings(self.settings)
+            clear_temporary_managed_release_state(self.managed_state)
+            self.managed_state.persist()
             self._clear_retry_after()
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.RESTART,
@@ -937,8 +943,8 @@ class ManagedOpenRouterReleaseService:
             )
 
         if error.error_class == "terminal":
-            clear_temporary_managed_release_state(self.settings)
-            self.persist_settings(self.settings)
+            clear_temporary_managed_release_state(self.managed_state)
+            self.managed_state.persist()
             self._clear_retry_after()
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.STOP,
@@ -993,12 +999,8 @@ class ManagedOpenRouterReleaseService:
         raise RuntimeError("managed hardware fingerprint provider is not configured")
 
     def _verified_snapshot(self) -> tuple[str, int] | None:
-        verified_hardware_hash = _normalize_optional_text(
-            self.settings.managed_identity.verified_hardware_hash
-        )
-        verified_hardware_hash_salt_version = (
-            self.settings.managed_identity.verified_hardware_hash_salt_version
-        )
+        verified_hardware_hash = _normalize_optional_text(self.managed_state.verified_hardware_hash)
+        verified_hardware_hash_salt_version = self.managed_state.verified_hardware_hash_salt_version
         if verified_hardware_hash is None or verified_hardware_hash_salt_version is None:
             return None
         return verified_hardware_hash, verified_hardware_hash_salt_version
@@ -1285,16 +1287,16 @@ async def _resolve_provider_without_blocking_event_loop(
     return await _resolve_maybe_awaitable(await asyncio.to_thread(provider))
 
 
-def _resolve_managed_issue_model(settings: AppSettings) -> str:
-    selection_alias = settings.openrouter.selection_alias
+def _resolve_managed_issue_model(config: OpenRouterReleaseRuntimeConfig) -> str:
+    selection_alias = config.selection_alias
     if selection_alias is None:
         selection_alias = openrouter_alias_for_fields(
-            model=settings.openrouter.llm_model.value,
-            source=settings.openrouter.selected_source.value,
+            model=config.llm_model.value,
+            source=config.selected_source.value,
         )
     profile = get_openrouter_llm_profile(
         selection_alias.value if hasattr(selection_alias, "value") else selection_alias
     )
     if profile is not None and profile.openrouter_model is not None:
         return profile.openrouter_model
-    return settings.openrouter.llm_model.value
+    return config.llm_model.value

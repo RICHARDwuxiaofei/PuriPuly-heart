@@ -15243,7 +15243,6 @@ async def test_apply_providers_broker_base_url_rebuilds_managed_broker_service(
     assert len(captured_services) == 1
     service = captured_services[0]
     assert isinstance(service, ManagedOpenRouterReleaseService)
-    assert service.settings.openrouter.broker_base_url == "https://new-broker.example.test/"
     assert isinstance(service.client, HttpManagedOpenRouterBrokerClient)
     assert service.client.base_url == "https://new-broker.example.test"
 
@@ -15289,8 +15288,8 @@ async def test_apply_providers_managed_identity_rebuilds_service_with_pending_id
     assert len(captured_services) == 1
     service = captured_services[0]
     assert isinstance(service, ManagedOpenRouterReleaseService)
-    assert service.settings.managed_identity.verified_hardware_hash == "pending-hardware-hash"
-    assert service.settings.managed_identity.verified_hardware_hash_salt_version == 9
+    assert service.managed_state.verified_hardware_hash == "pending-hardware-hash"
+    assert service.managed_state.verified_hardware_hash_salt_version == 9
     assert controller.settings.managed_identity.verified_hardware_hash == "pending-hardware-hash"
 
 

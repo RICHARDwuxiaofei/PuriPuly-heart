@@ -4,8 +4,10 @@ import pytest
 
 from puripuly_heart.app import wiring as wiring_module
 from puripuly_heart.app.wiring import (
+    ManagedIdentityStateAdapter,
     ResolvedPeerSTTConfig,
     _LazyFactoryLLMProvider,
+    build_openrouter_release_runtime_config,
     build_peer_stt_provider_signature,
     create_llm_provider,
     create_llm_provider_from_resolved_config,
@@ -795,12 +797,12 @@ def test_create_llm_provider_openrouter_direct_managed_reuse_forwards_cached_use
     calls: list[OpenRouterCredentialSource] = []
 
     def fake_load_managed_openrouter_user_identifier(
-        loaded_settings: AppSettings,
+        loaded_config: object,
         *,
         secrets: InMemorySecretStore,
     ) -> str:
         _ = secrets
-        calls.append(loaded_settings.openrouter.selected_source)
+        calls.append(loaded_config.selected_source)
         return "managed-user-123"
 
     monkeypatch.setattr(
@@ -1019,10 +1021,10 @@ def test_create_llm_provider_openrouter_managed_qwen_fallback_uses_fallback_spec
     )
     secrets = InMemorySecretStore()
     managed_release_service = ManagedOpenRouterReleaseService(
-        settings=settings,
+        openrouter_config=build_openrouter_release_runtime_config(settings),
+        managed_state=ManagedIdentityStateAdapter(settings, lambda _updated: None),
         secrets=secrets,
         client=object(),
-        persist_settings=lambda _updated: None,
         app_version="2.0.0",
         raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
     )
@@ -1045,15 +1047,16 @@ def test_create_llm_provider_openrouter_managed_qwen_fallback_uses_fallback_spec
     assert isinstance(fallback_delegate, ManagedOpenRouterLLMProvider)
     assert isinstance(fallback_delegate.release_service, ManagedOpenRouterReleaseService)
     assert fallback_delegate.release_service is not managed_release_service
-    assert fallback_delegate.release_service.settings is not settings
-    assert fallback_delegate.release_service.settings.openrouter is not settings.openrouter
-    assert fallback_delegate.release_service.settings.openrouter.selection_alias is None
     assert (
-        fallback_delegate.release_service.settings.openrouter.llm_model
+        fallback_delegate.release_service.managed_state is not managed_release_service.managed_state
+    )
+    assert fallback_delegate.release_service.openrouter_config.selection_alias is None
+    assert (
+        fallback_delegate.release_service.openrouter_config.llm_model
         == OpenRouterLLMModel.QWEN_35_FLASH_02_23
     )
     assert (
-        _resolve_managed_issue_model(fallback_delegate.release_service.settings)
+        _resolve_managed_issue_model(fallback_delegate.release_service.openrouter_config)
         == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
     )
     assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
@@ -1087,10 +1090,10 @@ def test_create_llm_provider_openrouter_managed_deepseek_fallback_uses_fallback_
     )
     secrets = InMemorySecretStore()
     managed_release_service = ManagedOpenRouterReleaseService(
-        settings=settings,
+        openrouter_config=build_openrouter_release_runtime_config(settings),
+        managed_state=ManagedIdentityStateAdapter(settings, lambda _updated: None),
         secrets=secrets,
         client=object(),
-        persist_settings=lambda _updated: None,
         app_version="2.0.0",
         raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
     )
@@ -1112,12 +1115,13 @@ def test_create_llm_provider_openrouter_managed_deepseek_fallback_uses_fallback_
     assert isinstance(fallback_delegate, ManagedOpenRouterLLMProvider)
     assert isinstance(fallback_delegate.release_service, ManagedOpenRouterReleaseService)
     assert fallback_delegate.release_service is not managed_release_service
-    assert fallback_delegate.release_service.settings is not settings
-    assert fallback_delegate.release_service.settings.openrouter is not settings.openrouter
-    assert fallback_delegate.release_service.settings.openrouter.selection_alias is None
-    assert fallback_delegate.release_service.settings.openrouter.llm_model == deepseek_model
     assert (
-        _resolve_managed_issue_model(fallback_delegate.release_service.settings)
+        fallback_delegate.release_service.managed_state is not managed_release_service.managed_state
+    )
+    assert fallback_delegate.release_service.openrouter_config.selection_alias is None
+    assert fallback_delegate.release_service.openrouter_config.llm_model == deepseek_model
+    assert (
+        _resolve_managed_issue_model(fallback_delegate.release_service.openrouter_config)
         == deepseek_model.value
     )
     assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
@@ -1200,10 +1204,10 @@ def test_create_llm_provider_openrouter_managed_deepseek_fallback_clears_primary
     )
     secrets = InMemorySecretStore()
     managed_release_service = ManagedOpenRouterReleaseService(
-        settings=settings,
+        openrouter_config=build_openrouter_release_runtime_config(settings),
+        managed_state=ManagedIdentityStateAdapter(settings, lambda _updated: None),
         secrets=secrets,
         client=object(),
-        persist_settings=lambda _updated: None,
         app_version="2.0.0",
         raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
     )
@@ -1223,13 +1227,13 @@ def test_create_llm_provider_openrouter_managed_deepseek_fallback_clears_primary
     assert isinstance(fallback_delegate, ManagedOpenRouterLLMProvider)
     assert isinstance(fallback_delegate.release_service, ManagedOpenRouterReleaseService)
     assert fallback_delegate.release_service is not managed_release_service
-    assert fallback_delegate.release_service.settings.openrouter.selection_alias is None
+    assert fallback_delegate.release_service.openrouter_config.selection_alias is None
     assert (
-        fallback_delegate.release_service.settings.openrouter.llm_model
+        fallback_delegate.release_service.openrouter_config.llm_model
         == OpenRouterLLMModel.DEEPSEEK_V4_FLASH
     )
     assert (
-        _resolve_managed_issue_model(fallback_delegate.release_service.settings)
+        _resolve_managed_issue_model(fallback_delegate.release_service.openrouter_config)
         == OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
     )
     assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED

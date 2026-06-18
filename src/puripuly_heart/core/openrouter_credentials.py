@@ -4,7 +4,8 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 
-from puripuly_heart.config.settings import AppSettings, OpenRouterCredentialSource
+from puripuly_heart.app.ports.managed_identity_state import ManagedIdentityStatePort
+from puripuly_heart.config.settings import OpenRouterCredentialSource
 from puripuly_heart.core.storage.secrets import SecretStore
 
 OPENROUTER_BYOK_API_KEY_SECRET = "openrouter_api_key"
@@ -13,6 +14,19 @@ OPENROUTER_MANAGED_USER_ID_SECRET = "openrouter_managed_user_id"
 OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET = "openrouter_managed_user_installation_id"
 OPENROUTER_MANAGED_USER_ID_MAX_LENGTH = 256
 OPENROUTER_BYOK_API_KEY_ENV = "OPENROUTER_API_KEY"
+
+
+@dataclass(frozen=True, slots=True)
+class OpenRouterCredentialRuntimeConfig:
+    """Narrow read-only runtime DTO for OpenRouter credential resolution.
+
+    ``selected_source`` is the OpenRouter credential source and
+    ``installation_id`` is the persisted managed-identity installation id used
+    to key cached managed user identifiers.
+    """
+
+    selected_source: OpenRouterCredentialSource
+    installation_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,12 +50,12 @@ class OpenRouterManagedRecoveryResult:
 
 
 def resolve_openrouter_credentials(
-    settings: AppSettings,
+    config: OpenRouterCredentialRuntimeConfig,
     *,
     secrets: SecretStore,
     request_intent: str | None = None,
 ) -> OpenRouterCredentialResolution:
-    selected_source = settings.openrouter.selected_source
+    selected_source = config.selected_source
     if selected_source == OpenRouterCredentialSource.NONE:
         return OpenRouterCredentialResolution(selected_source=selected_source, api_key=None)
 
@@ -65,8 +79,12 @@ def resolve_openrouter_credentials(
     )
 
 
-def require_openrouter_execution_api_key(settings: AppSettings, *, secrets: SecretStore) -> str:
-    resolution = resolve_openrouter_credentials(settings, secrets=secrets)
+def require_openrouter_execution_api_key(
+    config: OpenRouterCredentialRuntimeConfig,
+    *,
+    secrets: SecretStore,
+) -> str:
+    resolution = resolve_openrouter_credentials(config, secrets=secrets)
     if resolution.api_key is not None:
         return resolution.api_key
     if resolution.selected_source == OpenRouterCredentialSource.NONE:
@@ -88,11 +106,11 @@ def normalize_managed_openrouter_user_identifier(value: object) -> str | None:
 
 
 def load_managed_openrouter_user_identifier(
-    settings: AppSettings,
+    config: OpenRouterCredentialRuntimeConfig,
     *,
     secrets: SecretStore,
 ) -> str | None:
-    current_installation_id = _normalize_secret(settings.managed_identity.installation_id)
+    current_installation_id = _normalize_secret(config.installation_id)
     if current_installation_id is None:
         return None
 
@@ -112,13 +130,13 @@ def load_managed_openrouter_user_identifier(
 
 
 def best_effort_store_managed_openrouter_user_identifier(
-    settings: AppSettings,
+    config: OpenRouterCredentialRuntimeConfig,
     *,
     secrets: SecretStore,
     openrouter_user_id: object,
 ) -> None:
     normalized_user_id = normalize_managed_openrouter_user_identifier(openrouter_user_id)
-    current_installation_id = _normalize_secret(settings.managed_identity.installation_id)
+    current_installation_id = _normalize_secret(config.installation_id)
     if normalized_user_id is None or current_installation_id is None:
         return
 
@@ -140,43 +158,45 @@ def best_effort_clear_managed_openrouter_user_identifier(secrets: SecretStore) -
             pass
 
 
-def clear_temporary_managed_release_state(settings: AppSettings) -> None:
-    settings.managed_identity.release_token = None
-    settings.managed_identity.release_token_expires_at = None
-    settings.managed_identity.verified_hardware_hash = None
-    settings.managed_identity.verified_hardware_hash_salt_version = None
+def clear_temporary_managed_release_state(state: ManagedIdentityStatePort) -> None:
+    state.release_token = None
+    state.release_token_expires_at = None
+    state.verified_hardware_hash = None
+    state.verified_hardware_hash_salt_version = None
 
 
 def handle_managed_availability(
-    settings: AppSettings,
+    state: ManagedIdentityStatePort,
     *,
     managed_availability: str,
+    selected_source: OpenRouterCredentialSource,
 ) -> OpenRouterManagedRecoveryResult:
     normalized_managed_availability = _normalize_managed_availability(managed_availability)
     if normalized_managed_availability not in {"not_eligible", "unavailable"}:
         raise ValueError("unsupported managed availability")
-    clear_temporary_managed_release_state(settings)
+    clear_temporary_managed_release_state(state)
     return OpenRouterManagedRecoveryResult(
         action=OpenRouterManagedRecoveryAction.STOP,
         reason=normalized_managed_availability,
-        selected_source=settings.openrouter.selected_source,
+        selected_source=selected_source,
         managed_availability=normalized_managed_availability,
     )
 
 
 def handle_managed_release_error(
-    settings: AppSettings,
+    state: ManagedIdentityStatePort,
     *,
     error_code: str,
+    selected_source: OpenRouterCredentialSource,
 ) -> OpenRouterManagedRecoveryResult:
     normalized_error_code = _normalize_required_text(error_code)
     if normalized_error_code not in {"challenge_expired", "security_fail"}:
         raise ValueError("unsupported managed release error")
-    clear_temporary_managed_release_state(settings)
+    clear_temporary_managed_release_state(state)
     return OpenRouterManagedRecoveryResult(
         action=OpenRouterManagedRecoveryAction.RESTART_CHALLENGE,
         reason=normalized_error_code,
-        selected_source=settings.openrouter.selected_source,
+        selected_source=selected_source,
     )
 
 
