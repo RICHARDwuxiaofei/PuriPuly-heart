@@ -24,10 +24,19 @@ import flet as ft
 import numpy as np
 
 from puripuly_heart.app.ports.runtime_apply import RuntimeApplyRequest
+from puripuly_heart.app.ports.secret_store import (
+    SecretReadResult,
+    SecretSnapshot,
+    SecretWriteResult,
+)
 from puripuly_heart.app.ports.settings_repository import (
     SettingsCommitRequest,
     SettingsCommitResult,
     SettingsSnapshot,
+)
+from puripuly_heart.app.services.secret_settings_transaction import (
+    SecretSetRequest,
+    SecretSettingsTransaction,
 )
 from puripuly_heart.app.services.settings_mutation import (
     OverlayOscOutputSettingsMutation,
@@ -627,6 +636,71 @@ class _ControllerNoopRuntimeApply:
         _ = request
         return RuntimeApplyResult(
             status=RUNTIME_APPLY_STATUS_APPLIED,
+            message=None,
+            diagnostics=None,
+        )
+
+
+@dataclass(slots=True)
+class _ControllerSecretStorePortAdapter:
+    """Adapts a sync ``SecretStore`` to the async ``SecretStorePort`` protocol.
+
+    Lets the controller route secret atomicity through ``SecretSettingsTransaction``
+    without a separate async store construction path. The underlying sync store is
+    the same instance produced by ``create_secret_store`` so existing wiring and
+    test doubles continue to observe ``set``/``delete`` calls.
+    """
+
+    store: object
+
+    async def get_secret(self, key: str) -> SecretReadResult:
+        value = await asyncio.to_thread(self.store.get, key)
+        return SecretReadResult(
+            key=key,
+            value=value,
+            revision=None,
+            message=None,
+            diagnostics=None,
+        )
+
+    async def set_secret(self, key: str, value: str) -> SecretWriteResult:
+        await asyncio.to_thread(self.store.set, key, value)
+        return SecretWriteResult(
+            succeeded=True,
+            key=key,
+            revision=None,
+            message=None,
+            diagnostics=None,
+        )
+
+    async def clear_secret(self, key: str) -> SecretWriteResult:
+        await asyncio.to_thread(self.store.delete, key)
+        return SecretWriteResult(
+            succeeded=True,
+            key=key,
+            revision=None,
+            message=None,
+            diagnostics=None,
+        )
+
+    async def snapshot_secret(self, key: str) -> SecretSnapshot:
+        value = await asyncio.to_thread(self.store.get, key)
+        return SecretSnapshot(
+            key=key,
+            value=value,
+            revision=None,
+            existed=value is not None,
+        )
+
+    async def restore_secret(self, snapshot: SecretSnapshot) -> SecretWriteResult:
+        if snapshot.existed and snapshot.value is not None:
+            await asyncio.to_thread(self.store.set, snapshot.key, snapshot.value)
+        else:
+            await asyncio.to_thread(self.store.delete, snapshot.key)
+        return SecretWriteResult(
+            succeeded=True,
+            key=snapshot.key,
+            revision=None,
             message=None,
             diagnostics=None,
         )
@@ -6279,15 +6353,7 @@ class GuiController:
         if self.hub is None or self.settings is None:
             return
 
-        replace_llm_provider = getattr(self.hub, "replace_llm_provider", None)
-        if callable(replace_llm_provider):
-            await replace_llm_provider(None)
-        else:
-            previous_llm = self.hub.llm
-            self.hub.llm = None
-            if previous_llm is not None:
-                with contextlib.suppress(Exception):
-                    await previous_llm.close()
+        await self.hub.replace_llm_provider(None)
 
         # Create new LLM provider with current settings
         llm = None
@@ -6307,12 +6373,7 @@ class GuiController:
         except Exception:
             pass
 
-        # Update hub's named LLM provider owner when available; lightweight UI
-        # test doubles keep the legacy direct field surface.
-        if callable(replace_llm_provider):
-            await replace_llm_provider(llm)
-        else:
-            self.hub.llm = llm
+        await self.hub.replace_llm_provider(llm)
 
         # Update dashboard status
         dash = getattr(self.app, "view_dashboard", None)
@@ -7892,7 +7953,6 @@ class GuiController:
             raise ValueError("PKCE connection requires a BYOK OpenRouter alias")
         if profile.openrouter_model is None:
             raise ValueError("PKCE connection requires a BYOK OpenRouter model")
-        previous_settings = copy.deepcopy(self.settings)
 
         try:
             pkce_client = self._create_openrouter_pkce_client()
@@ -7901,59 +7961,96 @@ class GuiController:
                 result = await self._get_oauth_runtime().run_openrouter_pkce_flow(pkce_client)
             finally:
                 self._openrouter_pkce_client = None
-        except Exception as exc:
+        except Exception:
             self._show_short_message("openrouter.pkce.failed")
-            self._log_error(f"OpenRouter PKCE failed: {exc}")
-            if launch_source == "letter":
-                show_founder_letter_dialog = getattr(self.app, "show_founder_letter_dialog", None)
-                if callable(show_founder_letter_dialog):
-                    with contextlib.suppress(Exception):
-                        show_founder_letter_dialog()
+            self._log_error("OpenRouter PKCE flow failed")
+            self._maybe_show_founder_letter_after_pkce_failure(launch_source)
             return False
 
         try:
-            if not await self._get_provider_verifier().verify_api_key(
+            verified = await self._get_provider_verifier().verify_api_key(
                 "openrouter",
                 result.api_key,
-            ):
-                raise RuntimeError("OpenRouter PKCE key verification failed")
-            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-            previous_api_key = secrets.get(OPENROUTER_BYOK_API_KEY_SECRET)
-            secrets.set(OPENROUTER_BYOK_API_KEY_SECRET, result.api_key)
-            updated = copy.deepcopy(target_settings)
-            updated.provider.llm = LLMProviderName.OPENROUTER
-            updated.openrouter.selection_alias = OpenRouterSelectionAlias(profile.alias)
-            updated.openrouter.selected_source = OpenRouterCredentialSource.BYOK
-            updated.openrouter.llm_model = OpenRouterLLMModel(profile.openrouter_model)
-            updated.api_key_verified.openrouter = True
-            try:
-                await self.apply_providers(updated, force_rebuild_llm=True)
-                self.settings.api_key_verified.openrouter = True
-                self._save_settings()
-            except Exception:
-                with contextlib.suppress(Exception):
-                    if previous_api_key is None:
-                        secrets.delete(OPENROUTER_BYOK_API_KEY_SECRET)
-                    else:
-                        secrets.set(OPENROUTER_BYOK_API_KEY_SECRET, previous_api_key)
-                try:
-                    await self.apply_providers(previous_settings, force_rebuild_llm=True)
-                except Exception as rollback_exc:
-                    self.settings = previous_settings
-                    with contextlib.suppress(Exception):
-                        self._save_settings()
-                    self._log_error(f"OpenRouter PKCE rollback failed: {rollback_exc}")
-                raise
-        except Exception as exc:
+            )
+        except Exception:
+            verified = False
+        if not verified:
             self._show_short_message("openrouter.pkce.failed")
-            self._log_error(f"OpenRouter PKCE apply failed: {exc}")
-            if launch_source == "letter":
-                show_founder_letter_dialog = getattr(self.app, "show_founder_letter_dialog", None)
-                if callable(show_founder_letter_dialog):
-                    with contextlib.suppress(Exception):
-                        show_founder_letter_dialog()
+            self._log_error("OpenRouter PKCE key verification failed")
+            self._maybe_show_founder_letter_after_pkce_failure(launch_source)
             return False
+
+        updated = copy.deepcopy(target_settings)
+        updated.provider.llm = LLMProviderName.OPENROUTER
+        updated.openrouter.selection_alias = OpenRouterSelectionAlias(profile.alias)
+        updated.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+        updated.openrouter.llm_model = OpenRouterLLMModel(profile.openrouter_model)
+        updated.api_key_verified.openrouter = True
+
+        plan = self._build_provider_runtime_apply_plan(updated, force_rebuild_llm=True)
+        secret_store = create_secret_store(self.settings.secrets, config_path=self.config_path)
+        secret_store_port = _ControllerSecretStorePortAdapter(secret_store)
+        settings_repository = _ControllerSettingsPatchRepository(
+            controller=self,
+            committed_settings=updated,
+            surface="openrouter_pkce",
+        )
+        transaction = SecretSettingsTransaction(
+            secret_store=secret_store_port,
+            settings_repository=settings_repository,
+        )
+        runtime_apply_port = _ControllerProviderRuntimeApply(
+            controller=self,
+            settings=updated,
+            plan=plan,
+            surface="openrouter_pkce",
+            operation="openrouter_pkce_runtime_apply",
+        )
+
+        commit_result = await transaction.set_provider_secret(
+            SecretSetRequest(
+                secret_key=OPENROUTER_BYOK_API_KEY_SECRET,
+                secret_value=result.api_key,
+                settings_values=_settings_snapshot_values(updated),
+                expected_settings_revision=None,
+                reason="openrouter_pkce",
+                correlation_id=None,
+            )
+        )
+        if commit_result.status != TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+            self._show_short_message("openrouter.pkce.failed")
+            self._log_error("OpenRouter PKCE settings commit failed")
+            self.last_settings_mutation_result = commit_result
+            self._maybe_show_founder_letter_after_pkce_failure(launch_source)
+            return False
+
+        runtime_result = await runtime_apply_port.apply_runtime(
+            RuntimeApplyRequest(
+                settings_values=_settings_snapshot_values(updated),
+                reason="openrouter_pkce",
+                correlation_id=None,
+            )
+        )
+        if runtime_result.status == RUNTIME_APPLY_STATUS_APPLIED:
+            self.last_settings_mutation_result = TransactionResult(
+                status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
+                message=runtime_result.message,
+                diagnostics=runtime_result.diagnostics,
+            )
+            return True
+
+        self.last_settings_mutation_result = _runtime_apply_result_as_degraded_transaction(
+            runtime_result
+        )
         return True
+
+    def _maybe_show_founder_letter_after_pkce_failure(self, launch_source: str) -> None:
+        if launch_source != "letter":
+            return
+        show_founder_letter_dialog = getattr(self.app, "show_founder_letter_dialog", None)
+        if callable(show_founder_letter_dialog):
+            with contextlib.suppress(Exception):
+                show_founder_letter_dialog()
 
     def _save_settings(self) -> None:
         assert self.settings is not None

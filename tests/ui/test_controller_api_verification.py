@@ -81,9 +81,17 @@ class DummyHub:
         self.ui_events: asyncio.Queue[object] = asyncio.Queue()
         self.output_runtime = DummyOutputRuntime()
         self.start_calls: list[bool] = []
+        self.replace_llm_calls: list[object | None] = []
 
     async def start(self, *, auto_flush_osc: bool) -> None:
         self.start_calls.append(auto_flush_osc)
+
+    async def replace_llm_provider(self, llm: object | None) -> None:
+        old_llm = self.llm
+        self.replace_llm_calls.append(llm)
+        self.llm = llm
+        if old_llm is not None and old_llm is not llm and hasattr(old_llm, "close"):
+            await old_llm.close()
 
 
 def _local_stt_download_task(controller: GuiController) -> asyncio.Task[object] | None:
