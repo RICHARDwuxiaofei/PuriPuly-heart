@@ -581,43 +581,31 @@ KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementVio
             "legacy-settings-api-import",
             "src/puripuly_heart/ui/app.py",
             "AppSettings",
-            "UI app managed OpenRouter flows still build legacy settings drafts pending controller/service request DTOs",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
-            "src/puripuly_heart/ui/app.py",
-            "save_settings",
-            "UI app still saves through the legacy public facade pending controller/service request DTOs",
+            "UI app imports AppSettings only for typed annotations on the OpenRouter PKCE request parameter and the BYOK target wrapper returns; the BYOK target builder was moved to GuiController. Resolved by Gate 2 controller/service request DTO cutover.",
         ),
         SettingsRuntimeConfinementViolation(
             "legacy-settings-api-import",
             "src/puripuly_heart/ui/controller.py",
             "AppSettings",
-            "GuiController still owns legacy settings state pending controller-facing vNext intent/state DTO cutover",
+            "GuiController is the settings lifecycle boundary owner and still holds legacy AppSettings state; resolved by Gate 2 controller cutover (Provider Runtime Apply Extraction moves provider apply out of GuiController) and controller-facing vNext intent/state DTO adoption.",
         ),
         SettingsRuntimeConfinementViolation(
             "legacy-settings-api-import",
             "src/puripuly_heart/ui/controller.py",
             "load_settings",
-            "GuiController still loads through the legacy public facade pending vNext persistence adapter cutover",
+            "GuiController still loads through the legacy public facade as the persistence boundary owner; resolved by Gate 2 persistence adapter cutover.",
         ),
         SettingsRuntimeConfinementViolation(
             "legacy-settings-api-import",
             "src/puripuly_heart/ui/controller.py",
             "save_settings",
-            "GuiController still saves through the legacy public facade pending vNext persistence adapter cutover",
+            "GuiController still saves through the legacy public facade as the persistence boundary owner; resolved by Gate 2 persistence adapter cutover.",
         ),
         SettingsRuntimeConfinementViolation(
             "legacy-settings-api-import",
             "src/puripuly_heart/ui/views/settings.py",
             "AppSettings",
-            "SettingsView still edits legacy settings drafts pending settings view-model DTO adoption",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "dynamic-legacy-settings-shape-read",
-            "src/puripuly_heart/ui/app.py",
-            "TranslatorApp._build_managed_openrouter_byok_target_settings",
-            "UI app managed-auth flow still reads controller.settings pending controller/service request DTOs",
+            "SettingsView still edits legacy settings drafts; resolved by Gate 2 controller/service request DTO cutover when settings view-model DTOs replace direct AppSettings draft editing.",
         ),
     }
 )

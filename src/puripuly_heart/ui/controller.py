@@ -64,7 +64,10 @@ from puripuly_heart.app.wiring import (
     resolve_peer_stt_runtime_config,
 )
 from puripuly_heart.config.audio_host_api import normalize_input_host_api
-from puripuly_heart.config.llm_profiles import profile_for_alias
+from puripuly_heart.config.llm_profiles import (
+    get_openrouter_selection_alias_for_model_and_source,
+    profile_for_alias,
+)
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
 from puripuly_heart.config.resolved import ResolvedOverlayConfig
 from puripuly_heart.config.settings import (
@@ -7827,6 +7830,52 @@ class GuiController:
             return False
         return self._openrouter_pkce_client.reopen_authorization_url()
 
+    def build_managed_openrouter_byok_target_settings(self) -> AppSettings | None:
+        """Build a BYOK OpenRouter target settings draft from the current managed state.
+
+        The controller owns this projection so UI renderers do not perform dynamic
+        ``getattr(controller, "settings")`` shape reads. Returns ``None`` when the
+        current settings are not a managed OpenRouter configuration.
+        """
+        current_settings = self.settings
+        if current_settings is None:
+            return None
+        if current_settings.provider.llm != LLMProviderName.OPENROUTER:
+            return None
+        if current_settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED:
+            return None
+
+        openrouter_model = None
+        selection_alias = current_settings.openrouter.selection_alias
+        if selection_alias is not None:
+            try:
+                profile = profile_for_alias(selection_alias.value)
+            except KeyError:
+                profile = None
+            if profile is not None:
+                openrouter_model = profile.openrouter_model
+        if openrouter_model is None:
+            openrouter_model = current_settings.openrouter.llm_model.value
+
+        alias_value = get_openrouter_selection_alias_for_model_and_source(
+            openrouter_model,
+            OpenRouterCredentialSource.BYOK.value,
+        )
+        if alias_value is None:
+            return None
+
+        target_settings = copy.deepcopy(current_settings)
+        target_settings.provider.llm = LLMProviderName.OPENROUTER
+        target_settings.openrouter.selection_alias = OpenRouterSelectionAlias(alias_value)
+        target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+        target_settings.openrouter.llm_model = OpenRouterLLMModel(openrouter_model)
+        target_settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
+        target_settings.translation.connection = TranslationConnection.OPENROUTER
+        target_settings.translation.connection_history[target_settings.translation.model.value] = (
+            TranslationConnection.OPENROUTER
+        )
+        return target_settings
+
     async def connect_openrouter_via_pkce(
         self,
         *,
@@ -7912,6 +7961,11 @@ class GuiController:
             save_settings(self.config_path, self.settings)
         except Exception as exc:
             self._log_error(f"Failed to save settings: {exc}")
+
+    def persist_settings(self) -> None:
+        """Persist current settings, propagating persistence errors to the caller."""
+        assert self.settings is not None
+        save_settings(self.config_path, self.settings)
 
     def _sync_ui_from_settings(self) -> None:
         settings = self.settings

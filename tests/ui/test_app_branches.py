@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 
@@ -28,6 +28,7 @@ from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatu
 from puripuly_heart.core.runtime import OAuthRuntime
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.app import TranslatorApp, _check_and_notify_update
+from puripuly_heart.ui.controller import GuiController
 
 MISSING = object()
 
@@ -164,6 +165,12 @@ class ConstructionDummyController:
 
     def clear_debug_audio_fault_profiles(self) -> None:
         self.audio_faults_cleared = True
+
+    def _save_settings(self) -> None:
+        return None
+
+    def persist_settings(self) -> None:
+        return None
 
 
 class ConstructionDummyDashboardView(ft.Container):
@@ -491,6 +498,8 @@ def test_debug_preview_local_qwen_modal_opens_production_dialog_without_state_or
         settings=settings,
         _local_qwen_hallucination_detection_count=1,
         _local_qwen_hallucination_modal_shown=False,
+        _save_settings=lambda: pytest.fail("debug modal preview must not save settings"),
+        persist_settings=lambda: pytest.fail("debug modal preview must not persist settings"),
         apply_settings=lambda *_args, **_kwargs: pytest.fail(
             "debug modal preview must not apply settings"
         ),
@@ -512,11 +521,6 @@ def test_debug_preview_local_qwen_modal_opens_production_dialog_without_state_or
         app_module,
         "LocalQwenHallucinationDialog",
         FakeLocalQwenHallucinationDialog,
-    )
-    monkeypatch.setattr(
-        app_module,
-        "save_settings",
-        lambda *_args, **_kwargs: pytest.fail("debug modal preview must not save settings"),
     )
     monkeypatch.setattr(
         app_module.webbrowser,
@@ -578,9 +582,14 @@ def test_debug_audio_fault_actions_do_not_call_persistence_or_providers(monkeypa
     _patch_app_construction(monkeypatch)
     forbidden_calls: list[str] = []
     monkeypatch.setattr(
-        app_module,
-        "save_settings",
-        lambda *args, **kwargs: forbidden_calls.append("save_settings"),
+        ConstructionDummyController,
+        "_save_settings",
+        lambda self: forbidden_calls.append("save_settings"),
+    )
+    monkeypatch.setattr(
+        ConstructionDummyController,
+        "persist_settings",
+        lambda self: forbidden_calls.append("persist_settings"),
     )
     monkeypatch.setattr(
         app_module,
@@ -619,9 +628,14 @@ def test_local_qwen_guidance_modal_open_guide_opens_github_api_key_guide_safely(
     forbidden_calls: list[str] = []
     opened_urls: list[str] = []
     monkeypatch.setattr(
-        app_module,
-        "save_settings",
-        lambda *args, **kwargs: forbidden_calls.append("save_settings"),
+        ConstructionDummyController,
+        "_save_settings",
+        lambda self: forbidden_calls.append("save_settings"),
+    )
+    monkeypatch.setattr(
+        ConstructionDummyController,
+        "persist_settings",
+        lambda self: forbidden_calls.append("persist_settings"),
     )
     monkeypatch.setattr(
         app_module.webbrowser,
@@ -665,11 +679,6 @@ def test_debug_preview_talk_together_pass_invite_progress_sets_settings_state_on
         set_managed_key_state=lambda **kwargs: managed_key_calls.append(kwargs)
     )
     forbidden_calls: list[str] = []
-    monkeypatch.setattr(
-        app_module,
-        "save_settings",
-        lambda *args, **kwargs: forbidden_calls.append("save_settings"),
-    )
     monkeypatch.setattr(
         app_module.webbrowser,
         "open",
@@ -1076,7 +1085,9 @@ def test_debug_preview_founder_letter_opens_dialog_with_readme_action(
     def fail_save(*_args, **_kwargs):
         pytest.fail("debug founder-letter preview must not save settings")
 
-    app.controller = SimpleNamespace(settings=AppSettings(), _save_settings=fail_save)
+    app.controller = SimpleNamespace(
+        settings=AppSettings(), _save_settings=fail_save, persist_settings=fail_save
+    )
     monkeypatch.setattr(
         app,
         "_on_request_openrouter_pkce",
@@ -1209,6 +1220,10 @@ def test_debug_preview_discord_auth_opens_dialog_with_close_only_actions(
     app.controller = SimpleNamespace(
         settings=settings,
         config_path=Path("settings.json"),
+        _save_settings=lambda: pytest.fail("debug Discord-auth preview must not save settings"),
+        persist_settings=lambda: pytest.fail(
+            "debug Discord-auth preview must not persist settings"
+        ),
         start_discord_managed_auth=lambda *_args, **_kwargs: pytest.fail(
             "debug Discord-auth preview must not start broker OAuth"
         ),
@@ -1242,11 +1257,6 @@ def test_debug_preview_discord_auth_opens_dialog_with_close_only_actions(
             "debug Discord-auth preview must not launch OpenRouter PKCE"
         ),
         raising=False,
-    )
-    monkeypatch.setattr(
-        app_module,
-        "save_settings",
-        lambda *_args, **_kwargs: pytest.fail("debug Discord-auth preview must not save settings"),
     )
     monkeypatch.setattr(
         app_module.webbrowser,
@@ -1285,6 +1295,9 @@ def test_discord_managed_auth_byok_launches_openrouter_pkce_with_byok_target() -
     settings.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
     settings.openrouter.llm_model = OpenRouterLLMModel.QWEN_35_FLASH_02_23
     app.controller = SimpleNamespace(settings=settings)
+    app.controller.build_managed_openrouter_byok_target_settings = MethodType(
+        GuiController.build_managed_openrouter_byok_target_settings, app.controller
+    )
     pkce_calls: list[tuple[AppSettings, str]] = []
     app._on_request_openrouter_pkce = (
         lambda target_settings, *, launch_source="settings": pkce_calls.append(
@@ -1324,6 +1337,9 @@ def test_discord_managed_auth_byok_clears_managed_china_translation_state() -> N
     settings.openrouter.llm_model = OpenRouterLLMModel.DEEPSEEK_V4_FLASH
     settings.openrouter.provider_routing = OpenRouterProviderRouting.DEEPSEEK_ONLY
     app.controller = SimpleNamespace(settings=settings)
+    app.controller.build_managed_openrouter_byok_target_settings = MethodType(
+        GuiController.build_managed_openrouter_byok_target_settings, app.controller
+    )
 
     target_settings = app._build_managed_openrouter_byok_target_settings()
 
@@ -1794,7 +1810,7 @@ async def test_peer_translation_toggle_after_eula_acceptance_routes_and_enables(
         set_peer_translation_enabled=fake_enable,
     )
     saves: list[tuple[str, AppSettings]] = []
-    monkeypatch.setattr(app_module, "save_settings", lambda path, cfg: saves.append((path, cfg)))
+    app.controller._save_settings = lambda: saves.append(("controller", settings))
 
     app._accept_peer_translation_eula_and_enable()
     await app.page.tasks[0]()
@@ -3145,7 +3161,8 @@ async def test_on_verify_api_key_persists_and_updates_dashboard_flags(
     )
 
     saves: list[tuple[object, object]] = []
-    monkeypatch.setattr(app_module, "save_settings", lambda path, cfg: saves.append((path, cfg)))
+    app.controller._save_settings = lambda: saves.append(("controller", settings))
+    app.controller.persist_settings = lambda: saves.append(("controller", settings))
 
     deepgram_result = await app._on_verify_api_key("deepgram", "k")
     google_result = await app._on_verify_api_key("google", "k")
@@ -3198,7 +3215,8 @@ async def test_on_verify_api_key_skips_persistence_for_stale_field_value(
     )
 
     saves: list[tuple[object, object]] = []
-    monkeypatch.setattr(app_module, "save_settings", lambda path, cfg: saves.append((path, cfg)))
+    app.controller._save_settings = lambda: saves.append(("controller", settings))
+    app.controller.persist_settings = lambda: saves.append(("controller", settings))
 
     result = await app._on_verify_api_key("google", "old-key")
 

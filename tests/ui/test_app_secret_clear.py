@@ -7,7 +7,6 @@ import pytest
 
 pytest.importorskip("flet")
 
-import puripuly_heart.ui.app as app_module
 from puripuly_heart.ui.app import TranslatorApp
 
 
@@ -23,7 +22,7 @@ class DummyDashboard:
         self.stt_calls.append((value, update_ui))
 
 
-def _make_app_with_verified_state() -> TranslatorApp:
+def _make_app_with_verified_state(save_settings=None) -> TranslatorApp:
     app = TranslatorApp.__new__(TranslatorApp)
     app.controller = SimpleNamespace(
         settings=SimpleNamespace(
@@ -38,21 +37,16 @@ def _make_app_with_verified_state() -> TranslatorApp:
             )
         ),
         config_path=Path("settings.json"),
+        _save_settings=save_settings or (lambda: None),
+        persist_settings=save_settings or (lambda: None),
     )
     app.view_dashboard = DummyDashboard()
     return app
 
 
-def test_on_secret_cleared_resets_alibaba_beijing_for_new_secret_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    app = _make_app_with_verified_state()
-    saves: list[tuple[Path, object]] = []
-
-    def fake_save(path: Path, settings: object) -> None:
-        saves.append((path, settings))
-
-    monkeypatch.setattr(app_module, "save_settings", fake_save)
+def test_on_secret_cleared_resets_alibaba_beijing_for_new_secret_key() -> None:
+    saves: list[bool] = []
+    app = _make_app_with_verified_state(save_settings=lambda: saves.append(True))
 
     app._on_secret_cleared("alibaba_api_key_beijing")
 
@@ -62,16 +56,9 @@ def test_on_secret_cleared_resets_alibaba_beijing_for_new_secret_key(
     assert len(saves) == 1
 
 
-def test_on_secret_cleared_resets_alibaba_singapore_for_new_secret_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    app = _make_app_with_verified_state()
-    saves: list[tuple[Path, object]] = []
-
-    def fake_save(path: Path, settings: object) -> None:
-        saves.append((path, settings))
-
-    monkeypatch.setattr(app_module, "save_settings", fake_save)
+def test_on_secret_cleared_resets_alibaba_singapore_for_new_secret_key() -> None:
+    saves: list[bool] = []
+    app = _make_app_with_verified_state(save_settings=lambda: saves.append(True))
 
     app._on_secret_cleared("alibaba_api_key_singapore")
 
@@ -81,14 +68,9 @@ def test_on_secret_cleared_resets_alibaba_singapore_for_new_secret_key(
     assert len(saves) == 1
 
 
-def test_on_secret_cleared_ignores_unknown_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    app = _make_app_with_verified_state()
-    saves: list[tuple[Path, object]] = []
-
-    def fake_save(path: Path, settings: object) -> None:
-        saves.append((path, settings))
-
-    monkeypatch.setattr(app_module, "save_settings", fake_save)
+def test_on_secret_cleared_ignores_unknown_key() -> None:
+    saves: list[bool] = []
+    app = _make_app_with_verified_state(save_settings=lambda: saves.append(True))
 
     app._on_secret_cleared("unknown_key")
 
@@ -100,16 +82,9 @@ def test_on_secret_cleared_ignores_unknown_key(monkeypatch: pytest.MonkeyPatch) 
     assert saves == []
 
 
-def test_on_secret_cleared_resets_openrouter_for_new_secret_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    app = _make_app_with_verified_state()
-    saves: list[tuple[Path, object]] = []
-
-    def fake_save(path: Path, settings: object) -> None:
-        saves.append((path, settings))
-
-    monkeypatch.setattr(app_module, "save_settings", fake_save)
+def test_on_secret_cleared_resets_openrouter_for_new_secret_key() -> None:
+    saves: list[bool] = []
+    app = _make_app_with_verified_state(save_settings=lambda: saves.append(True))
 
     app._on_secret_cleared("openrouter_api_key")
 
@@ -119,16 +94,9 @@ def test_on_secret_cleared_resets_openrouter_for_new_secret_key(
     assert len(saves) == 1
 
 
-def test_on_secret_cleared_resets_deepseek_for_new_secret_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    app = _make_app_with_verified_state()
-    saves: list[tuple[Path, object]] = []
-
-    def fake_save(path: Path, settings: object) -> None:
-        saves.append((path, settings))
-
-    monkeypatch.setattr(app_module, "save_settings", fake_save)
+def test_on_secret_cleared_resets_deepseek_for_new_secret_key() -> None:
+    saves: list[bool] = []
+    app = _make_app_with_verified_state(save_settings=lambda: saves.append(True))
 
     app._on_secret_cleared("deepseek_api_key")
 

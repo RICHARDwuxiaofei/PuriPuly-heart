@@ -9,19 +9,9 @@ from pathlib import Path
 
 import flet as ft
 
-from puripuly_heart.config.llm_profiles import (
-    get_openrouter_selection_alias_for_model_and_source,
-    profile_for_alias,
-)
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
-    OpenRouterCredentialSource,
-    OpenRouterLLMModel,
-    OpenRouterProviderRouting,
-    OpenRouterSelectionAlias,
-    TranslationConnection,
-    save_settings,
 )
 from puripuly_heart.core.discord_oauth_loopback import (
     render_discord_oauth_callback_completion_page,
@@ -1342,44 +1332,7 @@ class TranslatorApp:
         self._close_discord_managed_auth_dialog()
 
     def _build_managed_openrouter_byok_target_settings(self) -> AppSettings | None:
-        current_settings = getattr(getattr(self, "controller", None), "settings", None)
-        if current_settings is None:
-            return None
-        if current_settings.provider.llm != LLMProviderName.OPENROUTER:
-            return None
-        if current_settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED:
-            return None
-
-        openrouter_model = None
-        selection_alias = current_settings.openrouter.selection_alias
-        if selection_alias is not None:
-            try:
-                profile = profile_for_alias(selection_alias.value)
-            except KeyError:
-                profile = None
-            if profile is not None:
-                openrouter_model = profile.openrouter_model
-        if openrouter_model is None:
-            openrouter_model = current_settings.openrouter.llm_model.value
-
-        alias_value = get_openrouter_selection_alias_for_model_and_source(
-            openrouter_model,
-            OpenRouterCredentialSource.BYOK.value,
-        )
-        if alias_value is None:
-            return None
-
-        target_settings = copy.deepcopy(current_settings)
-        target_settings.provider.llm = LLMProviderName.OPENROUTER
-        target_settings.openrouter.selection_alias = OpenRouterSelectionAlias(alias_value)
-        target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
-        target_settings.openrouter.llm_model = OpenRouterLLMModel(openrouter_model)
-        target_settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
-        target_settings.translation.connection = TranslationConnection.OPENROUTER
-        target_settings.translation.connection_history[target_settings.translation.model.value] = (
-            TranslationConnection.OPENROUTER
-        )
-        return target_settings
+        return self.controller.build_managed_openrouter_byok_target_settings()
 
     def _build_founder_letter_target_settings(self) -> AppSettings | None:
         return self._build_managed_openrouter_byok_target_settings()
@@ -1442,7 +1395,7 @@ class TranslatorApp:
 
         # Save verification result to settings
         setattr(self.controller.settings.api_key_verified, provider, success)
-        save_settings(self.controller.config_path, self.controller.settings)
+        self.controller.persist_settings()
 
         # Sync verification result with dashboard needs_key flags (UI update on user click)
         if provider in ("deepgram", "soniox", "qwen_asr"):
@@ -1474,7 +1427,7 @@ class TranslatorApp:
         provider = key_to_provider.get(key)
         if provider:
             setattr(self.controller.settings.api_key_verified, provider, False)
-            save_settings(self.controller.config_path, self.controller.settings)
+            self.controller.persist_settings()
 
             # Update dashboard needs_key flag
             if provider in ("deepgram", "soniox"):
