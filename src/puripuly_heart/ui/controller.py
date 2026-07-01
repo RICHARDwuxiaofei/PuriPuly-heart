@@ -206,6 +206,7 @@ from puripuly_heart.core.runtime.mic_test import MicTestRuntime
 from puripuly_heart.core.runtime.oauth import OAuthRuntime
 from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
 from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
+from puripuly_heart.core.runtime.provider_rebuild import ProviderRuntimeRebuildService
 from puripuly_heart.core.runtime.receiver import VrcMicReceiverRuntime
 from puripuly_heart.core.runtime.self_audio import SelfAudioRuntime
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
@@ -655,6 +656,11 @@ class GuiController:
     osc: ChatboxPaginator | None = None
     hub: ClientHub | None = None
     _self_audio_runtime: SelfAudioRuntime | None = field(init=False, default=None)
+    _provider_rebuild_runtime: ProviderRuntimeRebuildService = field(
+        init=False,
+        default_factory=ProviderRuntimeRebuildService,
+        repr=False,
+    )
     _peer_runtime: PeerChannelRuntime | None = None
     receiver: VrcOscReceiver | None = None
     _vrc_mic_receiver_runtime: VrcMicReceiverRuntime | None = field(
@@ -5990,29 +5996,26 @@ class GuiController:
         if self.hub is None or self.settings is None:
             return
 
-        await self.hub.replace_llm_provider(None)
-
-        # Create new LLM provider with current settings
-        llm = None
-        try:
+        async def create_provider() -> object | None:
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
             new_managed_release_service = self._create_managed_openrouter_release_service(
                 secrets=secrets
             )
             await self._replace_managed_openrouter_release_service(new_managed_release_service)
-            llm = create_llm_provider(
+            return create_llm_provider(
                 self.settings,
                 secrets=secrets,
                 managed_release_service=self._managed_openrouter_release_service,
                 managed_delegate_ready=self._on_managed_trial_delegate_ready,
                 runtime_logging=self.runtime_logging,
             )
-        except Exception:
-            pass
 
-        await self.hub.replace_llm_provider(llm)
+        outcome = await self._provider_rebuild_runtime.rebuild_llm_provider(
+            replace_provider=self.hub.replace_llm_provider,
+            create_provider=create_provider,
+        )
+        llm = outcome.provider
 
-        # Update dashboard status
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
             dash.set_translation_needs_key(
@@ -6032,16 +6035,14 @@ class GuiController:
         if self.hub is None or self.settings is None:
             return
 
-        stt = None
-        stt_error: Exception | None = None
-        try:
+        def create_provider() -> object | None:
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
             backend = create_stt_backend(
                 self.settings,
                 secrets=secrets,
                 diagnostics_enabled=self._detailed_audio_diag_enabled,
             )
-            stt = ManagedSTTProvider(
+            return ManagedSTTProvider(
                 backend=backend,
                 sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
                 stt_provider_name=self.settings.provider.stt,
@@ -6055,10 +6056,12 @@ class GuiController:
                     self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
                 ),
             )
-        except Exception as exc:
-            stt_error = exc
 
-        await self.hub.replace_stt_provider(stt)
+        outcome = await self._provider_rebuild_runtime.rebuild_stt_provider(
+            replace_provider=self.hub.replace_stt_provider,
+            create_provider=create_provider,
+        )
+        stt = outcome.provider
         self._sync_effective_hub_flags(self.settings)
 
         dash = getattr(self.app, "view_dashboard", None)
@@ -6068,7 +6071,7 @@ class GuiController:
                 dash.set_stt_enabled(False)
 
         if stt is None:
-            assert stt_error is not None
+            assert outcome.error is not None
             self._log_error("STT backend not available")
             return
 
@@ -6293,7 +6296,11 @@ class GuiController:
         desired_active = self._peer_runtime_should_be_active(self.settings)
         if desired_active and not await self._ensure_peer_local_stt_ready():
             desired_active = False
-        await self._peer_runtime.apply_policy(config=config, desired_active=desired_active)
+        await self._provider_rebuild_runtime.apply_peer_policy(
+            peer_runtime=self._peer_runtime,
+            config=config,
+            desired_active=desired_active,
+        )
         self._last_peer_stt_runtime_signature = config.runtime_signature
         self._sync_effective_hub_flags(self.settings)
 
