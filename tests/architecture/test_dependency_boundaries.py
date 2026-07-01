@@ -301,14 +301,6 @@ KNOWN_ALLOWED_VIOLATIONS: frozenset[ImportViolation] = frozenset(
     {
         ImportViolation(
             rule_id="adapters-avoid-ui-and-migration-internals",
-            importer="src/puripuly_heart/app/wiring.py",
-            imported="puripuly_heart.config.settings",
-            importer_layer="adapters",
-            imported_layer="migration/serialization",
-            reason="adapters may wrap concrete resources but must not depend on settings migration internals or UI controls unless explicitly UI-owned",
-        ),
-        ImportViolation(
-            rule_id="adapters-avoid-ui-and-migration-internals",
             importer="src/puripuly_heart/core/managed_openrouter_broker_client.py",
             imported="puripuly_heart.config.settings",
             importer_layer="adapters",
@@ -521,6 +513,10 @@ SETTINGS_PUBLIC_COMPATIBILITY_FACADE_PATHS = frozenset(
 SETTINGS_LEGACY_COMPATIBILITY_ADAPTER_PATHS = frozenset(
     {
         "src/puripuly_heart/app/services/settings_mutation_legacy.py",
+        "src/puripuly_heart/app/wiring_llm_factory.py",
+        "src/puripuly_heart/app/wiring_managed_auth_factory.py",
+        "src/puripuly_heart/app/wiring_overlay_factory.py",
+        "src/puripuly_heart/app/wiring_stt_factory.py",
     }
 )
 

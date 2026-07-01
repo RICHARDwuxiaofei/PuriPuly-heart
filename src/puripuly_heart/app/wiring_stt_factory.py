@@ -1,0 +1,523 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+
+from puripuly_heart.app.wiring_llm_factory import _qwen_api_key_for_resolved_credential
+from puripuly_heart.app.wiring_secrets_factory import require_secret
+from puripuly_heart.config.resolved import ResolvedCredentialRequirement, ResolvedSTTConfig
+from puripuly_heart.config.runtime_resolution import (
+    CREDENTIAL_REF_DEEPGRAM_STT,
+    CREDENTIAL_REF_QWEN_SINGAPORE,
+    CREDENTIAL_REF_SONIOX_STT,
+    SONIOX_STT_DEFAULT_KEEPALIVE_INTERVAL_S,
+    SONIOX_STT_DEFAULT_TRAILING_SILENCE_MS,
+    STT_PROVIDER_DEEPGRAM,
+    STT_PROVIDER_LOCAL_QWEN,
+    STT_PROVIDER_QWEN_ASR,
+    STT_PROVIDER_SONIOX,
+    STTRuntimeIntent,
+)
+from puripuly_heart.config.runtime_resolution import (
+    resolve_stt_config as resolve_stt_runtime_config,
+)
+from puripuly_heart.config.settings import (
+    STT_INTERNAL_SAMPLE_RATE_HZ,
+    AppSettings,
+    QwenRegion,
+    STTProviderName,
+)
+from puripuly_heart.core.storage.secrets import SecretStore
+from puripuly_heart.core.stt.backend import STTBackend
+from puripuly_heart.core.stt.custom_vocab import (
+    CustomVocabularyRuntimeConfig,
+    get_effective_custom_terms,
+)
+
+
+def build_custom_vocabulary_runtime_config(
+    settings: AppSettings,
+) -> CustomVocabularyRuntimeConfig:
+    """Build a narrow custom-vocabulary runtime DTO from legacy settings."""
+
+    return CustomVocabularyRuntimeConfig(
+        enabled=settings.stt.custom_vocabulary_enabled,
+        terms=settings.stt.custom_terms,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedPeerSTTConfig:
+    provider: STTProviderName
+    source_language: str
+    sample_rate_hz: int
+    keyterms: tuple[str, ...]
+    deepgram_model: str | None = None
+    qwen_model: str | None = None
+    qwen_region: QwenRegion | None = None
+    soniox_model: str | None = None
+    soniox_endpoint: str | None = None
+    soniox_keepalive_interval_s: float | None = None
+    soniox_trailing_silence_ms: int | None = None
+
+    @property
+    def model(self) -> str | None:
+        if self.provider == STTProviderName.DEEPGRAM:
+            return self.deepgram_model
+        if self.provider == STTProviderName.QWEN_ASR:
+            return self.qwen_model
+        if self.provider == STTProviderName.SONIOX:
+            return self.soniox_model
+        return None
+
+    @property
+    def endpoint(self) -> str | None:
+        if self.provider == STTProviderName.SONIOX:
+            return self.soniox_endpoint
+        return None
+
+    @property
+    def region(self) -> QwenRegion | None:
+        if self.provider == STTProviderName.QWEN_ASR:
+            return self.qwen_region
+        return None
+
+    @property
+    def provider_options(self) -> Mapping[str, object]:
+        if self.provider == STTProviderName.SONIOX:
+            return {
+                "keepalive_interval_s": self.soniox_keepalive_interval_s,
+                "trailing_silence_ms": self.soniox_trailing_silence_ms,
+            }
+        return {}
+
+
+def _stt_provider_name_or_raise(
+    provider: STTProviderName | str,
+    *,
+    peer: bool,
+) -> STTProviderName:
+    if isinstance(provider, STTProviderName):
+        return provider
+    try:
+        return STTProviderName(str(provider))
+    except ValueError as exc:
+        label = "peer STT" if peer else "STT"
+        raise ValueError(f"Unsupported {label} provider: {provider}") from exc
+
+
+def _stt_provider_value_or_raise(
+    provider: STTProviderName | str,
+    *,
+    peer: bool,
+) -> str:
+    return _stt_provider_name_or_raise(provider, peer=peer).value
+
+
+def _effective_custom_terms_for_resolved_config(
+    settings: AppSettings,
+    source_language: str,
+) -> Mapping[str, tuple[str, ...]]:
+    terms = tuple(
+        get_effective_custom_terms(
+            build_custom_vocabulary_runtime_config(settings), source_language
+        )
+    )
+    if not terms:
+        return {}
+    return {source_language: terms}
+
+
+def _self_stt_runtime_intent_from_compatibility_settings(settings: AppSettings) -> STTRuntimeIntent:
+    source_language = settings.languages.source_language
+    return STTRuntimeIntent(
+        channel="self",
+        provider=_stt_provider_value_or_raise(settings.provider.stt, peer=False),
+        source_language=source_language,
+        input_host_api=settings.audio.input_host_api,
+        input_device=settings.audio.input_device,
+        output_device=None,
+        sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
+        channels=settings.audio.internal_channels,
+        ring_buffer_ms=settings.audio.ring_buffer_ms,
+        drain_timeout_s=settings.stt.drain_timeout_s,
+        vad_speech_threshold=settings.stt.vad_speech_threshold,
+        vad_hangover_ms=settings.stt.low_latency_vad_hangover_ms,
+        vad_pre_roll_ms=500,
+        low_latency_enabled=settings.stt.low_latency_mode,
+        low_latency_merge_gap_ms=settings.stt.low_latency_merge_gap_ms,
+        low_latency_spec_retry_max=settings.stt.low_latency_spec_retry_max,
+        custom_vocabulary_enabled=settings.stt.custom_vocabulary_enabled,
+        custom_terms=_effective_custom_terms_for_resolved_config(settings, source_language),
+        deepgram_model=settings.deepgram_stt.model,
+        qwen_asr_model=settings.qwen_asr_stt.model,
+        qwen_region=settings.qwen.region.value,
+        soniox_model=settings.soniox_stt.model,
+        soniox_endpoint=settings.soniox_stt.endpoint,
+        soniox_keepalive_interval_s=settings.soniox_stt.keepalive_interval_s,
+        soniox_trailing_silence_ms=settings.soniox_stt.trailing_silence_ms,
+    )
+
+
+def _peer_stt_runtime_intent_from_compatibility_settings(settings: AppSettings) -> STTRuntimeIntent:
+    return STTRuntimeIntent(
+        channel="peer",
+        provider=_stt_provider_value_or_raise(settings.provider.peer_stt, peer=True),
+        source_language=settings.languages.effective_peer_source,
+        input_host_api=None,
+        input_device=None,
+        output_device=settings.desktop_audio.output_device,
+        sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
+        channels=settings.audio.internal_channels,
+        ring_buffer_ms=settings.audio.ring_buffer_ms,
+        drain_timeout_s=settings.stt.drain_timeout_s,
+        vad_speech_threshold=settings.desktop_audio.vad_speech_threshold,
+        vad_hangover_ms=settings.desktop_audio.vad_hangover_ms,
+        vad_pre_roll_ms=settings.desktop_audio.vad_pre_roll_ms,
+        low_latency_enabled=settings.stt.low_latency_mode,
+        low_latency_merge_gap_ms=settings.stt.low_latency_merge_gap_ms,
+        low_latency_spec_retry_max=settings.stt.low_latency_spec_retry_max,
+        custom_vocabulary_enabled=False,
+        custom_terms={},
+        deepgram_model=settings.deepgram_stt.model,
+        qwen_asr_model=settings.qwen_asr_stt.model,
+        qwen_region=settings.qwen.region.value,
+        soniox_model=settings.soniox_stt.model,
+        soniox_endpoint=settings.soniox_stt.endpoint,
+        soniox_keepalive_interval_s=settings.soniox_stt.keepalive_interval_s,
+        soniox_trailing_silence_ms=settings.soniox_stt.trailing_silence_ms,
+    )
+
+
+def _effective_custom_terms_for_resolved_config(
+    settings: AppSettings,
+    source_language: str,
+) -> Mapping[str, tuple[str, ...]]:
+    terms = tuple(
+        get_effective_custom_terms(
+            build_custom_vocabulary_runtime_config(settings), source_language
+        )
+    )
+    if not terms:
+        return {}
+    return {source_language: terms}
+
+
+def _self_stt_runtime_intent_from_compatibility_settings(settings: AppSettings) -> STTRuntimeIntent:
+    source_language = settings.languages.source_language
+    return STTRuntimeIntent(
+        channel="self",
+        provider=_stt_provider_value_or_raise(settings.provider.stt, peer=False),
+        source_language=source_language,
+        input_host_api=settings.audio.input_host_api,
+        input_device=settings.audio.input_device,
+        output_device=None,
+        sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
+        channels=settings.audio.internal_channels,
+        ring_buffer_ms=settings.audio.ring_buffer_ms,
+        drain_timeout_s=settings.stt.drain_timeout_s,
+        vad_speech_threshold=settings.stt.vad_speech_threshold,
+        vad_hangover_ms=settings.stt.low_latency_vad_hangover_ms,
+        vad_pre_roll_ms=500,
+        low_latency_enabled=settings.stt.low_latency_mode,
+        low_latency_merge_gap_ms=settings.stt.low_latency_merge_gap_ms,
+        low_latency_spec_retry_max=settings.stt.low_latency_spec_retry_max,
+        custom_vocabulary_enabled=settings.stt.custom_vocabulary_enabled,
+        custom_terms=_effective_custom_terms_for_resolved_config(settings, source_language),
+        deepgram_model=settings.deepgram_stt.model,
+        qwen_asr_model=settings.qwen_asr_stt.model,
+        qwen_region=settings.qwen.region.value,
+        soniox_model=settings.soniox_stt.model,
+        soniox_endpoint=settings.soniox_stt.endpoint,
+        soniox_keepalive_interval_s=settings.soniox_stt.keepalive_interval_s,
+        soniox_trailing_silence_ms=settings.soniox_stt.trailing_silence_ms,
+    )
+
+
+def _peer_stt_runtime_intent_from_compatibility_settings(settings: AppSettings) -> STTRuntimeIntent:
+    return STTRuntimeIntent(
+        channel="peer",
+        provider=_stt_provider_value_or_raise(settings.provider.peer_stt, peer=True),
+        source_language=settings.languages.effective_peer_source,
+        input_host_api=None,
+        input_device=None,
+        output_device=settings.desktop_audio.output_device,
+        sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
+        channels=settings.audio.internal_channels,
+        ring_buffer_ms=settings.audio.ring_buffer_ms,
+        drain_timeout_s=settings.stt.drain_timeout_s,
+        vad_speech_threshold=settings.desktop_audio.vad_speech_threshold,
+        vad_hangover_ms=settings.desktop_audio.vad_hangover_ms,
+        vad_pre_roll_ms=settings.desktop_audio.vad_pre_roll_ms,
+        low_latency_enabled=settings.stt.low_latency_mode,
+        low_latency_merge_gap_ms=settings.stt.low_latency_merge_gap_ms,
+        low_latency_spec_retry_max=settings.stt.low_latency_spec_retry_max,
+        custom_vocabulary_enabled=False,
+        custom_terms={},
+        deepgram_model=settings.deepgram_stt.model,
+        qwen_asr_model=settings.qwen_asr_stt.model,
+        qwen_region=settings.qwen.region.value,
+        soniox_model=settings.soniox_stt.model,
+        soniox_endpoint=settings.soniox_stt.endpoint,
+        soniox_keepalive_interval_s=settings.soniox_stt.keepalive_interval_s,
+        soniox_trailing_silence_ms=settings.soniox_stt.trailing_silence_ms,
+    )
+
+
+def create_stt_backend(
+    settings: AppSettings,
+    *,
+    secrets: SecretStore,
+    diagnostics_enabled: Callable[[], bool] | None = None,
+) -> STTBackend:
+    resolved = resolve_stt_runtime_config(
+        _self_stt_runtime_intent_from_compatibility_settings(settings)
+    )
+    return create_stt_backend_from_resolved_config(
+        resolved,
+        secrets=secrets,
+        diagnostics_enabled=diagnostics_enabled,
+    )
+
+
+def _resolved_stt_keyterms(config: ResolvedSTTConfig) -> tuple[str, ...]:
+    if not config.custom_vocabulary_enabled:
+        return ()
+    exact_terms = config.custom_terms.get(config.source_language)
+    if exact_terms is not None:
+        return tuple(exact_terms)
+    base_language = config.source_language.split("-")[0].lower()
+    return tuple(config.custom_terms.get(base_language, ()))
+
+
+def _resolved_float_option(
+    options: Mapping[str, object],
+    key: str,
+    *,
+    default: float,
+) -> float:
+    value = options.get(key)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return default
+
+
+def _resolved_int_option(
+    options: Mapping[str, object],
+    key: str,
+    *,
+    default: int,
+) -> int:
+    value = options.get(key)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return default
+
+
+def _deepgram_api_key_for_resolved_credential(
+    credential: ResolvedCredentialRequirement,
+    *,
+    secrets: SecretStore,
+) -> str:
+    if credential.reference not in (CREDENTIAL_REF_DEEPGRAM_STT, None):
+        raise ValueError("Unsupported Deepgram resolved credential reference")
+    return require_secret(secrets, key="deepgram_api_key", env_var="DEEPGRAM_API_KEY")
+
+
+def _soniox_api_key_for_resolved_credential(
+    credential: ResolvedCredentialRequirement,
+    *,
+    secrets: SecretStore,
+) -> str:
+    if credential.reference not in (CREDENTIAL_REF_SONIOX_STT, None):
+        raise ValueError("Unsupported Soniox resolved credential reference")
+    return require_secret(secrets, key="soniox_api_key", env_var="SONIOX_API_KEY")
+
+
+def _qwen_asr_endpoint_for_resolved_config(config: ResolvedSTTConfig) -> str:
+    if config.endpoint:
+        return config.endpoint
+    if config.region == QwenRegion.SINGAPORE.value or (
+        config.credential.reference == CREDENTIAL_REF_QWEN_SINGAPORE
+    ):
+        return "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+    return "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+
+
+def create_stt_backend_from_resolved_config(
+    config: ResolvedSTTConfig,
+    *,
+    secrets: SecretStore,
+    diagnostics_enabled: Callable[[], bool] | None = None,
+) -> STTBackend:
+    stream_label = config.channel
+    keyterms = _resolved_stt_keyterms(config)
+
+    if config.provider == STT_PROVIDER_LOCAL_QWEN:
+        from puripuly_heart.core.language import get_local_qwen_language_hint
+        from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
+        from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaSTTBackend
+
+        return LocalQwenSherpaSTTBackend(
+            model_dir=default_local_stt_model_dir(),
+            sample_rate_hz=config.sample_rate_hz,
+            stream_label=stream_label,
+            language_hint=get_local_qwen_language_hint(config.source_language),
+            diagnostics_enabled=diagnostics_enabled,
+        )
+
+    if config.provider == STT_PROVIDER_DEEPGRAM:
+        from puripuly_heart.core.language import get_deepgram_language
+        from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
+
+        api_key = _deepgram_api_key_for_resolved_credential(config.credential, secrets=secrets)
+        return DeepgramRealtimeSTTBackend(
+            api_key=api_key,
+            model=config.model or "nova-3",
+            language=get_deepgram_language(config.source_language),
+            sample_rate_hz=config.sample_rate_hz,
+            keyterms=keyterms,
+            stream_label=stream_label,
+        )
+
+    if config.provider == STT_PROVIDER_QWEN_ASR:
+        from puripuly_heart.core.language import get_qwen_asr_language
+        from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
+
+        api_key = _qwen_api_key_for_resolved_credential(config.credential, secrets=secrets)
+        return QwenASRRealtimeSTTBackend(
+            api_key=api_key,
+            model=config.model or "qwen3-asr-flash-realtime",
+            endpoint=_qwen_asr_endpoint_for_resolved_config(config),
+            language=get_qwen_asr_language(config.source_language),
+            sample_rate_hz=config.sample_rate_hz,
+        )
+
+    if config.provider == STT_PROVIDER_SONIOX:
+        from puripuly_heart.core.language import get_soniox_language_hints
+        from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
+
+        api_key = _soniox_api_key_for_resolved_credential(config.credential, secrets=secrets)
+        return SonioxRealtimeSTTBackend(
+            api_key=api_key,
+            model=config.model or "stt-rt-v4",
+            endpoint=config.endpoint or "wss://stt-rt.soniox.com/transcribe-websocket",
+            language_hints=get_soniox_language_hints(config.source_language),
+            sample_rate_hz=config.sample_rate_hz,
+            keepalive_interval_s=_resolved_float_option(
+                config.provider_options,
+                "keepalive_interval_s",
+                default=SONIOX_STT_DEFAULT_KEEPALIVE_INTERVAL_S,
+            ),
+            trailing_silence_ms=_resolved_int_option(
+                config.provider_options,
+                "trailing_silence_ms",
+                default=SONIOX_STT_DEFAULT_TRAILING_SILENCE_MS,
+            ),
+            context_terms=keyterms,
+        )
+
+    raise ValueError(f"Unsupported STT provider: {config.provider}")
+
+
+def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
+    peer_source_language = settings.languages.effective_peer_source
+    keyterms: tuple[str, ...] = ()
+    provider = _stt_provider_name_or_raise(settings.provider.peer_stt, peer=True)
+
+    if provider == STTProviderName.DEEPGRAM:
+        return ResolvedPeerSTTConfig(
+            provider=provider,
+            source_language=peer_source_language,
+            sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
+            keyterms=keyterms,
+            deepgram_model=settings.deepgram_stt.model,
+        )
+
+    if provider == STTProviderName.QWEN_ASR:
+        return ResolvedPeerSTTConfig(
+            provider=provider,
+            source_language=peer_source_language,
+            sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
+            keyterms=keyterms,
+            qwen_model=settings.qwen_asr_stt.model,
+            qwen_region=settings.qwen.region,
+        )
+
+    if provider == STTProviderName.SONIOX:
+        return ResolvedPeerSTTConfig(
+            provider=provider,
+            source_language=peer_source_language,
+            sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
+            keyterms=keyterms,
+            soniox_model=settings.soniox_stt.model,
+            soniox_endpoint=settings.soniox_stt.endpoint,
+            soniox_keepalive_interval_s=settings.soniox_stt.keepalive_interval_s,
+            soniox_trailing_silence_ms=settings.soniox_stt.trailing_silence_ms,
+        )
+
+    if provider == STTProviderName.LOCAL_QWEN:
+        return ResolvedPeerSTTConfig(
+            provider=provider,
+            source_language=peer_source_language,
+            sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
+            keyterms=(),
+        )
+
+    raise ValueError(f"Unsupported peer STT provider: {provider}")
+
+
+def _resolved_peer_stt_config_from_compatibility_settings(
+    settings: AppSettings,
+) -> ResolvedSTTConfig:
+    return resolve_stt_runtime_config(
+        _peer_stt_runtime_intent_from_compatibility_settings(settings)
+    )
+
+
+def resolve_peer_stt_runtime_config(settings: AppSettings) -> ResolvedSTTConfig:
+    return _resolved_peer_stt_config_from_compatibility_settings(settings)
+
+
+def build_peer_stt_provider_signature(settings: AppSettings) -> tuple[object, ...]:
+    resolved = resolve_peer_stt_config(settings)
+    return (
+        resolved.provider,
+        resolved.source_language,
+        resolved.sample_rate_hz,
+        resolved.deepgram_model,
+        resolved.qwen_model,
+        resolved.qwen_region,
+        resolved.soniox_model,
+        resolved.soniox_endpoint,
+        resolved.soniox_keepalive_interval_s,
+        resolved.soniox_trailing_silence_ms,
+        resolved.keyterms,
+    )
+
+
+def create_peer_stt_backend(
+    settings: AppSettings,
+    *,
+    secrets: SecretStore,
+    diagnostics_enabled: Callable[[], bool] | None = None,
+) -> STTBackend:
+    resolved = resolve_peer_stt_runtime_config(settings)
+    return create_peer_stt_backend_from_resolved_config(
+        resolved,
+        secrets=secrets,
+        diagnostics_enabled=diagnostics_enabled,
+    )
+
+
+def create_peer_stt_backend_from_resolved_config(
+    config: ResolvedSTTConfig,
+    *,
+    secrets: SecretStore,
+    diagnostics_enabled: Callable[[], bool] | None = None,
+) -> STTBackend:
+    return create_stt_backend_from_resolved_config(
+        config,
+        secrets=secrets,
+        diagnostics_enabled=diagnostics_enabled,
+    )
