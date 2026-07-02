@@ -145,7 +145,7 @@ Minimum automated smoke coverage should include the broker’s real HTTP contrac
 - [x] `POST /v1/trial/challenge/verify`
 - [x] `GET /v1/trial/status`
 - [x] `POST /v1/providers/openrouter/issue`
-- [x] `POST /v1/auth/qq/assert` with a synthetic non-PII `deploy-smoke-qq-<uuid>` identity and a credential computed from `BROKER_DEPLOY_SMOKE_QQ_AUTH_HMAC_PSK`
+- [x] `POST /v1/auth/qq/assert` with a synthetic non-PII QQ Managed issuance identity and a credential computed from `BROKER_DEPLOY_SMOKE_QQ_AUTH_HMAC_PSK`; when production issuance configuration is present, this returns `issued` plus a one-time `openrouter_api_key`.
 
 Implementation notes for the minimum smoke path:
 
@@ -174,7 +174,7 @@ Recommended failure-path smoke coverage:
 Canonical production smoke now also verifies:
 
 - [x] issued child-key metadata reflects the managed limit / expiry contract
-- [x] the test-only QQ assertion endpoint verifies a synthetic HMAC assertion without logging the PSK, raw identity, raw credential, or derived subject material
+- [x] QQ production issuance verifies a synthetic HMAC assertion without logging the PSK, raw identity, raw credential, derived subject material, or issued child key material
 - [x] the deploy path performs guardrail reconcile before deploy / smoke
 - [x] positive routing for `qwen/qwen3.5-flash-02-23`, `deepseek/deepseek-v4-flash`, and `google/gemini-2.5-flash-lite`
 - [x] a known disallowed model is rejected after guardrail assignment
