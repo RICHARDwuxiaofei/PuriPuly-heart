@@ -20,9 +20,10 @@ use crate::openvr::{
 };
 use crate::renderer::{
     CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionDebugOverlay, CaptionLayoutResult,
-    CaptionPresentation, CaptionRenderer, RenderDiagnostics, StyleBucketSourceCount,
-    VisibleCaptionBlock,
+    CaptionPresentation, CaptionRenderer,
 };
+#[cfg(test)]
+use crate::renderer::{RenderDiagnostics, StyleBucketSourceCount, VisibleCaptionBlock};
 use crate::state::{
     OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationSnapshot,
     OverlayScene, OverlaySlot, OverlayState,
@@ -516,13 +517,13 @@ impl OverlayRuntime {
             .apply_calibration(self.state.calibration())
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
         let detailed_logging = logger.is_detailed();
-        let blocks = self.caption_blocks_for_render(detailed_logging);
+        let visual_debug_overlays = false;
+        let blocks = self.caption_blocks_for_render(visual_debug_overlays);
         self.emit_pending_peer_overlay_first_emit_hooks(logger)
             .await?;
-        log_runtime_info(logger, format_caption_blocks_built_log(&blocks)).await?;
         let has_drawable_text = blocks.iter().any(CaptionBlock::has_drawable_text);
         let debug_overlay =
-            debug_overlay_for_frame(detailed_logging, self.state.snapshot().revision, &blocks);
+            debug_overlay_for_frame(visual_debug_overlays, self.state.snapshot().revision, &blocks);
         let peer_overlay_first_render_ids = peer_overlay_first_render_block_ids_from_caption_blocks(
             &blocks,
             &self.pending_peer_first_render_ids,
@@ -558,16 +559,6 @@ impl OverlayRuntime {
         let fully_transparent = frame.is_fully_transparent();
         let rendered_diagnostic_rows =
             collect_rendered_diagnostic_rows(self.state(), frame.layout());
-        log_runtime_info(
-            logger,
-            format_frame_rendered_log(
-                frame.layout(),
-                fully_transparent,
-                &rendered_diagnostic_rows,
-                render_duration_us,
-            ),
-        )
-        .await?;
         if !peer_overlay_first_render_ids.is_empty() {
             log_runtime_info(
                 logger,
@@ -669,7 +660,6 @@ impl OverlayRuntime {
                 ),
             )
             .await?;
-            log_runtime_info(logger, format_cache_stats_log(frame.diagnostics())).await?;
         }
         if detailed_logging {
             self.sample_and_log_frame_timing(
@@ -743,13 +733,7 @@ impl OverlayRuntime {
                 log_runtime_info(logger, format_snapshot_received_log(&snapshot)).await?;
                 let outcome = self.apply_snapshot(snapshot);
                 let receive_to_apply_us = snapshot_received_at.elapsed().as_micros();
-                log_runtime_info(
-                    logger,
-                    format_state_snapshot_log(&outcome, self.state(), self.redraw_requested),
-                )
-                .await?;
-                self.emit_snapshot_slot_correlation_if_changed(logger)
-                    .await?;
+                let _ = outcome;
                 self.emit_pending_visible_update_applied_diagnostics(logger)
                     .await?;
                 self.submit_frame_if_needed_with_timing(
@@ -947,25 +931,13 @@ fn overlay_variant_name(variant: OverlayPresentationBlockVariant) -> &'static st
     }
 }
 
+#[cfg(test)]
 fn caption_variant_name(variant: CaptionBlockVariant) -> &'static str {
     match variant {
         CaptionBlockVariant::ActiveSelf => "active_self",
         CaptionBlockVariant::ActivePeer => "active_peer",
         CaptionBlockVariant::Finalized => "finalized",
     }
-}
-
-fn format_snapshot_block_summary(block: &OverlayPresentationBlock) -> String {
-    format!(
-        "id={} variant={} sec={} channel={} update_id={} session_scope={} origin_wall_clock_ms={}",
-        block.id,
-        overlay_variant_name(block.block_variant),
-        log_runtime_secondary_state(block.secondary_enabled, &block.secondary_text),
-        block.channel,
-        format_optional_str(block.update_id.as_deref()),
-        format_optional_str(block.session_scope.as_deref()),
-        format_optional_u64(block.origin_wall_clock_ms),
-    )
 }
 
 fn update_ids_from_snapshot(snapshot: &OverlayPresentationSnapshot) -> Vec<String> {
@@ -979,16 +951,10 @@ fn update_ids_from_snapshot(snapshot: &OverlayPresentationSnapshot) -> Vec<Strin
 
 fn format_snapshot_received_log(snapshot: &OverlayPresentationSnapshot) -> String {
     format!(
-        "bridge_snapshot_received revision={} block_count={} update_ids=[{}] blocks=[{}]",
+        "bridge_snapshot_received revision={} block_count={} update_ids=[{}]",
         snapshot.revision,
         snapshot.blocks.len(),
         update_ids_from_snapshot(snapshot).join(","),
-        snapshot
-            .blocks
-            .iter()
-            .map(format_snapshot_block_summary)
-            .collect::<Vec<_>>()
-            .join("; ")
     )
 }
 
@@ -1275,6 +1241,7 @@ fn format_two_row_window_closed_log(
     )
 }
 
+#[cfg(test)]
 fn format_caption_block_summary(block: &CaptionBlock) -> String {
     format!(
         "id={} variant={} sec={}",
@@ -1284,6 +1251,7 @@ fn format_caption_block_summary(block: &CaptionBlock) -> String {
     )
 }
 
+#[cfg(test)]
 fn format_caption_blocks_built_log(blocks: &[CaptionBlock]) -> String {
     format!(
         "caption_blocks_built block_count={} blocks=[{}]",
@@ -1296,6 +1264,7 @@ fn format_caption_blocks_built_log(blocks: &[CaptionBlock]) -> String {
     )
 }
 
+#[cfg(test)]
 fn short_tail(value: &str) -> String {
     let trimmed = value.trim();
     let without_prefix = trimmed
@@ -1307,6 +1276,7 @@ fn short_tail(value: &str) -> String {
     chars[start..].iter().collect()
 }
 
+#[cfg(test)]
 fn stable_short_hash(value: &str) -> u32 {
     let mut hash = 0x811c9dc5u32;
     for byte in value.as_bytes() {
@@ -1316,6 +1286,7 @@ fn stable_short_hash(value: &str) -> u32 {
     hash
 }
 
+#[cfg(test)]
 fn debug_watermark_label_for_frame(revision: u64, blocks: &[CaptionBlock]) -> Option<String> {
     if !blocks.iter().any(CaptionBlock::has_drawable_text) {
         return None;
@@ -1358,16 +1329,15 @@ fn debug_watermark_label_for_frame(revision: u64, blocks: &[CaptionBlock]) -> Op
 }
 
 fn debug_overlay_for_frame(
-    detailed_logging: bool,
+    visual_debug_overlays: bool,
     revision: u64,
     blocks: &[CaptionBlock],
 ) -> Option<CaptionDebugOverlay> {
-    if !detailed_logging {
-        return None;
-    }
-    debug_watermark_label_for_frame(revision, blocks).and_then(CaptionDebugOverlay::new)
+    let _ = (visual_debug_overlays, revision, blocks);
+    None
 }
 
+#[cfg(test)]
 fn format_visible_block_summary(block: &VisibleCaptionBlock) -> String {
     format!(
         "id={} variant={} secondary_present={} secondary_reserved={} truncated_secondary={}",
@@ -1386,6 +1356,7 @@ fn update_ids_from_rendered_rows(rows: &[RenderedDiagnosticRow]) -> Vec<String> 
         .collect()
 }
 
+#[cfg(test)]
 fn block_ids_from_layout(layout: &CaptionLayoutResult) -> Vec<String> {
     layout
         .visible_blocks
@@ -1394,6 +1365,7 @@ fn block_ids_from_layout(layout: &CaptionLayoutResult) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn format_rendered_diagnostic_row_summary(row: &RenderedDiagnosticRow) -> String {
     format!(
         "{} bounds={:.1},{:.1},{:.1},{:.1} visual_bounds={:.1},{:.1},{:.1},{:.1} secondary_present={} truncated_secondary={}",
@@ -1411,6 +1383,7 @@ fn format_rendered_diagnostic_row_summary(row: &RenderedDiagnosticRow) -> String
     )
 }
 
+#[cfg(test)]
 fn format_rendered_diagnostic_rows(rows: &[RenderedDiagnosticRow]) -> String {
     rows.iter()
         .map(format_rendered_diagnostic_row_summary)
@@ -1424,6 +1397,7 @@ fn append_optional_duration(line: &mut String, name: &str, duration_us: Option<u
     }
 }
 
+#[cfg(test)]
 fn format_frame_rendered_log(
     layout: &CaptionLayoutResult,
     fully_transparent: bool,
@@ -1460,7 +1434,7 @@ fn format_frame_submitted_log(
     stage_durations: FrameStageDurations,
 ) -> String {
     let mut line = format!(
-        "frame_submitted revision={} visible_block_count={} self_block_count={} fully_transparent={} overlay_visible_before={} overlay_visible_after={} should_show_after_submit={} update_ids=[{}] block_ids=[{}] rows=[{}]",
+        "frame_submitted revision={} visible_block_count={} self_block_count={} fully_transparent={} overlay_visible_before={} overlay_visible_after={} should_show_after_submit={} update_ids=[{}]",
         revision,
         layout.visible_blocks.len(),
         visible_self_block_count(layout),
@@ -1469,20 +1443,8 @@ fn format_frame_submitted_log(
         overlay_visible_after,
         should_show_after_submit,
         update_ids_from_rendered_rows(rendered_rows).join(","),
-        block_ids_from_layout(layout).join(","),
-        format_rendered_diagnostic_rows(rendered_rows),
     );
     append_optional_duration(&mut line, "submit_duration_us", submit_duration_us);
-    append_optional_duration(
-        &mut line,
-        "receive_to_apply_us",
-        stage_durations.receive_to_apply_us,
-    );
-    append_optional_duration(
-        &mut line,
-        "render_duration_us",
-        stage_durations.render_duration_us,
-    );
     append_optional_duration(
         &mut line,
         "receive_to_submit_us",
@@ -1517,6 +1479,7 @@ fn format_frame_timing_log(
     )
 }
 
+#[cfg(test)]
 fn format_cache_stats_log(diagnostics: &RenderDiagnostics) -> String {
     format!(
         "cache_stats text_format_size={} layout_size={} line_size={} block_size={} text_format_hits={} text_format_misses={} font_warmup_attempts={} font_warmup_failures={} directwrite_layout_successes={} heuristic_layout_fallbacks={} layout_hits={} layout_misses={} line_hits={} line_misses={} block_hits={} block_misses={} style_bucket_source_counts=[{}]",
@@ -1540,6 +1503,7 @@ fn format_cache_stats_log(diagnostics: &RenderDiagnostics) -> String {
     )
 }
 
+#[cfg(test)]
 fn format_style_bucket_source_counts(counts: &[StyleBucketSourceCount]) -> String {
     counts
         .iter()
@@ -2321,14 +2285,12 @@ mod tests {
     }
 
     #[test]
-    fn debug_overlay_for_frame_is_present_in_detailed_mode_with_drawable_text() {
+    fn debug_overlay_for_frame_is_absent_in_detailed_mode_with_drawable_text() {
         let blocks = vec![CaptionBlock::new("self:active", "hello")
             .with_channel(CaptionChannel::SelfChannel)
             .with_variant(CaptionBlockVariant::ActiveSelf)];
 
-        let overlay = debug_overlay_for_frame(true, 73, &blocks).unwrap();
-
-        assert!(overlay.label().starts_with("DBG r73 "));
+        assert!(debug_overlay_for_frame(true, 73, &blocks).is_none());
     }
 
     #[tokio::test]
@@ -2383,7 +2345,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_summary_includes_variants_and_secondary_lengths() {
+    fn snapshot_summary_omits_block_details_for_log_noise_reduction() {
         let summary = format_snapshot_received_log(&OverlayPresentationSnapshot {
             revision: 7,
             calibration: OverlayPresentationCalibration::default(),
@@ -2423,11 +2385,10 @@ mod tests {
 
         assert!(summary.contains("bridge_snapshot_received revision=7 block_count=2"));
         assert!(summary.contains("update_ids=[upd-self-1]"));
-        assert!(summary.contains("id=self:1 variant=finalized sec=enabled/0"));
-        assert!(summary.contains("update_id=upd-self-1"));
-        assert!(summary.contains("session_scope=session:self"));
-        assert!(summary.contains("origin_wall_clock_ms=1712345678901"));
-        assert!(summary.contains("id=self:active variant=active_self sec=disabled/6"));
+        assert!(!summary.contains("blocks="));
+        assert!(!summary.contains("id=self:1 variant=finalized sec=enabled/0"));
+        assert!(!summary.contains("session_scope=session:self"));
+        assert!(!summary.contains("origin_wall_clock_ms=1712345678901"));
     }
 
     #[test]
@@ -2796,10 +2757,10 @@ mod tests {
 
         assert!(summary.contains("frame_submitted revision=7"));
         assert!(summary.contains("update_ids=[upd-self-1]"));
-        assert!(summary.contains("block_ids=[self:1,peer:1]"));
-        assert!(summary.contains("rows=[id=self:1"));
-        assert!(summary.contains("session_scope=session:self"));
-        assert!(summary.contains("origin_wall_clock_ms=1712345678901"));
+        assert!(!summary.contains("block_ids="));
+        assert!(!summary.contains("rows="));
+        assert!(!summary.contains("session_scope=session:self"));
+        assert!(!summary.contains("origin_wall_clock_ms=1712345678901"));
         assert!(summary.contains("visible_block_count=2"));
         assert!(summary.contains("self_block_count=1"));
         assert!(summary.contains("fully_transparent=false"));
@@ -2824,8 +2785,8 @@ mod tests {
             },
         );
         assert!(summary_with_duration.contains("submit_duration_us=421"));
-        assert!(summary_with_duration.contains("receive_to_apply_us=11"));
-        assert!(summary_with_duration.contains("render_duration_us=1234"));
+        assert!(!summary_with_duration.contains("receive_to_apply_us=11"));
+        assert!(!summary_with_duration.contains("render_duration_us=1234"));
         assert!(summary_with_duration.contains("receive_to_submit_us=3456"));
     }
 

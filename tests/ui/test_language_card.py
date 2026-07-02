@@ -121,7 +121,10 @@ def test_language_card_hover_and_set_languages(monkeypatch: pytest.MonkeyPatch) 
 
     card.set_row_labels("My voice", "Their voice")
     card.set_languages("Korean", "English", "Japanese", "French")
-    expected_short_size = language_card_module._row_text_size("Korean", "English")
+    expected_short_size = min(
+        language_card_module._row_text_size("Korean", "English"),
+        language_card_module._row_text_size("Japanese", "French"),
+    )
 
     assert card._self_row._label_text.value == "My voice"
     assert card._peer_row._label_text.value == "Their voice"
@@ -140,6 +143,26 @@ def test_language_card_hover_and_set_languages(monkeypatch: pytest.MonkeyPatch) 
     assert card._self_row._target_text.size == expected_long_size
     assert card._self_row._arrow_icon.size == expected_long_size + 4
     assert card._peer_row._target_text.value == "D" * 24
+
+
+def test_language_card_uses_unified_row_size_for_self_and_peer_visual_balance() -> None:
+    card = _build_language_card()
+
+    card.set_languages("Ko", "En", "A very long peer source language", "A very long peer target")
+
+    expected_size = min(
+        language_card_module._row_text_size("Ko", "En"),
+        language_card_module._row_text_size(
+            "A very long peer source language",
+            "A very long peer target",
+        ),
+    )
+    assert card._self_row._source_text.size == expected_size
+    assert card._self_row._target_text.size == expected_size
+    assert card._peer_row._source_text.size == expected_size
+    assert card._peer_row._target_text.size == expected_size
+    assert card._self_row._arrow_icon.size == expected_size + 4
+    assert card._peer_row._arrow_icon.size == expected_size + 4
 
 
 def test_language_card_uses_single_direction_arrow_icon() -> None:
