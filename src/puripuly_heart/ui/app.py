@@ -1454,6 +1454,25 @@ class TranslatorApp:
         self._mark_launch_high_priority_feedback_shown("snackbar", snackbar)
         self.page.open(snackbar)
 
+    def show_snackbar(self, message: str, bgcolor) -> None:
+        self._show_snackbar(message, bgcolor)
+
+    def clear_managed_auth_pending_state(self) -> None:
+        self.controller.clear_managed_auth_pending_state()
+
+    def get_event_language_codes(self) -> tuple[str | None, str | None]:
+        return self.controller.get_event_language_codes()
+
+    def is_event_translation_enabled(self) -> bool:
+        return bool(self.controller.hub.translation_enabled)
+
+    def get_event_stt_state(self) -> object | None:
+        stt = self.controller.hub.stt
+        return stt.state if stt is not None else None
+
+    def on_github_star_translation_success(self) -> None:
+        self.controller.schedule_github_star_prompt_translation_success_observed()
+
     def on_overlay_state_changed(
         self,
         *,

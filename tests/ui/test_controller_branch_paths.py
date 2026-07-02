@@ -1241,8 +1241,8 @@ async def test_start_local_llm_without_runtime_does_not_show_api_key_warning(
     hub = DummyHub(llm=None, stt=object())
 
     class FakeBridge:
-        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
-            _ = (app, event_queue, runtime_logging)
+        def __init__(self, **kwargs) -> None:
+            _ = kwargs
 
         async def run(self) -> None:
             await asyncio.sleep(0)
@@ -3775,9 +3775,8 @@ async def test_rebuild_pipeline_closes_previous_peer_runtime_before_replacement(
     new_hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
 
     class FakeUIEventBridge:
-        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
-            self.app = app
-            self.event_queue = event_queue
+        def __init__(self, **kwargs) -> None:
+            self.event_queue = kwargs["event_queue"]
 
         async def run(self) -> None:
             return None
@@ -3893,8 +3892,8 @@ async def test_rebuild_pipeline_local_llm_without_runtime_does_not_show_api_key_
     new_hub = DummyHub(llm=None, stt=object())
 
     class FakeUIEventBridge:
-        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
-            _ = (app, event_queue, runtime_logging)
+        def __init__(self, **kwargs) -> None:
+            _ = kwargs
 
         async def run(self) -> None:
             return None
@@ -3938,9 +3937,8 @@ async def test_rebuild_pipeline_rebinds_overlay_presenter_to_new_hub(
     new_hub = DummyHub(llm=object(), stt=object())
 
     class FakeUIEventBridge:
-        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
-            self.app = app
-            self.event_queue = event_queue
+        def __init__(self, **kwargs) -> None:
+            self.event_queue = kwargs["event_queue"]
 
         async def run(self) -> None:
             return None
@@ -4002,9 +4000,8 @@ async def test_rebuild_pipeline_keeps_preserved_presenter_detached_when_overlay_
     new_hub = DummyHub(llm=object(), stt=object())
 
     class FakeUIEventBridge:
-        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
-            self.app = app
-            self.event_queue = event_queue
+        def __init__(self, **kwargs) -> None:
+            self.event_queue = kwargs["event_queue"]
 
         async def run(self) -> None:
             return None
@@ -4048,8 +4045,8 @@ async def test_rebuild_pipeline_refreshes_overlay_dependencies_without_overlay_r
     events: list[tuple[str, object]] = []
 
     class FakeUIEventBridge:
-        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
-            events.append(("bridge_init", event_queue))
+        def __init__(self, **kwargs) -> None:
+            events.append(("bridge_init", kwargs["event_queue"]))
 
         async def run(self) -> None:
             events.append(("bridge_run", True))
@@ -11240,8 +11237,23 @@ async def test_start_initializes_dashboard_and_bridge(
     hub = DummyHub(llm=object(), stt=object())
 
     class FakeBridge:
-        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
-            bridge_events.append(("init", app, event_queue, runtime_logging))
+        def __init__(self, **kwargs) -> None:
+            assert "app" not in kwargs
+            assert {
+                "event_queue",
+                "runtime_logging",
+                "dashboard_destination",
+                "history_destination",
+                "conversation_destination",
+                "get_language_codes",
+                "is_translation_enabled",
+                "get_stt_state",
+                "clear_managed_auth_pending",
+                "show_snackbar",
+                "on_github_star_translation_success",
+                "on_overlay_state_changed",
+            }.issubset(kwargs)
+            bridge_events.append(("init", kwargs["event_queue"], kwargs.get("runtime_logging")))
 
         async def run(self) -> None:
             bridge_events.append("run")
@@ -11284,7 +11296,7 @@ async def test_start_initializes_dashboard_and_bridge(
     assert dash.translation_enabled is False
     assert hub.translation_enabled is False
     assert hub.start_calls == [True]
-    assert bridge_events[0] == ("init", app, hub.ui_events, controller.runtime_logging)
+    assert bridge_events[0] == ("init", hub.ui_events, controller.runtime_logging)
     assert "run" in bridge_events
 
 
@@ -11310,8 +11322,8 @@ async def test_start_does_not_auto_restore_transient_overlay_or_peer_toggles(
         overlay_calls.append(enabled)
 
     class FakeBridge:
-        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
-            _ = (app, event_queue, runtime_logging)
+        def __init__(self, **kwargs) -> None:
+            _ = kwargs
 
         async def run(self) -> None:
             return None
@@ -11484,8 +11496,8 @@ async def test_start_keeps_managed_openrouter_dashboard_toggle_available_without
     )
 
     class FakeBridge:
-        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
-            _ = (app, event_queue)
+        def __init__(self, **kwargs) -> None:
+            _ = kwargs
 
         async def run(self) -> None:
             return None
@@ -11551,8 +11563,8 @@ async def test_exhausted_managed_start_and_background_verify_do_not_auto_show_fo
     )
 
     class FakeBridge:
-        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
-            _ = (app, event_queue, runtime_logging)
+        def __init__(self, **kwargs) -> None:
+            _ = kwargs
 
         async def run(self) -> None:
             return None
@@ -17875,8 +17887,8 @@ async def test_rebuild_pipeline_restarts_runtime_and_schedules_verify(
             events.append(("new_hub_start", auto_flush_osc))
 
     class FakeBridge:
-        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
-            events.append(("bridge_init", app, event_queue, runtime_logging))
+        def __init__(self, **kwargs) -> None:
+            events.append(("bridge_init", kwargs["event_queue"], kwargs.get("runtime_logging")))
 
         async def run(self) -> None:
             events.append("bridge_run")

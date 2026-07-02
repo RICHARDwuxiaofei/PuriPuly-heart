@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import io
 import json
 import logging
@@ -21,8 +22,15 @@ from puripuly_heart.core.managed_openrouter_release import (
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.domain.events import STTSessionState, UIEvent, UIEventType
 from puripuly_heart.domain.models import OSCMessage, Transcript, Translation
-from puripuly_heart.ui import event_bridge as event_bridge_module
-from puripuly_heart.ui.event_bridge import UIEventBridge
+from puripuly_heart.ui import event_dispatch as event_dispatch_module
+from puripuly_heart.ui.event_bridge import (
+    AppConversationEventDestination,
+    AppDashboardEventDestination,
+    AppHistoryEventDestination,
+    UIEventBridge,
+)
+from puripuly_heart.ui.event_mapping import map_ui_event
+from puripuly_heart.ui.event_projection import EventProjectionContext, EventProjectionService
 from puripuly_heart.ui.i18n import get_locale, set_locale, t
 from puripuly_heart.ui.views import logs as logs_view_module
 from puripuly_heart.ui.views.logs import FletLogHandler, LogsView
@@ -194,9 +202,33 @@ class DummyApp:
         self.clear_managed_auth_pending_calls += 1
         self.controller.managed_auth_pending = False
 
+    def clear_managed_auth_pending_state(self) -> None:
+        self._record_clear_managed_auth_pending()
+
+    def get_event_language_codes(self) -> tuple[str | None, str | None]:
+        return self.controller.get_event_language_codes()
+
+    def is_event_translation_enabled(self) -> bool:
+        return bool(self.controller.hub.translation_enabled)
+
+    def get_event_stt_state(self) -> STTSessionState | None:
+        return self.controller.hub.stt.state
+
+    def on_github_star_translation_success(self) -> None:
+        scheduler = getattr(
+            self.controller,
+            "schedule_github_star_prompt_translation_success_observed",
+            None,
+        )
+        if callable(scheduler):
+            scheduler()
+
     def _show_snackbar(self, message: str, bgcolor, duration: int = 4000) -> None:
         _ = duration
         self.snackbar_calls.append((message, bgcolor))
+
+    def show_snackbar(self, message: str, bgcolor) -> None:
+        self._show_snackbar(message, bgcolor)
 
     def add_history_entry(
         self,
@@ -244,6 +276,47 @@ class RuntimeLoggingCapture:
         return True
 
 
+def make_bridge(app: object, **kwargs: object) -> UIEventBridge:
+    event_queue = kwargs.pop("event_queue", asyncio.Queue())
+    return UIEventBridge(
+        event_queue=event_queue,
+        dashboard_destination=kwargs.pop(
+            "dashboard_destination",
+            AppDashboardEventDestination(getattr(app, "view_dashboard", None)),
+        ),
+        history_destination=kwargs.pop(
+            "history_destination",
+            AppHistoryEventDestination(getattr(app, "add_history_entry", None)),
+        ),
+        conversation_destination=kwargs.pop(
+            "conversation_destination",
+            AppConversationEventDestination(
+                getattr(getattr(app, "view_logs", None), "append_conversation_record", None)
+            ),
+        ),
+        error_destination=kwargs.pop("error_destination", None),
+        runtime_logging=kwargs.pop("runtime_logging", None),
+        get_language_codes=kwargs.pop(
+            "get_language_codes", getattr(app, "get_event_language_codes", None)
+        ),
+        is_translation_enabled=kwargs.pop(
+            "is_translation_enabled", getattr(app, "is_event_translation_enabled", None)
+        ),
+        get_stt_state=kwargs.pop("get_stt_state", getattr(app, "get_event_stt_state", None)),
+        clear_managed_auth_pending=kwargs.pop(
+            "clear_managed_auth_pending", getattr(app, "clear_managed_auth_pending_state", None)
+        ),
+        show_snackbar=kwargs.pop("show_snackbar", getattr(app, "show_snackbar", None)),
+        on_github_star_translation_success=kwargs.pop(
+            "on_github_star_translation_success",
+            getattr(app, "on_github_star_translation_success", None),
+        ),
+        on_overlay_state_changed=kwargs.pop(
+            "on_overlay_state_changed", getattr(app, "on_overlay_state_changed", None)
+        ),
+    )
+
+
 def test_event_bridge_reads_language_codes_from_controller_contract_without_settings_shape() -> (
     None
 ):
@@ -252,9 +325,85 @@ def test_event_bridge_reads_language_codes_from_controller_contract_without_sett
         get_event_language_codes=lambda: ("ja", "de"),
         hub=SimpleNamespace(translation_enabled=False),
     )
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
 
     assert bridge._get_language_codes() == ("ja", "de")
+
+
+def test_event_bridge_constructor_requires_explicit_dispatch_ports() -> None:
+    signature = inspect.signature(UIEventBridge)
+
+    assert "app" not in signature.parameters
+    for name in (
+        "dashboard_destination",
+        "history_destination",
+        "conversation_destination",
+    ):
+        assert signature.parameters[name].default is inspect.Parameter.empty
+
+
+def test_event_mapping_is_testable_without_view_mutation() -> None:
+    transcript = Transcript(utterance_id=uuid4(), text="partial", is_final=False)
+    mapped = map_ui_event(
+        UIEvent(type=UIEventType.TRANSCRIPT_PARTIAL, payload=transcript, source="Mic")
+    )
+
+    assert mapped is not None
+    assert mapped.kind == "transcript"
+    assert mapped.payload is transcript
+    assert mapped.source == "Mic"
+    assert mapped.transcript_kind == "partial"
+    assert map_ui_event(UIEvent(type=UIEventType.TRANSCRIPT_FINAL, payload="bad")) is None
+
+
+def test_event_projection_builds_dtos_without_runtime_subscription() -> None:
+    service = EventProjectionService(final_transcript_cache_limit=2)
+    utterance_id = uuid4()
+    context = EventProjectionContext(
+        source_language="ko",
+        target_language="en",
+        translation_enabled=True,
+        runtime_logging_mode="detailed",
+    )
+    mapped_transcript = map_ui_event(
+        UIEvent(
+            type=UIEventType.TRANSCRIPT_FINAL,
+            payload=Transcript(
+                utterance_id=utterance_id,
+                text="source",
+                is_final=True,
+                channel="self",
+            ),
+            source="Mic",
+        )
+    )
+    assert mapped_transcript is not None
+    transcript_projection = service.project(mapped_transcript, context)
+
+    mapped_translation = map_ui_event(
+        UIEvent(
+            type=UIEventType.TRANSLATION_DONE,
+            payload=Translation(
+                utterance_id=utterance_id,
+                text="translated",
+                channel="self",
+                target_language="en",
+            ),
+            source="Mic",
+        )
+    )
+    assert mapped_translation is not None
+    translation_projection = service.project(mapped_translation, context)
+
+    assert transcript_projection.transcript is not None
+    assert transcript_projection.transcript.channel == "self"
+    assert transcript_projection.history[0].language_code == "ko"
+    assert translation_projection.translation is not None
+    assert translation_projection.translation.channel == "self"
+    assert translation_projection.conversation is not None
+    assert translation_projection.conversation.source_text == "source"
+    assert translation_projection.translation_diagnostic is not None
+    assert translation_projection.translation_diagnostic.text_len == len("translated")
 
 
 class RecordingDashboardDestination:
@@ -371,7 +520,7 @@ def assert_dashboard_translation_applied_marker(
 @pytest.mark.asyncio
 async def test_event_bridge_maps_session_and_transcript_events() -> None:
     app = DummyApp()
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
     utterance_id = uuid4()
 
     await bridge._handle_event(
@@ -411,7 +560,7 @@ async def test_event_bridge_maps_session_and_transcript_events() -> None:
 @pytest.mark.asyncio
 async def test_event_bridge_routes_translation_and_osc_history_by_language_mode() -> None:
     app = DummyApp()
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
     utterance_id = uuid4()
 
     translation = Translation(utterance_id=utterance_id, text="translated")
@@ -447,7 +596,7 @@ async def test_event_bridge_routes_translation_and_osc_history_by_language_mode(
 @pytest.mark.asyncio
 async def test_event_bridge_appends_self_conversation_record_from_translation_source_text() -> None:
     app = DummyApp()
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
     utterance_id = uuid4()
 
     await bridge._handle_event(
@@ -478,7 +627,7 @@ async def test_event_bridge_appends_self_conversation_record_from_translation_so
 @pytest.mark.asyncio
 async def test_event_bridge_uses_cached_final_self_transcript_as_source_fallback() -> None:
     app = DummyApp()
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
     utterance_id = uuid4()
 
     await bridge._handle_event(
@@ -505,7 +654,7 @@ async def test_event_bridge_translation_source_text_takes_precedence_over_cached
     None
 ):
     app = DummyApp()
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
     utterance_id = uuid4()
 
     await bridge._handle_event(
@@ -535,7 +684,7 @@ async def test_event_bridge_translation_source_text_takes_precedence_over_cached
 async def test_event_bridge_conversation_append_failure_does_not_skip_translation_history() -> None:
     app = DummyApp()
     app.view_logs = FailingConversationLogs()
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
     utterance_id = uuid4()
 
     await bridge._handle_event(
@@ -559,7 +708,7 @@ async def test_event_bridge_conversation_append_failure_does_not_skip_translatio
 async def test_event_bridge_missing_logs_sink_does_not_skip_translation_history() -> None:
     app_without_logs = DummyApp()
     delattr(app_without_logs, "view_logs")
-    bridge_without_logs = UIEventBridge(app=app_without_logs, event_queue=asyncio.Queue())
+    bridge_without_logs = make_bridge(app_without_logs, event_queue=asyncio.Queue())
 
     await bridge_without_logs._handle_event(
         UIEvent(
@@ -576,7 +725,7 @@ async def test_event_bridge_missing_logs_sink_does_not_skip_translation_history(
 
     app_without_append = DummyApp()
     app_without_append.view_logs = SimpleNamespace(lines=[])
-    bridge_without_append = UIEventBridge(app=app_without_append, event_queue=asyncio.Queue())
+    bridge_without_append = make_bridge(app_without_append, event_queue=asyncio.Queue())
 
     await bridge_without_append._handle_event(
         UIEvent(
@@ -600,7 +749,7 @@ async def test_event_bridge_skips_invalid_incomplete_peer_and_partial_conversati
     None
 ):
     app = DummyApp()
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
     partial_id = uuid4()
     peer_id = uuid4()
 
@@ -686,8 +835,8 @@ async def test_event_bridge_skips_invalid_incomplete_peer_and_partial_conversati
 @pytest.mark.asyncio
 async def test_event_bridge_final_self_transcript_cache_is_bounded(monkeypatch) -> None:
     app = DummyApp()
-    monkeypatch.setattr(event_bridge_module, "_FINAL_TRANSCRIPT_CACHE_LIMIT", 2)
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
+    bridge.projection_service.final_transcript_cache_limit = 2
     first_id = uuid4()
     second_id = uuid4()
     third_id = uuid4()
@@ -707,7 +856,7 @@ async def test_event_bridge_final_self_transcript_cache_is_bounded(monkeypatch) 
 @pytest.mark.asyncio
 async def test_event_bridge_close_clears_conversation_cache_and_rejects_late_records() -> None:
     app = DummyApp()
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
     utterance_id = uuid4()
 
     await bridge._handle_event(
@@ -741,7 +890,7 @@ async def test_event_bridge_close_clears_conversation_cache_and_rejects_late_rec
 async def test_event_bridge_appends_to_real_logs_view_conversation_text() -> None:
     app = DummyApp()
     app.view_logs = LogsView()
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
     utterance_id = uuid4()
 
     with (
@@ -776,8 +925,8 @@ async def test_event_bridge_appends_to_real_logs_view_conversation_text() -> Non
 async def test_event_bridge_logs_self_dashboard_translation_applied_detail_only() -> None:
     app = DummyApp()
     runtime_logging = RuntimeLoggingCapture()
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         runtime_logging=runtime_logging,
     )
@@ -816,8 +965,8 @@ async def test_event_bridge_accepts_separable_dashboard_history_conversation_des
     dashboard = RecordingDashboardDestination()
     history = RecordingHistoryDestination()
     conversation = RecordingConversationDestination()
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         dashboard_destination=dashboard,
         history_destination=history,
@@ -885,8 +1034,8 @@ async def test_event_bridge_error_destination_is_separable_from_dashboard_displa
     app = DummyApp()
     dashboard = RecordingDashboardDestination()
     error_destination = RecordingErrorDestination(show_dashboard_error=False)
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         dashboard_destination=dashboard,
         error_destination=error_destination,
@@ -912,8 +1061,8 @@ async def test_event_bridge_sanitizes_legacy_raw_string_payload_for_error_destin
     app = DummyApp()
     dashboard = RecordingDashboardDestination()
     error_destination = RecordingErrorDestination(show_dashboard_error=False)
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         dashboard_destination=dashboard,
         error_destination=error_destination,
@@ -965,8 +1114,8 @@ async def test_event_bridge_preserves_typed_error_payload_identity_for_error_des
     app = DummyApp()
     dashboard = RecordingDashboardDestination()
     error_destination = RecordingErrorDestination(show_dashboard_error=False)
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         dashboard_destination=dashboard,
         error_destination=error_destination,
@@ -1025,8 +1174,8 @@ async def test_event_bridge_localizes_user_error_report_without_diagnostic_leak(
         raw_detail = "upstream response body token=provider-secret-123"
         app = DummyApp()
         runtime_logging = RuntimeLoggingCapture()
-        bridge = UIEventBridge(
-            app=app,
+        bridge = make_bridge(
+            app,
             event_queue=asyncio.Queue(),
             runtime_logging=runtime_logging,
         )
@@ -1079,8 +1228,8 @@ async def test_event_bridge_localizes_direct_message_ref_payload() -> None:
     try:
         app = DummyApp()
         runtime_logging = RuntimeLoggingCapture()
-        bridge = UIEventBridge(
-            app=app,
+        bridge = make_bridge(
+            app,
             event_queue=asyncio.Queue(),
             runtime_logging=runtime_logging,
         )
@@ -1118,8 +1267,8 @@ async def test_event_bridge_redacts_unsafe_message_ref_params_before_user_visibl
     try:
         app = DummyApp()
         runtime_logging = RuntimeLoggingCapture()
-        bridge = UIEventBridge(
-            app=app,
+        bridge = make_bridge(
+            app,
             event_queue=asyncio.Queue(),
             runtime_logging=runtime_logging,
         )
@@ -1148,8 +1297,8 @@ async def test_event_bridge_redacts_unsafe_message_ref_params_before_user_visibl
 async def test_event_bridge_sanitizes_legacy_raw_string_error_before_user_visible_sinks() -> None:
     app = DummyApp()
     runtime_logging = RuntimeLoggingCapture()
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         runtime_logging=runtime_logging,
     )
@@ -1188,8 +1337,8 @@ async def test_event_bridge_sanitizes_legacy_raw_string_error_before_user_visibl
 async def test_event_bridge_routes_legacy_raw_fallback_through_central_redactor() -> None:
     app = DummyApp()
     runtime_logging = RuntimeLoggingCapture()
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         runtime_logging=runtime_logging,
     )
@@ -1213,7 +1362,7 @@ async def test_event_bridge_passes_dashboard_translation_visual_commit_metadata_
     None
 ):
     app = DummyApp()
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
     utterance_id = uuid4()
     translation = Translation(
         utterance_id=utterance_id,
@@ -1257,8 +1406,8 @@ async def test_event_bridge_passes_peer_debug_prefix_when_runtime_logging_is_det
     app = DummyApp()
     runtime_logging = RuntimeLoggingCapture()
     runtime_logging.mode = SessionLoggingMode.DETAILED
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         runtime_logging=runtime_logging,
     )
@@ -1302,8 +1451,8 @@ async def test_event_bridge_passes_peer_debug_prefix_when_runtime_logging_is_det
 async def test_event_bridge_logs_peer_dashboard_translation_applied_detail_only() -> None:
     app = DummyApp()
     runtime_logging = RuntimeLoggingCapture()
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         runtime_logging=runtime_logging,
     )
@@ -1346,8 +1495,8 @@ async def test_event_bridge_does_not_log_dashboard_translation_applied_for_inval
 ):
     app = DummyApp()
     runtime_logging = RuntimeLoggingCapture()
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         runtime_logging=runtime_logging,
     )
@@ -1367,8 +1516,8 @@ async def test_event_bridge_does_not_log_dashboard_translation_applied_without_d
     app = DummyApp()
     app.view_dashboard = None
     runtime_logging = RuntimeLoggingCapture()
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         runtime_logging=runtime_logging,
     )
@@ -1387,8 +1536,8 @@ async def test_event_bridge_does_not_log_dashboard_translation_applied_without_d
 async def test_event_bridge_best_effort_translation_apply_logging_does_not_block_history() -> None:
     app = DummyApp()
     runtime_logging = RuntimeLoggingCapture(detailed_error=RuntimeError("detail emit failed"))
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         runtime_logging=runtime_logging,
     )
@@ -1411,8 +1560,8 @@ async def test_event_bridge_dashboard_translation_applied_detail_disabled_keeps_
 ):
     app = DummyApp()
     runtime_logging = RuntimeLoggingCapture(detailed_enabled=False)
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         runtime_logging=runtime_logging,
     )
@@ -1434,8 +1583,8 @@ async def test_event_bridge_does_not_log_dashboard_translation_applied_when_sett
     app = DummyApp()
     app.view_dashboard = FailingTranslationDashboard()
     runtime_logging = RuntimeLoggingCapture()
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         runtime_logging=runtime_logging,
     )
@@ -1476,8 +1625,8 @@ async def test_event_bridge_handles_error_and_soniox_shutdown_suppression(tmp_pa
         ui_handler_factory=FletLogHandler,
     )
     runtime_logging.attach_realtime_sink(app.view_logs)
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         runtime_logging=runtime_logging,
     )
@@ -1530,8 +1679,8 @@ async def test_event_bridge_skips_duplicate_runtime_log_for_already_logged_error
         ui_handler_factory=FletLogHandler,
     )
     runtime_logging.attach_realtime_sink(app.view_logs)
-    bridge = UIEventBridge(
-        app=app,
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         runtime_logging=runtime_logging,
     )
@@ -1561,7 +1710,7 @@ async def test_event_bridge_skips_duplicate_runtime_log_for_already_logged_error
 async def test_event_bridge_ignores_unknown_event_and_keeps_queue_alive() -> None:
     app = DummyApp()
     queue: asyncio.Queue = asyncio.Queue()
-    bridge = UIEventBridge(app=app, event_queue=queue)
+    bridge = make_bridge(app, event_queue=queue)
 
     task = asyncio.create_task(bridge.run())
     await queue.put(SimpleNamespace(type="UNKNOWN", payload="x", source=None))
@@ -1580,9 +1729,9 @@ async def test_event_bridge_error_without_runtime_logging_uses_standard_logger_o
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = DummyApp()
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
     seen: list[str] = []
-    monkeypatch.setattr(event_bridge_module.logger, "error", lambda message: seen.append(message))
+    monkeypatch.setattr(event_dispatch_module.logger, "error", lambda message: seen.append(message))
 
     await bridge._handle_event(UIEvent(type=UIEventType.ERROR, payload="plain failure"))
 
@@ -1603,9 +1752,9 @@ async def test_event_bridge_error_with_broken_runtime_logging_uses_standard_logg
             _ = level
             raise RuntimeError("emit failed")
 
-    monkeypatch.setattr(event_bridge_module.logger, "error", lambda message: seen.append(message))
-    bridge = UIEventBridge(
-        app=app,
+    monkeypatch.setattr(event_dispatch_module.logger, "error", lambda message: seen.append(message))
+    bridge = make_bridge(
+        app,
         event_queue=asyncio.Queue(),
         runtime_logging=BrokenRuntimeLogging(),
     )
@@ -1626,7 +1775,7 @@ async def test_event_bridge_routes_managed_message_report_to_snackbar_without_da
     try:
         app = DummyApp()
         app.controller.managed_auth_pending = True
-        bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+        bridge = make_bridge(app, event_queue=asyncio.Queue())
         payload = messages.UserErrorReport(
             message=messages.UserMessageRef(
                 key="managed_release.retry_after_ms",
@@ -1673,7 +1822,7 @@ async def test_event_bridge_routes_managed_auth_error_to_snackbar_without_dashbo
     try:
         app = DummyApp()
         app.controller.managed_auth_pending = True
-        bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+        bridge = make_bridge(app, event_queue=asyncio.Queue())
         payload = ManagedOpenRouterUserFacingError(
             message_key="managed_release.retry_after_ms",
             message_kwargs={"retry_after_ms": 9000},
@@ -1703,7 +1852,7 @@ async def test_event_bridge_routes_managed_auth_error_to_snackbar_without_dashbo
 async def test_event_bridge_keeps_general_error_display_when_managed_auth_is_pending() -> None:
     app = DummyApp()
     app.controller.managed_auth_pending = True
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
 
     await bridge._handle_event(
         UIEvent(type=UIEventType.ERROR, payload="managed auth boom", runtime_log_handled=True)
@@ -1716,7 +1865,7 @@ async def test_event_bridge_keeps_general_error_display_when_managed_auth_is_pen
 
 def test_event_bridge_reports_overlay_state_to_app() -> None:
     app = DummyApp()
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
 
     bridge.report_overlay_state("starting")
     bridge.report_overlay_state("failed", failure_reason="runtime_crashed")

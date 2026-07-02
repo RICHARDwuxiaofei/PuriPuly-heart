@@ -218,7 +218,12 @@ from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
 from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
-from puripuly_heart.ui.event_bridge import UIEventBridge
+from puripuly_heart.ui.event_bridge import (
+    AppConversationEventDestination,
+    AppDashboardEventDestination,
+    AppHistoryEventDestination,
+    UIEventBridge,
+)
 from puripuly_heart.ui.i18n import get_locale, set_locale, t
 from puripuly_heart.ui.overlay_peer_contract import (
     OverlayPeerConsumerContract,
@@ -981,13 +986,34 @@ class GuiController:
 
         await self.hub.start(auto_flush_osc=True)
 
-        bridge = UIEventBridge(
-            app=self.app,
-            event_queue=self.hub.ui_events,
-            runtime_logging=runtime_logging,
-        )
+        bridge = self._create_ui_event_bridge(runtime_logging=runtime_logging)
         self._start_ui_event_bridge_task(bridge)
         await self._sync_clipboard_watcher()
+
+    def _create_ui_event_bridge(self, *, runtime_logging) -> UIEventBridge:  # noqa: ANN001
+        assert self.hub is not None
+        return UIEventBridge(
+            event_queue=self.hub.ui_events,
+            runtime_logging=runtime_logging,
+            dashboard_destination=AppDashboardEventDestination(
+                getattr(self.app, "view_dashboard", None)
+            ),
+            history_destination=AppHistoryEventDestination(
+                getattr(self.app, "add_history_entry", None)
+            ),
+            conversation_destination=AppConversationEventDestination(
+                getattr(getattr(self.app, "view_logs", None), "append_conversation_record", None)
+            ),
+            get_language_codes=getattr(self.app, "get_event_language_codes", None),
+            is_translation_enabled=getattr(self.app, "is_event_translation_enabled", None),
+            get_stt_state=getattr(self.app, "get_event_stt_state", None),
+            clear_managed_auth_pending=getattr(self.app, "clear_managed_auth_pending_state", None),
+            show_snackbar=getattr(self.app, "show_snackbar", None),
+            on_github_star_translation_success=getattr(
+                self.app, "on_github_star_translation_success", None
+            ),
+            on_overlay_state_changed=getattr(self.app, "on_overlay_state_changed", None),
+        )
 
     def _start_ui_event_bridge_task(self, bridge: UIEventBridge) -> None:
         assert self.hub is not None
@@ -6355,11 +6381,7 @@ class GuiController:
 
         await self.hub.start(auto_flush_osc=True)
 
-        bridge = UIEventBridge(
-            app=self.app,
-            event_queue=self.hub.ui_events,
-            runtime_logging=self.runtime_logging,
-        )
+        bridge = self._create_ui_event_bridge(runtime_logging=self.runtime_logging)
         self._start_ui_event_bridge_task(bridge)
 
         if self.overlay_state == "connected" and presenter is not None:
