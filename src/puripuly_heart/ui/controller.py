@@ -5467,6 +5467,16 @@ class GuiController:
                 success = await verifier.verify_api_key(provider, key)
             elif provider == "deepseek":
                 success = await verifier.verify_api_key(provider, key)
+            elif provider == "cerebras":
+                success = await verifier.verify_api_key(
+                    provider,
+                    key,
+                    model=(
+                        self.settings.cerebras.llm_model.value
+                        if self.settings is not None
+                        else None
+                    ),
+                )
             elif provider == "alibaba_beijing":
                 return await self._verify_qwen_key_with_model_fallback(
                     key,

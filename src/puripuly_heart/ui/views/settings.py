@@ -107,6 +107,7 @@ _TRANSLATION_MODEL_LABEL_KEYS = {
     TranslationModel.GEMINI_31_FLASH_LITE: "provider.gemini31_flash_lite",
     TranslationModel.QWEN_35_PLUS: "provider.qwen35_plus",
     TranslationModel.LOCAL_LLM: "provider.local_llms",
+    TranslationModel.GEMMA4_31B_CEREBRAS: "provider.gemma4_31b_cerebras",
 }
 _TRANSLATION_CONNECTION_LABEL_KEYS = {
     TranslationConnection.MANAGED: "settings.translation_connection.managed",
@@ -851,6 +852,16 @@ class SettingsView(ft.Column):
                 self.show_snackbar(msg, bg) if self.show_snackbar else None
             ),
         )
+        self._cerebras_key = ApiKeyField(
+            "settings.cerebras_api_key",
+            "cerebras_api_key",
+            "cerebras",
+            on_verify=self._verify_key,
+            on_save=self._on_secret_change,
+            show_snackbar=lambda msg, bg: (
+                self.show_snackbar(msg, bg) if self.show_snackbar else None
+            ),
+        )
         self._openrouter_pkce_button = self._build_action_button(
             t("settings.openrouter_authenticate"),
             self._on_openrouter_pkce_click,
@@ -971,6 +982,7 @@ class SettingsView(ft.Column):
                 self._openrouter_key,
                 self._openrouter_pkce_button_row,
                 self._deepseek_key,
+                self._cerebras_key,
                 self._alibaba_key_beijing,
                 self._alibaba_key_singapore,
             ],
@@ -2913,6 +2925,7 @@ class SettingsView(ft.Column):
         )
         self._openrouter_pkce_button_row.visible = openrouter_byok_selected
         self._deepseek_key.visible = llm == LLMProviderName.DEEPSEEK
+        self._cerebras_key.visible = llm == LLMProviderName.CEREBRAS
         self._sync_openrouter_pkce_button_state(settings)
         self._translation_connection_row.visible = True
         self._local_llm_connection_card.visible = llm == LLMProviderName.LOCAL_LLM
@@ -3064,6 +3077,7 @@ class SettingsView(ft.Column):
                 TranslationModel.GEMINI_3_FLASH,
                 TranslationModel.GEMINI_31_FLASH_LITE,
                 TranslationModel.QWEN_35_PLUS,
+                TranslationModel.GEMMA4_31B_CEREBRAS,
                 TranslationModel.LOCAL_LLM,
             )
         ]
