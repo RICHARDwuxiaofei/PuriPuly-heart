@@ -226,8 +226,6 @@
         "implementation_owner": "canonical_vnext_owner"
       },
       "exports": [
-        {"name": "headless_stdin", "kind": "submodule"},
-        {"name": "headless_mic", "kind": "submodule"},
         {"name": "wiring", "kind": "submodule"}
       ]
     },
@@ -975,7 +973,6 @@
       "surface": "vNext schema, resolved DTO, and runtime resolution modules",
       "classification": "internal_schema_and_runtime_resolution_contracts",
       "modules": [
-        "puripuly_heart.app.headless_runtime_config",
         "puripuly_heart.config.profile_bootstrap",
         "puripuly_heart.config.resolved",
         "puripuly_heart.config.runtime_resolution",

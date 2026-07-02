@@ -100,7 +100,7 @@ async def test_client_hub_uses_integrated_context_when_enabled_and_safe():
     )
 
 
-async def test_orchestrator_e2e_headless():
+async def test_orchestrator_e2e_pipeline():
     clock = FakeClock()
     sender = FakeSender()
     osc = ChatboxPaginator(sender=sender, clock=clock)

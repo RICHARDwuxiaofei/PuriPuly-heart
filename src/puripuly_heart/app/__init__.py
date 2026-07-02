@@ -1,1 +1,1 @@
-__all__ = ["headless_stdin", "headless_mic", "wiring"]
+__all__ = ["wiring"]

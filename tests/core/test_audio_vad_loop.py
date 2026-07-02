@@ -4,11 +4,11 @@ import asyncio
 
 import numpy as np
 
-from puripuly_heart.app.headless_mic import run_audio_vad_loop
 from puripuly_heart.core.audio.format import AudioFrameF32
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
+from puripuly_heart.core.runtime.audio_vad_loop import run_audio_vad_loop
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.vad.gating import VadGating
 from puripuly_heart.domain.events import STTSessionState
@@ -17,7 +17,7 @@ from tests.helpers.fakes import FakeSender, SpeechAwareFakeBackend, SpeechAwareF
 from tests.helpers.vad import SequenceVadEngine
 
 
-async def test_headless_mic_pipeline_smoke():
+async def test_audio_vad_loop_pipeline_smoke():
     clock = FakeClock()
     sender = FakeSender()
     osc = ChatboxPaginator(sender=sender, clock=clock)

@@ -121,7 +121,6 @@ def _run_isolated_cli_import_probe(
 ) -> tuple[int, dict[str, bool], str, str]:
     forbidden_modules = [
         "puripuly_heart.app.wiring",
-        "puripuly_heart.app.headless_mic",
         "puripuly_heart.core.managed_openrouter_broker_client",
         "puripuly_heart.core.storage.secrets",
         "puripuly_heart.core.stt.backend",

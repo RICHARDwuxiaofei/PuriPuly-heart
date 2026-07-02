@@ -1830,7 +1830,6 @@ def test_desktop_overlay_preview_guard_avoids_provider_broker_stt_translation_se
 
     forbidden_prefixes = (
         "puripuly_heart.app.wiring",
-        "puripuly_heart.app.headless_mic",
         "puripuly_heart.core.managed_openrouter_broker_client",
         "puripuly_heart.core.storage.secrets",
         "puripuly_heart.core.stt",

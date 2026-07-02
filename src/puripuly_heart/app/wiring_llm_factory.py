@@ -68,7 +68,7 @@ from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 
 MANAGED_OPENROUTER_RELEASE_SERVICE_REQUIRED_ERROR = (
     "OpenRouter managed mode requires a managed release service; "
-    "CLI/headless paths are not wired for managed OpenRouter mode yet"
+    "non-GUI paths are not wired for managed OpenRouter mode yet"
 )
 
 

@@ -1748,28 +1748,6 @@ class StdoutLifecycleSink:
         print(json.dumps(safe_event, sort_keys=True), file=stream, flush=True)
 
 
-class HeadlessRendererWindow:
-    """Minimal window lifecycle boundary until the Flet window implementation lands."""
-
-    def __init__(self) -> None:
-        self._closed = asyncio.Event()
-
-    async def start(self, initial_snapshot: OverlayPresentationSnapshot) -> None:
-        _ = initial_snapshot
-
-    async def run_until_closed(self) -> None:
-        await self._closed.wait()
-
-    async def close(self) -> None:
-        self._closed.set()
-
-    async def dispatch_snapshot(self, snapshot: OverlayPresentationSnapshot) -> None:
-        _ = snapshot
-
-    async def dispatch_runtime_control(self, payload: dict[str, object]) -> None:
-        _ = payload
-
-
 type FletAppRunner = Callable[[Callable[[Any], object]], Awaitable[None]]
 type OverlayEventSink = Callable[[dict[str, object]], Awaitable[None]]
 type PreviewAppRunner = Callable[[Callable[[Any], object]], object]

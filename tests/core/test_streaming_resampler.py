@@ -7,8 +7,8 @@ import sys
 import numpy as np
 import pytest
 
-import puripuly_heart.app.headless_mic as headless_mic
 import puripuly_heart.core.audio.streaming_resampler as streaming_resampler
+import puripuly_heart.core.runtime.audio_vad_loop as audio_vad_loop
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
 from puripuly_heart.core.audio.format import AudioFrameF32, float32_to_pcm16le_bytes
 from puripuly_heart.core.audio.streaming_resampler import MonoFirstStreamingResampler
@@ -223,7 +223,7 @@ async def test_run_audio_vad_loop_uses_one_streaming_resampler_and_flushes_tail(
             calls.append(("flush",))
             return np.array([0.75], dtype=np.float32)
 
-    monkeypatch.setattr(headless_mic, "MonoFirstStreamingResampler", FakeResampler, raising=False)
+    monkeypatch.setattr(audio_vad_loop, "MonoFirstStreamingResampler", FakeResampler, raising=False)
 
     source = _StubAudioSource(
         [
@@ -242,7 +242,7 @@ async def test_run_audio_vad_loop_uses_one_streaming_resampler_and_flushes_tail(
     vad = _StubVad(chunk_samples=2)
     sink = _StubSink()
 
-    await headless_mic.run_audio_vad_loop(
+    await audio_vad_loop.run_audio_vad_loop(
         source=source,
         vad=vad,
         sink=sink,
@@ -273,9 +273,9 @@ async def test_run_audio_vad_loop_logs_gate_summary_when_detailed() -> None:
     )
     vad = _StubVad(chunk_samples=16000)
     sink = _StubSink()
-    gate = headless_mic.VrcMicAudioGate(state=MutedState(), enabled=True, receiver_active=True)
+    gate = audio_vad_loop.VrcMicAudioGate(state=MutedState(), enabled=True, receiver_active=True)
 
-    await headless_mic.run_audio_vad_loop(
+    await audio_vad_loop.run_audio_vad_loop(
         source=source,
         vad=vad,
         sink=sink,
@@ -313,9 +313,9 @@ async def test_run_audio_vad_loop_diagnostic_log_failure_does_not_interrupt_deli
     )
     vad = _StubVad(chunk_samples=16000)
     sink = _StubSink()
-    gate = headless_mic.VrcMicAudioGate(state=MutedState(), enabled=True, receiver_active=True)
+    gate = audio_vad_loop.VrcMicAudioGate(state=MutedState(), enabled=True, receiver_active=True)
 
-    await headless_mic.run_audio_vad_loop(
+    await audio_vad_loop.run_audio_vad_loop(
         source=source,
         vad=vad,
         sink=sink,
@@ -341,7 +341,7 @@ async def test_run_audio_vad_loop_diagnostic_metric_failure_does_not_interrupt_d
         muted = True
 
     monkeypatch.setattr(
-        headless_mic,
+        audio_vad_loop,
         "compute_audio_frame_metrics",
         lambda _frame: (_ for _ in ()).throw(RuntimeError("diagnostic metric computation failed")),
         raising=False,
@@ -357,9 +357,9 @@ async def test_run_audio_vad_loop_diagnostic_metric_failure_does_not_interrupt_d
     )
     vad = _StubVad(chunk_samples=16000)
     sink = _StubSink()
-    gate = headless_mic.VrcMicAudioGate(state=MutedState(), enabled=True, receiver_active=True)
+    gate = audio_vad_loop.VrcMicAudioGate(state=MutedState(), enabled=True, receiver_active=True)
 
-    await headless_mic.run_audio_vad_loop(
+    await audio_vad_loop.run_audio_vad_loop(
         source=source,
         vad=vad,
         sink=sink,
@@ -394,9 +394,9 @@ async def test_run_audio_vad_loop_detailed_predicate_failure_does_not_interrupt_
     )
     vad = _StubVad(chunk_samples=16000)
     sink = _StubSink()
-    gate = headless_mic.VrcMicAudioGate(state=MutedState(), enabled=True, receiver_active=True)
+    gate = audio_vad_loop.VrcMicAudioGate(state=MutedState(), enabled=True, receiver_active=True)
 
-    await headless_mic.run_audio_vad_loop(
+    await audio_vad_loop.run_audio_vad_loop(
         source=source,
         vad=vad,
         sink=sink,
@@ -423,7 +423,7 @@ async def test_run_audio_vad_loop_skips_vad_input_metrics_when_not_detailed(
         muted = True
 
     monkeypatch.setattr(
-        headless_mic,
+        audio_vad_loop,
         "compute_audio_frame_metrics",
         lambda _frame: (_ for _ in ()).throw(
             AssertionError("Basic mode must not compute VAD-input metrics")
@@ -441,9 +441,9 @@ async def test_run_audio_vad_loop_skips_vad_input_metrics_when_not_detailed(
     )
     vad = _StubVad(chunk_samples=16000)
     sink = _StubSink()
-    gate = headless_mic.VrcMicAudioGate(state=MutedState(), enabled=True, receiver_active=True)
+    gate = audio_vad_loop.VrcMicAudioGate(state=MutedState(), enabled=True, receiver_active=True)
 
-    await headless_mic.run_audio_vad_loop(
+    await audio_vad_loop.run_audio_vad_loop(
         source=source,
         vad=vad,
         sink=sink,
@@ -573,7 +573,7 @@ async def test_desktop_pipeline_output_integrates_with_run_audio_vad_loop(
         FakeDesktopResampler,
     )
     monkeypatch.setattr(
-        headless_mic,
+        audio_vad_loop,
         "MonoFirstStreamingResampler",
         FakeVadLoopResampler,
         raising=False,
@@ -594,7 +594,7 @@ async def test_desktop_pipeline_output_integrates_with_run_audio_vad_loop(
     vad = _StubVad(chunk_samples=2)
     sink = _StubSink()
 
-    await headless_mic.run_audio_vad_loop(
+    await audio_vad_loop.run_audio_vad_loop(
         source=pipeline,
         vad=vad,
         sink=sink,
@@ -631,7 +631,7 @@ async def test_run_audio_vad_loop_raises_on_source_sample_rate_change(
         def flush(self) -> np.ndarray:
             return np.empty((0,), dtype=np.float32)
 
-    monkeypatch.setattr(headless_mic, "MonoFirstStreamingResampler", FakeResampler, raising=False)
+    monkeypatch.setattr(audio_vad_loop, "MonoFirstStreamingResampler", FakeResampler, raising=False)
 
     source = _StubAudioSource(
         [
@@ -649,7 +649,7 @@ async def test_run_audio_vad_loop_raises_on_source_sample_rate_change(
     )
 
     with pytest.raises(ValueError, match="source audio format changed"):
-        await headless_mic.run_audio_vad_loop(
+        await audio_vad_loop.run_audio_vad_loop(
             source=source,
             vad=_StubVad(chunk_samples=2),
             sink=_StubSink(),

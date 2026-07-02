@@ -531,11 +531,6 @@ if ($localQwenRuntimeSmokeTest.ExitCode -ne 0) {
 
 Invoke-SoxrRuntimeSmokeCheck -ExePath $exePath -ReportPath $packagedSoxrRuntimeReportPath -ExpectedExtensionPath $packagedSoxrExtensionPath -ExpectedSoxrDllPath $packagedSoxrDllPath -Label "Packaged"
 
-$smokeTest = Start-Process -FilePath $exePath -ArgumentList @("osc-send", "ci-smoke") -Wait -PassThru
-if ($smokeTest.ExitCode -ne 0) {
-    throw "Packaged executable smoke test failed with exit code $($smokeTest.ExitCode)"
-}
-
 Write-Host "Smoke-testing packaged overlay executable..."
 Invoke-External -FilePath $packagedOverlayPath -ArgumentList @("--check-startup-contract")
 

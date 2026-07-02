@@ -6327,7 +6327,7 @@ class GuiController:
         )
 
     async def _run_peer_audio_vad_loop(self, **kwargs: object) -> None:
-        from puripuly_heart.app.headless_mic import run_audio_vad_loop
+        from puripuly_heart.core.runtime.audio_vad_loop import run_audio_vad_loop
 
         await run_audio_vad_loop(
             **kwargs,
@@ -7457,7 +7457,7 @@ class GuiController:
         assert self._audio_source is not None
         assert self._vad is not None
 
-        from puripuly_heart.app.headless_mic import run_audio_vad_loop
+        from puripuly_heart.core.runtime.audio_vad_loop import run_audio_vad_loop
 
         try:
             sink: object = _HubVadSink(hub=self.hub)

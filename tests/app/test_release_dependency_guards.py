@@ -276,7 +276,7 @@ def test_shared_windows_build_script_runs_packaged_smoke_test() -> None:
     assert '"--version"' in script
     assert "_multiarray_umath" in script
     assert 'Get-ChildItem -Path $distDir -Filter "_multiarray_umath*.pyd" -Recurse' in script
-    assert "osc-send" in script
+    assert "osc-send" not in script
     assert "Remove-Item -Recurse -Force $pyInstallerBuildDir" in script
     assert "Remove-Item -Recurse -Force $distDir" in script
     assert '"innosetup"' in script
@@ -914,7 +914,12 @@ def test_shared_windows_build_script_runs_soxr_runtime_check_smoke() -> None:
         '-Label "Packaged"' in script
     )
     assert "soxr runtime smoke test failed" in script
-    assert script.index("soxr-runtime-check") < script.index('"osc-send", "ci-smoke"')
+    assert script.index("$localQwenRuntimeSmokeTest = Start-Process") < script.index(
+        "Invoke-SoxrRuntimeSmokeCheck -ExePath $exePath"
+    )
+    assert script.index("Invoke-SoxrRuntimeSmokeCheck -ExePath $exePath") < script.index(
+        "Smoke-testing packaged overlay executable"
+    )
 
 
 def test_shared_windows_build_script_guards_packaged_soxr_dll_layout_and_source_bundle_contents() -> (

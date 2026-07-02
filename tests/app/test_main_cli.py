@@ -12,33 +12,12 @@ from types import ModuleType
 
 import pytest
 
-import puripuly_heart.app.headless_runtime_config as runtime_config_module
-import puripuly_heart.app.wiring as wiring_module
 import puripuly_heart.main as main_module
 from puripuly_heart import __version__
-from puripuly_heart.app.headless_runtime_config import HeadlessMicRuntimeConfig
-from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core.runtime_logging import (
     SessionRuntimeLoggingService,
     configure_main_logging,
 )
-from puripuly_heart.core.storage.secrets import InMemorySecretStore
-
-
-def _patch_headless_mic_types(monkeypatch, runner_cls, error_cls=None) -> None:
-    if error_cls is None:
-
-        class FakeHeadlessMicInitializationError(Exception):
-            pass
-
-        error_cls = FakeHeadlessMicInitializationError
-
-    monkeypatch.setattr(
-        main_module,
-        "_load_headless_mic_types",
-        lambda: (runner_cls, error_cls),
-        raising=False,
-    )
 
 
 def test_main_version_prints(capsys) -> None:
@@ -61,236 +40,20 @@ def test_main_version_prints_without_soxr_runtime_startup_check(monkeypatch, cap
     assert capsys.readouterr().out.strip() == __version__
 
 
-def test_main_osc_send_uses_sender(monkeypatch, tmp_path) -> None:
-    sent: dict[str, object] = {}
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["osc-send", "hello"],
+        ["run-stdin"],
+        ["run-mic"],
+    ],
+)
+def test_main_rejects_removed_cli_commands(argv, capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main_module.main(argv)
 
-    class FakeSender:
-        def __init__(self, *args, **kwargs):
-            sent["instance"] = self
-
-        def send_chatbox(self, text: str) -> None:
-            sent["text"] = text
-
-        def close(self) -> None:
-            sent["closed"] = True
-
-    monkeypatch.setattr(main_module, "VrchatOscUdpSender", FakeSender)
-
-    config_path = tmp_path / "settings.json"
-    result = main_module.main(["--config", str(config_path), "osc-send", "hello"])
-
-    assert result == 0
-    assert sent["text"] == "hello"
-    assert sent["closed"] is True
-
-
-def test_main_osc_send_does_not_require_soxr_runtime_startup_check(monkeypatch, tmp_path) -> None:
-    sent: dict[str, object] = {}
-
-    class FakeSender:
-        def __init__(self, *args, **kwargs):
-            sent["instance"] = self
-
-        def send_chatbox(self, text: str) -> None:
-            sent["text"] = text
-
-        def close(self) -> None:
-            sent["closed"] = True
-
-    monkeypatch.setattr(
-        main_module,
-        "ensure_soxr_runtime_available_for_startup",
-        lambda: pytest.fail("osc-send should not run the soxr startup check"),
-        raising=False,
-    )
-    monkeypatch.setattr(main_module, "VrchatOscUdpSender", FakeSender)
-
-    config_path = tmp_path / "settings.json"
-    result = main_module.main(["--config", str(config_path), "osc-send", "hello"])
-
-    assert result == 0
-    assert sent["text"] == "hello"
-    assert sent["closed"] is True
-
-
-def test_main_run_mic_still_aborts_when_soxr_runtime_startup_check_fails(
-    monkeypatch, tmp_path, capsys
-) -> None:
-    class FakeSoxrRuntimeAvailabilityError(RuntimeError):
-        pass
-
-    def raise_runtime_error() -> None:
-        raise FakeSoxrRuntimeAvailabilityError("missing packaged soxr sibling dll")
-
-    monkeypatch.setattr(
-        main_module,
-        "SoxrRuntimeAvailabilityError",
-        FakeSoxrRuntimeAvailabilityError,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        main_module,
-        "ensure_soxr_runtime_available_for_startup",
-        raise_runtime_error,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_load_headless_mic_types",
-        lambda: pytest.fail("run-mic should abort before loading headless mic types"),
-        raising=False,
-    )
-
-    config_path = tmp_path / "settings.json"
-    vad_model = tmp_path / "vad.onnx"
-    vad_model.write_text("dummy", encoding="utf-8")
-
-    result = main_module.main(
-        ["--config", str(config_path), "run-mic", "--vad-model", str(vad_model)]
-    )
-
-    assert result == 2
-    assert capsys.readouterr().out.strip() == (
-        "Error: failed to verify packaged soxr runtime: missing packaged soxr sibling dll"
-    )
-
-
-def test_main_run_stdin_llm_error(monkeypatch, tmp_path, capsys) -> None:
-    monkeypatch.setattr(
-        runtime_config_module,
-        "create_secret_store_from_vnext_intent",
-        lambda *a, **k: InMemorySecretStore(),
-    )
-
-    def raise_llm(*_args, **_kwargs):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(wiring_module, "create_llm_provider_from_resolved_config", raise_llm)
-
-    config_path = tmp_path / "settings.json"
-    result = main_module.main(["--config", str(config_path), "run-stdin", "--use-llm"])
-
-    assert result == 2
-    assert "failed to initialize LLM provider" in capsys.readouterr().out
-
-
-def test_main_run_stdin_managed_openrouter_without_release_service_reports_clear_error(
-    monkeypatch, tmp_path, capsys
-) -> None:
-    settings = AppSettingsVNext()
-    monkeypatch.setattr(main_module, "_load_settings_or_default", lambda _path: settings)
-    monkeypatch.setattr(
-        runtime_config_module,
-        "create_secret_store_from_vnext_intent",
-        lambda *a, **k: InMemorySecretStore(),
-    )
-
-    config_path = tmp_path / "settings.json"
-    result = main_module.main(["--config", str(config_path), "run-stdin", "--use-llm"])
-
-    output = capsys.readouterr().out
-    assert result == 2
-    assert "failed to initialize LLM provider" in output
-    assert "managed release service" in output
-
-
-def test_main_run_stdin_invokes_runner(monkeypatch, tmp_path) -> None:
-    ran: dict[str, object] = {}
-
-    class FakeRunner:
-        def __init__(self, *args, **kwargs):
-            return None
-
-        async def run(self):
-            ran["called"] = True
-            return 0
-
-    monkeypatch.setattr(main_module, "HeadlessStdinRunner", FakeRunner)
-
-    config_path = tmp_path / "settings.json"
-    result = main_module.main(["--config", str(config_path), "run-stdin"])
-
-    assert result == 0
-    assert ran["called"] is True
-
-
-def test_main_run_mic_invokes_runner(monkeypatch, tmp_path) -> None:
-    ran: dict[str, object] = {}
-
-    class FakeRunner:
-        def __init__(self, *args, **kwargs):
-            return None
-
-        async def run(self):
-            ran["called"] = True
-            return 0
-
-    _patch_headless_mic_types(monkeypatch, FakeRunner)
-
-    config_path = tmp_path / "settings.json"
-    vad_model = tmp_path / "vad.onnx"
-    vad_model.write_text("dummy", encoding="utf-8")
-    result = main_module.main(
-        ["--config", str(config_path), "run-mic", "--vad-model", str(vad_model)]
-    )
-
-    assert result == 0
-    assert ran["called"] is True
-
-
-def test_main_run_mic_managed_openrouter_without_release_service_reports_clear_error(
-    monkeypatch, tmp_path, capsys
-) -> None:
-    settings = AppSettingsVNext()
-
-    class FakeHeadlessMicInitializationError(Exception):
-        pass
-
-    class FakeRunner:
-        def __init__(self, *args, **kwargs):
-            runtime_config = kwargs["runtime_config"]
-            assert isinstance(runtime_config, HeadlessMicRuntimeConfig)
-            assert runtime_config.use_llm is True
-
-        async def run(self):
-            raise FakeHeadlessMicInitializationError(
-                "Headless mic LLM initialization failed: OpenRouter managed mode requires a managed release service; "
-                "CLI/headless paths are not wired for managed OpenRouter mode yet"
-            )
-
-    monkeypatch.setattr(main_module, "_load_settings_or_default", lambda _path: settings)
-    _patch_headless_mic_types(monkeypatch, FakeRunner, FakeHeadlessMicInitializationError)
-
-    config_path = tmp_path / "settings.json"
-    vad_model = tmp_path / "vad.onnx"
-    vad_model.write_text("dummy", encoding="utf-8")
-
-    result = main_module.main(
-        ["--config", str(config_path), "run-mic", "--vad-model", str(vad_model), "--use-llm"]
-    )
-
-    output = capsys.readouterr().out
-    assert result == 2
-    assert "failed to initialize headless mic runner" in output
-    assert "managed release service" in output
-
-
-def test_main_run_mic_runtime_value_error_propagates(monkeypatch, tmp_path) -> None:
-    class FakeRunner:
-        def __init__(self, *args, **kwargs):
-            return None
-
-        async def run(self):
-            raise ValueError("runtime boom")
-
-    _patch_headless_mic_types(monkeypatch, FakeRunner)
-
-    config_path = tmp_path / "settings.json"
-    vad_model = tmp_path / "vad.onnx"
-    vad_model.write_text("dummy", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="runtime boom"):
-        main_module.main(["--config", str(config_path), "run-mic", "--vad-model", str(vad_model)])
+    assert exc_info.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_main_run_gui_invokes_flet_app(monkeypatch, tmp_path) -> None:

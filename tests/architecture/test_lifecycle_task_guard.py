@@ -21,7 +21,6 @@ LIFECYCLE_OWNER_PRIMITIVES = frozenset(
 
 LEGACY_TASK_CREATION_ALLOWLIST = Counter(
     {
-        ("src/puripuly_heart/app/headless_stdin.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/llm/fallback_racing.py", ASYNCIO_CREATE_TASK): 1,
         (
             "src/puripuly_heart/core/local_stt_runtime_installer.py",
@@ -65,10 +64,6 @@ NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST = Counter(
 )
 
 TASK_CREATION_ALLOWLIST_RATIONALES = {
-    (
-        "src/puripuly_heart/app/headless_stdin.py",
-        ASYNCIO_CREATE_TASK,
-    ): "headless adapter owns its terminal flush loop until a headless runtime owner replaces the adapter-local queue drain",
     (
         "src/puripuly_heart/core/llm/fallback_racing.py",
         ASYNCIO_CREATE_TASK,
