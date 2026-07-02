@@ -445,6 +445,9 @@ def test_translator_app_mounts_debug_preview_when_enabled(
         "on_founder_letter",
         "on_pkce_failure",
         "on_discord_auth",
+        "on_qq_auth",
+        "on_qq_auth_recoverable_error",
+        "on_qq_auth_translation_gated",
         "on_discord_callback_page",
         "on_peer_translation_eula",
         "on_local_qwen_hallucination_modal",
@@ -456,6 +459,9 @@ def test_translator_app_mounts_debug_preview_when_enabled(
     discord_callback = seen["callbacks"]["on_discord_auth"]
     assert getattr(discord_callback, "__self__", None) is app
     assert getattr(discord_callback, "__func__", None) is TranslatorApp._preview_discord_auth
+    qq_callback = seen["callbacks"]["on_qq_auth"]
+    assert getattr(qq_callback, "__self__", None) is app
+    assert getattr(qq_callback, "__func__", None) is TranslatorApp._preview_qq_auth
     callback_page = seen["callbacks"]["on_discord_callback_page"]
     assert getattr(callback_page, "__self__", None) is app
     assert getattr(callback_page, "__func__", None) is TranslatorApp._preview_discord_callback_page
@@ -1283,6 +1289,53 @@ def test_debug_preview_discord_auth_opens_dialog_with_close_only_actions(
         getattr(dialog, button_attr).on_click(None)
         assert app.page.closed[-1] is opened_dialog
 
+    assert app.page.tasks == []
+    assert settings.openrouter.selected_source is OpenRouterCredentialSource.MANAGED
+
+
+def test_debug_preview_qq_auth_states_are_pure_ui_without_tasks_or_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    app.controller = SimpleNamespace(
+        settings=settings,
+        config_path=Path("settings.json"),
+        _save_settings=lambda: pytest.fail("debug QQ-auth preview must not save settings"),
+        persist_settings=lambda: pytest.fail("debug QQ-auth preview must not persist settings"),
+        start_qq_managed_auth_from_dialog=lambda *_args, **_kwargs: pytest.fail(
+            "debug QQ-auth preview must not call QQ auth service"
+        ),
+        set_translation_enabled=lambda *_args, **_kwargs: pytest.fail(
+            "debug QQ-auth preview must not mutate runtime translation"
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "_start_qq_managed_auth",
+        lambda *_args, **_kwargs: pytest.fail("debug QQ-auth preview must not start auth"),
+        raising=False,
+    )
+
+    app._preview_qq_auth()
+    initial_dialog = app._qq_managed_auth_dialog
+    assert initial_dialog._dialog is app.page.opened[-1]
+    initial_dialog._continue_button.on_click(None)
+    assert app.page.tasks == []
+    assert initial_dialog._error_text.value == app_module.t("qq_managed_auth.error.invalid_input")
+    initial_dialog._close_button.on_click(None)
+    assert app.page.closed[-1] is initial_dialog._dialog
+
+    app._preview_qq_auth_recoverable_error()
+    recoverable_dialog = app._qq_managed_auth_dialog
+    assert recoverable_dialog._error_text.value == app_module.t("qq_managed_auth.mismatch")
+
+    app._preview_qq_auth_translation_gated()
+    gated_dialog = app._qq_managed_auth_dialog
+    assert gated_dialog._error_text.value == app_module.t("qq_managed_auth.required")
     assert app.page.tasks == []
     assert settings.openrouter.selected_source is OpenRouterCredentialSource.MANAGED
 

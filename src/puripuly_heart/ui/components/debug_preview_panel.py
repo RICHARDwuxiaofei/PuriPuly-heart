@@ -50,6 +50,9 @@ class DebugPreviewPanel(ft.Container):
         on_founder_letter: Callable[[], None],
         on_pkce_failure: Callable[[], None],
         on_discord_auth: Callable[[], None],
+        on_qq_auth: Callable[[], None],
+        on_qq_auth_recoverable_error: Callable[[], None],
+        on_qq_auth_translation_gated: Callable[[], None],
         on_discord_callback_page: Callable[[], None],
         on_peer_translation_eula: Callable[[], None],
         on_local_qwen_hallucination_modal: Callable[[], None],
@@ -70,6 +73,17 @@ class DebugPreviewPanel(ft.Container):
             _PreviewAction("founder_letter", "debug_preview.founder_letter", on_founder_letter),
             _PreviewAction("pkce_failure", "debug_preview.pkce_failure", on_pkce_failure),
             _PreviewAction("discord_auth", "debug_preview.discord_auth", on_discord_auth),
+            _PreviewAction("qq_auth", "debug_preview.qq_auth", on_qq_auth),
+            _PreviewAction(
+                "qq_auth_recoverable_error",
+                "debug_preview.qq_auth_recoverable_error",
+                on_qq_auth_recoverable_error,
+            ),
+            _PreviewAction(
+                "qq_auth_translation_gated",
+                "debug_preview.qq_auth_translation_gated",
+                on_qq_auth_translation_gated,
+            ),
             _PreviewAction(
                 "discord_callback_page",
                 "debug_preview.discord_callback_page",

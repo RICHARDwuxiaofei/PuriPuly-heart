@@ -25,6 +25,9 @@ DEBUG_PREVIEW_I18N_KEYS = {
     "debug_preview.founder_letter",
     "debug_preview.pkce_failure",
     "debug_preview.discord_auth",
+    "debug_preview.qq_auth",
+    "debug_preview.qq_auth_recoverable_error",
+    "debug_preview.qq_auth_translation_gated",
     "debug_preview.discord_callback_page",
     "debug_preview.peer_translation_eula",
     "debug_preview.local_qwen_hallucination_modal",
@@ -47,6 +50,9 @@ ACTION_KEYS = [
     "founder_letter",
     "pkce_failure",
     "discord_auth",
+    "qq_auth",
+    "qq_auth_recoverable_error",
+    "qq_auth_translation_gated",
     "discord_callback_page",
     "peer_translation_eula",
     "local_qwen_hallucination_modal",
@@ -65,6 +71,9 @@ def _callbacks(seen: list[str]):
         "on_founder_letter": lambda: seen.append("founder_letter"),
         "on_pkce_failure": lambda: seen.append("pkce_failure"),
         "on_discord_auth": lambda: seen.append("discord_auth"),
+        "on_qq_auth": lambda: seen.append("qq_auth"),
+        "on_qq_auth_recoverable_error": lambda: seen.append("qq_auth_recoverable_error"),
+        "on_qq_auth_translation_gated": lambda: seen.append("qq_auth_translation_gated"),
         "on_discord_callback_page": lambda: seen.append("discord_callback_page"),
         "on_peer_translation_eula": lambda: seen.append("peer_translation_eula"),
         "on_local_qwen_hallucination_modal": lambda: seen.append("local_qwen_hallucination_modal"),
@@ -151,6 +160,15 @@ def test_debug_preview_panel_apply_locale_refreshes_labels(
     assert (
         _button_label(panel._action_buttons["discord_auth"]) == "label:debug_preview.discord_auth"
     )
+    assert _button_label(panel._action_buttons["qq_auth"]) == "label:debug_preview.qq_auth"
+    assert (
+        _button_label(panel._action_buttons["qq_auth_recoverable_error"])
+        == "label:debug_preview.qq_auth_recoverable_error"
+    )
+    assert (
+        _button_label(panel._action_buttons["qq_auth_translation_gated"])
+        == "label:debug_preview.qq_auth_translation_gated"
+    )
     assert (
         _button_label(panel._action_buttons["discord_callback_page"])
         == "label:debug_preview.discord_callback_page"
@@ -193,6 +211,9 @@ def test_debug_preview_panel_uses_text_button_label_api_when_available(
         "Founder letter",
         "PKCE failure",
         "Discord auth",
+        "QQ auth",
+        "QQ recoverable error",
+        "QQ translation gated",
         "Discord callback page",
         "Peer translation EULA",
         "Local Qwen warning",
@@ -208,6 +229,15 @@ def test_debug_preview_panel_uses_text_button_label_api_when_available(
     assert panel._toggle_button.text == "label:debug_preview.button"
     assert panel._action_buttons["brake_notice"].text == "label:debug_preview.brake_notice"
     assert panel._action_buttons["discord_auth"].text == "label:debug_preview.discord_auth"
+    assert panel._action_buttons["qq_auth"].text == "label:debug_preview.qq_auth"
+    assert (
+        panel._action_buttons["qq_auth_recoverable_error"].text
+        == "label:debug_preview.qq_auth_recoverable_error"
+    )
+    assert (
+        panel._action_buttons["qq_auth_translation_gated"].text
+        == "label:debug_preview.qq_auth_translation_gated"
+    )
     assert (
         panel._action_buttons["discord_callback_page"].text
         == "label:debug_preview.discord_callback_page"

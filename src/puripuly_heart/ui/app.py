@@ -277,6 +277,9 @@ class TranslatorApp:
             on_founder_letter=self._preview_founder_letter,
             on_pkce_failure=self._preview_pkce_failure,
             on_discord_auth=self._preview_discord_auth,
+            on_qq_auth=self._preview_qq_auth,
+            on_qq_auth_recoverable_error=self._preview_qq_auth_recoverable_error,
+            on_qq_auth_translation_gated=self._preview_qq_auth_translation_gated,
             on_discord_callback_page=self._preview_discord_callback_page,
             on_peer_translation_eula=self._preview_peer_translation_eula,
             on_local_qwen_hallucination_modal=self._preview_local_qwen_hallucination_modal,
@@ -519,6 +522,28 @@ class TranslatorApp:
 
     def _preview_discord_auth(self) -> None:
         self.show_discord_managed_auth_dialog(preview=True)
+
+    def _open_qq_auth_preview_dialog(self) -> QqManagedAuthDialog:
+        dialog = QqManagedAuthDialog(
+            self.page,
+            on_continue=self._close_qq_managed_auth_dialog,
+            on_close=self._close_qq_managed_auth_dialog,
+            on_cancel=self._close_qq_managed_auth_dialog,
+        )
+        self._qq_managed_auth_dialog = dialog
+        dialog.open()
+        return dialog
+
+    def _preview_qq_auth(self) -> None:
+        self._open_qq_auth_preview_dialog()
+
+    def _preview_qq_auth_recoverable_error(self) -> None:
+        dialog = self._open_qq_auth_preview_dialog()
+        dialog.set_error("qq_managed_auth.mismatch")
+
+    def _preview_qq_auth_translation_gated(self) -> None:
+        dialog = self._open_qq_auth_preview_dialog()
+        dialog.set_error("qq_managed_auth.required")
 
     def _preview_discord_callback_page(self) -> None:
         webbrowser.open(_write_discord_callback_preview_page(get_locale()))
