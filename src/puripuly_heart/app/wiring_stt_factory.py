@@ -12,6 +12,7 @@ from puripuly_heart.config.runtime_resolution import (
     CREDENTIAL_REF_SONIOX_STT,
     SONIOX_STT_DEFAULT_KEEPALIVE_INTERVAL_S,
     SONIOX_STT_DEFAULT_TRAILING_SILENCE_MS,
+    SONIOX_STT_MODEL_RT_V5,
     STT_PROVIDER_DEEPGRAM,
     STT_PROVIDER_LOCAL_QWEN,
     STT_PROVIDER_QWEN_ASR,
@@ -400,7 +401,7 @@ def create_stt_backend_from_resolved_config(
         api_key = _soniox_api_key_for_resolved_credential(config.credential, secrets=secrets)
         return SonioxRealtimeSTTBackend(
             api_key=api_key,
-            model=config.model or "stt-rt-v4",
+            model=config.model or SONIOX_STT_MODEL_RT_V5,
             endpoint=config.endpoint or "wss://stt-rt.soniox.com/transcribe-websocket",
             language_hints=get_soniox_language_hints(config.source_language),
             sample_rate_hz=config.sample_rate_hz,

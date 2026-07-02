@@ -1217,6 +1217,53 @@ async def test_managed_stt_provider_multiple_pending_finals_resolve_fifo() -> No
         await stt.close()
 
 
+async def test_managed_stt_provider_empty_final_boundary_consumes_pending_id_before_next_final() -> (
+    None
+):
+    backend = Float32Backend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        reset_deadline_s=90.0,
+    )
+
+    empty_utterance_id = uuid4()
+    next_utterance_id = uuid4()
+    stream = stt.events()
+
+    try:
+        await stt.handle_vad_event(
+            SpeechStart(
+                empty_utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(1.0),
+            )
+        )
+        await _next_state(stream, STTSessionState.STREAMING)
+        await stt.handle_vad_event(SpeechEnd(empty_utterance_id))
+        await backend.sessions[0]._queue.put(STTBackendTranscriptEvent(text="", is_final=True))
+
+        await stt.handle_vad_event(
+            SpeechStart(
+                next_utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(0.5),
+            )
+        )
+        await stt.handle_vad_event(SpeechEnd(next_utterance_id))
+        await backend.sessions[0]._queue.put(
+            STTBackendTranscriptEvent(text="next final", is_final=True)
+        )
+
+        event = await _next_typed_event(stream, STTFinalEvent)
+
+        assert event.utterance_id == next_utterance_id
+        assert event.transcript.utterance_id == next_utterance_id
+        assert event.transcript.text == "next final"
+    finally:
+        await stt.close()
+
+
 async def test_managed_stt_provider_drops_stale_pending_final_before_later_final() -> None:
     backend = Float32Backend()
     clock = FakeClock(10.0)

@@ -49,6 +49,12 @@ async def test_soniox_backend_validates_params() -> None:
         await backend.open_session()
 
 
+def test_soniox_backend_defaults_to_realtime_v5_model() -> None:
+    backend = SonioxRealtimeSTTBackend(api_key="k", language_hints=["en"])
+
+    assert backend.model == "stt-rt-v5"
+
+
 @pytest.mark.asyncio
 async def test_soniox_session_handles_message_errors() -> None:
     session = _make_session()
@@ -218,6 +224,51 @@ async def test_soniox_session_repeated_finalize_boundaries_clear_each_final_segm
 
 
 @pytest.mark.asyncio
+async def test_soniox_empty_final_boundary_clears_previous_segment_before_next_final() -> None:
+    session = _make_session()
+
+    await session.on_speech_end(trailing_silence_ms=0)
+    first_finalize = await session._audio_q.get()
+    assert isinstance(first_finalize, _FinalizeRequest)
+    session._handle_message(
+        json.dumps(
+            {
+                "tokens": [
+                    {"text": "First", "is_final": True, "end_ms": 100},
+                    {"text": "<fin>", "is_final": True},
+                ]
+            }
+        )
+    )
+    first = session._events.get_nowait()
+    assert first.text == "First"
+
+    await session.on_speech_end(trailing_silence_ms=0)
+    empty_finalize = await session._audio_q.get()
+    assert isinstance(empty_finalize, _FinalizeRequest)
+    session._handle_message(json.dumps({"tokens": [{"text": "<fin>", "is_final": True}]}))
+    empty_boundary = session._events.get_nowait()
+    assert empty_boundary.text == ""
+    assert empty_boundary.is_final is True
+
+    await session.on_speech_end(trailing_silence_ms=0)
+    next_finalize = await session._audio_q.get()
+    assert isinstance(next_finalize, _FinalizeRequest)
+    session._handle_message(
+        json.dumps(
+            {
+                "tokens": [
+                    {"text": "Second", "is_final": True, "end_ms": 200},
+                    {"text": "<fin>", "is_final": True},
+                ]
+            }
+        )
+    )
+    second = session._events.get_nowait()
+    assert second.text == "Second"
+
+
+@pytest.mark.asyncio
 async def test_soniox_session_send_audio_and_stop() -> None:
     session = _make_session()
 
@@ -250,12 +301,15 @@ async def test_soniox_session_events_yield_and_raise() -> None:
 
 @pytest.mark.asyncio
 async def test_soniox_verify_api_key_handles_timeout(monkeypatch):
+    seen: dict[str, object] = {}
+
     class FakeWebSocket:
         def __init__(self):
             self.sent = []
 
         async def send(self, payload):
             self.sent.append(payload)
+            seen["config"] = payload
 
         async def recv(self):
             raise asyncio.TimeoutError
@@ -274,6 +328,8 @@ async def test_soniox_verify_api_key_handles_timeout(monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "websockets", FakeWebsockets)
 
     assert await SonioxRealtimeSTTBackend.verify_api_key("secret") is True
+    config = json.loads(str(seen["config"]))
+    assert config["model"] == "stt-rt-v5"
 
 
 @pytest.mark.asyncio

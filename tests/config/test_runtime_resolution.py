@@ -251,6 +251,18 @@ def test_default_peer_stt_runtime_intent_uses_desktop_peer_vad_defaults() -> Non
     assert config.vad_pre_roll_ms == 500
 
 
+def test_default_self_stt_runtime_intent_uses_low_latency_vad_defaults() -> None:
+    runtime_resolution = _runtime_resolution_module()
+    resolved = _resolved_module()
+
+    config = runtime_resolution.resolve_stt_config(runtime_resolution.STTRuntimeIntent())
+
+    assert config.channel == resolved.RUNTIME_CHANNEL_SELF
+    assert config.vad_speech_threshold == 0.5
+    assert config.vad_hangover_ms == 500
+    assert config.vad_pre_roll_ms == 500
+
+
 def test_soniox_runtime_default_uses_realtime_v5_model() -> None:
     runtime_resolution = _runtime_resolution_module()
 
