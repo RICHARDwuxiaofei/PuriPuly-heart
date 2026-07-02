@@ -7,7 +7,7 @@ from puripuly_heart.app.ports.managed_identity_state import (
     ManagedIdentitySnapshot,
     ManagedIdentityStatePort,
 )
-from puripuly_heart.config.settings import AppSettings
+from puripuly_heart.config.settings import AppSettings, TranslationConnection
 from puripuly_heart.core.managed_openrouter_release import OpenRouterReleaseRuntimeConfig
 from puripuly_heart.core.openrouter_credentials import OpenRouterCredentialRuntimeConfig
 
@@ -145,6 +145,9 @@ def build_openrouter_credential_runtime_config(
     return OpenRouterCredentialRuntimeConfig(
         selected_source=settings.openrouter.selected_source,
         installation_id=settings.managed_identity.installation_id,
+        managed_credential_kind=_managed_credential_kind_for_settings(settings),
+        active_managed_credential_ref=settings.managed_identity.active_managed_credential_ref,
+        active_managed_expires_at=settings.managed_identity.active_managed_expires_at,
     )
 
 
@@ -157,7 +160,14 @@ def build_openrouter_release_runtime_config(
         llm_model=settings.openrouter.llm_model,
         selected_source=settings.openrouter.selected_source,
         selection_alias=settings.openrouter.selection_alias,
+        managed_credential_kind=_managed_credential_kind_for_settings(settings),
     )
+
+
+def _managed_credential_kind_for_settings(settings: AppSettings) -> str:
+    if settings.translation.connection == TranslationConnection.MANAGED_CHINA:
+        return "qq"
+    return "standard"
 
 
 def _managed_release_service_for_alias(

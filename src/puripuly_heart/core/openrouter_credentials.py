@@ -29,6 +29,8 @@ class OpenRouterCredentialRuntimeConfig:
     selected_source: OpenRouterCredentialSource
     installation_id: str | None
     managed_credential_kind: str = "standard"
+    active_managed_credential_ref: str | None = None
+    active_managed_expires_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,8 +69,14 @@ def resolve_openrouter_credentials(
             api_key=_get_byok_api_key(secrets),
         )
 
-    managed_secret_key = _managed_api_key_secret_for_kind(config.managed_credential_kind)
+    managed_credential_kind = _normalize_managed_credential_kind(config.managed_credential_kind)
+    managed_secret_key = _managed_api_key_secret_for_kind(managed_credential_kind)
     managed_api_key = _normalize_secret(secrets.get(managed_secret_key))
+    if (
+        managed_credential_kind == "qq"
+        and _normalize_secret(config.active_managed_credential_ref) is None
+    ):
+        managed_api_key = None
     if managed_api_key is not None:
         return OpenRouterCredentialResolution(
             selected_source=selected_source,
@@ -214,9 +222,15 @@ def _get_byok_api_key(secrets: SecretStore) -> str | None:
 
 
 def _managed_api_key_secret_for_kind(kind: object) -> str:
-    if isinstance(kind, str) and kind.strip() == "qq":
+    if _normalize_managed_credential_kind(kind) == "qq":
         return OPENROUTER_MANAGED_QQ_API_KEY_SECRET
     return OPENROUTER_MANAGED_API_KEY_SECRET
+
+
+def _normalize_managed_credential_kind(kind: object) -> str:
+    if isinstance(kind, str) and kind.strip() == "qq":
+        return "qq"
+    return "standard"
 
 
 def _normalize_managed_availability(value: str) -> str:

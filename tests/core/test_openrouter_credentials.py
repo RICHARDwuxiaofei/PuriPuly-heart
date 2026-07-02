@@ -27,7 +27,19 @@ def _credential_config(settings: AppSettings) -> OpenRouterCredentialRuntimeConf
     return OpenRouterCredentialRuntimeConfig(
         selected_source=settings.openrouter.selected_source,
         installation_id=settings.managed_identity.installation_id,
+        active_managed_credential_ref=settings.managed_identity.active_managed_credential_ref,
+        active_managed_expires_at=settings.managed_identity.active_managed_expires_at,
     )
+
+
+class TrackingSecretStore(InMemorySecretStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.get_calls: list[str] = []
+
+    def get(self, key: str) -> str | None:
+        self.get_calls.append(key)
+        return super().get(key)
 
 
 def _managed_state(settings: AppSettings) -> ManagedIdentityStateAdapter:
@@ -81,6 +93,7 @@ def test_resolve_openrouter_credentials_uses_selected_managed_key_without_byok_f
 def test_resolve_openrouter_credentials_separates_standard_and_qq_managed_keys() -> None:
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.managed_identity.active_managed_credential_ref = "managed-ref-qq"
     store = InMemorySecretStore()
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "standard-managed-key")
     store.set(OPENROUTER_MANAGED_QQ_API_KEY_SECRET, "qq-managed-key")
@@ -91,6 +104,7 @@ def test_resolve_openrouter_credentials_separates_standard_and_qq_managed_keys()
             selected_source=settings.openrouter.selected_source,
             installation_id=settings.managed_identity.installation_id,
             managed_credential_kind="qq",
+            active_managed_credential_ref=settings.managed_identity.active_managed_credential_ref,
         ),
         secrets=store,
     )
@@ -110,6 +124,7 @@ def test_resolve_openrouter_credentials_never_falls_back_between_managed_key_kin
             selected_source=settings.openrouter.selected_source,
             installation_id=settings.managed_identity.installation_id,
             managed_credential_kind="qq",
+            active_managed_credential_ref="managed-ref-qq",
         ),
         secrets=store,
         request_intent="TRANS",
@@ -117,6 +132,66 @@ def test_resolve_openrouter_credentials_never_falls_back_between_managed_key_kin
 
     assert qq.api_key is None
     assert qq.requires_managed_challenge is False
+
+
+def test_resolve_openrouter_credentials_standard_managed_does_not_read_qq_key() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    store = TrackingSecretStore()
+    store.set(OPENROUTER_MANAGED_QQ_API_KEY_SECRET, "qq-managed-key")
+
+    resolution = resolve_openrouter_credentials(
+        _credential_config(settings),
+        secrets=store,
+        request_intent="TRANS",
+    )
+
+    assert resolution.api_key is None
+    assert resolution.requires_managed_challenge is True
+    assert store.get_calls == [OPENROUTER_MANAGED_API_KEY_SECRET]
+
+
+def test_resolve_openrouter_credentials_qq_managed_does_not_read_standard_key() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    store = TrackingSecretStore()
+    store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "standard-managed-key")
+
+    resolution = resolve_openrouter_credentials(
+        OpenRouterCredentialRuntimeConfig(
+            selected_source=settings.openrouter.selected_source,
+            installation_id=settings.managed_identity.installation_id,
+            managed_credential_kind="qq",
+            active_managed_credential_ref="managed-ref-qq",
+        ),
+        secrets=store,
+        request_intent="TRANS",
+    )
+
+    assert resolution.api_key is None
+    assert resolution.requires_managed_challenge is False
+    assert store.get_calls == [OPENROUTER_MANAGED_QQ_API_KEY_SECRET]
+
+
+def test_resolve_openrouter_credentials_qq_requires_active_managed_state() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    store = InMemorySecretStore()
+    store.set(OPENROUTER_MANAGED_QQ_API_KEY_SECRET, "qq-managed-key")
+
+    resolution = resolve_openrouter_credentials(
+        OpenRouterCredentialRuntimeConfig(
+            selected_source=settings.openrouter.selected_source,
+            installation_id=settings.managed_identity.installation_id,
+            managed_credential_kind="qq",
+            active_managed_credential_ref=None,
+        ),
+        secrets=store,
+        request_intent="TRANS",
+    )
+
+    assert resolution.api_key is None
+    assert resolution.requires_managed_challenge is False
 
 
 def test_resolve_openrouter_credentials_requires_explicit_trans_intent_before_managed_release() -> (

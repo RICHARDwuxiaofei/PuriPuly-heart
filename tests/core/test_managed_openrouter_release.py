@@ -23,6 +23,8 @@ from puripuly_heart.config.settings import (
     OpenRouterCredentialSource,
     OpenRouterLLMModel,
     OpenRouterSelectionAlias,
+    TranslationConnection,
+    TranslationModel,
 )
 from puripuly_heart.core.discord_oauth_loopback import DiscordOAuthCallbackError
 from puripuly_heart.core.managed_identity import ensure_managed_identity_bundle
@@ -45,6 +47,7 @@ from puripuly_heart.core.managed_openrouter_release import (
 )
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_MANAGED_API_KEY_SECRET,
+    OPENROUTER_MANAGED_QQ_API_KEY_SECRET,
     OPENROUTER_MANAGED_USER_ID_SECRET,
     OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
     load_managed_openrouter_user_identifier,
@@ -472,6 +475,113 @@ async def test_prepare_for_translation_short_circuits_when_managed_key_exists() 
     assert result.local_key_available is True
     assert result.pending_issue is False
     assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_managed_china_prepare_uses_only_qq_key_with_active_entitlement_state() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.translation.model = TranslationModel.DEEPSEEK_V4_FLASH
+    settings.translation.connection = TranslationConnection.MANAGED_CHINA
+    settings.managed_identity.active_managed_credential_ref = "managed-ref-qq"
+    settings.managed_identity.active_managed_expires_at = "2026-08-03T06:00:00.000Z"
+    secrets = InMemorySecretStore()
+    secrets.set(OPENROUTER_MANAGED_API_KEY_SECRET, "standard-managed-key")
+    secrets.set(OPENROUTER_MANAGED_QQ_API_KEY_SECRET, "qq-managed-key")
+    client = FakeManagedReleaseClient()
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert result.api_key == "qq-managed-key"
+    assert result.local_key_available is True
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_managed_china_prepare_requires_qq_auth_without_active_entitlement_state() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.translation.model = TranslationModel.DEEPSEEK_V4_FLASH
+    settings.translation.connection = TranslationConnection.MANAGED_CHINA
+    secrets = InMemorySecretStore()
+    secrets.set(OPENROUTER_MANAGED_API_KEY_SECRET, "standard-managed-key")
+    secrets.set(OPENROUTER_MANAGED_QQ_API_KEY_SECRET, "qq-managed-key")
+    client = FakeManagedReleaseClient()
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.RESTART
+    assert result.message_key == "qq_managed_auth.required"
+    assert result.api_key is None
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_managed_china_prepare_does_not_start_standard_discord_challenge_when_qq_key_missing() -> (
+    None
+):
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.translation.model = TranslationModel.DEEPSEEK_V4_FLASH
+    settings.translation.connection = TranslationConnection.MANAGED_CHINA
+    settings.managed_identity.active_managed_credential_ref = "managed-ref-qq"
+    secrets = InMemorySecretStore()
+    secrets.set(OPENROUTER_MANAGED_API_KEY_SECRET, "standard-managed-key")
+    client = FakeManagedReleaseClient()
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.RESTART
+    assert result.message_key == "qq_managed_auth.required"
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_managed_china_llm_start_requires_qq_auth_without_standard_fallback_or_issue() -> (
+    None
+):
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.translation.model = TranslationModel.DEEPSEEK_V4_FLASH
+    settings.translation.connection = TranslationConnection.MANAGED_CHINA
+    settings.managed_identity.active_managed_credential_ref = "managed-ref-qq"
+    secrets = InMemorySecretStore()
+    secrets.set(OPENROUTER_MANAGED_API_KEY_SECRET, "standard-managed-key")
+    client = FakeManagedReleaseClient(issue_result=ManagedOpenRouterIssueSuccess("issued-key"))
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.ensure_key_for_llm_start()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.RESTART
+    assert result.message_key == "qq_managed_auth.required"
+    assert result.api_key is None
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_standard_managed_prepare_preserves_discord_flow_without_reading_qq_key() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.translation.connection = TranslationConnection.MANAGED
+    secrets = InMemorySecretStore()
+    secrets.set(OPENROUTER_MANAGED_QQ_API_KEY_SECRET, "qq-managed-key")
+    service, _settings, _secrets, client, harness = _make_discord_service(
+        settings=settings,
+        secrets=secrets,
+    )
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert client.calls[0][0] == "discord_start"
+    assert client.calls[-1][0] == "discord_issue"
+    assert harness.listeners[0].closed is True
+    assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
+    assert secrets.get(OPENROUTER_MANAGED_QQ_API_KEY_SECRET) == "qq-managed-key"
 
 
 @pytest.mark.asyncio

@@ -73,6 +73,7 @@ class OpenRouterReleaseRuntimeConfig:
     llm_model: OpenRouterLLMModel
     selected_source: OpenRouterCredentialSource
     selection_alias: OpenRouterSelectionAlias | None
+    managed_credential_kind: str = "standard"
 
 
 def _default_signed_at() -> str:
@@ -421,6 +422,23 @@ class ManagedOpenRouterReleaseService:
         return OpenRouterCredentialRuntimeConfig(
             selected_source=self.openrouter_config.selected_source,
             installation_id=self.managed_state.installation_id,
+            managed_credential_kind=self.openrouter_config.managed_credential_kind,
+            active_managed_credential_ref=self.managed_state.active_managed_credential_ref,
+            active_managed_expires_at=self.managed_state.active_managed_expires_at,
+        )
+
+    def _uses_qq_managed_credentials(self) -> bool:
+        return self.openrouter_config.managed_credential_kind == "qq"
+
+    def _qq_managed_auth_required_result(self) -> ManagedOpenRouterReleaseResult:
+        return ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.RESTART,
+            message_key="qq_managed_auth.required",
+            diagnostics=ManagedOpenRouterReleaseDiagnostics(
+                operation="resolve_openrouter_credentials",
+                code="qq_managed_key_required",
+                error_class="terminal",
+            ),
         )
 
     def _start_shared_task(
@@ -485,6 +503,8 @@ class ManagedOpenRouterReleaseService:
                 api_key=resolution.api_key,
                 local_key_available=True,
             )
+        if self._uses_qq_managed_credentials():
+            return self._qq_managed_auth_required_result()
 
         if self._prepare_task is not None and not self._prepare_task.done():
             prepare_result = await self._await_shared_task(
@@ -632,6 +652,8 @@ class ManagedOpenRouterReleaseService:
                 api_key=resolution.api_key,
                 local_key_available=True,
             )
+        if self._uses_qq_managed_credentials():
+            return self._qq_managed_auth_required_result()
 
         bundle = ensure_managed_identity_bundle(
             self.managed_state,
@@ -764,6 +786,8 @@ class ManagedOpenRouterReleaseService:
                 api_key=resolution.api_key,
                 local_key_available=True,
             )
+        if self._uses_qq_managed_credentials():
+            return self._qq_managed_auth_required_result()
 
         if self._issue_task is not None and not self._issue_task.done():
             return await self._await_shared_task(self._issue_task, single_flight_reused=True)
@@ -776,6 +800,8 @@ class ManagedOpenRouterReleaseService:
         return await self._await_shared_task(task, single_flight_reused=False)
 
     async def _run_issue_flow(self) -> ManagedOpenRouterReleaseResult:
+        if self._uses_qq_managed_credentials():
+            return self._qq_managed_auth_required_result()
         bundle = ensure_managed_identity_bundle(
             self.managed_state,
             self.secrets,
