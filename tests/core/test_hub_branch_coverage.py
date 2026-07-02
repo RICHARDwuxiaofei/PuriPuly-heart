@@ -10,7 +10,6 @@ import numpy as np
 import pytest
 
 from puripuly_heart.core.clock import FakeClock
-from puripuly_heart.core.diagnostic_validation import DIAGNOSTIC_REDACTION_MARKER
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseDiagnostics,
     ManagedOpenRouterUserFacingError,
@@ -752,7 +751,51 @@ async def test_handle_stt_event_logs_basic_channel_state_breadcrumb() -> None:
 
 
 @pytest.mark.asyncio
-async def test_enqueue_osc_emits_payload_preview_only_in_detailed_runtime_logs() -> None:
+async def test_handle_stt_partial_runtime_log_uses_metadata_without_transcript_text() -> None:
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+    utterance_id = uuid4()
+    raw_partial = "raw partial transcript should not enter runtime logs"
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+        runtime_logging=runtime_logging,
+    )
+
+    try:
+        await hub._handle_stt_event(
+            STTPartialEvent(
+                utterance_id=utterance_id,
+                transcript=Transcript(
+                    utterance_id=utterance_id,
+                    text=raw_partial,
+                    is_final=False,
+                    created_at=1.0,
+                ),
+            )
+        )
+
+        event = await hub.ui_events.get()
+        messages = _runtime_log_messages(log_stream)
+
+        assert event.type == UIEventType.TRANSCRIPT_PARTIAL
+        assert any(
+            message.startswith("[Hub] STT Partial:")
+            and "channel=self" in message
+            and f"utterance_id={utterance_id}" in message
+            and f"text_len={len(raw_partial)}" in message
+            for message in messages
+        )
+        assert not any(raw_partial in message for message in messages)
+        assert not any(raw_partial[:20] in message for message in messages)
+    finally:
+        runtime_logging.close()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_osc_emits_metadata_preview_only_in_detailed_runtime_logs() -> None:
     basic_runtime_logging, basic_stream = _make_runtime_logging_capture()
     detailed_runtime_logging, detailed_stream = _make_runtime_logging_capture()
     detailed_runtime_logging.set_mode(SessionLoggingMode.DETAILED)
@@ -796,9 +839,12 @@ async def test_enqueue_osc_emits_payload_preview_only_in_detailed_runtime_logs()
         assert not any("OSC enqueue preview" in message for message in basic_messages)
         assert any(
             message.startswith("[Hub] OSC enqueue preview:")
-            and "hello world from transcript (hello world translated)" in message
+            and "text_len=" in message
+            and "translation_text_present=True" in message
             for message in detailed_messages
         )
+        assert not any("hello world from transcript" in message for message in detailed_messages)
+        assert not any("hello world translated" in message for message in detailed_messages)
     finally:
         basic_runtime_logging.close()
         detailed_runtime_logging.close()
@@ -1130,7 +1176,9 @@ async def test_handle_stt_event_preserves_runtime_logged_flag_from_stt_errors() 
 
 
 @pytest.mark.asyncio
-async def test_run_stt_event_loop_without_runtime_logging_preserves_traceback(caplog) -> None:
+async def test_run_stt_event_loop_without_runtime_logging_uses_safe_exception_metadata(
+    caplog,
+) -> None:
     hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), clock=FakeClock())
 
     with (
@@ -1139,7 +1187,8 @@ async def test_run_stt_event_loop_without_runtime_logging_preserves_traceback(ca
     ):
         await hub._run_stt_event_loop(RaisingEventSTT())
 
-    assert "[Hub] STT event loop crashed: loop boom" in caplog.messages
+    assert "[Hub] STT event loop crashed: RuntimeError" in caplog.messages
+    assert "loop boom" not in "\n".join(caplog.messages)
     assert any(record.levelno == logging.ERROR for record in caplog.records)
 
 
@@ -1195,7 +1244,7 @@ async def test_handle_stt_event_loop_exception_with_runtime_logging_uses_safe_st
 
 
 @pytest.mark.asyncio
-async def test_emit_overlay_event_routes_traceback_to_detailed_runtime_logs() -> None:
+async def test_emit_overlay_event_logs_safe_exception_metadata() -> None:
     basic_runtime_logging, basic_stream = _make_runtime_logging_capture()
     detailed_runtime_logging, detailed_stream = _make_runtime_logging_capture()
     detailed_runtime_logging.set_mode(SessionLoggingMode.DETAILED)
@@ -1224,17 +1273,16 @@ async def test_emit_overlay_event_routes_traceback_to_detailed_runtime_logs() ->
         basic_messages = _runtime_log_messages(basic_stream)
         detailed_messages = _runtime_log_messages(detailed_stream)
 
-        assert "[Hub] Overlay sink emit failed: overlay down" in basic_messages
+        assert "[Hub] Overlay sink emit failed: RuntimeError" in basic_messages
         assert not any(
             "Traceback (most recent call last):" in message for message in basic_messages
         )
 
-        assert "[Hub] Overlay sink emit failed: overlay down" in detailed_messages
-        assert DIAGNOSTIC_REDACTION_MARKER in detailed_messages
+        assert "[Hub] Overlay sink emit failed: RuntimeError" in detailed_messages
         assert not any(
             "Traceback (most recent call last):" in message for message in detailed_messages
         )
-        assert not any("RuntimeError: overlay down" in message for message in detailed_messages)
+        assert not any("overlay down" in message for message in detailed_messages)
     finally:
         basic_runtime_logging.close()
         detailed_runtime_logging.close()

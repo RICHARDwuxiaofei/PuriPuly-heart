@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 import time
-import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Protocol, cast
@@ -36,27 +34,25 @@ from puripuly_heart.core.orchestrator.channel_runtime import (
     _MergeBuffer,
 )
 from puripuly_heart.core.orchestrator.context import ContextMode, ContextResolver
-from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
+from puripuly_heart.core.orchestrator.ports import (
+    HubChatboxPort,
+    HubOverlayEventFactoryPort,
+    HubOverlaySinkPort,
+    HubRuntimeLoggingPort,
+    format_basic_latency_summary,
+    format_detailed_latency_breakdown,
+    format_detailed_latency_trace,
+    format_translation_ready_for_output,
+    runtime_logging_mode_is_detailed,
+)
 from puripuly_heart.core.output.models import (
     OUTPUT_ROUTE_SUBTITLE_OVERLAY,
     PUBLICATION_KIND_PEER_SUBTITLE,
     PUBLICATION_KIND_SELF_UTTERANCE,
 )
 from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
-from puripuly_heart.core.overlay.sink import (
-    OverlayEventAdapter,
-    OverlaySink,
-)
 from puripuly_heart.core.runtime.output import OutputPublicationResult, OutputRuntime
 from puripuly_heart.core.runtime.provider_handle import ProviderRuntimeHandle
-from puripuly_heart.core.runtime_logging import (
-    SessionLoggingMode,
-    SessionRuntimeLoggingService,
-    format_basic_latency_summary,
-    format_detailed_latency_breakdown,
-    format_detailed_latency_trace,
-    format_translation_ready_for_output,
-)
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadEvent
 from puripuly_heart.domain.events import (
     STTErrorEvent,
@@ -122,6 +118,12 @@ class _StaleProviderCompletion(Exception):
     """Internal signal for provider calls completed by a replaced provider handle."""
 
 
+def _safe_log_arg(value: object) -> object:
+    if isinstance(value, BaseException):
+        return type(value).__name__
+    return value
+
+
 def _safe_user_message_params(params: Mapping[str, object]) -> dict[str, SafeMessageParam]:
     safe_params: dict[str, SafeMessageParam] = {}
     for key, value in params.items():
@@ -136,12 +138,12 @@ def _safe_user_message_params(params: Mapping[str, object]) -> dict[str, SafeMes
 class ClientHub:
     stt: STTProvider | None
     llm: LLMProvider | None
-    osc: ChatboxPaginator
+    osc: HubChatboxPort
     peer_stt: STTProvider | None = None
-    overlay_sink: OverlaySink | None = None
+    overlay_sink: HubOverlaySinkPort | None = None
     overlay_diagnostics: OverlayDiagnosticsRecorder | None = None
     clock: Clock = SystemClock()
-    runtime_logging: SessionRuntimeLoggingService | None = None
+    runtime_logging: HubRuntimeLoggingPort | None = None
 
     source_language: str = "ko"
     target_language: str = "en"
@@ -192,7 +194,7 @@ class ClientHub:
     context_resolver: ContextResolver = field(init=False)
     active_chatbox_channel: ChannelId = field(init=False, default="self")
     output_runtime: OutputRuntime = field(init=False)
-    overlay_event_adapter: OverlayEventAdapter = field(init=False)
+    overlay_event_adapter: HubOverlayEventFactoryPort = field(init=False)
     _last_logged_context_modes: dict[ChannelId, ContextMode | None] = field(
         init=False,
         default_factory=lambda: {"self": None, "peer": None},
@@ -726,14 +728,11 @@ class ClientHub:
         *args: object,
         level: int = logging.ERROR,
     ) -> None:
-        formatted = self._format_log_message(message, *args)
+        formatted = self._format_log_message(message, *(_safe_log_arg(arg) for arg in args))
         if self.runtime_logging is not None:
             self.runtime_logging.emit_basic(formatted, level=level)
-            detail = "".join(traceback.format_exception(*sys.exc_info())).rstrip()
-            if detail:
-                self.runtime_logging.emit_detailed(detail, level=level)
             return
-        logger.exception(formatted)
+        logger.log(level, formatted)
 
     def _emit_stt_event_loop_failure(
         self,
@@ -1232,7 +1231,10 @@ class ClientHub:
             if self.low_latency_mode:
                 return
             self._emit_detailed(
-                f"[Hub] STT Partial: '{event.transcript.text[:50]}...' id={str(event.transcript.utterance_id)[:8]}",
+                "[Hub] STT Partial: channel=%s utterance_id=%s text_len=%s",
+                event.channel,
+                event.transcript.utterance_id,
+                len(event.transcript.text),
                 fallback_level=logging.DEBUG,
             )
             await self._handle_transcript(event.transcript, is_final=False, source="Mic")
@@ -1755,9 +1757,8 @@ class ClientHub:
         )
         if decision is not None:
             return
-        detailed_mode = (
-            self.runtime_logging is not None
-            and self.runtime_logging.mode is SessionLoggingMode.DETAILED
+        detailed_mode = self.runtime_logging is not None and runtime_logging_mode_is_detailed(
+            self.runtime_logging.mode
         )
         start = time.perf_counter() if detailed_mode else 0.0
         try:
@@ -3322,9 +3323,11 @@ class ClientHub:
         merged = msg.text
 
         self._emit_detailed(
-            "[Hub] OSC enqueue preview: channel=%s text=%r",
+            "[Hub] OSC enqueue preview: channel=%s text_len=%s translation_text_present=%s include_source=%s",
             runtime.channel,
-            merged,
+            len(merged),
+            translation_text is not None,
+            self.chatbox_include_source,
             fallback_level=logging.INFO,
         )
         if runtime.channel == "self":

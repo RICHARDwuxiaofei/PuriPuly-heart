@@ -308,22 +308,6 @@ KNOWN_ALLOWED_VIOLATIONS: frozenset[ImportViolation] = frozenset(
             reason="adapters may wrap concrete resources but must not depend on settings migration internals or UI controls unless explicitly UI-owned",
         ),
         ImportViolation(
-            rule_id="orchestrator-avoids-product-adapters",
-            importer="src/puripuly_heart/core/orchestrator/hub.py",
-            imported="puripuly_heart.core.runtime_logging",
-            importer_layer="orchestrator",
-            imported_layer="adapters",
-            reason="orchestrator modules must avoid Flet UI, concrete provider construction, settings migration internals, services, and product-output adapters",
-        ),
-        ImportViolation(
-            rule_id="orchestrator-avoids-product-adapters",
-            importer="src/puripuly_heart/core/orchestrator/hub.py",
-            imported="puripuly_heart.core.osc.chatbox_paginator",
-            importer_layer="orchestrator",
-            imported_layer="adapters",
-            reason="orchestrator modules must avoid Flet UI, concrete provider construction, settings migration internals, services, and product-output adapters",
-        ),
-        ImportViolation(
             rule_id="runtime-owners-use-ports",
             importer="src/puripuly_heart/core/runtime/logging.py",
             imported="puripuly_heart.core.runtime_logging",
@@ -1231,14 +1215,6 @@ def test_current_concrete_osc_imports_are_adapter_boundary_violations() -> None:
     ui_rule = _rule_for_layer(UI_ADAPTERS_RENDERERS)
     expected = {
         ImportViolation(
-            rule_id=orchestrator_rule.rule_id,
-            importer="src/puripuly_heart/core/orchestrator/hub.py",
-            imported="puripuly_heart.core.osc.chatbox_paginator",
-            importer_layer=ORCHESTRATOR,
-            imported_layer=ADAPTERS,
-            reason=orchestrator_rule.reason,
-        ),
-        ImportViolation(
             rule_id=ui_rule.rule_id,
             importer="src/puripuly_heart/ui/controller.py",
             imported="puripuly_heart.core.osc.chatbox_paginator",
@@ -1265,6 +1241,17 @@ def test_current_concrete_osc_imports_are_adapter_boundary_violations() -> None:
     }
 
     assert expected <= _dependency_violations()
+    assert (
+        ImportViolation(
+            rule_id=orchestrator_rule.rule_id,
+            importer="src/puripuly_heart/core/orchestrator/hub.py",
+            imported="puripuly_heart.core.osc.chatbox_paginator",
+            importer_layer=ORCHESTRATOR,
+            imported_layer=ADAPTERS,
+            reason=orchestrator_rule.reason,
+        )
+        not in _dependency_violations()
+    )
 
 
 def test_current_runtime_owner_imports_are_allowlist_synchronization_only() -> None:
