@@ -16,6 +16,7 @@ from puripuly_heart.config.settings import (
     from_dict,
     load_settings,
     load_settings_with_result,
+    new_settings_for_first_run,
     save_settings,
     to_dict,
 )
@@ -37,6 +38,7 @@ PROVIDER_VERIFICATION_FIELDS = (
     "google",
     "openrouter",
     "deepseek",
+    "cerebras",
     "alibaba_beijing",
     "alibaba_singapore",
 )
@@ -99,6 +101,13 @@ def test_v24_maximal_fixture_migrates_to_canonical_vnext_serialization() -> None
     assert serialized["intent"]["translation"]["model"] == "local_llm"
     assert serialized["intent"]["translation"]["connection"] == "ollama"
     assert serialized["intent"]["translation"]["qwen"]["region"] == "singapore"
+    assert serialized["intent"]["translation"]["cerebras"]["llm_model"] == "gemma-4-31b"
+    assert serialized["intent"]["translation"]["openrouter_model"] == ("qwen/qwen3.5-flash-02-23")
+    assert serialized["intent"]["translation"]["openrouter_selected_source"] == "byok"
+    assert serialized["intent"]["translation"]["openrouter_selection_alias"] == (
+        "qwen35_flash_byok"
+    )
+    assert serialized["intent"]["translation"]["openrouter_provider_routing"] == "default"
     assert serialized["intent"]["local_llm"]["base_url"] == "http://127.0.0.1:12345/v1"
     assert serialized["intent"]["stt"]["provider"] == "deepgram"
     assert serialized["intent"]["peer_stt"]["provider"] == "soniox"
@@ -213,6 +222,63 @@ def test_evidence_bound_verified_entry_serializes_and_projects_legacy_true(
     assert loaded.api_key_verified.deepgram is False
 
 
+def test_cerebras_evidence_bound_provider_verification_entry_projects_legacy_true(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "settings.json"
+    verified_cerebras = ProviderVerificationEntry(
+        status="verified",
+        provider="cerebras",
+        secret_key="cerebras_api_key",
+        secret_revision=None,
+        secret_fingerprint="sha256:cerebras-test-fingerprint",
+        verifier_context={"flow": "settings.verify_api_key"},
+        verifier_evidence={"verifier": "cerebras"},
+    )
+    settings = AppSettingsVNext(
+        state=PersistedOperationalState(
+            provider_verification=ProviderVerificationState(cerebras=verified_cerebras)
+        )
+    )
+
+    save_settings(path, settings)
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["state"]["provider_verification"]["cerebras"] == {
+        "status": "verified",
+        "provider": "cerebras",
+        "secret_key": "cerebras_api_key",
+        "secret_revision": None,
+        "secret_fingerprint": "sha256:cerebras-test-fingerprint",
+        "verifier_context": {"flow": "settings.verify_api_key"},
+        "verifier_evidence": {"verifier": "cerebras"},
+    }
+
+    loaded = load_settings(path)
+    assert loaded.api_key_verified.cerebras is True
+
+
+def test_china_first_run_defaults_project_to_vnext_intent() -> None:
+    migration = _migration()
+    serialization = _serialization()
+
+    settings = new_settings_for_first_run("zh-CN")
+    serialized = serialization.to_dict(migration.from_legacy_app_settings(settings))
+
+    assert serialized["intent"]["ui"]["locale"] == "zh-CN"
+    assert serialized["intent"]["translation"]["model"] == "deepseek_v4_flash"
+    assert serialized["intent"]["translation"]["connection"] == "managed_china"
+    assert serialized["intent"]["translation"]["openrouter_model"] == ("deepseek/deepseek-v4-flash")
+    assert serialized["intent"]["translation"]["openrouter_selected_source"] == "managed"
+    assert serialized["intent"]["translation"]["openrouter_selection_alias"] == (
+        "deepseek_v4_flash_managed"
+    )
+    assert serialized["intent"]["translation"]["openrouter_provider_routing"] == ("deepseek_only")
+    assert serialized["intent"]["translation"]["openrouter_fallback_selection_alias"] == (
+        "deepseek_v4_flash_china"
+    )
+
+
 def test_current_vnext_status_only_provider_verification_entries_load_as_unknown() -> None:
     migration = _migration()
     serialization = _serialization()
@@ -223,6 +289,7 @@ def test_current_vnext_status_only_provider_verification_entries_load_as_unknown
         "google": {"status": "skipped"},
         "openrouter": {"status": "verified"},
         "deepseek": {"status": "failed"},
+        "cerebras": {"status": "verified"},
         "alibaba_beijing": {"status": "skipped"},
         "alibaba_singapore": {"status": "verified"},
     }
@@ -499,6 +566,8 @@ def test_raw_provider_api_key_fields_are_absent_from_vnext_serialized_output() -
             "deepgram_api_key": "raw-deepgram-secret",
             "soniox_api_key": "raw-soniox-secret",
             "local_llm_api_key": "raw-local-secret",
+            "cerebras_api_key": "raw-cerebras-secret",
+            "openrouter_managed_qq_api_key": "raw-managed-qq-secret",
         }
     )
 
@@ -510,10 +579,12 @@ def test_raw_provider_api_key_fields_are_absent_from_vnext_serialized_output() -
         "alibaba_api_key_singapore",
         "deepgram_api_key",
         "deepseek_api_key",
+        "cerebras_api_key",
         "google_api_key",
         "local_llm_api_key",
         "openrouter_api_key",
         "openrouter_managed_api_key",
+        "openrouter_managed_qq_api_key",
         "soniox_api_key",
     }
 
@@ -525,6 +596,8 @@ def test_raw_provider_api_key_fields_are_absent_from_vnext_serialized_output() -
     assert "raw-deepgram-secret" not in encoded
     assert "raw-soniox-secret" not in encoded
     assert "raw-local-secret" not in encoded
+    assert "raw-cerebras-secret" not in encoded
+    assert "raw-managed-qq-secret" not in encoded
 
 
 def test_secret_bearing_legacy_local_llm_extra_body_is_repaired_before_vnext_output() -> None:

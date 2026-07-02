@@ -10,6 +10,7 @@ from puripuly_heart.config.settings_vnext.schema import (
     VNEXT_SETTINGS_SCHEMA_VERSION,
     AppSettingsVNext,
     AudioIntent,
+    CerebrasTranslationIntent,
     ClipboardIntent,
     DeepgramSTTIntent,
     DesktopAudioIntent,
@@ -62,6 +63,7 @@ _PROVIDER_VERIFICATION_FIELDS = (
     "google",
     "openrouter",
     "deepseek",
+    "cerebras",
     "alibaba_beijing",
     "alibaba_singapore",
 )
@@ -111,9 +113,16 @@ def from_legacy_app_settings(
                 openrouter_fallback_selection_alias=data["openrouter"]["fallback_selection_alias"],
                 openrouter_broker_base_url=data["openrouter"]["broker_base_url"],
                 openrouter_routing_mode=data["openrouter"]["routing_mode"],
+                openrouter_model=data["openrouter"]["llm_model"],
+                openrouter_selected_source=data["openrouter"]["selected_source"],
+                openrouter_selection_alias=data["openrouter"]["selection_alias"],
+                openrouter_provider_routing=data["openrouter"]["provider_routing"],
                 qwen=QwenTranslationIntent(
                     region=data["qwen"]["region"],
                     llm_model=data["qwen"]["llm_model"],
+                ),
+                cerebras=CerebrasTranslationIntent(
+                    llm_model=data["cerebras"]["llm_model"],
                 ),
             ),
             local_llm=LocalLLMIntent(
@@ -345,8 +354,10 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
     data["openrouter"].update(
         {
             "routing_mode": intent.translation.openrouter_routing_mode,
-            "selected_source": legacy_settings.OpenRouterCredentialSource.NONE.value,
-            "selection_alias": None,
+            "llm_model": intent.translation.openrouter_model,
+            "selected_source": intent.translation.openrouter_selected_source,
+            "selection_alias": intent.translation.openrouter_selection_alias,
+            "provider_routing": intent.translation.openrouter_provider_routing,
             "fallback_selection_alias": intent.translation.openrouter_fallback_selection_alias,
             "broker_base_url": intent.translation.openrouter_broker_base_url,
         }
@@ -360,6 +371,9 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
         "base_url": intent.local_llm.base_url,
         "model": intent.local_llm.model,
         "extra_body": copy.deepcopy(intent.local_llm.extra_body),
+    }
+    data["cerebras"] = {
+        "llm_model": intent.translation.cerebras.llm_model,
     }
     data["llm"] = {"concurrency_limit": intent.translation.concurrency_limit}
     data["osc"] = {
@@ -413,6 +427,10 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
             state.provider_verification.deepseek,
             provider="deepseek",
         ),
+        "cerebras": _is_evidence_bound_verified_entry(
+            state.provider_verification.cerebras,
+            provider="cerebras",
+        ),
         "alibaba_beijing": _is_evidence_bound_verified_entry(
             state.provider_verification.alibaba_beijing,
             provider="alibaba_beijing",
@@ -453,7 +471,11 @@ def _coerce_int(value: object, default: int) -> int:
 def _legacy_provider_llm_for_translation(model: str, connection: str) -> str:
     if model == "local_llm":
         return "local_llm"
+    if model == "gemma4_31b_cerebras":
+        return "cerebras"
     if model in {"gemini3_flash", "gemini31_flash_lite"}:
+        if connection == "openrouter":
+            return "openrouter"
         return "gemini"
     if model in {"deepseek_v4_flash", "deepseek_v4_pro"} and connection == "official_byok":
         return "deepseek"

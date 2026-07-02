@@ -131,6 +131,7 @@ def test_vnext_native_provider_verification_evidence_leaves_are_explicitly_exclu
     providers = {
         "alibaba_beijing",
         "alibaba_singapore",
+        "cerebras",
         "deepgram",
         "deepseek",
         "google",

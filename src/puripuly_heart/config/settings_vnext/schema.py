@@ -210,6 +210,11 @@ class QwenTranslationIntent:
 
 
 @dataclass(frozen=True, slots=True)
+class CerebrasTranslationIntent:
+    llm_model: str = "gemma-4-31b"
+
+
+@dataclass(frozen=True, slots=True)
 class TranslationIntent:
     model: str = "gemma4"
     connection: str = "managed"
@@ -220,7 +225,12 @@ class TranslationIntent:
     openrouter_fallback_selection_alias: str = "deepseek-v4-flash"
     openrouter_broker_base_url: str = DEFAULT_OPENROUTER_BROKER_BASE_URL
     openrouter_routing_mode: str = "latency"
+    openrouter_model: str = "google/gemma-4-26b-a4b-it"
+    openrouter_selected_source: str = "managed"
+    openrouter_selection_alias: str | None = "gemma4_managed"
+    openrouter_provider_routing: str = "default"
     qwen: QwenTranslationIntent = field(default_factory=QwenTranslationIntent)
+    cerebras: CerebrasTranslationIntent = field(default_factory=CerebrasTranslationIntent)
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,7 +256,7 @@ class QwenASRSTTIntent:
 
 @dataclass(frozen=True, slots=True)
 class SonioxSTTIntent:
-    model: str = "stt-rt-v4"
+    model: str = "stt-rt-v5"
     endpoint: str = "wss://stt-rt.soniox.com/transcribe-websocket"
     keepalive_interval_s: float = 10.0
     trailing_silence_ms: int = 100
@@ -258,7 +268,7 @@ class STTIntent:
     drain_timeout_s: float = 2.0
     vad_speech_threshold: float = 0.5
     low_latency_mode: bool = True
-    low_latency_vad_hangover_ms: int = 600
+    low_latency_vad_hangover_ms: int = 500
     low_latency_merge_gap_ms: int = 600
     low_latency_spec_retry_max: int = 10
     custom_vocabulary_enabled: bool = True
@@ -464,6 +474,7 @@ class ProviderVerificationState:
     google: ProviderVerificationEntry = field(default_factory=ProviderVerificationEntry)
     openrouter: ProviderVerificationEntry = field(default_factory=ProviderVerificationEntry)
     deepseek: ProviderVerificationEntry = field(default_factory=ProviderVerificationEntry)
+    cerebras: ProviderVerificationEntry = field(default_factory=ProviderVerificationEntry)
     alibaba_beijing: ProviderVerificationEntry = field(default_factory=ProviderVerificationEntry)
     alibaba_singapore: ProviderVerificationEntry = field(default_factory=ProviderVerificationEntry)
 
@@ -522,6 +533,7 @@ __all__ = [
     "AppSettingsVNext",
     "AudioIntent",
     "ClipboardIntent",
+    "CerebrasTranslationIntent",
     "DeepgramSTTIntent",
     "DesktopAudioIntent",
     "DesktopFletOverlayIntent",

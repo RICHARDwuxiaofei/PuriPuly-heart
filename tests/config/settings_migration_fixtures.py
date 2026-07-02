@@ -55,6 +55,7 @@ VNEXT_NATIVE_PERSISTED_LEAF_PATHS = frozenset(
     for provider in (
         "alibaba_beijing",
         "alibaba_singapore",
+        "cerebras",
         "deepgram",
         "deepseek",
         "google",
@@ -75,6 +76,7 @@ CURRENT_USER_INTENT_DESTINATIONS = {
     "audio.input_device": "intent.audio.input_device",
     "audio.input_host_api": "intent.audio.input_host_api",
     "audio.ring_buffer_ms": "intent.audio.ring_buffer_ms",
+    "cerebras.llm_model": "intent.translation.cerebras.llm_model",
     "deepgram_stt.model": "intent.stt.deepgram.model",
     "desktop_audio.output_device": "intent.desktop_audio.output_device",
     "desktop_audio.vad_hangover_ms": "intent.desktop_audio.vad_hangover_ms",
@@ -94,7 +96,11 @@ CURRENT_USER_INTENT_DESTINATIONS = {
     "openrouter.fallback_selection_alias": (
         "intent.translation.openrouter_fallback_selection_alias"
     ),
+    "openrouter.llm_model": "intent.translation.openrouter_model",
+    "openrouter.provider_routing": "intent.translation.openrouter_provider_routing",
     "openrouter.routing_mode": "intent.translation.openrouter_routing_mode",
+    "openrouter.selected_source": "intent.translation.openrouter_selected_source",
+    "openrouter.selection_alias": "intent.translation.openrouter_selection_alias",
     "osc.chatbox_address": "intent.osc.chatbox_address",
     "osc.chatbox_clear": "intent.osc.chatbox_clear",
     "osc.chatbox_include_source": "intent.osc.chatbox_include_source",
@@ -145,13 +151,8 @@ CURRENT_USER_INTENT_DESTINATIONS = {
 }
 
 CURRENT_COMPATIBILITY_INPUT_DESTINATIONS = {
-    "cerebras.llm_model": "compatibility_input.cerebras.llm_model",
     "deepseek.llm_model": "compatibility_input.deepseek.llm_model",
     "gemini.llm_model": "compatibility_input.gemini.llm_model",
-    "openrouter.llm_model": "compatibility_input.openrouter.llm_model",
-    "openrouter.provider_routing": "compatibility_input.openrouter.provider_routing",
-    "openrouter.selected_source": "compatibility_input.openrouter.selected_source",
-    "openrouter.selection_alias": "compatibility_input.openrouter.selection_alias",
     "provider.llm": "compatibility_input.provider.llm",
     "qwen_asr_stt.endpoint": "compatibility_input.qwen_asr_stt.endpoint",
 }
@@ -159,7 +160,7 @@ CURRENT_COMPATIBILITY_INPUT_DESTINATIONS = {
 CURRENT_OPERATIONAL_STATE_DESTINATIONS = {
     "api_key_verified.alibaba_beijing": "state.provider_verification.alibaba_beijing.status",
     "api_key_verified.alibaba_singapore": "state.provider_verification.alibaba_singapore.status",
-    "api_key_verified.cerebras": "compatibility_input.api_key_verified.cerebras",
+    "api_key_verified.cerebras": "state.provider_verification.cerebras.status",
     "api_key_verified.deepgram": "state.provider_verification.deepgram.status",
     "api_key_verified.deepseek": "state.provider_verification.deepseek.status",
     "api_key_verified.google": "state.provider_verification.google.status",

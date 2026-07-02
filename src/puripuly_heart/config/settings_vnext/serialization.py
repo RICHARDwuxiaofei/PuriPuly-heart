@@ -18,6 +18,7 @@ _PROVIDER_VERIFICATION_FIELDS: Final = (
     "google",
     "openrouter",
     "deepseek",
+    "cerebras",
     "alibaba_beijing",
     "alibaba_singapore",
 )
