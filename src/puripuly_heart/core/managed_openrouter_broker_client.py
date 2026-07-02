@@ -7,7 +7,14 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from puripuly_heart.app.ports.broker_client import (
+    QqManagedAssertionFailureSubcode,
+    QqManagedAssertionRequest,
+    QqManagedAssertionResult,
+    QqManagedEntitlementSnapshot,
+)
 from puripuly_heart.config.settings import normalize_owned_referral_id
+from puripuly_heart.core import messages
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterChallengeSuccess,
     ManagedOpenRouterDiscordStartSuccess,
@@ -174,6 +181,64 @@ class HttpManagedOpenRouterBrokerClient:
                 "discord_issue", f"broker returned malformed payload: {exc}"
             ) from exc
 
+    async def assert_qq_managed_identity(
+        self,
+        request: QqManagedAssertionRequest,
+    ) -> QqManagedAssertionResult:
+        try:
+            payload = await self._post_json(
+                path="/v1/auth/qq/assert",
+                request_body={
+                    "qq_identity": request.qq_identity,
+                    "credential": request.credential,
+                    "asserted_at": request.asserted_at,
+                },
+                operation="qq_assert",
+            )
+        except ManagedOpenRouterReleaseError as exc:
+            return _qq_assertion_failure_from_error(exc)
+
+        status = payload.get("status")
+        if status != "issued":
+            return _qq_assertion_failure(
+                failure_subcode="key_unavailable",
+                code="qq_key_unavailable",
+                operation="qq_assert",
+                category=messages.DIAGNOSTIC_CATEGORY_SERVICE_UNAVAILABLE,
+                retry_after_ms=None,
+                fields={"status": status if isinstance(status, str) else "missing"},
+            )
+        try:
+            entitlement = QqManagedEntitlementSnapshot(
+                qq_subject_ref=_require_text(payload, "qq_subject_ref"),
+                managed_credential_ref=_require_optional_text(
+                    payload,
+                    "managed_credential_ref",
+                ),
+                expires_at=_require_optional_text(payload, "expires_at"),
+                openrouter_user_id=normalize_managed_openrouter_user_identifier(
+                    payload.get("openrouter_user_id")
+                ),
+            )
+            return QqManagedAssertionResult(
+                succeeded=True,
+                managed_secret_key=_require_text(payload, "openrouter_api_key"),
+                entitlement=entitlement,
+                failure_subcode=None,
+                retry_after_ms=None,
+                message=None,
+                diagnostics=None,
+            )
+        except ValueError as exc:
+            return _qq_assertion_failure(
+                failure_subcode="key_unavailable",
+                code="qq_malformed_success_payload",
+                operation="qq_assert",
+                category=messages.DIAGNOSTIC_CATEGORY_INVALID_RESPONSE,
+                retry_after_ms=None,
+                fields={"payload_valid": False, "reason": _safe_field_label(str(exc))},
+            )
+
     async def get_trial_status(
         self,
         *,
@@ -313,6 +378,97 @@ def _parse_talk_together_pass_status(
         invite_limit=invite_limit,
         bonus_translations_per_friend=bonus,
     )
+
+
+def _qq_assertion_failure_from_error(
+    error: ManagedOpenRouterReleaseError,
+) -> QqManagedAssertionResult:
+    failure_subcode = _qq_safe_failure_subcode(error)
+    return _qq_assertion_failure(
+        failure_subcode=failure_subcode,
+        code=error.code,
+        operation=error.operation or "qq_assert",
+        category=_qq_failure_category(failure_subcode),
+        retry_after_ms=error.retry_after_ms,
+        fields={
+            "broker_code": error.code,
+            "broker_class": error.error_class,
+            "broker_subcode": error.subcode,
+        },
+    )
+
+
+def _qq_assertion_failure(
+    *,
+    failure_subcode: QqManagedAssertionFailureSubcode,
+    code: str,
+    operation: str,
+    category: messages.DiagnosticCategory,
+    retry_after_ms: int | None,
+    fields: Mapping[str, messages.DiagnosticFieldValue],
+) -> QqManagedAssertionResult:
+    diagnostics = messages.ErrorDiagnostics(
+        component="managed_openrouter_broker_client",
+        operation=operation,
+        code=code,
+        category=category,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_DIAGNOSTIC_ONLY,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=retry_after_ms,
+        fields={
+            "qq_failure_subcode": failure_subcode,
+            **{key: value for key, value in fields.items() if value is not None},
+        },
+    )
+    return QqManagedAssertionResult(
+        succeeded=False,
+        managed_secret_key=None,
+        entitlement=None,
+        failure_subcode=failure_subcode,
+        retry_after_ms=retry_after_ms,
+        message=None,
+        diagnostics=diagnostics,
+    )
+
+
+def _qq_safe_failure_subcode(
+    error: ManagedOpenRouterReleaseError,
+) -> QqManagedAssertionFailureSubcode:
+    if error.subcode == "qq_credential_invalid":
+        return "invalid_credential"
+    if error.subcode in {
+        "qq_identity_mismatch",
+        "qq_subject_mismatch",
+        "installation_binding_mismatch",
+        "device_public_key_registered",
+    }:
+        return "mismatch"
+    if error.subcode == "qq_lifetime_used":
+        return "lifetime_used"
+    if error.code == "rate_limited" or error.retry_after_ms is not None:
+        return "rate_limited"
+    if error.code in {"internal_error", "trial_unavailable"}:
+        return "key_unavailable"
+    return "broker_unavailable"
+
+
+def _qq_failure_category(
+    subcode: QqManagedAssertionFailureSubcode,
+) -> messages.DiagnosticCategory:
+    if subcode in {"invalid_credential", "mismatch"}:
+        return messages.DIAGNOSTIC_CATEGORY_AUTH
+    if subcode == "rate_limited":
+        return messages.DIAGNOSTIC_CATEGORY_RATE_LIMIT
+    if subcode == "lifetime_used":
+        return messages.DIAGNOSTIC_CATEGORY_QUOTA
+    return messages.DIAGNOSTIC_CATEGORY_SERVICE_UNAVAILABLE
+
+
+def _safe_field_label(value: str) -> str:
+    stripped = value.strip()
+    safe = "".join(char if char.isalnum() or char in "._:-" else "_" for char in stripped)
+    return safe[:64] or "invalid"
 
 
 def _parse_json_int(value: object) -> int | None:

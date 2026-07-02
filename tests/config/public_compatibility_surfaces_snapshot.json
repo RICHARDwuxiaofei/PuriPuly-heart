@@ -122,6 +122,7 @@
   "broker_v1": {
     "paths": [
       "/v1/auth/discord/start",
+      "/v1/auth/qq/assert",
       "/v1/providers/openrouter/discord/issue",
       "/v1/providers/openrouter/issue",
       "/v1/trial/challenge",

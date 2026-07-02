@@ -7,6 +7,7 @@ from collections.abc import Callable
 import httpx
 import pytest
 
+from puripuly_heart.app.ports.broker_client import QqManagedAssertionRequest
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterChallengeSuccess,
     ManagedOpenRouterDiscordStartSuccess,
@@ -450,6 +451,167 @@ async def test_issue_discord_managed_key_parses_talk_together_pass_status() -> N
         invite_limit=5,
         bonus_translations_per_friend=200,
     )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_assert_qq_managed_identity_posts_credentials_and_maps_issued_snapshot() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/auth/qq/assert"
+        assert json.loads(request.content) == {
+            "qq_identity": "qq-user-123",
+            "credential": "a" * 64,
+            "asserted_at": "2026-07-03T06:00:00.000Z",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "status": "issued",
+                "qq_subject_ref": "ph-qq-subject-v1_subject",
+                "openrouter_api_key": "qq-managed-openrouter-api-key",
+                "managed_credential_ref": "managed-ref-qq",
+                "expires_at": "2026-08-03T06:00:00.000Z",
+                "openrouter_user_id": " user-qq ",
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.assert_qq_managed_identity(
+        QqManagedAssertionRequest(
+            qq_identity="qq-user-123",
+            credential="a" * 64,
+            asserted_at="2026-07-03T06:00:00.000Z",
+            metadata={"flow": "qq_managed"},
+        )
+    )
+
+    assert result.succeeded is True
+    assert result.managed_secret_key == "qq-managed-openrouter-api-key"
+    assert result.entitlement is not None
+    assert result.entitlement.qq_subject_ref == "ph-qq-subject-v1_subject"
+    assert result.entitlement.managed_credential_ref == "managed-ref-qq"
+    assert result.entitlement.expires_at == "2026-08-03T06:00:00.000Z"
+    assert result.entitlement.openrouter_user_id == "user-qq"
+    assert "qq-managed-openrouter-api-key" not in repr(result)
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_payload", "expected_subcode"),
+    [
+        (
+            {
+                "code": "invalid_request",
+                "class": "security_fail",
+                "subcode": "qq_credential_invalid",
+                "message": "invalid credential",
+            },
+            "invalid_credential",
+        ),
+        (
+            {
+                "code": "invalid_request",
+                "class": "security_fail",
+                "subcode": "qq_identity_mismatch",
+                "message": "mismatch",
+            },
+            "mismatch",
+        ),
+        (
+            {
+                "code": "trial_not_eligible",
+                "class": "terminal",
+                "subcode": "qq_lifetime_used",
+                "message": "used",
+            },
+            "lifetime_used",
+        ),
+        (
+            {
+                "code": "rate_limited",
+                "class": "retryable",
+                "subcode": "qq_auth_rate_limited",
+                "retry_after_ms": 3000,
+                "message": "rate limited",
+            },
+            "rate_limited",
+        ),
+        (
+            {
+                "code": "internal_error",
+                "class": "retryable",
+                "subcode": None,
+                "message": "temporarily unavailable",
+            },
+            "key_unavailable",
+        ),
+    ],
+)
+async def test_assert_qq_managed_identity_maps_recoverable_error_subcodes(
+    error_payload: dict[str, object],
+    expected_subcode: str,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"error": error_payload})
+
+    client, _transport = _build_client(handler)
+
+    result = await client.assert_qq_managed_identity(
+        QqManagedAssertionRequest(
+            qq_identity="qq-user-123",
+            credential="b" * 64,
+            asserted_at="2026-07-03T06:00:00.000Z",
+            metadata={"flow": "qq_managed"},
+        )
+    )
+
+    assert result.succeeded is False
+    assert result.managed_secret_key is None
+    assert result.failure_subcode == expected_subcode
+    assert result.entitlement is None
+    assert result.diagnostics is not None
+    assert result.diagnostics.content_policy == "metadata_only"
+    assert result.diagnostics.fields["qq_failure_subcode"] == expected_subcode
+    rendered = repr(result)
+    assert "qq-user-123" not in rendered
+    assert "bbbb" not in rendered
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["verified", "already_verified"])
+async def test_assert_qq_managed_identity_maps_legacy_verified_without_key_to_key_unavailable(
+    status: str,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "status": status,
+                "qq_subject_ref": "ph-qq-subject-v1_subject",
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.assert_qq_managed_identity(
+        QqManagedAssertionRequest(
+            qq_identity="qq-user-123",
+            credential="c" * 64,
+            asserted_at="2026-07-03T06:00:00.000Z",
+            metadata={"flow": "qq_managed"},
+        )
+    )
+
+    assert result.succeeded is False
+    assert result.failure_subcode == "key_unavailable"
+    assert result.diagnostics is not None
+    assert result.diagnostics.fields["status"] == status
     await client.close()
 
 

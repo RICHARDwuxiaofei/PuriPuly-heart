@@ -185,6 +185,27 @@ def test_secret_broker_provider_and_runtime_ports_expose_service_result_seams() 
         message=None,
         diagnostics=None,
     )
+    qq_assertion_request = broker_client.QqManagedAssertionRequest(
+        qq_identity="qq-user-1",
+        credential="a" * 64,
+        asserted_at="2026-07-03T06:00:00.000Z",
+        metadata={"flow": "qq_managed"},
+    )
+    qq_entitlement = broker_client.QqManagedEntitlementSnapshot(
+        qq_subject_ref="ph-qq-subject-v1_subject",
+        managed_credential_ref="managed-ref-qq",
+        expires_at="2026-08-03T06:00:00.000Z",
+        openrouter_user_id="qq-user-openrouter",
+    )
+    qq_assertion_result = broker_client.QqManagedAssertionResult(
+        succeeded=True,
+        managed_secret_key="qq-managed-secret",
+        entitlement=qq_entitlement,
+        failure_subcode=None,
+        retry_after_ms=None,
+        message=None,
+        diagnostics=None,
+    )
     discord_request = discord_auth.DiscordAuthRequest(
         correlation_id="corr-1",
         metadata={"flow": "managed_connection"},
@@ -232,6 +253,9 @@ def test_secret_broker_provider_and_runtime_ports_expose_service_result_seams() 
     for dto in (
         secret_result,
         broker_result,
+        qq_assertion_request,
+        qq_entitlement,
+        qq_assertion_result,
         discord_request,
         discord_result,
         identity_request,
@@ -253,6 +277,12 @@ def test_secret_broker_provider_and_runtime_ports_expose_service_result_seams() 
         discord_request.metadata["flow"] = "other"  # type: ignore[index]
     with pytest.raises(TypeError):
         identity_request.metadata["flow"] = "other"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        qq_assertion_request.metadata["flow"] = "other"  # type: ignore[index]
+
+    assert "qq-user-1" not in repr(qq_assertion_request)
+    assert "credential" not in repr(qq_assertion_request)
+    assert "qq-managed-secret" not in repr(qq_assertion_result)
 
     request_hints = get_type_hints(provider_verifier.ProviderVerificationRequest)
     assert request_hints["secret_value"] is str
@@ -275,7 +305,10 @@ def test_secret_broker_provider_and_runtime_ports_expose_service_result_seams() 
             "snapshot_secret",
             "restore_secret",
         ),
-        broker_client.BrokerClientPort: ("issue_managed_connection",),
+        broker_client.BrokerClientPort: (
+            "issue_managed_connection",
+            "assert_qq_managed_identity",
+        ),
         discord_auth.DiscordAuthPort: ("start_discord_auth",),
         managed_identity.ManagedIdentityPort: ("preflight_managed_identity",),
         provider_verifier.ProviderVerifierPort: ("verify_provider_secret",),
