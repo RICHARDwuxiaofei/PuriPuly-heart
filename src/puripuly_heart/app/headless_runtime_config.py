@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
+from puripuly_heart.config.paths import VNEXT_APP_DIR_NAME
 from puripuly_heart.config.resolved import ResolvedLLMConfig, ResolvedSTTConfig
 from puripuly_heart.config.runtime_resolution import (
     DEEPSEEK_MODEL_V4_FLASH,
@@ -498,7 +499,7 @@ def create_secret_store_from_vnext_intent(
     secrets = settings.intent.secrets
     backend = secrets.backend
     if backend == "keyring":
-        return KeyringSecretStore()
+        return KeyringSecretStore(service_name=VNEXT_APP_DIR_NAME)
     if backend == "encrypted_file":
         passphrase = passphrase or os.getenv(SECRETS_PASSPHRASE_ENV)
         if not passphrase:

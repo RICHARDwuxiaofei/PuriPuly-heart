@@ -931,3 +931,24 @@ def test_load_settings_or_default_loads_when_exists(monkeypatch, tmp_path) -> No
     )
 
     assert main_module._load_settings_or_default(settings_path) is sentinel
+
+
+def test_settings_config_path_marks_default_as_implicit(monkeypatch, tmp_path) -> None:
+    default_path = tmp_path / "vnext" / "settings.json"
+    monkeypatch.setattr(main_module, "default_settings_path", lambda: default_path)
+    args = type("Args", (), {})()
+
+    path, explicit = main_module._settings_config_path(args)
+
+    assert path == default_path
+    assert explicit is False
+
+
+def test_settings_config_path_marks_custom_config_as_explicit(tmp_path) -> None:
+    custom_path = tmp_path / "custom.json"
+    args = type("Args", (), {"config": custom_path})()
+
+    path, explicit = main_module._settings_config_path(args)
+
+    assert path == custom_path
+    assert explicit is True

@@ -15,6 +15,7 @@ from puripuly_heart.app.wiring_managed_auth_factory import (
 from puripuly_heart.app.wiring_overlay_factory import resolve_overlay_config
 from puripuly_heart.app.wiring_secrets_factory import (
     SECRETS_PASSPHRASE_ENV,
+    copy_stable_secrets_to_vnext_namespace,
     create_secret_store,
     require_secret,
     require_secret_any,
@@ -77,6 +78,7 @@ __all__ = (
     "create_peer_stt_backend_from_resolved_config",
     "create_provider_verifier",
     "create_secret_store",
+    "copy_stable_secrets_to_vnext_namespace",
     "create_stt_backend",
     "create_stt_backend_from_resolved_config",
     "require_secret",

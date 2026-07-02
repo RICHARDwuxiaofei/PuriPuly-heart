@@ -83,6 +83,7 @@ from puripuly_heart.app.wiring import (
     build_openrouter_credential_runtime_config,
     build_openrouter_release_runtime_config,
     build_peer_stt_provider_signature,
+    copy_stable_secrets_to_vnext_namespace,
     create_llm_provider,
     create_peer_stt_backend,
     create_peer_stt_backend_from_resolved_config,
@@ -98,6 +99,7 @@ from puripuly_heart.config.llm_profiles import (
     profile_for_alias,
 )
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
+from puripuly_heart.config.profile_bootstrap import import_stable_settings_if_missing
 from puripuly_heart.config.resolved import ResolvedOverlayConfig
 from puripuly_heart.config.settings import (
     DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA,
@@ -644,6 +646,7 @@ class GuiController:
     page: ft.Page
     app: object
     config_path: Path
+    allow_stable_settings_import: bool = False
     settings_mutation_service: SettingsMutationService | None = None
     provider_verifier: _ControllerProviderVerifier | None = None
 
@@ -6007,6 +6010,25 @@ class GuiController:
     def _load_or_init_settings(self, path: Path) -> AppSettings:
         if path.exists():
             return load_settings(path)
+        if self.allow_stable_settings_import:
+            import_result = import_stable_settings_if_missing(path)
+            if import_result.error is not None:
+                raise RuntimeError(
+                    "failed to import stable settings into vNext profile: "
+                    f"{import_result.error.message}"
+                )
+            if import_result.imported and import_result.settings is not None:
+                if import_result.source_path is not None:
+                    with contextlib.suppress(Exception):
+                        copy_stable_secrets_to_vnext_namespace(
+                            (
+                                import_result.source_settings or import_result.settings
+                            ).intent.secrets,
+                            stable_config_path=import_result.source_path,
+                            vnext_config_path=path,
+                            vnext_settings=import_result.settings.intent.secrets,
+                        )
+                return load_settings(path)
         settings = new_settings_for_first_run()
         path.parent.mkdir(parents=True, exist_ok=True)
         save_settings(path, settings)

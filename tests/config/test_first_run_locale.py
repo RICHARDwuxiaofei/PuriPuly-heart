@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from puripuly_heart.config import profile_bootstrap
 from puripuly_heart.config import settings as settings_module
 from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
@@ -187,3 +188,41 @@ def test_main_first_run_populates_default_system_prompt(
     assert loaded.intent.prompts.system_prompt == expected
     assert loaded.intent.prompts.system_prompt != ""
     assert not path.exists()
+
+
+def test_main_stable_import_failure_does_not_create_default_vnext_settings(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stable_path = tmp_path / "stable" / "settings.json"
+    target_path = tmp_path / "vnext" / "settings.json"
+    stable_path.parent.mkdir()
+    stable_path.write_text("not-json", encoding="utf-8")
+    monkeypatch.setattr(profile_bootstrap, "stable_settings_path", lambda: stable_path)
+
+    with pytest.raises(RuntimeError, match="failed to import stable settings"):
+        _load_settings_or_default(target_path, allow_stable_settings_import=True)
+
+    assert not target_path.exists()
+
+
+def test_controller_stable_import_failure_does_not_create_default_vnext_settings(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stable_path = tmp_path / "stable" / "settings.json"
+    target_path = tmp_path / "vnext" / "settings.json"
+    stable_path.parent.mkdir()
+    stable_path.write_text("not-json", encoding="utf-8")
+    monkeypatch.setattr(profile_bootstrap, "stable_settings_path", lambda: stable_path)
+    controller = GuiController(
+        page=object(),
+        app=object(),
+        config_path=target_path,
+        allow_stable_settings_import=True,
+    )
+
+    with pytest.raises(RuntimeError, match="failed to import stable settings"):
+        controller._load_or_init_settings(target_path)
+
+    assert not target_path.exists()

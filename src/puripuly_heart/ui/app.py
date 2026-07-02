@@ -107,13 +107,26 @@ def _write_discord_callback_preview_page(locale: str | None) -> str:
 
 
 class TranslatorApp:
-    def __init__(self, page: ft.Page, *, config_path, debug_ui_preview: bool = False):
+    def __init__(
+        self,
+        page: ft.Page,
+        *,
+        config_path,
+        debug_ui_preview: bool = False,
+        allow_stable_settings_import: bool = False,
+    ):
         self.page = page
-        self.controller = GuiController(
-            page=page,
-            app=self,
-            config_path=config_path,
-        )
+        controller_kwargs = {
+            "page": page,
+            "app": self,
+            "config_path": config_path,
+        }
+        parameters = inspect.signature(GuiController).parameters
+        if "allow_stable_settings_import" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        ):
+            controller_kwargs["allow_stable_settings_import"] = allow_stable_settings_import
+        self.controller = GuiController(**controller_kwargs)
         self.overlay_state = "off"
         self.overlay_failure_reason: str | None = None
         self.overlay_peer_contract = None
@@ -1490,12 +1503,23 @@ class TranslatorApp:
         self.refresh_overlay_peer_contract()
 
 
-async def main_gui(page: ft.Page, *, config_path, debug_ui_preview: bool = False):
-    app = TranslatorApp(
-        page,
-        config_path=config_path,
-        debug_ui_preview=debug_ui_preview,
-    )
+async def main_gui(
+    page: ft.Page,
+    *,
+    config_path,
+    debug_ui_preview: bool = False,
+    allow_stable_settings_import: bool = False,
+):
+    app_kwargs = {
+        "config_path": config_path,
+        "debug_ui_preview": debug_ui_preview,
+    }
+    parameters = inspect.signature(TranslatorApp).parameters
+    if "allow_stable_settings_import" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    ):
+        app_kwargs["allow_stable_settings_import"] = allow_stable_settings_import
+    app = TranslatorApp(page, **app_kwargs)
     await app.controller.start()
 
     # Check for updates in background

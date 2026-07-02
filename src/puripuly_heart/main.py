@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,8 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=Path,
-        default=default_settings_path(),
-        help="Path to settings JSON (default: user config dir)",
+        default=argparse.SUPPRESS,
+        help="Path to settings JSON (default: vNext user config dir)",
     )
     parser.add_argument(
         "--debug-ui-preview",
@@ -160,18 +161,28 @@ def _requires_soxr_runtime_startup_check(args: argparse.Namespace) -> bool:
     return args.command == "run-mic"
 
 
-def _run_gui(config_path: Path, *, debug_ui_preview: bool) -> int:
+def _run_gui(
+    config_path: Path,
+    *,
+    debug_ui_preview: bool,
+    allow_stable_settings_import: bool,
+) -> int:
     import flet as ft
 
     from puripuly_heart.ui.app import main_gui
     from puripuly_heart.ui.fonts import assets_dir
 
     async def _target(page: ft.Page):
-        return await main_gui(
-            page,
-            config_path=config_path,
-            debug_ui_preview=debug_ui_preview,
-        )
+        kwargs = {
+            "config_path": config_path,
+            "debug_ui_preview": debug_ui_preview,
+        }
+        parameters = inspect.signature(main_gui).parameters
+        if "allow_stable_settings_import" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        ):
+            kwargs["allow_stable_settings_import"] = allow_stable_settings_import
+        return await main_gui(page, **kwargs)
 
     ft.app(target=_target, assets_dir=str(assets_dir()))
     return 0
@@ -189,9 +200,14 @@ def _run_desktop_overlay_preview() -> int:
     return desktop_overlay_main(["--preview"])
 
 
-def _load_settings_or_default(path: Path) -> AppSettingsVNext:
+def _load_settings_or_default(
+    path: Path,
+    *,
+    allow_stable_settings_import: bool = False,
+) -> AppSettingsVNext:
     from dataclasses import replace
 
+    from puripuly_heart.config.profile_bootstrap import import_stable_settings_if_missing
     from puripuly_heart.config.settings import (
         detect_system_locale,
         resolve_first_run_ui_locale,
@@ -206,6 +222,13 @@ def _load_settings_or_default(path: Path) -> AppSettingsVNext:
                 result.error.message if result.error is not None else str(result.status)
             )
         return result.settings
+
+    if allow_stable_settings_import:
+        import_result = import_stable_settings_if_missing(path)
+        _raise_stable_settings_import_error(import_result)
+        if import_result.imported and import_result.settings is not None:
+            _copy_stable_secrets_after_settings_import(import_result)
+            return import_result.settings
 
     settings = AppSettingsVNext()
     locale_value = resolve_first_run_ui_locale(detect_system_locale())
@@ -230,11 +253,65 @@ def _load_settings_or_default(path: Path) -> AppSettingsVNext:
     return settings
 
 
+def _copy_stable_secrets_after_settings_import(import_result: object) -> None:
+    settings = getattr(import_result, "settings", None)
+    source_path = getattr(import_result, "source_path", None)
+    target_path = getattr(import_result, "target_path", None)
+    if settings is None or source_path is None or target_path is None:
+        return
+    try:
+        from puripuly_heart.app.wiring_secrets_factory import (
+            copy_stable_secrets_to_vnext_namespace,
+        )
+
+        copy_stable_secrets_to_vnext_namespace(
+            (getattr(import_result, "source_settings", None) or settings).intent.secrets,
+            stable_config_path=source_path,
+            vnext_config_path=target_path,
+            vnext_settings=settings.intent.secrets,
+        )
+    except Exception:
+        return
+
+
+def _raise_stable_settings_import_error(import_result: object) -> None:
+    error = getattr(import_result, "error", None)
+    if error is None:
+        return
+    message = getattr(error, "message", str(error))
+    raise RuntimeError(f"failed to import stable settings into vNext profile: {message}")
+
+
+def _settings_config_path(args: argparse.Namespace) -> tuple[Path, bool]:
+    if hasattr(args, "config"):
+        return args.config, True
+    return default_settings_path(), False
+
+
+def _call_load_settings_or_default(
+    path: Path,
+    *,
+    allow_stable_settings_import: bool,
+) -> AppSettingsVNext:
+    parameters = inspect.signature(_load_settings_or_default).parameters
+    if "allow_stable_settings_import" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    ):
+        return _load_settings_or_default(
+            path,
+            allow_stable_settings_import=allow_stable_settings_import,
+        )
+    return _load_settings_or_default(path)
+
+
 def main(argv: list[str] | None = None) -> int:
     logging_sinks = configure_main_logging()
     try:
         parser = build_parser()
         args = parser.parse_args(argv)
+        settings_config_path, explicit_settings_config = _settings_config_path(args)
+        if args.command != "run-desktop-overlay":
+            args.config = settings_config_path
 
         if args.version:
             from puripuly_heart import __version__
@@ -258,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
             return _run_gui(
                 args.config,
                 debug_ui_preview=bool(getattr(args, "debug_ui_preview", False)),
+                allow_stable_settings_import=not explicit_settings_config,
             )
 
         if args.command == "local-qwen-runtime-check":
@@ -266,7 +344,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "soxr-runtime-check":
             return run_soxr_runtime_check()
 
-        settings = _load_settings_or_default(args.config)
+        settings = _call_load_settings_or_default(
+            args.config,
+            allow_stable_settings_import=not explicit_settings_config,
+        )
 
         if args.command == "osc-send":
             sender_cls = _load_vrchat_osc_udp_sender()
@@ -343,6 +424,7 @@ def main(argv: list[str] | None = None) -> int:
             return _run_gui(
                 args.config,
                 debug_ui_preview=bool(getattr(args, "debug_ui_preview", False)),
+                allow_stable_settings_import=not explicit_settings_config,
             )
 
         parser.print_help()
