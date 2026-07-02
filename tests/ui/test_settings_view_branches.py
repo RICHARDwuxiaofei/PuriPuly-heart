@@ -163,6 +163,7 @@ def _make_llm_selection_view(
     view._google_key = SimpleNamespace(visible=False)
     view._openrouter_key = SimpleNamespace(visible=False)
     view._deepseek_key = SimpleNamespace(visible=False)
+    view._cerebras_key = SimpleNamespace(visible=False)
     view._openrouter_pkce_button_row = SimpleNamespace(visible=False, update=lambda: None)
     view._openrouter_pkce_button = SimpleNamespace(text="", style=None, update=lambda: None)
     view._alibaba_key_beijing = SimpleNamespace(visible=False)
@@ -3227,6 +3228,7 @@ def test_llm_modal_lists_logical_translation_models_once(
         TranslationModel.GEMINI_3_FLASH.value,
         TranslationModel.GEMINI_31_FLASH_LITE.value,
         TranslationModel.QWEN_35_PLUS.value,
+        TranslationModel.GEMMA4_31B_CEREBRAS.value,
         TranslationModel.LOCAL_LLM.value,
     ]
     assert captured["current"] == TranslationModel.GEMINI_3_FLASH.value
@@ -3244,6 +3246,9 @@ def test_llm_modal_lists_logical_translation_models_once(
     )
     assert option_by_value[TranslationModel.DEEPSEEK_V4_PRO.value].label == t(
         "provider.deepseek_v4_pro"
+    )
+    assert option_by_value[TranslationModel.GEMMA4_31B_CEREBRAS.value].label == t(
+        "provider.gemma4_31b_cerebras"
     )
     assert option_by_value[TranslationModel.LOCAL_LLM.value].label == t("provider.local_llms")
 
@@ -3293,7 +3298,7 @@ def test_translation_connection_modal_lists_supported_connections(
     assert captured["current"] == TranslationConnection.MANAGED.value
 
 
-def test_translation_connection_modal_opens_for_single_connection_model_without_description(
+def test_translation_connection_modal_lists_gemini_connections_without_description(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -3323,8 +3328,11 @@ def test_translation_connection_modal_opens_for_single_connection_model_without_
     options = captured["options"]
     assert captured["show_description"] is False
     assert captured["current"] == TranslationConnection.OFFICIAL_BYOK.value
-    assert [option.value for option in options] == [TranslationConnection.OFFICIAL_BYOK.value]
-    assert options[0].description == ""
+    assert [option.value for option in options] == [
+        TranslationConnection.OFFICIAL_BYOK.value,
+        TranslationConnection.OPENROUTER.value,
+    ]
+    assert [option.description for option in options] == ["", ""]
 
 
 def test_openrouter_fallback_modal_hides_provider_descriptions_for_active_options(
