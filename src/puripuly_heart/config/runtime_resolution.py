@@ -14,6 +14,8 @@ from puripuly_heart.config.llm_profiles import (
     OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_CHINA,
     OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE,
     OPENROUTER_MODEL_DEEPSEEK_V4_FLASH,
+    OPENROUTER_MODEL_GEMINI_3_FLASH,
+    OPENROUTER_MODEL_GEMINI_31_FLASH_LITE,
     OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT,
     OPENROUTER_MODEL_QWEN_35_FLASH_02_23,
     get_openrouter_llm_profile,
@@ -43,6 +45,7 @@ TRANSLATION_MODEL_GEMINI_31_FLASH_LITE: Final = "gemini31_flash_lite"
 TRANSLATION_MODEL_QWEN_35_PLUS: Final = "qwen35_plus"
 TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH: Final = "openrouter_qwen35_flash"
 TRANSLATION_MODEL_LOCAL_LLM: Final = "local_llm"
+TRANSLATION_MODEL_GEMMA4_31B_CEREBRAS: Final = "gemma4_31b_cerebras"
 
 TranslationModelName: TypeAlias = Literal[
     "gemma4",
@@ -53,6 +56,7 @@ TranslationModelName: TypeAlias = Literal[
     "qwen35_plus",
     "openrouter_qwen35_flash",
     "local_llm",
+    "gemma4_31b_cerebras",
 ]
 TRANSLATION_MODELS: Final[tuple[TranslationModelName, ...]] = (
     TRANSLATION_MODEL_GEMMA4,
@@ -63,6 +67,7 @@ TRANSLATION_MODELS: Final[tuple[TranslationModelName, ...]] = (
     TRANSLATION_MODEL_QWEN_35_PLUS,
     TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH,
     TRANSLATION_MODEL_LOCAL_LLM,
+    TRANSLATION_MODEL_GEMMA4_31B_CEREBRAS,
 )
 
 TRANSLATION_CONNECTION_MANAGED: Final = "managed"
@@ -100,14 +105,21 @@ TRANSLATION_CONNECTIONS_BY_MODEL: Final[
             TRANSLATION_CONNECTION_OFFICIAL_BYOK,
         ),
         TRANSLATION_MODEL_DEEPSEEK_V4_PRO: (TRANSLATION_CONNECTION_OFFICIAL_BYOK,),
-        TRANSLATION_MODEL_GEMINI_3_FLASH: (TRANSLATION_CONNECTION_OFFICIAL_BYOK,),
-        TRANSLATION_MODEL_GEMINI_31_FLASH_LITE: (TRANSLATION_CONNECTION_OFFICIAL_BYOK,),
+        TRANSLATION_MODEL_GEMINI_3_FLASH: (
+            TRANSLATION_CONNECTION_OFFICIAL_BYOK,
+            TRANSLATION_CONNECTION_OPENROUTER,
+        ),
+        TRANSLATION_MODEL_GEMINI_31_FLASH_LITE: (
+            TRANSLATION_CONNECTION_OFFICIAL_BYOK,
+            TRANSLATION_CONNECTION_OPENROUTER,
+        ),
         TRANSLATION_MODEL_QWEN_35_PLUS: (TRANSLATION_CONNECTION_OFFICIAL_BYOK,),
         TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH: (
             TRANSLATION_CONNECTION_MANAGED,
             TRANSLATION_CONNECTION_OPENROUTER,
         ),
         TRANSLATION_MODEL_LOCAL_LLM: (TRANSLATION_CONNECTION_OLLAMA,),
+        TRANSLATION_MODEL_GEMMA4_31B_CEREBRAS: (TRANSLATION_CONNECTION_OFFICIAL_BYOK,),
     }
 )
 TRANSLATION_CONNECTION_PRIORITY: Final[tuple[TranslationConnectionName, ...]] = (
@@ -125,6 +137,13 @@ OPENROUTER_SOURCES: Final[tuple[OpenRouterSource, ...]] = (
     OPENROUTER_SOURCE_MANAGED,
     OPENROUTER_SOURCE_BYOK,
 )
+OPENROUTER_MANAGED_CREDENTIAL_STANDARD: Final = "standard"
+OPENROUTER_MANAGED_CREDENTIAL_QQ: Final = "qq"
+OpenRouterManagedCredentialKind: TypeAlias = Literal["standard", "qq"]
+OPENROUTER_MANAGED_CREDENTIAL_KINDS: Final[tuple[OpenRouterManagedCredentialKind, ...]] = (
+    OPENROUTER_MANAGED_CREDENTIAL_STANDARD,
+    OPENROUTER_MANAGED_CREDENTIAL_QQ,
+)
 
 OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE_VALUE: Final = OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE
 OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_VALUE: Final = (
@@ -136,12 +155,14 @@ PROVIDER_DEEPSEEK: Final = "deepseek"
 PROVIDER_GEMINI: Final = "gemini"
 PROVIDER_QWEN: Final = "qwen"
 PROVIDER_LOCAL_LLM: Final = "local_llm"
+PROVIDER_CEREBRAS: Final = "cerebras"
 LLM_PROVIDERS: Final[tuple[str, ...]] = (
     PROVIDER_GEMINI,
     PROVIDER_OPENROUTER,
     PROVIDER_QWEN,
     PROVIDER_DEEPSEEK,
     PROVIDER_LOCAL_LLM,
+    PROVIDER_CEREBRAS,
 )
 
 GEMINI_MODEL_3_FLASH: Final = "gemini-3-flash-preview"
@@ -153,13 +174,16 @@ QWEN_MODEL_35_PLUS: Final = "qwen3.5-plus"
 LOCAL_LLM_BACKEND_OLLAMA: Final = "ollama"
 LOCAL_LLM_DEFAULT_BASE_URL: Final = "http://127.0.0.1:11434/v1"
 LOCAL_LLM_DEFAULT_MODEL: Final = "llama3.1:8b"
+CEREBRAS_MODEL_GEMMA_4_31B: Final = "gemma-4-31b"
 QWEN_REGION_BEIJING: Final = "beijing"
 QWEN_REGION_SINGAPORE: Final = "singapore"
 
 CREDENTIAL_REF_OPENROUTER_BYOK: Final = "openrouter:byok"
 CREDENTIAL_REF_OPENROUTER_MANAGED: Final = "openrouter:managed"
+CREDENTIAL_REF_OPENROUTER_MANAGED_QQ: Final = "openrouter:managed_qq"
 CREDENTIAL_REF_GEMINI_BYOK: Final = "gemini:byok"
 CREDENTIAL_REF_DEEPSEEK_BYOK: Final = "deepseek:byok"
+CREDENTIAL_REF_CEREBRAS_BYOK: Final = "cerebras:byok"
 CREDENTIAL_REF_QWEN_BEIJING: Final = "qwen:beijing"
 CREDENTIAL_REF_QWEN_SINGAPORE: Final = "qwen:singapore"
 CREDENTIAL_REF_DEEPGRAM_STT: Final = "deepgram:stt"
@@ -192,7 +216,7 @@ STT_DEFAULT_LOW_LATENCY_MERGE_GAP_MS: Final = 600
 STT_DEFAULT_LOW_LATENCY_SPEC_RETRY_MAX: Final = 10
 DEEPGRAM_STT_MODEL_NOVA_3: Final = "nova-3"
 QWEN_ASR_STT_MODEL_REALTIME: Final = "qwen3-asr-flash-realtime"
-SONIOX_STT_MODEL_RT_V4: Final = "stt-rt-v4"
+SONIOX_STT_MODEL_RT_V5: Final = "stt-rt-v5"
 SONIOX_STT_DEFAULT_ENDPOINT: Final = "wss://stt-rt.soniox.com/transcribe-websocket"
 SONIOX_STT_DEFAULT_KEEPALIVE_INTERVAL_S: Final = 10.0
 SONIOX_STT_DEFAULT_TRAILING_SILENCE_MS: Final = 100
@@ -201,6 +225,8 @@ _OPENROUTER_MODELS: Final[tuple[str, ...]] = (
     OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT,
     OPENROUTER_MODEL_QWEN_35_FLASH_02_23,
     OPENROUTER_MODEL_DEEPSEEK_V4_FLASH,
+    OPENROUTER_MODEL_GEMINI_3_FLASH,
+    OPENROUTER_MODEL_GEMINI_31_FLASH_LITE,
 )
 _OPENROUTER_ROUTING_MODES: Final[tuple[str, ...]] = (
     "latency",
@@ -210,6 +236,7 @@ _OPENROUTER_ROUTING_MODES: Final[tuple[str, ...]] = (
 _OPENROUTER_PROVIDER_ROUTINGS: Final[tuple[str, ...]] = (
     "default",
     "deepseek_only",
+    "google_gemini_latency",
 )
 
 
@@ -355,6 +382,21 @@ def _normalize_openrouter_model(value: object) -> str:
     )
 
 
+def _normalize_openrouter_managed_credential_kind(
+    value: object,
+    *,
+    default: OpenRouterManagedCredentialKind = OPENROUTER_MANAGED_CREDENTIAL_STANDARD,
+) -> OpenRouterManagedCredentialKind:
+    return cast(
+        OpenRouterManagedCredentialKind,
+        _normalize_allowed(
+            value,
+            allowed=OPENROUTER_MANAGED_CREDENTIAL_KINDS,
+            default=default,
+        ),
+    )
+
+
 def _canonical_openrouter_alias(model: str, source: OpenRouterSource) -> str | None:
     if source == OPENROUTER_SOURCE_NONE:
         return None
@@ -389,9 +431,18 @@ def _required_credential(source: str, reference: str) -> ResolvedCredentialRequi
     return ResolvedCredentialRequirement(source=source, required=True, reference=reference)
 
 
-def _openrouter_credential(source: OpenRouterSource) -> ResolvedCredentialRequirement:
+def _openrouter_credential(
+    source: OpenRouterSource,
+    *,
+    managed_credential_kind: OpenRouterManagedCredentialKind = OPENROUTER_MANAGED_CREDENTIAL_STANDARD,
+) -> ResolvedCredentialRequirement:
     if source == OPENROUTER_SOURCE_MANAGED:
-        return _required_credential(CREDENTIAL_SOURCE_MANAGED, CREDENTIAL_REF_OPENROUTER_MANAGED)
+        reference = (
+            CREDENTIAL_REF_OPENROUTER_MANAGED_QQ
+            if managed_credential_kind == OPENROUTER_MANAGED_CREDENTIAL_QQ
+            else CREDENTIAL_REF_OPENROUTER_MANAGED
+        )
+        return _required_credential(CREDENTIAL_SOURCE_MANAGED, reference)
     if source == OPENROUTER_SOURCE_BYOK:
         return _required_credential(
             CREDENTIAL_SOURCE_SECRET_STORE,
@@ -459,6 +510,9 @@ class OpenRouterRuntimeIntent:
     fallback_selection_alias: str = OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH
     routing_mode: str = "latency"
     provider_routing: str = "default"
+    managed_credential_kind: OpenRouterManagedCredentialKind = (
+        OPENROUTER_MANAGED_CREDENTIAL_STANDARD
+    )
     broker_base_url: str | None = None
 
     def __post_init__(self) -> None:
@@ -481,12 +535,16 @@ class OpenRouterRuntimeIntent:
             allowed=_OPENROUTER_PROVIDER_ROUTINGS,
             default="default",
         )
+        managed_credential_kind = _normalize_openrouter_managed_credential_kind(
+            self.managed_credential_kind
+        )
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "selected_source", source)
         object.__setattr__(self, "selection_alias", selection_alias)
         object.__setattr__(self, "fallback_selection_alias", fallback_selection_alias)
         object.__setattr__(self, "routing_mode", routing_mode)
         object.__setattr__(self, "provider_routing", provider_routing)
+        object.__setattr__(self, "managed_credential_kind", managed_credential_kind)
         object.__setattr__(
             self,
             "broker_base_url",
@@ -505,6 +563,7 @@ class DirectProviderRuntimeIntent:
     local_llm_backend: str = LOCAL_LLM_BACKEND_OLLAMA
     local_llm_base_url: str = LOCAL_LLM_DEFAULT_BASE_URL
     local_llm_model: str = LOCAL_LLM_DEFAULT_MODEL
+    cerebras_model: str = CEREBRAS_MODEL_GEMMA_4_31B
     local_llm_extra_body: Mapping[str, ResolvedOptionValue] = field(default_factory=_empty_options)
 
     def __post_init__(self) -> None:
@@ -544,7 +603,7 @@ class STTRuntimeIntent:
     deepgram_model: str = DEEPGRAM_STT_MODEL_NOVA_3
     qwen_asr_model: str = QWEN_ASR_STT_MODEL_REALTIME
     qwen_region: str = QWEN_REGION_BEIJING
-    soniox_model: str = SONIOX_STT_MODEL_RT_V4
+    soniox_model: str = SONIOX_STT_MODEL_RT_V5
     soniox_endpoint: str = SONIOX_STT_DEFAULT_ENDPOINT
     soniox_keepalive_interval_s: float = SONIOX_STT_DEFAULT_KEEPALIVE_INTERVAL_S
     soniox_trailing_silence_ms: int = SONIOX_STT_DEFAULT_TRAILING_SILENCE_MS
@@ -703,6 +762,7 @@ def normalize_openrouter_runtime_intent(
     fallback_selection_alias: object = None,
     routing_mode: object = None,
     provider_routing: object = None,
+    managed_credential_kind: object = None,
     broker_base_url: object = None,
 ) -> OpenRouterRuntimeIntent:
     selection_profile = None
@@ -744,6 +804,9 @@ def normalize_openrouter_runtime_intent(
             allowed=_OPENROUTER_PROVIDER_ROUTINGS,
             default="default",
         ),
+        managed_credential_kind=_normalize_openrouter_managed_credential_kind(
+            managed_credential_kind
+        ),
         broker_base_url=_normalize_openrouter_broker_base_url(broker_base_url),
     )
 
@@ -757,6 +820,7 @@ def derive_translation_runtime_intent_from_compatibility(
     gemini_model: object = None,
     qwen_model: object = None,
     deepseek_model: object = None,
+    cerebras_model: object = None,
     concurrency_limit: object = None,
 ) -> TranslationRuntimeIntent:
     provider = _normalize_allowed(
@@ -807,6 +871,26 @@ def derive_translation_runtime_intent_from_compatibility(
                 ),
                 concurrency_limit=concurrency,
             )
+        if openrouter_model_value == OPENROUTER_MODEL_GEMINI_3_FLASH:
+            return TranslationRuntimeIntent(
+                model=TRANSLATION_MODEL_GEMINI_3_FLASH,
+                connection=_translation_connection_from_openrouter_source(
+                    openrouter_source,
+                    model=TRANSLATION_MODEL_GEMINI_3_FLASH,
+                    provider_routing=provider_routing,
+                ),
+                concurrency_limit=concurrency,
+            )
+        if openrouter_model_value == OPENROUTER_MODEL_GEMINI_31_FLASH_LITE:
+            return TranslationRuntimeIntent(
+                model=TRANSLATION_MODEL_GEMINI_31_FLASH_LITE,
+                connection=_translation_connection_from_openrouter_source(
+                    openrouter_source,
+                    model=TRANSLATION_MODEL_GEMINI_31_FLASH_LITE,
+                    provider_routing=provider_routing,
+                ),
+                concurrency_limit=concurrency,
+            )
         return TranslationRuntimeIntent(
             model=TRANSLATION_MODEL_DEEPSEEK_V4_FLASH,
             connection=_default_translation_connection(TRANSLATION_MODEL_DEEPSEEK_V4_FLASH),
@@ -836,6 +920,13 @@ def derive_translation_runtime_intent_from_compatibility(
             )
         return TranslationRuntimeIntent(
             model=TRANSLATION_MODEL_DEEPSEEK_V4_FLASH,
+            connection=TRANSLATION_CONNECTION_OFFICIAL_BYOK,
+            concurrency_limit=concurrency,
+        )
+
+    if provider == PROVIDER_CEREBRAS:
+        return TranslationRuntimeIntent(
+            model=TRANSLATION_MODEL_GEMMA4_31B_CEREBRAS,
             connection=TRANSLATION_CONNECTION_OFFICIAL_BYOK,
             concurrency_limit=concurrency,
         )
@@ -891,11 +982,22 @@ def _openrouter_source_for_translation(
     return OPENROUTER_SOURCE_BYOK
 
 
+def _openrouter_managed_credential_kind_for_translation(
+    connection: TranslationConnectionName,
+    openrouter: OpenRouterRuntimeIntent,
+) -> OpenRouterManagedCredentialKind:
+    _ = openrouter
+    if connection == TRANSLATION_CONNECTION_MANAGED_CHINA:
+        return OPENROUTER_MANAGED_CREDENTIAL_QQ
+    return OPENROUTER_MANAGED_CREDENTIAL_STANDARD
+
+
 def _openrouter_fallback_fields(
     openrouter: OpenRouterRuntimeIntent,
     source: OpenRouterSource,
     *,
     provider_routing: str,
+    managed_credential_kind: OpenRouterManagedCredentialKind,
 ) -> tuple[str | None, str | None, ResolvedCredentialRequirement, str | None]:
     if (
         openrouter.fallback_selection_alias == OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE
@@ -914,7 +1016,7 @@ def _openrouter_fallback_fields(
     return (
         PROVIDER_OPENROUTER,
         fallback_profile.openrouter_model,
-        _openrouter_credential(source),
+        _openrouter_credential(source, managed_credential_kind=managed_credential_kind),
         fallback_provider_routing,
     )
 
@@ -925,6 +1027,7 @@ def _resolved_openrouter_config(
     source: OpenRouterSource,
     openrouter: OpenRouterRuntimeIntent,
     provider_routing: str,
+    managed_credential_kind: OpenRouterManagedCredentialKind,
     concurrency_limit: int,
 ) -> ResolvedLLMConfig:
     (
@@ -936,11 +1039,15 @@ def _resolved_openrouter_config(
         openrouter,
         source,
         provider_routing=provider_routing,
+        managed_credential_kind=managed_credential_kind,
     )
     return ResolvedLLMConfig(
         provider=PROVIDER_OPENROUTER,
         model=model,
-        credential=_openrouter_credential(source),
+        credential=_openrouter_credential(
+            source,
+            managed_credential_kind=managed_credential_kind,
+        ),
         fallback_provider=fallback_provider,
         fallback_model=fallback_model,
         fallback_credential=fallback_credential,
@@ -1055,6 +1162,10 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
             source=_openrouter_source_for_translation(translation.connection, openrouter),
             openrouter=openrouter,
             provider_routing="default",
+            managed_credential_kind=_openrouter_managed_credential_kind_for_translation(
+                translation.connection,
+                openrouter,
+            ),
             concurrency_limit=concurrency_limit,
         )
 
@@ -1083,6 +1194,10 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
             source=_openrouter_source_for_translation(translation.connection, openrouter),
             openrouter=openrouter,
             provider_routing=provider_routing,
+            managed_credential_kind=_openrouter_managed_credential_kind_for_translation(
+                translation.connection,
+                openrouter,
+            ),
             concurrency_limit=concurrency_limit,
         )
 
@@ -1098,6 +1213,18 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
         )
 
     if translation.model == TRANSLATION_MODEL_GEMINI_3_FLASH:
+        if translation.connection == TRANSLATION_CONNECTION_OPENROUTER:
+            return _resolved_openrouter_config(
+                model=OPENROUTER_MODEL_GEMINI_3_FLASH,
+                source=_openrouter_source_for_translation(translation.connection, openrouter),
+                openrouter=openrouter,
+                provider_routing="google_gemini_latency",
+                managed_credential_kind=_openrouter_managed_credential_kind_for_translation(
+                    translation.connection,
+                    openrouter,
+                ),
+                concurrency_limit=concurrency_limit,
+            )
         return _resolved_direct_provider_config(
             provider=PROVIDER_GEMINI,
             model=direct.gemini_3_flash_model,
@@ -1109,6 +1236,18 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
         )
 
     if translation.model == TRANSLATION_MODEL_GEMINI_31_FLASH_LITE:
+        if translation.connection == TRANSLATION_CONNECTION_OPENROUTER:
+            return _resolved_openrouter_config(
+                model=OPENROUTER_MODEL_GEMINI_31_FLASH_LITE,
+                source=_openrouter_source_for_translation(translation.connection, openrouter),
+                openrouter=openrouter,
+                provider_routing="google_gemini_latency",
+                managed_credential_kind=_openrouter_managed_credential_kind_for_translation(
+                    translation.connection,
+                    openrouter,
+                ),
+                concurrency_limit=concurrency_limit,
+            )
         return _resolved_direct_provider_config(
             provider=PROVIDER_GEMINI,
             model=direct.gemini_31_flash_lite_model,
@@ -1138,6 +1277,21 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
             source=_openrouter_source_for_translation(translation.connection, openrouter),
             openrouter=openrouter,
             provider_routing=openrouter.provider_routing,
+            managed_credential_kind=_openrouter_managed_credential_kind_for_translation(
+                translation.connection,
+                openrouter,
+            ),
+            concurrency_limit=concurrency_limit,
+        )
+
+    if translation.model == TRANSLATION_MODEL_GEMMA4_31B_CEREBRAS:
+        return _resolved_direct_provider_config(
+            provider=PROVIDER_CEREBRAS,
+            model=direct.cerebras_model,
+            credential=_required_credential(
+                CREDENTIAL_SOURCE_SECRET_STORE,
+                CREDENTIAL_REF_CEREBRAS_BYOK,
+            ),
             concurrency_limit=concurrency_limit,
         )
 
@@ -1156,9 +1310,11 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
 
 __all__ = [
     "CREDENTIAL_REF_DEEPSEEK_BYOK",
+    "CREDENTIAL_REF_CEREBRAS_BYOK",
     "CREDENTIAL_REF_GEMINI_BYOK",
     "CREDENTIAL_REF_OPENROUTER_BYOK",
     "CREDENTIAL_REF_OPENROUTER_MANAGED",
+    "CREDENTIAL_REF_OPENROUTER_MANAGED_QQ",
     "CREDENTIAL_REF_DEEPGRAM_STT",
     "CREDENTIAL_REF_QWEN_BEIJING",
     "CREDENTIAL_REF_QWEN_SINGAPORE",
@@ -1167,6 +1323,7 @@ __all__ = [
     "DEEPSEEK_MODEL_V4_PRO",
     "DEEPGRAM_STT_MODEL_NOVA_3",
     "DirectProviderRuntimeIntent",
+    "CEREBRAS_MODEL_GEMMA_4_31B",
     "GEMINI_MODEL_3_FLASH",
     "GEMINI_MODEL_31_FLASH_LITE",
     "LOCAL_LLM_BACKEND_OLLAMA",
@@ -1179,6 +1336,9 @@ __all__ = [
     "OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE",
     "OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE_VALUE",
     "OPENROUTER_SOURCE_BYOK",
+    "OPENROUTER_MANAGED_CREDENTIAL_KINDS",
+    "OPENROUTER_MANAGED_CREDENTIAL_QQ",
+    "OPENROUTER_MANAGED_CREDENTIAL_STANDARD",
     "OPENROUTER_SOURCE_MANAGED",
     "OPENROUTER_SOURCE_NONE",
     "OPENROUTER_SOURCES",
@@ -1186,6 +1346,7 @@ __all__ = [
     "OpenRouterRuntimeIntent",
     "OpenRouterSource",
     "PROVIDER_DEEPSEEK",
+    "PROVIDER_CEREBRAS",
     "PROVIDER_GEMINI",
     "PROVIDER_LOCAL_LLM",
     "PROVIDER_OPENROUTER",
@@ -1199,7 +1360,7 @@ __all__ = [
     "SONIOX_STT_DEFAULT_ENDPOINT",
     "SONIOX_STT_DEFAULT_KEEPALIVE_INTERVAL_S",
     "SONIOX_STT_DEFAULT_TRAILING_SILENCE_MS",
-    "SONIOX_STT_MODEL_RT_V4",
+    "SONIOX_STT_MODEL_RT_V5",
     "STT_DEFAULT_CHANNELS",
     "STT_DEFAULT_DRAIN_TIMEOUT_S",
     "STT_DEFAULT_LOW_LATENCY_ENABLED",
@@ -1230,6 +1391,7 @@ __all__ = [
     "TRANSLATION_MODEL_GEMINI_3_FLASH",
     "TRANSLATION_MODEL_GEMINI_31_FLASH_LITE",
     "TRANSLATION_MODEL_GEMMA4",
+    "TRANSLATION_MODEL_GEMMA4_31B_CEREBRAS",
     "TRANSLATION_MODEL_LOCAL_LLM",
     "TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH",
     "TRANSLATION_MODEL_QWEN_35_PLUS",

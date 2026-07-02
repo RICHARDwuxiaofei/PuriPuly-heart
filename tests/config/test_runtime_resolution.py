@@ -251,6 +251,17 @@ def test_default_peer_stt_runtime_intent_uses_desktop_peer_vad_defaults() -> Non
     assert config.vad_pre_roll_ms == 500
 
 
+def test_soniox_runtime_default_uses_realtime_v5_model() -> None:
+    runtime_resolution = _runtime_resolution_module()
+
+    config = runtime_resolution.resolve_stt_config(
+        runtime_resolution.STTRuntimeIntent(provider=runtime_resolution.STT_PROVIDER_SONIOX)
+    )
+
+    assert config.model == "stt-rt-v5"
+    assert runtime_resolution.SONIOX_STT_MODEL_RT_V5 == "stt-rt-v5"
+
+
 def test_overlay_runtime_resolution_maps_desktop_options_without_legacy_name() -> None:
     runtime_resolution = _runtime_resolution_module()
     resolved = _resolved_module()
@@ -347,7 +358,7 @@ def test_overlay_runtime_resolution_maps_desktop_options_without_legacy_name() -
             "openrouter",
             "deepseek/deepseek-v4-flash",
             "managed",
-            "openrouter:managed",
+            "openrouter:managed_qq",
             None,
             "deepseek_only",
         ),
@@ -386,6 +397,28 @@ def test_overlay_runtime_resolution_maps_desktop_options_without_legacy_name() -
         ),
         (
             "gemini3_flash",
+            "openrouter",
+            "byok",
+            "openrouter",
+            "google/gemini-3-flash-preview",
+            "secret_store",
+            "openrouter:byok",
+            None,
+            "google_gemini_latency",
+        ),
+        (
+            "gemini31_flash_lite",
+            "openrouter",
+            "byok",
+            "openrouter",
+            "google/gemini-3.1-flash-lite",
+            "secret_store",
+            "openrouter:byok",
+            None,
+            "google_gemini_latency",
+        ),
+        (
+            "gemini3_flash",
             "official_byok",
             "byok",
             "gemini",
@@ -415,6 +448,17 @@ def test_overlay_runtime_resolution_maps_desktop_options_without_legacy_name() -
             "secret_store",
             "qwen:beijing",
             "beijing",
+            None,
+        ),
+        (
+            "gemma4_31b_cerebras",
+            "official_byok",
+            "byok",
+            "cerebras",
+            "gemma-4-31b",
+            "secret_store",
+            "cerebras:byok",
+            None,
             None,
         ),
         (
@@ -646,6 +690,54 @@ def test_openrouter_deepseek_only_primary_suppresses_fallback_fields() -> None:
         reference=None,
     )
     assert config.fallback_provider_routing is None
+
+
+def test_managed_china_resolves_explicit_qq_managed_credential_reference() -> None:
+    runtime_resolution = _runtime_resolution_module()
+    resolved = _resolved_module()
+
+    config = runtime_resolution.resolve_llm_config(
+        _runtime_input(
+            runtime_resolution,
+            model=runtime_resolution.TRANSLATION_MODEL_DEEPSEEK_V4_FLASH,
+            connection=runtime_resolution.TRANSLATION_CONNECTION_MANAGED_CHINA,
+            openrouter=runtime_resolution.OpenRouterRuntimeIntent(
+                selected_source=runtime_resolution.OPENROUTER_SOURCE_MANAGED,
+                fallback_selection_alias=runtime_resolution.OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE,
+            ),
+        )
+    )
+
+    assert config.credential == resolved.ResolvedCredentialRequirement(
+        source=resolved.CREDENTIAL_SOURCE_MANAGED,
+        required=True,
+        reference="openrouter:managed_qq",
+    )
+    assert config.provider_routing == "deepseek_only"
+
+
+def test_standard_managed_resolves_standard_managed_credential_reference() -> None:
+    runtime_resolution = _runtime_resolution_module()
+    resolved = _resolved_module()
+
+    config = runtime_resolution.resolve_llm_config(
+        _runtime_input(
+            runtime_resolution,
+            model=runtime_resolution.TRANSLATION_MODEL_GEMMA4,
+            connection=runtime_resolution.TRANSLATION_CONNECTION_MANAGED,
+            openrouter=runtime_resolution.OpenRouterRuntimeIntent(
+                selected_source=runtime_resolution.OPENROUTER_SOURCE_MANAGED,
+                managed_credential_kind=runtime_resolution.OPENROUTER_MANAGED_CREDENTIAL_QQ,
+                fallback_selection_alias=runtime_resolution.OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE,
+            ),
+        )
+    )
+
+    assert config.credential == resolved.ResolvedCredentialRequirement(
+        source=resolved.CREDENTIAL_SOURCE_MANAGED,
+        required=True,
+        reference="openrouter:managed",
+    )
 
 
 def test_openrouter_deepseek_byok_deepseek_only_preserves_routing_and_suppresses_fallback() -> None:
@@ -982,8 +1074,83 @@ def test_current_and_legacy_setting_value_snapshots_convert_to_canonical_input_a
         )
 
         assert isinstance(config, resolved.ResolvedLLMConfig)
-        assert config.provider in {"deepseek", "gemini", "local_llm", "openrouter", "qwen"}
+        assert config.provider in {
+            "cerebras",
+            "deepseek",
+            "gemini",
+            "local_llm",
+            "openrouter",
+            "qwen",
+        }
         assert config.concurrency_limit == raw_settings["llm"]["concurrency_limit"]
+
+
+def test_derive_runtime_from_openrouter_gemini_compatibility_values() -> None:
+    runtime_resolution = _runtime_resolution_module()
+    resolved = _resolved_module()
+
+    openrouter_intent = runtime_resolution.normalize_openrouter_runtime_intent(
+        provider_llm="openrouter",
+        model="google/gemini-3.1-flash-lite",
+        selected_source="byok",
+        selection_alias="gemini31_flash_lite_byok",
+        fallback_selection_alias="none",
+        routing_mode="latency",
+        provider_routing="google_gemini_latency",
+    )
+    translation_intent = runtime_resolution.derive_translation_runtime_intent_from_compatibility(
+        provider_llm="openrouter",
+        openrouter_model=openrouter_intent.model,
+        openrouter_selected_source=openrouter_intent.selected_source,
+        openrouter_provider_routing=openrouter_intent.provider_routing,
+        concurrency_limit=6,
+    )
+
+    config = runtime_resolution.resolve_llm_config(
+        runtime_resolution.RuntimeResolutionInput(
+            translation=translation_intent,
+            openrouter=openrouter_intent,
+        )
+    )
+
+    assert openrouter_intent.selection_alias == "gemini31_flash_lite_byok"
+    assert translation_intent.model == runtime_resolution.TRANSLATION_MODEL_GEMINI_31_FLASH_LITE
+    assert translation_intent.connection == runtime_resolution.TRANSLATION_CONNECTION_OPENROUTER
+    assert config.provider == "openrouter"
+    assert config.model == "google/gemini-3.1-flash-lite"
+    assert config.provider_routing == "google_gemini_latency"
+    assert config.credential == resolved.ResolvedCredentialRequirement(
+        source=resolved.CREDENTIAL_SOURCE_SECRET_STORE,
+        required=True,
+        reference="openrouter:byok",
+    )
+
+
+def test_derive_runtime_from_cerebras_compatibility_values() -> None:
+    runtime_resolution = _runtime_resolution_module()
+    resolved = _resolved_module()
+
+    translation_intent = runtime_resolution.derive_translation_runtime_intent_from_compatibility(
+        provider_llm="cerebras",
+        cerebras_model="gemma-4-31b",
+        concurrency_limit=3,
+    )
+    config = runtime_resolution.resolve_llm_config(
+        runtime_resolution.RuntimeResolutionInput(
+            translation=translation_intent,
+            direct=runtime_resolution.DirectProviderRuntimeIntent(cerebras_model="gemma-4-31b"),
+        )
+    )
+
+    assert translation_intent.model == runtime_resolution.TRANSLATION_MODEL_GEMMA4_31B_CEREBRAS
+    assert translation_intent.connection == runtime_resolution.TRANSLATION_CONNECTION_OFFICIAL_BYOK
+    assert config.provider == "cerebras"
+    assert config.model == "gemma-4-31b"
+    assert config.credential == resolved.ResolvedCredentialRequirement(
+        source=resolved.CREDENTIAL_SOURCE_SECRET_STORE,
+        required=True,
+        reference="cerebras:byok",
+    )
 
 
 def test_missing_translation_openrouter_compatibility_values_derive_exact_runtime_config() -> None:

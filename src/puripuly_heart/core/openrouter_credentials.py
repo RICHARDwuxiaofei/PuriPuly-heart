@@ -28,6 +28,7 @@ class OpenRouterCredentialRuntimeConfig:
 
     selected_source: OpenRouterCredentialSource
     installation_id: str | None
+    managed_credential_kind: str = "standard"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +67,8 @@ def resolve_openrouter_credentials(
             api_key=_get_byok_api_key(secrets),
         )
 
-    managed_api_key = _normalize_secret(secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET))
+    managed_secret_key = _managed_api_key_secret_for_kind(config.managed_credential_kind)
+    managed_api_key = _normalize_secret(secrets.get(managed_secret_key))
     if managed_api_key is not None:
         return OpenRouterCredentialResolution(
             selected_source=selected_source,
@@ -76,7 +78,10 @@ def resolve_openrouter_credentials(
     return OpenRouterCredentialResolution(
         selected_source=selected_source,
         api_key=None,
-        requires_managed_challenge=_is_trans_intent(request_intent),
+        requires_managed_challenge=(
+            _is_trans_intent(request_intent)
+            and managed_secret_key == OPENROUTER_MANAGED_API_KEY_SECRET
+        ),
     )
 
 
@@ -206,6 +211,12 @@ def _get_byok_api_key(secrets: SecretStore) -> str | None:
     if stored_key is not None:
         return stored_key
     return _normalize_secret(os.getenv(OPENROUTER_BYOK_API_KEY_ENV))
+
+
+def _managed_api_key_secret_for_kind(kind: object) -> str:
+    if isinstance(kind, str) and kind.strip() == "qq":
+        return OPENROUTER_MANAGED_QQ_API_KEY_SECRET
+    return OPENROUTER_MANAGED_API_KEY_SECRET
 
 
 def _normalize_managed_availability(value: str) -> str:

@@ -7,6 +7,7 @@ from puripuly_heart.config.settings import AppSettings, OpenRouterCredentialSour
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_BYOK_API_KEY_SECRET,
     OPENROUTER_MANAGED_API_KEY_SECRET,
+    OPENROUTER_MANAGED_QQ_API_KEY_SECRET,
     OPENROUTER_MANAGED_USER_ID_MAX_LENGTH,
     OPENROUTER_MANAGED_USER_ID_SECRET,
     OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
@@ -75,6 +76,47 @@ def test_resolve_openrouter_credentials_uses_selected_managed_key_without_byok_f
     assert resolution.selected_source == OpenRouterCredentialSource.MANAGED
     assert resolution.api_key == "managed-key"
     assert resolution.requires_managed_challenge is False
+
+
+def test_resolve_openrouter_credentials_separates_standard_and_qq_managed_keys() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    store = InMemorySecretStore()
+    store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "standard-managed-key")
+    store.set(OPENROUTER_MANAGED_QQ_API_KEY_SECRET, "qq-managed-key")
+
+    standard = resolve_openrouter_credentials(_credential_config(settings), secrets=store)
+    qq = resolve_openrouter_credentials(
+        OpenRouterCredentialRuntimeConfig(
+            selected_source=settings.openrouter.selected_source,
+            installation_id=settings.managed_identity.installation_id,
+            managed_credential_kind="qq",
+        ),
+        secrets=store,
+    )
+
+    assert standard.api_key == "standard-managed-key"
+    assert qq.api_key == "qq-managed-key"
+
+
+def test_resolve_openrouter_credentials_never_falls_back_between_managed_key_kinds() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    store = InMemorySecretStore()
+    store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "standard-managed-key")
+
+    qq = resolve_openrouter_credentials(
+        OpenRouterCredentialRuntimeConfig(
+            selected_source=settings.openrouter.selected_source,
+            installation_id=settings.managed_identity.installation_id,
+            managed_credential_kind="qq",
+        ),
+        secrets=store,
+        request_intent="TRANS",
+    )
+
+    assert qq.api_key is None
+    assert qq.requires_managed_challenge is False
 
 
 def test_resolve_openrouter_credentials_requires_explicit_trans_intent_before_managed_release() -> (

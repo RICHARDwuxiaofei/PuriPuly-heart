@@ -669,6 +669,7 @@
       "fallback_selection_alias",
       "routing_mode",
       "provider_routing",
+      "managed_credential_kind",
       "broker_base_url"
     ],
     "resolved_llm_config_fields": [
