@@ -11,6 +11,7 @@ from puripuly_heart.config.settings import (
     DEFAULT_OPENROUTER_BROKER_BASE_URL,
     OVERLAY_TARGET_DESKTOP,
     AppSettings,
+    CerebrasLLMModel,
     DeepSeekLLMModel,
     GeminiLLMModel,
     OpenRouterCredentialSource,
@@ -144,6 +145,7 @@ CURRENT_USER_INTENT_DESTINATIONS = {
 }
 
 CURRENT_COMPATIBILITY_INPUT_DESTINATIONS = {
+    "cerebras.llm_model": "compatibility_input.cerebras.llm_model",
     "deepseek.llm_model": "compatibility_input.deepseek.llm_model",
     "gemini.llm_model": "compatibility_input.gemini.llm_model",
     "openrouter.llm_model": "compatibility_input.openrouter.llm_model",
@@ -157,6 +159,7 @@ CURRENT_COMPATIBILITY_INPUT_DESTINATIONS = {
 CURRENT_OPERATIONAL_STATE_DESTINATIONS = {
     "api_key_verified.alibaba_beijing": "state.provider_verification.alibaba_beijing.status",
     "api_key_verified.alibaba_singapore": "state.provider_verification.alibaba_singapore.status",
+    "api_key_verified.cerebras": "compatibility_input.api_key_verified.cerebras",
     "api_key_verified.deepgram": "state.provider_verification.deepgram.status",
     "api_key_verified.deepseek": "state.provider_verification.deepseek.status",
     "api_key_verified.google": "state.provider_verification.google.status",
@@ -344,6 +347,7 @@ def maximal_v24_settings_fixture() -> dict[str, Any]:
     settings.qwen.region = QwenRegion.SINGAPORE
     settings.qwen.llm_model = QwenLLMModel.QWEN_35_FLASH
     settings.deepseek.llm_model = DeepSeekLLMModel.DEEPSEEK_V4_PRO
+    settings.cerebras.llm_model = CerebrasLLMModel.GEMMA_4_31B
     settings.local_llm.base_url = "http://127.0.0.1:12345/v1"
     settings.local_llm.model = "fixture-local-model"
     settings.local_llm.extra_body = {"temperature": 0.25, "reasoning_effort": "low"}
@@ -375,6 +379,7 @@ def maximal_v24_settings_fixture() -> dict[str, Any]:
     settings.api_key_verified.deepseek = True
     settings.api_key_verified.alibaba_beijing = True
     settings.api_key_verified.alibaba_singapore = True
+    settings.api_key_verified.cerebras = True
     settings.managed_identity.installation_id = "fixture-installation-id"
     settings.managed_identity.release_token = "fixture-release-token"
     settings.managed_identity.release_token_expires_at = "2026-07-08T00:00:00Z"

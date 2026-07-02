@@ -5,9 +5,11 @@
       "google_api_key",
       "openrouter_api_key",
       "openrouter_managed_api_key",
+      "openrouter_managed_qq_api_key",
       "openrouter_managed_user_id",
       "openrouter_managed_user_installation_id",
       "deepseek_api_key",
+      "cerebras_api_key",
       "deepgram_api_key",
       "soniox_api_key",
       "alibaba_api_key_beijing",
@@ -257,7 +259,7 @@
         ],
         "success_response_source": {
           "file": "qq-auth.ts",
-          "function": "handleQqAuthAssert",
+          "function": "legacyVerificationResponse",
           "kind": "c_json_object"
         }
       },
@@ -615,6 +617,8 @@
       "gemma4_managed",
       "qwen35_flash_managed",
       "deepseek_v4_flash_managed",
+      "gemini3_flash_byok",
+      "gemini31_flash_lite_byok",
       "gemma4_byok",
       "qwen35_flash_byok",
       "deepseek_v4_flash_byok"

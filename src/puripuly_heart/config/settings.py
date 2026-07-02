@@ -4,7 +4,7 @@ import copy
 import json
 import locale
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -20,8 +20,12 @@ from puripuly_heart.config.llm_profiles import (
     OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE,
     OPENROUTER_FALLBACK_SELECTION_ALIAS_QWEN35_FLASH,
     OPENROUTER_MODEL_DEEPSEEK_V4_FLASH,
+    OPENROUTER_MODEL_GEMINI_3_FLASH,
+    OPENROUTER_MODEL_GEMINI_31_FLASH_LITE,
     OPENROUTER_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_BYOK,
     OPENROUTER_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_MANAGED,
+    OPENROUTER_SELECTION_ALIAS_GEMINI3_FLASH_BYOK,
+    OPENROUTER_SELECTION_ALIAS_GEMINI31_FLASH_LITE_BYOK,
     OPENROUTER_SELECTION_ALIAS_GEMMA4_BYOK,
     OPENROUTER_SELECTION_ALIAS_GEMMA4_MANAGED,
     OPENROUTER_SELECTION_ALIAS_QWEN35_FLASH_BYOK,
@@ -37,6 +41,8 @@ from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext  # noqa
 SETTINGS_SCHEMA_VERSION = 24
 STT_INTERNAL_SAMPLE_RATE_HZ = 16000
 DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS = 500
+LEGACY_LOW_LATENCY_VAD_HANGOVER_MS = 600
+DEFAULT_LOW_LATENCY_VAD_HANGOVER_MS = 500
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
 REFERRAL_ID_LENGTH = 6
@@ -128,6 +134,7 @@ class LLMProviderName(str, Enum):
     OPENROUTER = "openrouter"
     QWEN = "qwen"
     DEEPSEEK = "deepseek"
+    CEREBRAS = "cerebras"
     LOCAL_LLM = "local_llm"
 
 
@@ -156,6 +163,10 @@ class DeepSeekLLMModel(str, Enum):
     DEEPSEEK_V4_PRO = "deepseek-v4-pro"
 
 
+class CerebrasLLMModel(str, Enum):
+    GEMMA_4_31B = "gemma-4-31b"
+
+
 class LocalLLMBackend(str, Enum):
     OLLAMA = "ollama"
 
@@ -164,6 +175,8 @@ class OpenRouterLLMModel(str, Enum):
     GEMMA_4_26B_A4B_IT = "google/gemma-4-26b-a4b-it"
     QWEN_35_FLASH_02_23 = "qwen/qwen3.5-flash-02-23"
     DEEPSEEK_V4_FLASH = OPENROUTER_MODEL_DEEPSEEK_V4_FLASH
+    GEMINI_3_FLASH = OPENROUTER_MODEL_GEMINI_3_FLASH
+    GEMINI_31_FLASH_LITE = OPENROUTER_MODEL_GEMINI_31_FLASH_LITE
 
 
 class OpenRouterRoutingMode(str, Enum):
@@ -175,6 +188,7 @@ class OpenRouterRoutingMode(str, Enum):
 class OpenRouterProviderRouting(str, Enum):
     DEFAULT = "default"
     DEEPSEEK_ONLY = "deepseek_only"
+    GOOGLE_GEMINI_LATENCY = "google_gemini_latency"
 
 
 class OpenRouterCredentialSource(str, Enum):
@@ -190,6 +204,8 @@ class OpenRouterSelectionAlias(str, Enum):
     QWEN35_FLASH_BYOK = OPENROUTER_SELECTION_ALIAS_QWEN35_FLASH_BYOK
     DEEPSEEK_V4_FLASH_MANAGED = OPENROUTER_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_MANAGED
     DEEPSEEK_V4_FLASH_BYOK = OPENROUTER_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_BYOK
+    GEMINI3_FLASH_BYOK = OPENROUTER_SELECTION_ALIAS_GEMINI3_FLASH_BYOK
+    GEMINI31_FLASH_LITE_BYOK = OPENROUTER_SELECTION_ALIAS_GEMINI31_FLASH_LITE_BYOK
 
 
 class OpenRouterFallbackSelectionAlias(str, Enum):
@@ -207,6 +223,7 @@ class TranslationModel(str, Enum):
     GEMINI_31_FLASH_LITE = "gemini31_flash_lite"
     QWEN_35_PLUS = "qwen35_plus"
     LOCAL_LLM = "local_llm"
+    GEMMA4_31B_CEREBRAS = "gemma4_31b_cerebras"
 
 
 class TranslationConnection(str, Enum):
@@ -256,10 +273,17 @@ TRANSLATION_CONNECTIONS_BY_MODEL: dict[TranslationModel, tuple[TranslationConnec
         TranslationConnection.OFFICIAL_BYOK,
     ),
     TranslationModel.DEEPSEEK_V4_PRO: (TranslationConnection.OFFICIAL_BYOK,),
-    TranslationModel.GEMINI_3_FLASH: (TranslationConnection.OFFICIAL_BYOK,),
-    TranslationModel.GEMINI_31_FLASH_LITE: (TranslationConnection.OFFICIAL_BYOK,),
+    TranslationModel.GEMINI_3_FLASH: (
+        TranslationConnection.OFFICIAL_BYOK,
+        TranslationConnection.OPENROUTER,
+    ),
+    TranslationModel.GEMINI_31_FLASH_LITE: (
+        TranslationConnection.OFFICIAL_BYOK,
+        TranslationConnection.OPENROUTER,
+    ),
     TranslationModel.QWEN_35_PLUS: (TranslationConnection.OFFICIAL_BYOK,),
     TranslationModel.LOCAL_LLM: (TranslationConnection.OLLAMA,),
+    TranslationModel.GEMMA4_31B_CEREBRAS: (TranslationConnection.OFFICIAL_BYOK,),
 }
 TRANSLATION_CONNECTION_PRIORITY: tuple[TranslationConnection, ...] = (
     TranslationConnection.MANAGED,
@@ -275,6 +299,8 @@ def supported_translation_connections(
 
 
 def default_translation_connection(model: TranslationModel) -> TranslationConnection:
+    if model in (TranslationModel.GEMINI_3_FLASH, TranslationModel.GEMINI_31_FLASH_LITE):
+        return TranslationConnection.OFFICIAL_BYOK
     supported_connections = supported_translation_connections(model)
     for connection in TRANSLATION_CONNECTION_PRIORITY:
         if connection in supported_connections:
@@ -478,7 +504,7 @@ class STTSettings:
     drain_timeout_s: float = 2.0
     vad_speech_threshold: float = 0.5
     low_latency_mode: bool = True
-    low_latency_vad_hangover_ms: int = 600
+    low_latency_vad_hangover_ms: int = DEFAULT_LOW_LATENCY_VAD_HANGOVER_MS
     low_latency_merge_gap_ms: int = 600
     low_latency_spec_retry_max: int = 10
     custom_vocabulary_enabled: bool = True
@@ -532,7 +558,7 @@ class QwenASRSTTSettings:
 
 @dataclass(slots=True)
 class SonioxSTTSettings:
-    model: str = "stt-rt-v4"
+    model: str = "stt-rt-v5"
     endpoint: str = "wss://stt-rt.soniox.com/transcribe-websocket"
     keepalive_interval_s: float = 10.0
     trailing_silence_ms: int = 100
@@ -674,6 +700,15 @@ class DeepSeekSettings:
     def validate(self) -> None:
         if not isinstance(self.llm_model, DeepSeekLLMModel):
             raise ValueError("invalid deepseek llm model")
+
+
+@dataclass(slots=True)
+class CerebrasSettings:
+    llm_model: CerebrasLLMModel = CerebrasLLMModel.GEMMA_4_31B
+
+    def validate(self) -> None:
+        if not isinstance(self.llm_model, CerebrasLLMModel):
+            raise ValueError("invalid cerebras llm model")
 
 
 @dataclass(slots=True)
@@ -928,6 +963,7 @@ class ApiKeyVerificationSettings:
     deepseek: bool = False
     alibaba_beijing: bool = False
     alibaba_singapore: bool = False
+    cerebras: bool = False
 
     def validate(self) -> None:
         pass  # No validation needed
@@ -997,6 +1033,7 @@ class AppSettings:
     openrouter: OpenRouterSettings = field(default_factory=OpenRouterSettings)
     qwen: QwenSettings = field(default_factory=QwenSettings)
     deepseek: DeepSeekSettings = field(default_factory=DeepSeekSettings)
+    cerebras: CerebrasSettings = field(default_factory=CerebrasSettings)
     local_llm: LocalLLMSettings = field(default_factory=LocalLLMSettings)
     llm: LLMSettings = field(default_factory=LLMSettings)
     osc: OSCSettings = field(default_factory=OSCSettings)
@@ -1034,6 +1071,7 @@ class AppSettings:
         self.openrouter.validate()
         self.qwen.validate()
         self.deepseek.validate()
+        self.cerebras.validate()
         self.local_llm.validate()
         self.llm.validate()
         self.osc.validate()
@@ -1403,6 +1441,9 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         "deepseek": {
             "llm_model": settings.deepseek.llm_model.value,
         },
+        "cerebras": {
+            "llm_model": settings.cerebras.llm_model.value,
+        },
         "local_llm": {
             "backend": settings.local_llm.backend.value,
             "base_url": _parse_local_llm_base_url(settings.local_llm.base_url),
@@ -1452,6 +1493,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "deepseek": settings.api_key_verified.deepseek,
             "alibaba_beijing": settings.api_key_verified.alibaba_beijing,
             "alibaba_singapore": settings.api_key_verified.alibaba_singapore,
+            "cerebras": settings.api_key_verified.cerebras,
         },
         "managed_identity": {
             "installation_id": settings.managed_identity.installation_id,
@@ -1535,6 +1577,16 @@ def _parse_deepseek_llm_model(value: object) -> DeepSeekLLMModel:
         except ValueError:
             pass
     return DeepSeekLLMModel.DEEPSEEK_V4_FLASH
+
+
+def _parse_cerebras_llm_model(value: object) -> CerebrasLLMModel:
+    if isinstance(value, str):
+        normalized = value.strip()
+        try:
+            return CerebrasLLMModel(normalized)
+        except ValueError:
+            pass
+    return CerebrasLLMModel.GEMMA_4_31B
 
 
 def _parse_openrouter_llm_model(value: object) -> OpenRouterLLMModel:
@@ -1870,6 +1922,7 @@ def _derive_translation_settings_from_runtime_values(
     gemini_model: GeminiLLMModel,
     qwen_model: QwenLLMModel,
     deepseek_model: DeepSeekLLMModel,
+    cerebras_model: CerebrasLLMModel,
     history: object = None,
 ) -> TranslationSettings:
     normalized_history = _parse_translation_connection_history(history)
@@ -1904,11 +1957,38 @@ def _derive_translation_settings_from_runtime_values(
                 ),
                 history=normalized_history,
             )
+        if openrouter_model == OpenRouterLLMModel.GEMINI_3_FLASH:
+            return _normalize_translation_settings(
+                model=TranslationModel.GEMINI_3_FLASH,
+                connection=_translation_connection_from_openrouter_source(
+                    openrouter_selected_source,
+                    model=TranslationModel.GEMINI_3_FLASH,
+                    provider_routing=openrouter_provider_routing,
+                ),
+                history=normalized_history,
+            )
+        if openrouter_model == OpenRouterLLMModel.GEMINI_31_FLASH_LITE:
+            return _normalize_translation_settings(
+                model=TranslationModel.GEMINI_31_FLASH_LITE,
+                connection=_translation_connection_from_openrouter_source(
+                    openrouter_selected_source,
+                    model=TranslationModel.GEMINI_31_FLASH_LITE,
+                    provider_routing=openrouter_provider_routing,
+                ),
+                history=normalized_history,
+            )
 
     if provider_llm == LLMProviderName.LOCAL_LLM:
         return _normalize_translation_settings(
             model=TranslationModel.LOCAL_LLM,
             connection=TranslationConnection.OLLAMA,
+            history=normalized_history,
+        )
+
+    if provider_llm == LLMProviderName.CEREBRAS:
+        return _normalize_translation_settings(
+            model=TranslationModel.GEMMA4_31B_CEREBRAS,
+            connection=TranslationConnection.OFFICIAL_BYOK,
             history=normalized_history,
         )
 
@@ -1966,6 +2046,7 @@ def _derive_translation_settings_from_runtime(
         gemini_model=settings.gemini.llm_model,
         qwen_model=settings.qwen.llm_model,
         deepseek_model=settings.deepseek.llm_model,
+        cerebras_model=settings.cerebras.llm_model,
         history=history,
     )
 
@@ -2025,12 +2106,32 @@ def materialize_translation_settings(settings: AppSettings) -> AppSettings:
         return settings
 
     if model == TranslationModel.GEMINI_3_FLASH:
+        if connection == TranslationConnection.OPENROUTER:
+            settings.provider.llm = LLMProviderName.OPENROUTER
+            settings.openrouter.llm_model = OpenRouterLLMModel.GEMINI_3_FLASH
+            settings.openrouter.provider_routing = OpenRouterProviderRouting.GOOGLE_GEMINI_LATENCY
+            settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+            settings.openrouter.selection_alias = _derive_openrouter_selection_alias(
+                settings.openrouter.llm_model,
+                settings.openrouter.selected_source,
+            )
+            return settings
         settings.provider.llm = LLMProviderName.GEMINI
         settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
         settings.gemini.llm_model = GeminiLLMModel.GEMINI_3_FLASH
         return settings
 
     if model == TranslationModel.GEMINI_31_FLASH_LITE:
+        if connection == TranslationConnection.OPENROUTER:
+            settings.provider.llm = LLMProviderName.OPENROUTER
+            settings.openrouter.llm_model = OpenRouterLLMModel.GEMINI_31_FLASH_LITE
+            settings.openrouter.provider_routing = OpenRouterProviderRouting.GOOGLE_GEMINI_LATENCY
+            settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+            settings.openrouter.selection_alias = _derive_openrouter_selection_alias(
+                settings.openrouter.llm_model,
+                settings.openrouter.selected_source,
+            )
+            return settings
         settings.provider.llm = LLMProviderName.GEMINI
         settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
         settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
@@ -2039,6 +2140,12 @@ def materialize_translation_settings(settings: AppSettings) -> AppSettings:
     if model == TranslationModel.LOCAL_LLM:
         settings.provider.llm = LLMProviderName.LOCAL_LLM
         settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
+        return settings
+
+    if model == TranslationModel.GEMMA4_31B_CEREBRAS:
+        settings.provider.llm = LLMProviderName.CEREBRAS
+        settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
+        settings.cerebras.llm_model = CerebrasLLMModel.GEMMA_4_31B
         return settings
 
     settings.provider.llm = LLMProviderName.QWEN
@@ -2075,6 +2182,8 @@ def _apply_materialized_translation_to_data(
     qwen_data, block_changed = _ensure_mapping_block(data, "qwen")
     changed = changed or block_changed
     deepseek_data, block_changed = _ensure_mapping_block(data, "deepseek")
+    changed = changed or block_changed
+    cerebras_data, block_changed = _ensure_mapping_block(data, "cerebras")
     changed = changed or block_changed
 
     translation = _normalize_translation_settings(
@@ -2167,6 +2276,29 @@ def _apply_materialized_translation_to_data(
         return changed
 
     if translation.model == TranslationModel.GEMINI_3_FLASH:
+        if translation.connection == TranslationConnection.OPENROUTER:
+            selection_alias = _derive_openrouter_selection_alias(
+                OpenRouterLLMModel.GEMINI_3_FLASH,
+                OpenRouterCredentialSource.BYOK,
+            )
+            changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.OPENROUTER.value)
+            changed |= _set_mapping_value(
+                openrouter_data,
+                "llm_model",
+                OpenRouterLLMModel.GEMINI_3_FLASH.value,
+            )
+            changed |= _set_mapping_value(
+                openrouter_data,
+                "provider_routing",
+                OpenRouterProviderRouting.GOOGLE_GEMINI_LATENCY.value,
+            )
+            changed |= _set_mapping_value(
+                openrouter_data,
+                "selected_source",
+                OpenRouterCredentialSource.BYOK.value,
+            )
+            changed |= _set_mapping_value(openrouter_data, "selection_alias", selection_alias.value)
+            return changed
         changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.GEMINI.value)
         changed |= _set_mapping_value(
             openrouter_data,
@@ -2181,6 +2313,29 @@ def _apply_materialized_translation_to_data(
         return changed
 
     if translation.model == TranslationModel.GEMINI_31_FLASH_LITE:
+        if translation.connection == TranslationConnection.OPENROUTER:
+            selection_alias = _derive_openrouter_selection_alias(
+                OpenRouterLLMModel.GEMINI_31_FLASH_LITE,
+                OpenRouterCredentialSource.BYOK,
+            )
+            changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.OPENROUTER.value)
+            changed |= _set_mapping_value(
+                openrouter_data,
+                "llm_model",
+                OpenRouterLLMModel.GEMINI_31_FLASH_LITE.value,
+            )
+            changed |= _set_mapping_value(
+                openrouter_data,
+                "provider_routing",
+                OpenRouterProviderRouting.GOOGLE_GEMINI_LATENCY.value,
+            )
+            changed |= _set_mapping_value(
+                openrouter_data,
+                "selected_source",
+                OpenRouterCredentialSource.BYOK.value,
+            )
+            changed |= _set_mapping_value(openrouter_data, "selection_alias", selection_alias.value)
+            return changed
         changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.GEMINI.value)
         changed |= _set_mapping_value(
             openrouter_data,
@@ -2196,6 +2351,20 @@ def _apply_materialized_translation_to_data(
 
     if translation.model == TranslationModel.LOCAL_LLM:
         changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.LOCAL_LLM.value)
+        return changed
+
+    if translation.model == TranslationModel.GEMMA4_31B_CEREBRAS:
+        changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.CEREBRAS.value)
+        changed |= _set_mapping_value(
+            openrouter_data,
+            "provider_routing",
+            OpenRouterProviderRouting.DEFAULT.value,
+        )
+        changed |= _set_mapping_value(
+            cerebras_data,
+            "llm_model",
+            CerebrasLLMModel.GEMMA_4_31B.value,
+        )
         return changed
 
     changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.QWEN.value)
@@ -2278,11 +2447,37 @@ def resolve_first_run_ui_locale(system_locale: str | None) -> str:
     return "en"
 
 
+def _is_china_first_run_locale(system_locale: str | None) -> bool:
+    return resolve_first_run_ui_locale(system_locale) == "zh-CN"
+
+
+def _apply_china_managed_first_run_defaults(settings: AppSettings) -> None:
+    settings.openrouter = replace(
+        settings.openrouter,
+        selection_alias=OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED,
+        provider_routing=OpenRouterProviderRouting.DEEPSEEK_ONLY,
+        fallback_selection_alias=OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH_CHINA,
+    )
+    settings.translation = _derive_translation_settings_from_runtime_values(
+        provider_llm=settings.provider.llm,
+        openrouter_model=settings.openrouter.llm_model,
+        openrouter_selected_source=settings.openrouter.selected_source,
+        openrouter_provider_routing=settings.openrouter.provider_routing,
+        gemini_model=settings.gemini.llm_model,
+        qwen_model=settings.qwen.llm_model,
+        deepseek_model=settings.deepseek.llm_model,
+        cerebras_model=settings.cerebras.llm_model,
+        history=settings.translation.connection_history,
+    )
+
+
 def new_settings_for_first_run(system_locale: str | None = None) -> AppSettings:
     if system_locale is None:
         system_locale = detect_system_locale()
     settings = AppSettings()
     settings.ui.locale = resolve_first_run_ui_locale(system_locale)
+    if _is_china_first_run_locale(system_locale):
+        _apply_china_managed_first_run_defaults(settings)
     ensure_prompt_defaults(settings)
     settings.validate()
     return settings
@@ -2842,10 +3037,11 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     soniox_data = data.get("soniox_stt")
     if isinstance(soniox_data, dict):
         model = soniox_data.get("model")
-        # Preserve explicit custom model values and only upgrade legacy default v3.
-        if isinstance(model, str) and model.strip() == "stt-rt-v3":
-            soniox_data["model"] = "stt-rt-v4"
-            changed = True
+        if isinstance(model, str):
+            normalized = model.strip()
+            if normalized in ("stt-rt-v3", "stt-rt-v4"):
+                soniox_data["model"] = "stt-rt-v5"
+                changed = True
 
     gemini_data = data.get("gemini")
     if not isinstance(gemini_data, dict):
@@ -2958,6 +3154,22 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         deepseek_data["llm_model"] = normalized_deepseek_model
         changed = True
 
+    cerebras_data = data.get("cerebras")
+    if not isinstance(cerebras_data, dict):
+        cerebras_data = {}
+        data["cerebras"] = cerebras_data
+        changed = True
+
+    raw_cerebras_model = cerebras_data.get("llm_model")
+    normalized_cerebras_model = _parse_cerebras_llm_model(raw_cerebras_model).value
+    if raw_cerebras_model != normalized_cerebras_model:
+        cerebras_data["llm_model"] = normalized_cerebras_model
+        changed = True
+
+    if stt_data.get("low_latency_vad_hangover_ms") == LEGACY_LOW_LATENCY_VAD_HANGOVER_MS:
+        stt_data["low_latency_vad_hangover_ms"] = DEFAULT_LOW_LATENCY_VAD_HANGOVER_MS
+        changed = True
+
     translation_data = data.get("translation") if isinstance(data.get("translation"), dict) else {}
     translation_history = _parse_translation_connection_history(
         translation_data.get("connection_history") if isinstance(translation_data, dict) else None
@@ -2984,6 +3196,7 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             gemini_model=_parse_gemini_llm_model(gemini_data.get("llm_model")),
             qwen_model=_parse_qwen_llm_model(qwen_data.get("llm_model")),
             deepseek_model=_parse_deepseek_llm_model(deepseek_data.get("llm_model")),
+            cerebras_model=_parse_cerebras_llm_model(cerebras_data.get("llm_model")),
             history=translation_history,
         )
     normalized_translation_data = _translation_settings_to_dict(normalized_translation_settings)
@@ -3000,6 +3213,9 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         changed = True
     if "deepseek" not in api_key_verified_data:
         api_key_verified_data["deepseek"] = False
+        changed = True
+    if "cerebras" not in api_key_verified_data:
+        api_key_verified_data["cerebras"] = False
         changed = True
 
     overlay_data = data.get("overlay")
@@ -3306,6 +3522,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
 
     qwen_raw = data.get("qwen") if isinstance(data.get("qwen"), dict) else {}
     deepseek_raw = data.get("deepseek") if isinstance(data.get("deepseek"), dict) else {}
+    cerebras_raw = data.get("cerebras") if isinstance(data.get("cerebras"), dict) else {}
     local_llm_raw = data.get("local_llm") if isinstance(data.get("local_llm"), dict) else {}
     qwen_asr_raw = data.get("qwen_asr_stt") if isinstance(data.get("qwen_asr_stt"), dict) else {}
     openrouter_raw = data.get("openrouter") if isinstance(data.get("openrouter"), dict) else {}
@@ -3420,7 +3637,12 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             drain_timeout_s=float(stt_data.get("drain_timeout_s", 2.0)),
             vad_speech_threshold=float(vad_threshold_raw) if vad_threshold_raw is not None else 0.5,
             low_latency_mode=bool(stt_data.get("low_latency_mode", False)),
-            low_latency_vad_hangover_ms=int(stt_data.get("low_latency_vad_hangover_ms", 600)),
+            low_latency_vad_hangover_ms=int(
+                stt_data.get(
+                    "low_latency_vad_hangover_ms",
+                    DEFAULT_LOW_LATENCY_VAD_HANGOVER_MS,
+                )
+            ),
             low_latency_merge_gap_ms=int(stt_data.get("low_latency_merge_gap_ms", 600)),
             low_latency_spec_retry_max=int(stt_data.get("low_latency_spec_retry_max", 10)),
             custom_vocabulary_enabled=custom_vocabulary_enabled,
@@ -3434,7 +3656,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             endpoint=qwen_settings.get_asr_endpoint(),
         ),
         soniox_stt=SonioxSTTSettings(
-            model=str(data.get("soniox_stt", {}).get("model", "stt-rt-v4")),
+            model=str(data.get("soniox_stt", {}).get("model", "stt-rt-v5")),
             endpoint=str(
                 data.get("soniox_stt", {}).get(
                     "endpoint", "wss://stt-rt.soniox.com/transcribe-websocket"
@@ -3490,6 +3712,11 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         deepseek=DeepSeekSettings(
             llm_model=_parse_deepseek_llm_model(
                 deepseek_raw.get("llm_model", DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value)
+            ),
+        ),
+        cerebras=CerebrasSettings(
+            llm_model=_parse_cerebras_llm_model(
+                cerebras_raw.get("llm_model", CerebrasLLMModel.GEMMA_4_31B.value)
             ),
         ),
         local_llm=LocalLLMSettings(
@@ -3553,6 +3780,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             alibaba_singapore=bool(
                 data.get("api_key_verified", {}).get("alibaba_singapore", False)
             ),
+            cerebras=bool(data.get("api_key_verified", {}).get("cerebras", False)),
         ),
         managed_identity=ManagedIdentitySettings(
             installation_id=_parse_optional_str(managed_identity_data.get("installation_id")) or "",

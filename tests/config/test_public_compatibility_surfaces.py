@@ -135,9 +135,11 @@ REQUIRED_SECRET_KEYS = (
     "google_api_key",
     "openrouter_api_key",
     "openrouter_managed_api_key",
+    "openrouter_managed_qq_api_key",
     "openrouter_managed_user_id",
     "openrouter_managed_user_installation_id",
     "deepseek_api_key",
+    "cerebras_api_key",
     "deepgram_api_key",
     "soniox_api_key",
     "alibaba_api_key_beijing",
@@ -868,6 +870,9 @@ def test_secret_store_key_registry_snapshot_matches_current_public_keys() -> Non
     assert openrouter_credentials.OPENROUTER_BYOK_API_KEY_SECRET == "openrouter_api_key"
     assert openrouter_credentials.OPENROUTER_MANAGED_API_KEY_SECRET == (
         "openrouter_managed_api_key"
+    )
+    assert openrouter_credentials.OPENROUTER_MANAGED_QQ_API_KEY_SECRET == (
+        "openrouter_managed_qq_api_key"
     )
     assert openrouter_credentials.OPENROUTER_MANAGED_USER_ID_SECRET == (
         "openrouter_managed_user_id"

@@ -33,6 +33,7 @@ from tests.config.settings_migration_fixtures import (
 
 SCHEMA_OR_SINGLETON_SAME_AS_DEFAULT_PATHS = frozenset(
     {
+        "cerebras.llm_model",
         "overlay.calibration.anchor",
         "settings_version",
     }

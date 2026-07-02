@@ -26,6 +26,7 @@ from puripuly_heart.config.settings import (
     SETTINGS_SCHEMA_VERSION,
     AppSettings,
     AudioSettings,
+    CerebrasLLMModel,
     DeepSeekLLMModel,
     DeepSeekSettings,
     GeminiLLMModel,
@@ -83,11 +84,11 @@ def test_settings_roundtrip(tmp_path):
     assert loaded == expected
 
 
-def test_peer_vad_hangover_default_is_500_ms_and_self_default_stays_600_ms() -> None:
+def test_peer_and_self_vad_hangover_defaults_are_500_ms() -> None:
     settings = AppSettings()
 
     assert settings.desktop_audio.vad_hangover_ms == 500
-    assert settings.stt.low_latency_vad_hangover_ms == 600
+    assert settings.stt.low_latency_vad_hangover_ms == 500
     assert (
         from_dict(
             {"settings_version": SETTINGS_SCHEMA_VERSION, "desktop_audio": {}}
@@ -111,7 +112,7 @@ def test_schema21_migration_forces_existing_peer_vad_hangover_to_500_ms(
 
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.desktop_audio.vad_hangover_ms == 500
-    assert loaded.stt.low_latency_vad_hangover_ms == 600
+    assert loaded.stt.low_latency_vad_hangover_ms == 500
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["desktop_audio"]["vad_hangover_ms"] == 500
 
@@ -407,6 +408,35 @@ def test_default_stt_provider_is_local_qwen() -> None:
     assert to_dict(settings)["provider"]["stt"] == STTProviderName.LOCAL_QWEN.value
 
 
+def test_self_vad_and_soniox_defaults_match_current_compatibility_defaults() -> None:
+    settings = from_dict({})
+
+    assert settings.stt.low_latency_vad_hangover_ms == 500
+    assert settings.soniox_stt.model == "stt-rt-v5"
+    assert to_dict(settings)["stt"]["low_latency_vad_hangover_ms"] == 500
+    assert to_dict(settings)["soniox_stt"]["model"] == "stt-rt-v5"
+
+
+@pytest.mark.parametrize("legacy_model", ["stt-rt-v3", "stt-rt-v4"])
+def test_migrate_settings_dict_upgrades_only_legacy_soniox_defaults(legacy_model: str) -> None:
+    raw = to_dict(AppSettings())
+    raw["soniox_stt"]["model"] = legacy_model
+
+    migrated, changed = _migrate_settings_dict(raw)
+
+    assert changed is True
+    assert migrated["soniox_stt"]["model"] == "stt-rt-v5"
+
+
+def test_migrate_settings_dict_preserves_custom_soniox_model() -> None:
+    raw = to_dict(AppSettings())
+    raw["soniox_stt"]["model"] = "custom-soniox-model"
+
+    migrated, _changed = _migrate_settings_dict(raw)
+
+    assert migrated["soniox_stt"]["model"] == "custom-soniox-model"
+
+
 def test_translation_model_public_member_names_and_values_match_plan() -> None:
     assert tuple((member.name, member.value) for member in TranslationModel) == (
         ("GEMMA4", "gemma4"),
@@ -416,6 +446,7 @@ def test_translation_model_public_member_names_and_values_match_plan() -> None:
         ("GEMINI_31_FLASH_LITE", "gemini31_flash_lite"),
         ("QWEN_35_PLUS", "qwen35_plus"),
         ("LOCAL_LLM", "local_llm"),
+        ("GEMMA4_31B_CEREBRAS", "gemma4_31b_cerebras"),
     )
 
 
@@ -512,15 +543,20 @@ def test_public_translation_connection_helpers_match_model_matrix() -> None:
     )
     assert supported_translation_connections(TranslationModel.GEMINI_3_FLASH) == (
         TranslationConnection.OFFICIAL_BYOK,
+        TranslationConnection.OPENROUTER,
     )
     assert supported_translation_connections(TranslationModel.GEMINI_31_FLASH_LITE) == (
         TranslationConnection.OFFICIAL_BYOK,
+        TranslationConnection.OPENROUTER,
     )
     assert supported_translation_connections(TranslationModel.QWEN_35_PLUS) == (
         TranslationConnection.OFFICIAL_BYOK,
     )
     assert supported_translation_connections(TranslationModel.LOCAL_LLM) == (
         TranslationConnection.OLLAMA,
+    )
+    assert supported_translation_connections(TranslationModel.GEMMA4_31B_CEREBRAS) == (
+        TranslationConnection.OFFICIAL_BYOK,
     )
     assert default_translation_connection(TranslationModel.GEMMA4) == TranslationConnection.MANAGED
     assert (
@@ -529,6 +565,10 @@ def test_public_translation_connection_helpers_match_model_matrix() -> None:
     )
     assert (
         default_translation_connection(TranslationModel.LOCAL_LLM) == TranslationConnection.OLLAMA
+    )
+    assert (
+        default_translation_connection(TranslationModel.GEMMA4_31B_CEREBRAS)
+        == TranslationConnection.OFFICIAL_BYOK
     )
 
 
@@ -991,6 +1031,61 @@ def test_from_dict_backfills_missing_deepseek_settings_and_verification() -> Non
     persisted = to_dict(loaded)
     assert persisted["deepseek"] == {"llm_model": DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value}
     assert persisted["api_key_verified"]["deepseek"] is False
+
+
+def test_gemini_openrouter_alias_and_routing_roundtrip() -> None:
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OPENROUTER,
+        connection_history={
+            TranslationModel.GEMINI_3_FLASH.value: TranslationConnection.OPENROUTER,
+        },
+    )
+
+    persisted = to_dict(settings)
+    loaded = from_dict(persisted)
+
+    assert loaded.translation.model == TranslationModel.GEMINI_3_FLASH
+    assert loaded.translation.connection == TranslationConnection.OPENROUTER
+    assert loaded.provider.llm == LLMProviderName.OPENROUTER
+    assert loaded.openrouter.llm_model == OpenRouterLLMModel.GEMINI_3_FLASH
+    assert loaded.openrouter.selected_source == OpenRouterCredentialSource.BYOK
+    assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.GEMINI3_FLASH_BYOK
+    assert loaded.openrouter.provider_routing == OpenRouterProviderRouting.GOOGLE_GEMINI_LATENCY
+
+
+def test_cerebras_settings_default_roundtrip_and_verification_state() -> None:
+    raw = to_dict(AppSettings())
+    raw.pop("cerebras", None)
+    raw["api_key_verified"].pop("cerebras", None)
+
+    loaded = from_dict(raw)
+    persisted = to_dict(loaded)
+
+    assert loaded.cerebras.llm_model == CerebrasLLMModel.GEMMA_4_31B
+    assert loaded.api_key_verified.cerebras is False
+    assert persisted["cerebras"] == {"llm_model": CerebrasLLMModel.GEMMA_4_31B.value}
+    assert persisted["api_key_verified"]["cerebras"] is False
+
+    persisted["provider"]["llm"] = LLMProviderName.CEREBRAS.value
+    persisted.pop("translation", None)
+    persisted["api_key_verified"]["cerebras"] = True
+    loaded_verified = from_dict(persisted)
+    assert loaded_verified.provider.llm == LLMProviderName.CEREBRAS
+    assert loaded_verified.translation.model == TranslationModel.GEMMA4_31B_CEREBRAS
+    assert loaded_verified.api_key_verified.cerebras is True
+
+
+def test_cerebras_api_key_is_not_serialized_in_settings() -> None:
+    raw = to_dict(AppSettings())
+    raw["cerebras"]["api_key"] = "do-not-persist"
+    raw["cerebras_api_key"] = "do-not-persist"
+
+    persisted = to_dict(from_dict(raw))
+
+    assert "cerebras_api_key" not in persisted
+    assert "api_key" not in persisted["cerebras"]
 
 
 def test_openrouter_fallback_aliases_include_curated_openrouter_models() -> None:
@@ -2327,12 +2422,12 @@ def test_load_settings_persists_normalized_translation_section(tmp_path) -> None
     persisted = legacy_projected_settings_file(path)
 
     assert loaded.translation.model == TranslationModel.GEMINI_31_FLASH_LITE
-    assert loaded.translation.connection == TranslationConnection.OFFICIAL_BYOK
+    assert loaded.translation.connection == TranslationConnection.OPENROUTER
     assert persisted["translation"] == {
         "model": TranslationModel.GEMINI_31_FLASH_LITE.value,
-        "connection": TranslationConnection.OFFICIAL_BYOK.value,
+        "connection": TranslationConnection.OPENROUTER.value,
         "connection_history": {
-            TranslationModel.GEMINI_31_FLASH_LITE.value: TranslationConnection.OFFICIAL_BYOK.value,
+            TranslationModel.GEMINI_31_FLASH_LITE.value: TranslationConnection.OPENROUTER.value,
         },
     }
 
@@ -2901,11 +2996,11 @@ def test_load_settings_migrates_legacy_soniox_model_and_persists(tmp_path):
 
     loaded = load_settings(path)
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
-    assert loaded.soniox_stt.model == "stt-rt-v4"
+    assert loaded.soniox_stt.model == "stt-rt-v5"
 
     persisted = legacy_projected_settings_file(path)
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
-    assert persisted["soniox_stt"]["model"] == "stt-rt-v4"
+    assert persisted["soniox_stt"]["model"] == "stt-rt-v5"
 
 
 def test_load_settings_migration_preserves_custom_soniox_model(tmp_path):
