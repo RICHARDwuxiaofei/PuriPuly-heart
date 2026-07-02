@@ -191,8 +191,15 @@ _UNSAFE_TEXT_KEYS: Final = frozenset(
         "file_contents",
         "raw_exception",
         "raw_file",
+        "raw_source_text",
+        "raw_transcript",
+        "raw_translation",
+        "source_text",
         "stack_trace",
         "traceback",
+        "transcript_text",
+        "translated_text",
+        "translation_text",
     }
 )
 _SECRET_VALUE_PATTERNS: Final = (

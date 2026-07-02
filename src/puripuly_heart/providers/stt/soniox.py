@@ -289,10 +289,9 @@ class _SonioxSession(STTBackendSession):
                     )
                     continue
                 self._pending_last_end_ms = end_ms
-            preview = text if len(text) <= 80 else f"{text[:80]}..."
             logger.debug(
-                "[STT] Soniox token final text=%r end_ms=%s pending_tokens=%s",
-                preview,
+                "[STT] Soniox token final text_len=%s end_ms=%s pending_tokens=%s",
+                len(text),
                 end_ms,
                 len(self._pending_tokens) + 1,
             )
@@ -378,7 +377,7 @@ class _SonioxSession(STTBackendSession):
         text = re.sub(r"^[.,:;!?。，；：！？]+\s+", "", text)
         if not text:
             return
-        logger.info("[STT] Transcript: '%s' (final)", text)
+        logger.info("[STT] Transcript final text_len=%s", len(text))
         logger.debug(
             "[STT] Soniox final flush tokens=%s text_len=%s",
             len(self._final_tokens),

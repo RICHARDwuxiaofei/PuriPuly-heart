@@ -553,34 +553,56 @@ KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementVio
             "legacy-settings-api-import",
             "src/puripuly_heart/ui/app.py",
             "AppSettings",
-            "UI app imports AppSettings only for typed annotations on the OpenRouter PKCE request parameter and the BYOK target wrapper returns; the BYOK target builder was moved to GuiController. Resolved by Gate 2 controller/service request DTO cutover.",
+            "UI app imports AppSettings only for public compatibility type annotations and BYOK target wrapper handoff; active provider apply runtime behavior is owned by controller/app services.",
         ),
         SettingsRuntimeConfinementViolation(
             "legacy-settings-api-import",
             "src/puripuly_heart/ui/controller.py",
             "AppSettings",
-            "GuiController is the settings lifecycle boundary owner and still holds legacy AppSettings state; resolved by Gate 2 controller cutover (Provider Runtime Apply Extraction moves provider apply out of GuiController) and controller-facing vNext intent/state DTO adoption.",
+            "GuiController remains the UI settings/persistence boundary for loading, saving, and view synchronization while vNext serialization remains behind the public settings facade; no private legacy runtime shim may be reintroduced.",
         ),
         SettingsRuntimeConfinementViolation(
             "legacy-settings-api-import",
             "src/puripuly_heart/ui/controller.py",
             "load_settings",
-            "GuiController still loads through the legacy public facade as the persistence boundary owner; resolved by Gate 2 persistence adapter cutover.",
+            "GuiController loads through the preserved public settings facade as the UI persistence boundary; facade compatibility is frozen by Gate 0 and backed by vNext serialization internally.",
         ),
         SettingsRuntimeConfinementViolation(
             "legacy-settings-api-import",
             "src/puripuly_heart/ui/controller.py",
             "save_settings",
-            "GuiController still saves through the legacy public facade as the persistence boundary owner; resolved by Gate 2 persistence adapter cutover.",
+            "GuiController saves through the preserved public settings facade as the UI persistence boundary; facade compatibility is frozen by Gate 0 and backed by vNext serialization internally.",
         ),
         SettingsRuntimeConfinementViolation(
             "legacy-settings-api-import",
             "src/puripuly_heart/ui/views/settings.py",
             "AppSettings",
-            "SettingsView still edits legacy settings drafts; resolved by Gate 2 controller/service request DTO cutover when settings view-model DTOs replace direct AppSettings draft editing.",
+            "SettingsView remains a UI editor for the public AppSettings compatibility model while controller/app services own persistence; replacing the view draft model is deferred UI-rendering work, not active runtime resolution.",
         ),
     }
 )
+
+
+def _known_allowed_violation_gate6_rationale(violation: ImportViolation) -> str:
+    if violation.importer == "src/puripuly_heart/core/managed_openrouter_broker_client.py":
+        return "managed OpenRouter broker adapter still consumes public settings compatibility values at the adapter boundary"
+    if violation.importer_layer == RUNTIME_OWNERS:
+        return "runtime owner currently wraps a concrete adapter while preserving explicit lifecycle ownership; adapter-port extraction remains deferred work"
+    if violation.importer_layer == PROVIDERS:
+        return "provider modules retain concrete runtime logging/settings compatibility imports until provider observation ports replace adapter logging"
+    if violation.importer_layer == UI_ADAPTERS_RENDERERS:
+        if violation.imported == "puripuly_heart.config.settings":
+            return "UI boundary uses the public settings compatibility facade for user settings load/edit/save surfaces"
+        if violation.imported == "puripuly_heart.app.wiring":
+            return "UI composition still enters through the preserved public wiring facade while split factories remain behind it"
+        return "UI boundary still wires concrete adapter seams for user-facing runtime controls; concrete port extraction is deferred and explicitly guarded"
+    return UNKNOWN_SETTINGS_RUNTIME_CONFINEMENT_RATIONALE
+
+
+KNOWN_ALLOWED_VIOLATION_GATE6_RATIONALES = {
+    violation: _known_allowed_violation_gate6_rationale(violation)
+    for violation in KNOWN_ALLOWED_VIOLATIONS
+}
 
 
 def _module_name_for_path(path: Path) -> str:
@@ -1400,6 +1422,14 @@ def test_dependency_boundary_allowlist_matches_current_violations() -> None:
     )
 
 
+def test_dependency_boundary_allowlist_entries_have_gate6_rationale() -> None:
+    assert set(KNOWN_ALLOWED_VIOLATION_GATE6_RATIONALES) == set(KNOWN_ALLOWED_VIOLATIONS)
+    assert all(
+        rationale and rationale != UNKNOWN_SETTINGS_RUNTIME_CONFINEMENT_RATIONALE
+        for rationale in KNOWN_ALLOWED_VIOLATION_GATE6_RATIONALES.values()
+    )
+
+
 def test_settings_runtime_confinement_guard_tracks_current_debt() -> None:
     actual = _settings_runtime_confinement_violations()
 
@@ -1415,6 +1445,16 @@ def test_settings_runtime_confinement_guard_tracks_current_debt() -> None:
         f"{_format_settings_runtime_violations(unexpected)}\n"
         "Stale allowlist entries:\n"
         f"{_format_settings_runtime_violations(stale)}"
+    )
+
+
+def test_settings_runtime_confinement_debt_has_current_gate6_rationale() -> None:
+    assert all(
+        violation.rationale
+        and "Gate 2" not in violation.rationale
+        and "order-11" not in violation.rationale
+        and "resolved by" not in violation.rationale.lower()
+        for violation in KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT
     )
 
 

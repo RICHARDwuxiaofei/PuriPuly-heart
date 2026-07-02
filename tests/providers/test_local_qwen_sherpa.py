@@ -294,14 +294,15 @@ async def test_local_qwen_backend_redacts_known_hallucination_text_in_transcript
     assert event.text == text
     assert event.is_final is True
     assert any(
-        "[STT][local_qwen][self] Transcript: '<known-local-qwen-hallucination>'" in message
+        "[STT][local_qwen][self] Transcript final text_len=" in message
+        and "known_hallucination=True" in message
         for message in caplog.messages
     )
     assert not any(text in message for message in caplog.messages)
 
 
 @pytest.mark.asyncio
-async def test_local_qwen_backend_keeps_non_matching_transcript_text_useful_in_log(
+async def test_local_qwen_backend_logs_non_matching_transcript_metadata_without_text(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -345,9 +346,11 @@ async def test_local_qwen_backend_keeps_non_matching_transcript_text_useful_in_l
     assert event.text == text
     assert event.is_final is True
     assert any(
-        "[STT][local_qwen][self] Transcript: 'hello local qwen'" in message
+        "[STT][local_qwen][self] Transcript final text_len=16" in message
+        and "known_hallucination=False" in message
         for message in caplog.messages
     )
+    assert not any(text in message for message in caplog.messages)
 
 
 @pytest.mark.asyncio
@@ -856,16 +859,18 @@ async def test_local_qwen_session_logs_inference_metrics_and_summary(
         await session.close()
 
     messages = [record.getMessage() for record in caplog.records]
-    final_messages = [message for message in messages if "Transcript:" in message]
+    final_messages = [message for message in messages if "Transcript final" in message]
     assert len(final_messages) == 2
     assert (
-        "[STT][local_qwen][peer] Transcript: 'first local qwen' "
-        "(final, audio_ms=1000.0, inference_ms=250.0, rtf=0.250)"
+        "[STT][local_qwen][peer] Transcript final text_len=16 "
+        "known_hallucination=False audio_ms=1000.0 inference_ms=250.0 rtf=0.250"
     ) in final_messages
     assert (
-        "[STT][local_qwen][peer] Transcript: 'second local qwen' "
-        "(final, audio_ms=500.0, inference_ms=200.0, rtf=0.400)"
+        "[STT][local_qwen][peer] Transcript final text_len=17 "
+        "known_hallucination=False audio_ms=500.0 inference_ms=200.0 rtf=0.400"
     ) in final_messages
+    assert not any("first local qwen" in message for message in messages)
+    assert not any("second local qwen" in message for message in messages)
     assert (
         "[STT][local_qwen][peer] Session summary: utterances=2 "
         "total_audio_ms=1500.0 total_inference_ms=450.0 weighted_total_rtf=0.300 mean_rtf=0.325"

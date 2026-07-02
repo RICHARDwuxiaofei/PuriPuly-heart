@@ -58,12 +58,6 @@ def _audio_diag_prefix(stream_label: str | None) -> str:
     return prefix
 
 
-def _transcript_text_for_log(text: str) -> str:
-    if is_known_local_qwen_hallucination(text):
-        return _KNOWN_HALLUCINATION_LOG_REDACTION
-    return text
-
-
 def _looks_repetitive(text: str) -> bool:
     stripped = text.strip()
     if len(stripped) < 6:
@@ -304,9 +298,10 @@ class _LocalQwenSherpaSession(STTBackendSession):
 
         if text:
             logger.info(
-                "%s Transcript: '%s' (final, audio_ms=%.1f, inference_ms=%.1f, rtf=%.3f)",
+                "%s Transcript final text_len=%s known_hallucination=%s audio_ms=%.1f inference_ms=%.1f rtf=%.3f",
                 _log_prefix(self.backend.stream_label),
-                _transcript_text_for_log(text),
+                len(text),
+                is_known_local_qwen_hallucination(text),
                 audio_ms,
                 inference_ms,
                 rtf,

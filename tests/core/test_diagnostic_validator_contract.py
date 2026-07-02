@@ -395,6 +395,67 @@ def test_validator_rejects_managed_private_key_material_inside_values() -> None:
     assert redacted.diagnostics.fields["broker_error"] == validator.DIAGNOSTIC_REDACTION_MARKER
 
 
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "transcript_text",
+        "translation_text",
+        "source_text",
+        "raw_transcript",
+        "raw_translation",
+        "raw_source_text",
+        "translated_text",
+        "payload.transcript-text",
+        "payload.translationText",
+        "payload.sourceText",
+    ],
+)
+def test_validator_rejects_and_redacts_raw_transcript_translation_source_fields(
+    field_name: str,
+) -> None:
+    validator = _validator()
+    unsafe = _diagnostics(
+        visibility=messages.DIAGNOSTIC_VISIBILITY_DETAILED,
+        content_policy=messages.CONTENT_POLICY_REDACTED,
+        fields={field_name: "raw user utterance text must not enter diagnostics"},
+    )
+
+    validation = validator.validate_diagnostics_for_sink(
+        unsafe,
+        validator.DIAGNOSTIC_SINK_DETAILED_LOGS,
+    )
+    assert validation.status == validator.DIAGNOSTIC_VALIDATION_STATUS_REJECTED
+    assert validator.DIAGNOSTIC_VALIDATION_REASON_UNSAFE_TEXT_PAYLOAD in validation.reasons
+
+    redacted = validator.redact_diagnostics_for_sink(
+        unsafe,
+        validator.DIAGNOSTIC_SINK_DETAILED_LOGS,
+    )
+    assert redacted.status == validator.DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED
+    assert redacted.redacted is True
+    assert redacted.diagnostics is not None
+    assert redacted.diagnostics.fields[field_name] == validator.DIAGNOSTIC_REDACTION_MARKER
+
+
+def test_text_redactor_removes_raw_transcript_translation_source_assignments() -> None:
+    validator = _validator()
+    text = (
+        "transcript_text=hello secret transcript\n"
+        "translationText=bonjour secret translation\n"
+        "source text=original source text"
+    )
+
+    result = validator.redact_text_for_sink(text, validator.DIAGNOSTIC_SINK_DETAILED_LOGS)
+
+    assert result.status == validator.DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED
+    assert result.redacted is True
+    assert result.text is not None
+    assert "hello secret transcript" not in result.text
+    assert "bonjour secret translation" not in result.text
+    assert "original source text" not in result.text
+    assert validator.DIAGNOSTIC_REDACTION_MARKER in result.text
+
+
 def test_local_llm_sensitive_extra_body_requires_named_allow_policy() -> None:
     validator = _validator()
     unsafe = _diagnostics(

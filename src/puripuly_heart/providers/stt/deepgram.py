@@ -132,8 +132,8 @@ class _DeepgramSDKSession(STTBackendSession):
         speech_final = getattr(result, "speech_final", False)
         is_final = getattr(result, "is_final", False)
         logger.info(
-            "[STT] Transcript: '%s' (is_final=%s, speech_final=%s)",
-            transcript,
+            "[STT] Transcript metadata text_len=%s is_final=%s speech_final=%s",
+            len(transcript),
             is_final,
             speech_final,
         )

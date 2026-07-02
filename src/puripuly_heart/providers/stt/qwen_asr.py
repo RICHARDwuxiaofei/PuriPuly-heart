@@ -160,7 +160,10 @@ class _QwenASRSession(STTBackendSession):
                             # Final transcript
                             transcript = response.get("transcript", "").strip()
                             if transcript:
-                                logger.info(f"[STT] Transcript: '{transcript}' (final)")
+                                logger.info(
+                                    "[STT] Qwen ASR transcript final text_len=%s",
+                                    len(transcript),
+                                )
                                 event = STTBackendTranscriptEvent(text=transcript, is_final=True)
                                 cb_self.parent._put_event(event)
 
@@ -170,7 +173,9 @@ class _QwenASRSession(STTBackendSession):
                             stash = response.get("stash", "").strip()
                             if text or stash:
                                 logger.debug(
-                                    f"Qwen ASR: Intermediate text='{text}', stash='{stash}'"
+                                    "Qwen ASR: Intermediate text_len=%s stash_len=%s",
+                                    len(text),
+                                    len(stash),
                                 )
 
                         elif event_type == "input_audio_buffer.committed":
