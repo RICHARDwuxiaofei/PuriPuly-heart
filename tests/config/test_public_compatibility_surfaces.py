@@ -81,6 +81,15 @@ REQUIRED_SURFACES = (
     "guard_coverage",
     "blockers",
 )
+REQUIRED_SOURCE_PUBLIC_COMPATIBILITY_SURFACES = {
+    "SecretStore keys": ("secret_store",),
+    "Broker /v1": ("broker_v1",),
+    "overlay protocol and startup contract": ("overlay",),
+    "prompt fallback behavior": ("prompt_loader",),
+    "provider aliases": ("provider_aliases",),
+    "i18n key parity": ("i18n_parity",),
+    "installer identity": ("packaging",),
+}
 REQUIRED_INVENTORY_SURFACES = (
     "public_import_facades",
     "settings_runtime_compatibility",
@@ -840,6 +849,34 @@ def test_guard_coverage_references_existing_tests_for_every_surface() -> None:
             test_path = REPO_ROOT / file_name
             assert test_path.is_file(), ref
             assert test_name in _test_function_names(test_path), ref
+
+
+def test_source_named_public_compatibility_surfaces_have_guard_evidence() -> None:
+    snapshot = _load_snapshot()
+    coverage = snapshot["guard_coverage"]
+    inventory = _load_inventory()["compatibility_surfaces"]
+
+    assert REQUIRED_SOURCE_PUBLIC_COMPATIBILITY_SURFACES.keys() == {
+        "SecretStore keys",
+        "Broker /v1",
+        "overlay protocol and startup contract",
+        "prompt fallback behavior",
+        "provider aliases",
+        "i18n key parity",
+        "installer identity",
+    }
+    assert "prompt_fallback" in inventory
+    assert "installer_identity" in inventory
+    assert inventory["prompt_fallback"]["fixture_or_guard_refs"]
+    assert inventory["installer_identity"]["fixture_or_guard_refs"]
+
+    for source_surface, coverage_surfaces in REQUIRED_SOURCE_PUBLIC_COMPATIBILITY_SURFACES.items():
+        refs = [ref for surface in coverage_surfaces for ref in coverage[surface]]
+        assert refs, source_surface
+        for ref in refs:
+            file_name, separator, test_name = ref.partition("::")
+            assert separator == "::", ref
+            assert test_name in _test_function_names(REPO_ROOT / file_name), ref
 
 
 def test_guard_coverage_includes_overlay_rust_and_installer_freeze_refs() -> None:

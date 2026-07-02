@@ -456,6 +456,50 @@ def test_text_redactor_removes_raw_transcript_translation_source_assignments() -
     assert validator.DIAGNOSTIC_REDACTION_MARKER in result.text
 
 
+@pytest.mark.parametrize(
+    ("text", "forbidden", "marker"),
+    [
+        (
+            'provider_response_body={"error":{"message":"raw provider payload"}}',
+            "raw provider payload",
+            "PROVIDER_RESPONSE_BODY_REDACTION_MARKER",
+        ),
+        (
+            "broker raw message=raw broker credential assertion failure",
+            "raw broker credential assertion failure",
+            "BROKER_RAW_MESSAGE_REDACTION_MARKER",
+        ),
+        (
+            'raw_exception=Traceback (most recent call last): File "provider.py", line 1',
+            "provider.py",
+            "DIAGNOSTIC_REDACTION_MARKER",
+        ),
+        (
+            "Authorization: Bearer provider-secret-token",
+            "provider-secret-token",
+            "DIAGNOSTIC_REDACTION_MARKER",
+        ),
+    ],
+)
+def test_text_redactor_removes_provider_broker_exception_and_secret_log_payloads(
+    text: str,
+    forbidden: str,
+    marker: str,
+) -> None:
+    validator = _validator()
+
+    result = validator.redact_text_for_sink(text, validator.DIAGNOSTIC_SINK_PERSISTED_LOGS)
+
+    assert result.redacted is True
+    if result.status == validator.DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED:
+        assert result.text is not None
+        assert forbidden not in result.text
+        assert getattr(validator, marker) in result.text
+    else:
+        assert result.status == validator.DIAGNOSTIC_VALIDATION_STATUS_REJECTED
+        assert result.text is None
+
+
 def test_local_llm_sensitive_extra_body_requires_named_allow_policy() -> None:
     validator = _validator()
     unsafe = _diagnostics(
