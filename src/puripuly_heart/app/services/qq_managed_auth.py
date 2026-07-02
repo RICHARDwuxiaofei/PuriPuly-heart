@@ -42,6 +42,14 @@ from puripuly_heart.core.messages import (
 )
 
 OPENROUTER_MANAGED_QQ_API_KEY_SECRET = "openrouter_managed_qq_api_key"
+QQ_MANAGED_AUTH_FAILURE_MESSAGE_KEYS = (
+    "qq_managed_auth.invalid_credential",
+    "qq_managed_auth.mismatch",
+    "qq_managed_auth.lifetime_used",
+    "qq_managed_auth.rate_limited",
+    "qq_managed_auth.key_unavailable",
+    "qq_managed_auth.broker_unavailable",
+)
 
 
 def _freeze_fields(

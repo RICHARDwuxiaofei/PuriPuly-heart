@@ -54,6 +54,7 @@ from puripuly_heart.app.services.provider_runtime_apply import (
     _ui_prompt_clipboard_state_runtime_degraded_transaction_result,
     _ui_prompt_clipboard_state_save_failed_transaction_result,
 )
+from puripuly_heart.app.services.qq_managed_auth import QqManagedAuthRequest, QqManagedAuthService
 from puripuly_heart.app.services.secret_settings_transaction import (
     SecretSetRequest,
     SecretSettingsTransaction,
@@ -1272,6 +1273,67 @@ class GuiController:
         if self._managed_openrouter_local_key_available():
             return "continue"
         return "prompt"
+
+    def dashboard_managed_auth_prompt_kind(self) -> str:
+        if self._managed_china_auth_relevant_for_translation_enable():
+            return "qq"
+        return "discord"
+
+    def _managed_china_auth_relevant_for_translation_enable(self) -> bool:
+        return bool(
+            self.settings is not None
+            and self.settings.translation.connection == TranslationConnection.MANAGED_CHINA
+            and self.settings.provider.llm == LLMProviderName.OPENROUTER
+            and self.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+        )
+
+    def _show_qq_managed_auth_dialog(self) -> None:
+        if not self._managed_china_auth_relevant_for_translation_enable():
+            return
+        show_dialog = getattr(self.app, "show_qq_managed_auth_dialog", None)
+        if callable(show_dialog):
+            show_dialog()
+
+    async def start_qq_managed_auth_from_dialog(
+        self,
+        *,
+        qq_identity: str,
+        credential: str,
+    ) -> bool | tuple[str, dict[str, object]]:
+        if not self._managed_china_auth_relevant_for_translation_enable() or self.settings is None:
+            return "qq_managed_auth.error.retry", {}
+        service = self._managed_openrouter_release_service
+        broker_client = getattr(service, "client", None)
+        if broker_client is None:
+            return "qq_managed_auth.error.retry", {}
+        secret_store = create_secret_store(self.settings.secrets, config_path=self.config_path)
+        auth_service = QqManagedAuthService(
+            broker_client=broker_client,
+            secret_store=_ControllerSecretStorePortAdapter(secret_store),
+            managed_state=build_managed_identity_state_port(
+                self.settings,
+                lambda updated: save_settings(self.config_path, updated),
+            ),
+        )
+        result = await auth_service.authenticate(
+            QqManagedAuthRequest(
+                qq_identity=qq_identity,
+                credential=credential,
+                asserted_at=_github_star_prompt_utc_timestamp(),
+                metadata={"flow": "qq_managed_auth_dialog"},
+            )
+        )
+        if _settings_mutation_committed(result):
+            self._set_managed_trial_pending_auth(False)
+            if self.hub is not None and self.hub.llm is None:
+                await self._rebuild_llm_provider()
+            else:
+                self._schedule_managed_trial_usage_refresh()
+            return True
+        message = result.message
+        if message is None:
+            return "qq_managed_auth.error.retry", {}
+        return message.key, dict(message.params)
 
     def _discord_auth_message_key(self, result) -> str:  # noqa: ANN001
         diagnostics = getattr(result, "diagnostics", None)
@@ -4080,6 +4142,12 @@ class GuiController:
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
             dash.set_translation_enabled(False)
+        if (
+            result.message_key == "qq_managed_auth.required"
+            and self._managed_china_auth_relevant_for_translation_enable()
+        ):
+            self._show_qq_managed_auth_dialog()
+            return False
         self._show_short_message(result.message_key, **dict(result.message_kwargs))
         return False
 

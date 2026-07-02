@@ -1,0 +1,112 @@
+from __future__ import annotations
+
+import pytest
+
+pytest.importorskip("flet")
+
+from puripuly_heart.ui.components.qq_managed_auth_dialog import QqManagedAuthDialog  # noqa: E402
+from puripuly_heart.ui.i18n import get_locale, set_locale, t  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def restore_locale_after_test():
+    previous_locale = get_locale()
+    try:
+        yield
+    finally:
+        set_locale(previous_locale)
+
+
+class DummyPage:
+    def __init__(self) -> None:
+        self.dialog = None
+        self.opened: list[object] = []
+        self.closed: list[object] = []
+        self.updated = 0
+
+    def open(self, dialog) -> None:
+        self.dialog = dialog
+        self.opened.append(dialog)
+
+    def close(self, dialog) -> None:
+        self.closed.append(dialog)
+        if self.dialog is dialog:
+            self.dialog = None
+
+    def update(self) -> None:
+        self.updated += 1
+
+
+def _dialog(page: DummyPage, events: list[str] | None = None) -> QqManagedAuthDialog:
+    calls = events if events is not None else []
+    return QqManagedAuthDialog(
+        page,
+        on_continue=lambda: calls.append("continue"),
+        on_close=lambda: calls.append("close"),
+        on_cancel=lambda: calls.append("cancel"),
+    )
+
+
+def test_qq_managed_auth_dialog_renders_inputs_and_actions() -> None:
+    set_locale("en")
+    page = DummyPage()
+    dialog = _dialog(page)
+
+    dialog.open()
+
+    assert dialog.action_labels == ["qq_managed_auth.close", "qq_managed_auth.continue"]
+    assert page.dialog is dialog._dialog
+    assert dialog._qq_identity_field is not None
+    assert dialog._credential_field is not None
+    assert dialog._qq_identity_field.label == t("qq_managed_auth.identity.label")
+    assert dialog._credential_field.label == t("qq_managed_auth.credential.label")
+    assert dialog._credential_field.password is True
+    assert [control.text for control in dialog._actions.controls] == [
+        t("qq_managed_auth.close"),
+        t("qq_managed_auth.continue"),
+    ]
+
+
+def test_qq_managed_auth_dialog_validates_required_fields_without_closing() -> None:
+    page = DummyPage()
+    events: list[str] = []
+    dialog = _dialog(page, events)
+    dialog.open()
+
+    dialog._continue_button.on_click(None)
+
+    assert events == []
+    assert page.closed == []
+    assert dialog._error_text is not None
+    assert dialog._error_text.visible is True
+    assert dialog._error_text.value == t("qq_managed_auth.error.invalid_input")
+
+
+def test_qq_managed_auth_dialog_submit_waiting_error_and_cancel_states() -> None:
+    page = DummyPage()
+    events: list[str] = []
+    dialog = _dialog(page, events)
+    dialog.open()
+    dialog._qq_identity_field.value = "qq-user"
+    dialog._credential_field.value = "credential"
+
+    dialog._continue_button.on_click(None)
+
+    assert events == ["continue"]
+    assert page.closed == []
+    dialog.set_waiting()
+    assert dialog.is_waiting is True
+    assert dialog._qq_identity_field.disabled is True
+    assert dialog._credential_field.disabled is True
+    assert [control.text for control in dialog._actions.controls] == [t("qq_managed_auth.cancel")]
+
+    dialog.set_error("qq_managed_auth.mismatch")
+    assert dialog.is_waiting is False
+    assert dialog._qq_identity_field.disabled is False
+    assert dialog._credential_field.disabled is False
+    assert dialog._error_text.value == t("qq_managed_auth.mismatch")
+
+    dialog.set_waiting()
+    dialog._cancel_button.on_click(None)
+    assert events == ["continue", "cancel"]
+    assert page.closed == [dialog._dialog]

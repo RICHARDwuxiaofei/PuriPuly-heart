@@ -1405,6 +1405,158 @@ async def test_start_discord_managed_auth_uses_run_task_and_success_enables_tran
     assert dashboard_translation_calls == [True]
 
 
+@pytest.mark.asyncio
+async def test_start_qq_managed_auth_uses_run_task_and_success_closes_dialog() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(
+        qq_identity="qq-user",
+        credential="credential",
+        set_waiting_calls=0,
+        close_calls=0,
+    )
+    dialog.set_waiting = lambda: setattr(dialog, "set_waiting_calls", dialog.set_waiting_calls + 1)
+    dialog.close = lambda: setattr(dialog, "close_calls", dialog.close_calls + 1)
+    app._qq_managed_auth_dialog = dialog
+    app._qq_managed_auth_generation = 0
+    app._qq_managed_auth_cancelled = False
+    snackbar_calls: list[tuple[str, object]] = []
+    dashboard_translation_calls: list[bool] = []
+    start_calls: list[tuple[str, str]] = []
+    enable_calls: list[bool] = []
+    hub = SimpleNamespace(llm=object(), translation_enabled=False)
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
+    )
+
+    async def fake_start_qq_managed_auth_from_dialog(**kwargs) -> bool:
+        start_calls.append((kwargs["qq_identity"], kwargs["credential"]))
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        enable_calls.append(enabled)
+        hub.translation_enabled = enabled
+        return True
+
+    app.controller = SimpleNamespace(
+        hub=hub,
+        start_qq_managed_auth_from_dialog=fake_start_qq_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_qq_managed_auth()
+
+    assert dialog.set_waiting_calls == 1
+    assert start_calls == []
+    assert len(app.page.tasks) == 1
+
+    await app.page.tasks[0]()
+
+    assert start_calls == [("qq-user", "credential")]
+    assert enable_calls == [True]
+    assert hub.translation_enabled is True
+    assert dialog.close_calls == 1
+    assert snackbar_calls == [(app_module.t("qq_managed_auth.success"), app_module.COLOR_SUCCESS)]
+    assert dashboard_translation_calls == [True]
+
+
+def test_managed_china_dashboard_prompt_opens_qq_auth_not_discord() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dashboard_translation_calls: list[bool] = []
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
+    )
+    discord_calls: list[bool] = []
+    qq_calls: list[str] = []
+    app.show_discord_managed_auth_dialog = lambda *, preview=False: discord_calls.append(preview)
+    app.show_qq_managed_auth_dialog = lambda: qq_calls.append("qq")
+    app.controller = SimpleNamespace(
+        dashboard_managed_auth_action=lambda: "prompt",
+        dashboard_managed_auth_prompt_kind=lambda: "qq",
+        set_translation_enabled=lambda _enabled: pytest.fail(
+            "dashboard QQ prompt should not bypass auth dialog"
+        ),
+    )
+    app._log_basic = lambda *_args, **_kwargs: None
+    app._log_detailed = lambda *_args, **_kwargs: None
+
+    handled = app._on_translation_toggle(True)
+
+    assert handled is False
+    assert qq_calls == ["qq"]
+    assert discord_calls == []
+    assert dashboard_translation_calls == [False]
+    assert app.page.tasks == []
+
+
+@pytest.mark.asyncio
+async def test_start_qq_managed_auth_renders_recoverable_error_without_closing() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    error_calls: list[tuple[str, dict[str, object]]] = []
+    dialog = SimpleNamespace(
+        qq_identity="qq-user",
+        credential="credential",
+        set_waiting=lambda: None,
+        close=lambda: pytest.fail("recoverable QQ error must keep the dialog open"),
+        set_error=lambda key, **kwargs: error_calls.append((key, kwargs)),
+    )
+    app._qq_managed_auth_dialog = dialog
+    app._qq_managed_auth_generation = 0
+    app._qq_managed_auth_cancelled = False
+    app._show_snackbar = lambda *_args, **_kwargs: pytest.fail(
+        "recoverable QQ error must render in dialog"
+    )
+
+    async def fake_start_qq_managed_auth_from_dialog(**_kwargs):
+        return "qq_managed_auth.rate_limited", {"retry_after_ms": 3000}
+
+    app.controller = SimpleNamespace(
+        start_qq_managed_auth_from_dialog=fake_start_qq_managed_auth_from_dialog,
+    )
+
+    app._start_qq_managed_auth()
+    await app.page.tasks[0]()
+
+    assert error_calls == [("qq_managed_auth.rate_limited", {"retry_after_ms": 3000})]
+
+
+@pytest.mark.asyncio
+async def test_start_qq_managed_auth_exception_uses_safe_bounded_log() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    error_calls: list[tuple[str, dict[str, object]]] = []
+    dialog = SimpleNamespace(
+        qq_identity="raw-qq-user",
+        credential="raw-credential",
+        set_waiting=lambda: None,
+        set_error=lambda key, **kwargs: error_calls.append((key, kwargs)),
+    )
+    app._qq_managed_auth_dialog = dialog
+    app._qq_managed_auth_generation = 0
+    app._qq_managed_auth_cancelled = False
+    logs: list[tuple[str, object]] = []
+    app._log_basic = lambda message, *, level=app_module.logging.INFO: logs.append((message, level))
+
+    async def fake_start_qq_managed_auth_from_dialog(**_kwargs):
+        raise RuntimeError("raw broker payload and raw-credential must not leak")
+
+    app.controller = SimpleNamespace(
+        start_qq_managed_auth_from_dialog=fake_start_qq_managed_auth_from_dialog,
+    )
+
+    app._start_qq_managed_auth()
+    await app.page.tasks[0]()
+
+    assert error_calls == [("qq_managed_auth.error.retry", {})]
+    rendered_logs = repr(logs)
+    assert "raw broker payload" not in rendered_logs
+    assert "raw-credential" not in rendered_logs
+    assert "Traceback" not in rendered_logs
+
+
 def test_start_discord_managed_auth_registers_page_task_with_oauth_runtime() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()

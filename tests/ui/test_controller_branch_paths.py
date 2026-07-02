@@ -634,6 +634,14 @@ def _make_controller(*, app: object) -> GuiController:
     return GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
 
 
+def _managed_china_settings() -> AppSettings:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.translation.connection = TranslationConnection.MANAGED_CHINA
+    return settings
+
+
 def _local_qwen_suppressed_notification(
     *,
     channel: Literal["self", "peer"] = "self",
@@ -643,6 +651,107 @@ def _local_qwen_suppressed_notification(
         channel=channel,
         stt_provider_name=STTProviderName.LOCAL_QWEN,
     )
+
+
+@pytest.mark.asyncio
+async def test_managed_china_required_prepare_opens_qq_dialog_instead_of_snackbar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    qq_dialog_calls: list[str] = []
+    snackbars: list[tuple[str, object]] = []
+    dashboard_enabled: list[bool] = []
+    app = SimpleNamespace(
+        view_dashboard=SimpleNamespace(
+            set_translation_enabled=lambda enabled: dashboard_enabled.append(enabled)
+        ),
+        show_qq_managed_auth_dialog=lambda: qq_dialog_calls.append("show"),
+        _show_snackbar=lambda *args: snackbars.append(args),
+    )
+    controller = _make_controller(app=app)
+    controller.settings = _managed_china_settings()
+    controller.hub = SimpleNamespace(llm=None, translation_enabled=False)
+    controller._translation_toggle_generation = 1
+    controller._translation_toggle_intent_enabled = True
+
+    async def prepare_required() -> ManagedOpenRouterReleaseResult:
+        return ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.RETRY,
+            message_key="qq_managed_auth.required",
+            local_key_available=False,
+        )
+
+    controller._managed_openrouter_release_service = SimpleNamespace(
+        prepare_for_translation=prepare_required
+    )
+
+    async def no_founder_letter(_self) -> bool:
+        return False
+
+    async def refresh_noop(_self, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        GuiController, "_should_route_managed_trans_to_founder_letter", no_founder_letter
+    )
+    monkeypatch.setattr(GuiController, "_refresh_managed_trial_usage_state_impl", refresh_noop)
+    monkeypatch.setattr(GuiController, "log_detailed", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(GuiController, "log_basic", lambda *_args, **_kwargs: None)
+
+    result = await controller._handle_managed_translation_enable(1)
+
+    assert result is False
+    assert qq_dialog_calls == ["show"]
+    assert snackbars == []
+    assert dashboard_enabled == [False]
+
+
+@pytest.mark.asyncio
+async def test_managed_china_required_prepare_does_not_open_qq_dialog_when_not_relevant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    qq_dialog_calls: list[str] = []
+    snackbars: list[tuple[str, object]] = []
+    app = SimpleNamespace(
+        view_dashboard=SimpleNamespace(set_translation_enabled=lambda _enabled: None),
+        show_qq_managed_auth_dialog=lambda: qq_dialog_calls.append("show"),
+        _show_snackbar=lambda *args: snackbars.append(args),
+    )
+    controller = _make_controller(app=app)
+    controller.settings = _managed_china_settings()
+    controller.settings.translation.connection = TranslationConnection.MANAGED
+    controller.hub = SimpleNamespace(llm=None, translation_enabled=False)
+    controller._translation_toggle_generation = 1
+    controller._translation_toggle_intent_enabled = True
+
+    async def prepare_required() -> ManagedOpenRouterReleaseResult:
+        return ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.RETRY,
+            message_key="qq_managed_auth.required",
+            local_key_available=False,
+        )
+
+    controller._managed_openrouter_release_service = SimpleNamespace(
+        prepare_for_translation=prepare_required
+    )
+
+    async def no_founder_letter(_self) -> bool:
+        return False
+
+    async def refresh_noop(_self, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        GuiController, "_should_route_managed_trans_to_founder_letter", no_founder_letter
+    )
+    monkeypatch.setattr(GuiController, "_refresh_managed_trial_usage_state_impl", refresh_noop)
+    monkeypatch.setattr(GuiController, "log_detailed", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(GuiController, "log_basic", lambda *_args, **_kwargs: None)
+
+    result = await controller._handle_managed_translation_enable(1)
+
+    assert result is False
+    assert qq_dialog_calls == []
+    assert snackbars != []
 
 
 def test_local_qwen_suppression_first_gui_detection_counts_without_modal() -> None:

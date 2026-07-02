@@ -30,6 +30,7 @@ from puripuly_heart.ui.components.local_qwen_hallucination_dialog import (
 )
 from puripuly_heart.ui.components.microphone_test_dialog import MicrophoneTestDialog
 from puripuly_heart.ui.components.peer_translation_eula_dialog import PeerTranslationEulaDialog
+from puripuly_heart.ui.components.qq_managed_auth_dialog import QqManagedAuthDialog
 from puripuly_heart.ui.components.title_bar import TitleBar
 from puripuly_heart.ui.controller import GuiController
 from puripuly_heart.ui.fonts import font_for_language, register_fonts
@@ -137,6 +138,8 @@ class TranslatorApp:
         self._discord_managed_auth_generation = 0
         self._discord_managed_auth_cancelled = False
         self._discord_managed_auth_task_handle = None
+        self._qq_managed_auth_generation = 0
+        self._qq_managed_auth_cancelled = False
         self._github_star_prompt_launch_pending = True
         self._github_star_prompt_runtime = GithubStarPromptRuntime(
             diagnostics_sink=self._github_star_prompt_runtime_diagnostics_sink,
@@ -869,6 +872,17 @@ class TranslatorApp:
             logger.exception("Failed to evaluate managed auth dashboard gate")
             return "prompt"
 
+    def _dashboard_managed_auth_prompt_kind(self) -> str:
+        prompt_kind = getattr(self.controller, "dashboard_managed_auth_prompt_kind", None)
+        if not callable(prompt_kind):
+            return "discord"
+        try:
+            resolved = str(prompt_kind())
+        except Exception:
+            logger.warning("Failed to evaluate managed auth prompt kind")
+            return "discord"
+        return "qq" if resolved == "qq" else "discord"
+
     def _on_translation_toggle(self, enabled: bool) -> bool:
         self._log_basic(f"[Dashboard] Translation toggle requested: enabled={enabled}")
         self._log_detailed(
@@ -881,7 +895,10 @@ class TranslatorApp:
             if managed_auth_action in {"prompt", "in_progress"}:
                 self._revert_dashboard_translation_toggle()
                 if managed_auth_action == "prompt":
-                    self.show_discord_managed_auth_dialog(preview=False)
+                    if self._dashboard_managed_auth_prompt_kind() == "qq":
+                        self.show_qq_managed_auth_dialog()
+                    else:
+                        self.show_discord_managed_auth_dialog(preview=False)
                 return False
 
         async def _task():
@@ -1188,6 +1205,95 @@ class TranslatorApp:
         )
         self._discord_managed_auth_dialog = dialog
         dialog.open()
+
+    def show_qq_managed_auth_dialog(self) -> None:
+        self._mark_launch_high_priority_feedback_shown("auth_required")
+        dialog = QqManagedAuthDialog(
+            self.page,
+            on_continue=self._start_qq_managed_auth,
+            on_close=self._close_qq_managed_auth_dialog,
+            on_cancel=self._cancel_qq_managed_auth,
+        )
+        self._qq_managed_auth_dialog = dialog
+        dialog.open()
+
+    def _close_qq_managed_auth_dialog(self) -> None:
+        dialog = getattr(self, "_qq_managed_auth_dialog", None)
+        if dialog is not None:
+            close = getattr(dialog, "close", None)
+            if callable(close):
+                close()
+
+    def _next_qq_managed_auth_generation(self) -> int:
+        generation = int(getattr(self, "_qq_managed_auth_generation", 0)) + 1
+        self._qq_managed_auth_generation = generation
+        self._qq_managed_auth_cancelled = False
+        return generation
+
+    def _is_current_qq_managed_auth_generation(self, generation: int) -> bool:
+        return bool(
+            generation == getattr(self, "_qq_managed_auth_generation", None)
+            and not getattr(self, "_qq_managed_auth_cancelled", False)
+        )
+
+    def _start_qq_managed_auth(self) -> None:
+        dialog = getattr(self, "_qq_managed_auth_dialog", None)
+        qq_identity = getattr(dialog, "qq_identity", "")
+        credential = getattr(dialog, "credential", "")
+        set_waiting = getattr(dialog, "set_waiting", None)
+        if callable(set_waiting):
+            set_waiting()
+        generation = self._next_qq_managed_auth_generation()
+
+        async def _task() -> None:
+            controller = getattr(self, "controller", None)
+            start_auth = getattr(controller, "start_qq_managed_auth_from_dialog", None)
+            if not callable(start_auth):
+                return
+            if not self._is_current_qq_managed_auth_generation(generation):
+                return
+            try:
+                result = await start_auth(
+                    qq_identity=qq_identity,
+                    credential=credential,
+                )
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                self._log_basic("[ManagedAuth] QQ auth task failed", level=logging.ERROR)
+                result = None
+            if not self._is_current_qq_managed_auth_generation(generation):
+                return
+            if result is True:
+                enable_translation = getattr(controller, "set_translation_enabled", None)
+                if callable(enable_translation):
+                    enable_result = await enable_translation(True)
+                    if not self._is_current_qq_managed_auth_generation(generation):
+                        return
+                    if not self._translation_enable_succeeded(controller, enable_result):
+                        set_error = getattr(dialog, "set_error", None)
+                        if callable(set_error):
+                            set_error("qq_managed_auth.error.retry")
+                        return
+                self._close_qq_managed_auth_dialog()
+                self._show_snackbar(t("qq_managed_auth.success"), COLOR_SUCCESS)
+                self._set_dashboard_translation_visual_state(True)
+                return
+            message_key = "qq_managed_auth.error.retry"
+            message_kwargs: dict[str, object] = {}
+            if isinstance(result, tuple) and result:
+                message_key = str(result[0])
+                if len(result) > 1 and isinstance(result[1], dict):
+                    message_kwargs = dict(result[1])
+            set_error = getattr(dialog, "set_error", None)
+            if callable(set_error):
+                set_error(message_key, **message_kwargs)
+
+        self.page.run_task(_task)
+
+    def _cancel_qq_managed_auth(self) -> None:
+        self._qq_managed_auth_cancelled = True
+        self._close_qq_managed_auth_dialog()
 
     def _run_optional_discord_auth_controller_hook(self, hook_name: str) -> None:
         controller = getattr(self, "controller", None)
