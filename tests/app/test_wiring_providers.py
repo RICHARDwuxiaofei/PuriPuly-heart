@@ -325,7 +325,6 @@ def test_create_llm_provider_deepseek_uses_secret_and_model() -> None:
     assert provider.inner.api_key == "ds-key"
     assert provider.inner.model == "deepseek-v4-flash"
     assert provider.inner.base_url == "https://api.deepseek.com"
-    assert provider.inner.max_tokens == 100
     assert provider.semaphore._value == 4  # type: ignore[attr-defined]
 
 
@@ -567,6 +566,35 @@ def test_create_llm_provider_openrouter_uses_secret_and_model() -> None:
     assert provider.inner.base_url == "https://openrouter.ai/api/v1"
     assert provider.inner.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
     assert provider.semaphore._value == 4  # type: ignore[attr-defined]
+
+
+def test_create_llm_provider_from_resolved_openrouter_gemini_byok_uses_google_latency_routing() -> (
+    None
+):
+    resolved = ResolvedLLMConfig(
+        provider="openrouter",
+        model=OpenRouterLLMModel.GEMINI_31_FLASH_LITE.value,
+        credential=ResolvedCredentialRequirement(
+            source=CREDENTIAL_SOURCE_SECRET_STORE,
+            required=True,
+            reference="openrouter:byok",
+        ),
+        routing_mode="latency",
+        provider_routing="google_gemini_latency",
+        concurrency_limit=3,
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "gemini-byok-key")
+
+    provider = create_llm_provider_from_resolved_config(resolved, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, OpenRouterLLMProvider)
+    assert provider.inner.api_key == "gemini-byok-key"
+    assert provider.inner.model == OpenRouterLLMModel.GEMINI_31_FLASH_LITE.value
+    assert provider.inner.routing_mode == OpenRouterRoutingMode.LATENCY
+    assert provider.inner.provider_routing == OpenRouterProviderRouting.GOOGLE_GEMINI_LATENCY
+    assert provider.semaphore._value == 3  # type: ignore[attr-defined]
 
 
 def test_create_llm_provider_openrouter_byok_still_uses_user_owned_secret_after_pkce_storage() -> (

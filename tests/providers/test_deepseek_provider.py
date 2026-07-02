@@ -122,15 +122,6 @@ async def test_deepseek_provider_close_cleans_up() -> None:
     assert provider._internal_client is None
 
 
-def test_deepseek_provider_passes_max_tokens_to_internal_httpx_client() -> None:
-    provider = DeepSeekLLMProvider(api_key="k", max_tokens=17)
-
-    client = provider._get_client()
-
-    assert isinstance(client, HttpxDeepSeekClient)
-    assert client.max_tokens == 17
-
-
 def test_deepseek_provider_passes_v4_pro_model_to_internal_httpx_client() -> None:
     from puripuly_heart.config.settings import DeepSeekLLMModel
 
@@ -172,7 +163,7 @@ async def test_httpx_deepseek_client_builds_non_thinking_request(monkeypatch) ->
 
     body = fake_client.last_request["json"]
     assert body["model"] == "deepseek-v4-flash"
-    assert body["max_tokens"] == 100
+    assert "max_tokens" not in body
     assert body["thinking"] == {"type": "disabled"}
     assert "reasoning" not in body
     assert "reasoning_effort" not in body
@@ -226,7 +217,7 @@ async def test_httpx_deepseek_client_logs_safe_request_failure(
     client = HttpxDeepSeekClient(api_key="k", model="m", base_url="https://example")
 
     with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.deepseek"):
-        with pytest.raises(RuntimeError, match="upstream unavailable"):
+        with pytest.raises(RuntimeError, match="DeepSeek request failed \\(status=503\\)"):
             await client.translate(
                 text="hello",
                 system_prompt="SYSTEM",

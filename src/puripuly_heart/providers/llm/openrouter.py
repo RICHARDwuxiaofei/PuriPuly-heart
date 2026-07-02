@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -116,22 +115,6 @@ def _extract_message_content(content: object) -> str:
     raise RuntimeError("OpenRouter response did not contain message content")
 
 
-def _extract_error_message(data: object) -> str:
-    if not isinstance(data, dict):
-        return ""
-    message = data.get("message")
-    if isinstance(message, str) and message.strip():
-        return message.strip()
-    error = data.get("error")
-    if isinstance(error, dict):
-        nested = error.get("message")
-        if isinstance(nested, str) and nested.strip():
-            return nested.strip()
-    if isinstance(error, str) and error.strip():
-        return error.strip()
-    return ""
-
-
 def _has_length_finish_reason(data: object) -> bool:
     if not isinstance(data, dict):
         return False
@@ -149,13 +132,38 @@ def _has_length_finish_reason(data: object) -> bool:
 def _build_provider_preferences(
     routing_mode: OpenRouterRoutingMode,
     provider_routing: OpenRouterProviderRouting = OpenRouterProviderRouting.DEFAULT,
+    *,
+    model: str | None = None,
 ) -> dict[str, object]:
     if provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY:
-        return {"only": ["deepseek"], "allow_fallbacks": False}
+        return {
+            "order": ["deepseek", "baidu/fp8"],
+            "only": ["deepseek", "baidu"],
+            "allow_fallbacks": True,
+        }
+    if provider_routing == OpenRouterProviderRouting.GOOGLE_GEMINI_LATENCY:
+        return {
+            "sort": "latency",
+            "only": ["google-vertex", "google-ai-studio"],
+            "allow_fallbacks": True,
+            "data_collection": "deny",
+        }
     if routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST:
         return {"order": ["Parasail", "Novita"], "allow_fallbacks": True}
     if routing_mode == OpenRouterRoutingMode.NOVITA_FIRST:
         return {"order": ["Novita", "Parasail"], "allow_fallbacks": True}
+    if model == "google/gemma-4-26b-a4b-it":
+        return {
+            "order": ["cloudflare", "parasail/bf16", "wafer/fp8"],
+            "only": ["cloudflare", "parasail", "wafer"],
+            "allow_fallbacks": True,
+        }
+    if model == "deepseek/deepseek-v4-flash":
+        return {
+            "order": ["cloudflare", "deepseek", "parasail/fp8"],
+            "only": ["cloudflare", "deepseek", "parasail"],
+            "allow_fallbacks": True,
+        }
     return {
         "sort": "latency",
         "allow_fallbacks": True,
@@ -329,6 +337,7 @@ class HttpxOpenRouterClient:
             "provider": _build_provider_preferences(
                 self.routing_mode,
                 self.provider_routing,
+                model=self.model,
             ),
             "max_tokens": self.max_tokens,
         }
@@ -376,22 +385,13 @@ class HttpxOpenRouterClient:
             json=request_body,
         )
         if response.status_code != 200:
-            error_message = ""
-            with contextlib.suppress(Exception):
-                error_message = _extract_error_message(response.json())
-            if not error_message:
-                with contextlib.suppress(Exception):
-                    error_message = response.text[:200]
             _log_basic_request_failure(
                 runtime_logging=self.runtime_logging,
                 operation="translate",
                 status=response.status_code,
-                message=error_message or "unknown error",
+                message="provider returned non-success status",
             )
-            raise RuntimeError(
-                "OpenRouter request failed "
-                f"(status={response.status_code}, message={error_message or 'unknown error'})"
-            )
+            raise RuntimeError(f"OpenRouter request failed (status={response.status_code})")
 
         data = response.json()
         choices = data.get("choices", [])

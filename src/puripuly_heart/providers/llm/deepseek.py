@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -111,22 +110,6 @@ def _extract_message_content(content: object) -> str:
     raise RuntimeError("DeepSeek response did not contain message content")
 
 
-def _extract_error_message(data: object) -> str:
-    if not isinstance(data, dict):
-        return ""
-    message = data.get("message")
-    if isinstance(message, str) and message.strip():
-        return message.strip()
-    error = data.get("error")
-    if isinstance(error, dict):
-        nested = error.get("message")
-        if isinstance(nested, str) and nested.strip():
-            return nested.strip()
-    if isinstance(error, str) and error.strip():
-        return error.strip()
-    return ""
-
-
 def _has_length_finish_reason(data: object) -> bool:
     if not isinstance(data, dict):
         return False
@@ -160,7 +143,6 @@ class DeepSeekLLMProvider:
     api_key: str
     base_url: str = "https://api.deepseek.com"
     model: str = "deepseek-v4-flash"
-    max_tokens: int = 100
     timeout: float = 30.0
     runtime_logging: SessionRuntimeLoggingService | None = None
     client: DeepSeekClient | None = None
@@ -174,7 +156,6 @@ class DeepSeekLLMProvider:
                 api_key=self.api_key,
                 model=self.model,
                 base_url=self.base_url,
-                max_tokens=self.max_tokens,
                 timeout=self.timeout,
                 runtime_logging=self.runtime_logging,
             )
@@ -237,7 +218,6 @@ class HttpxDeepSeekClient:
     api_key: str
     model: str
     base_url: str = "https://api.deepseek.com"
-    max_tokens: int = 100
     timeout: float = 30.0
     runtime_logging: SessionRuntimeLoggingService | None = None
     _client: httpx.AsyncClient | None = field(init=False, default=None, repr=False)
@@ -275,7 +255,6 @@ class HttpxDeepSeekClient:
                 {"role": "user", "content": user_message},
             ],
             "thinking": {"type": "disabled"},
-            "max_tokens": self.max_tokens,
         }
         return request_body
 
@@ -318,22 +297,13 @@ class HttpxDeepSeekClient:
             json=request_body,
         )
         if response.status_code != 200:
-            error_message = ""
-            with contextlib.suppress(Exception):
-                error_message = _extract_error_message(response.json())
-            if not error_message:
-                with contextlib.suppress(Exception):
-                    error_message = response.text[:200]
             _log_basic_request_failure(
                 runtime_logging=self.runtime_logging,
                 operation="translate",
                 status=response.status_code,
-                message=error_message or "unknown error",
+                message="provider returned non-success status",
             )
-            raise RuntimeError(
-                "DeepSeek request failed "
-                f"(status={response.status_code}, message={error_message or 'unknown error'})"
-            )
+            raise RuntimeError(f"DeepSeek request failed (status={response.status_code})")
 
         data = response.json()
         choices = data.get("choices", [])

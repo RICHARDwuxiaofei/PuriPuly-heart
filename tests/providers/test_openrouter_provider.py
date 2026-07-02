@@ -252,9 +252,9 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_la
     assert body["reasoning"] == {"effort": "none"}
     assert body["user"] == "managed-user-123"
     assert body["provider"] == {
-        "sort": "latency",
+        "order": ["cloudflare", "parasail/bf16", "wafer/fp8"],
+        "only": ["cloudflare", "parasail", "wafer"],
         "allow_fallbacks": True,
-        "ignore": ["venice", "deepinfra", "google-vertex"],
     }
     assert body["messages"][0] == {"role": "system", "content": "SYSTEM"}
     assert body["messages"][1]["role"] == "user"
@@ -265,7 +265,7 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_la
 
 
 @pytest.mark.asyncio
-async def test_httpx_openrouter_client_latency_routing_ignores_venice_and_deepinfra_providers_and_preserves_latency_sort(
+async def test_httpx_openrouter_client_gemma_uses_cloudflare_first_routing(
     monkeypatch,
 ) -> None:
     fake_client = FakeAsyncClient()
@@ -285,14 +285,43 @@ async def test_httpx_openrouter_client_latency_routing_ignores_venice_and_deepin
 
     body = fake_client.last_request["json"]
     assert body["provider"] == {
-        "sort": "latency",
+        "order": ["cloudflare", "parasail/bf16", "wafer/fp8"],
+        "only": ["cloudflare", "parasail", "wafer"],
         "allow_fallbacks": True,
-        "ignore": ["venice", "deepinfra", "google-vertex"],
     }
 
 
 @pytest.mark.asyncio
-async def test_httpx_openrouter_client_deepseek_only_routing_locks_provider_without_fallbacks(
+async def test_httpx_openrouter_client_google_gemini_latency_denies_data_collection(
+    monkeypatch,
+) -> None:
+    fake_client = FakeAsyncClient()
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+
+    client = HttpxOpenRouterClient(
+        api_key="test-key",
+        model="google/gemini-3.1-flash-lite",
+        base_url="https://example",
+        provider_routing=OpenRouterProviderRouting.GOOGLE_GEMINI_LATENCY,
+    )
+    await client.translate(
+        text="hello",
+        system_prompt="SYSTEM",
+        source_language="ko-KR",
+        target_language="en",
+    )
+
+    body = fake_client.last_request["json"]
+    assert body["provider"] == {
+        "sort": "latency",
+        "only": ["google-vertex", "google-ai-studio"],
+        "allow_fallbacks": True,
+        "data_collection": "deny",
+    }
+
+
+@pytest.mark.asyncio
+async def test_httpx_openrouter_client_deepseek_only_routing_uses_deepseek_baidu_order(
     monkeypatch,
 ) -> None:
     fake_client = FakeAsyncClient()
@@ -314,8 +343,36 @@ async def test_httpx_openrouter_client_deepseek_only_routing_locks_provider_with
 
     body = fake_client.last_request["json"]
     assert body["provider"] == {
-        "only": ["deepseek"],
-        "allow_fallbacks": False,
+        "order": ["deepseek", "baidu/fp8"],
+        "only": ["deepseek", "baidu"],
+        "allow_fallbacks": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_httpx_openrouter_client_deepseek_default_uses_cloudflare_first_routing(
+    monkeypatch,
+) -> None:
+    fake_client = FakeAsyncClient()
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+
+    client = HttpxOpenRouterClient(
+        api_key="test-key",
+        model="deepseek/deepseek-v4-flash",
+        base_url="https://example",
+    )
+    await client.translate(
+        text="hello",
+        system_prompt="SYSTEM",
+        source_language="ko-KR",
+        target_language="zh-CN",
+    )
+
+    body = fake_client.last_request["json"]
+    assert body["provider"] == {
+        "order": ["cloudflare", "deepseek", "parasail/fp8"],
+        "only": ["cloudflare", "deepseek", "parasail"],
+        "allow_fallbacks": True,
     }
 
 
@@ -422,7 +479,7 @@ async def test_httpx_openrouter_client_logs_basic_translate_failure_without_runt
     client = HttpxOpenRouterClient(api_key="k", model="m", base_url="https://example")
 
     with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.openrouter"):
-        with pytest.raises(RuntimeError, match="quota exceeded"):
+        with pytest.raises(RuntimeError, match="OpenRouter request failed \\(status=429\\)"):
             await client.translate(
                 text="hello",
                 system_prompt="SYSTEM",
@@ -432,7 +489,7 @@ async def test_httpx_openrouter_client_logs_basic_translate_failure_without_runt
 
     assert caplog.messages == [
         "[Basic][LLM] OpenRouter request [translate][context=no] ko -> en: 'hello'",
-        "[Basic][LLM] OpenRouter request failed [translate]: category=quota code=provider.quota status=429",
+        "[Basic][LLM] OpenRouter request failed [translate]: category=rate_limit code=provider.rate_limit status=429",
     ]
     assert "quota exceeded" not in "\n".join(caplog.messages)
 
@@ -502,7 +559,7 @@ async def test_httpx_openrouter_client_runtime_logging_logs_basic_translate_fail
     )
 
     with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.openrouter"):
-        with pytest.raises(RuntimeError, match="quota exceeded"):
+        with pytest.raises(RuntimeError, match="OpenRouter request failed \\(status=429\\)"):
             await client.translate(
                 text="hello",
                 system_prompt="SYSTEM",
@@ -517,7 +574,7 @@ async def test_httpx_openrouter_client_runtime_logging_logs_basic_translate_fail
             logging.INFO,
         ),
         (
-            "[Basic][LLM] OpenRouter request failed [translate]: category=quota code=provider.quota status=429",
+            "[Basic][LLM] OpenRouter request failed [translate]: category=rate_limit code=provider.rate_limit status=429",
             logging.ERROR,
         ),
     ]
