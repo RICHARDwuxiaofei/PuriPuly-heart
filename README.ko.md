@@ -24,13 +24,13 @@
 
 ## Demo
 
-![](docs/images/demo/jp-ko_screenshot.png)
+![PuriPuly(Deepgram + Gemini 3 Flash)와 VRCT(Google Web Speech + Google Translate)의 번역 비교. PuriPuly 전사: "てか俺にも声かけてくんないかな まあ関係ないんだけどさ。", 번역: "그나저나 나 한테도 말 좀 해주지. 뭐, 나랑은 상관없는 일이긴 하지만." | VRCT 전사: "てか俺에도声かけてくんないかな ま 관계ないんだけどさ", 번역: "나는 나에게도 말하지 않을 거야. 상관 없다."](docs/images/demo/jp-ko_screenshot.png)
 
 ---
 
 <video src="https://github.com/user-attachments/assets/c667f44d-b91d-42a9-b24a-e6a993b392d3" controls width="100%"></video>
 
-데모 영상 유튜브 링크:
+PuriPuly를 통해 다른 외국인 친구들과 실제로 소통하는 모습을 더 보고 싶다면:
 - [데모 1](https://www.youtube.com/watch?v=3p0CamYui0o)
 - [데모 2](https://youtu.be/DoX36Y7J_lc?si=YjbeVTS8v3jGQB1w)
 - [데모 3](https://www.youtube.com/watch?v=D0npvp68xNY)
@@ -80,7 +80,7 @@
 ---
 
 ## 비교
-![comparison](docs/images/performance/1.png)
+![번역 품질 벤치마크 차트. 한국어에서 영어, 일본어, 중국어 간체로의 216개 멀티턴 대화 샘플을 Gemba MQM 프레임워크(판정 모델: Gemini 3.1 Pro Preview)로 평가한 문장당 평균 에러 페널티(낮을수록 좋음) 결과이다. 각 모델별 점수는 Gemini 3.1 Flash-lite 0.573, Gemini 3 Flash 0.596, Gemma 4 26B A4B 0.813, Qwen 3.5 Plus 0.958, DeepSeek V4 Flash 1.025, Gemma 4 26B A4B (no-context) 1.265, DeepSeek V4 Flash (no-context) 1.647, Qwen 3.5 Flash 2.198, DeepL 4.963, DeepL (no-context) 5.717, Google Translation Basic 5.998 이다.](docs/images/performance/1.png)
 
 - 마이크로소프트의 Gemba MQM 프레임워크를 사용해서 실험했어요.
 - 실제 대화 환경과 가깝게 하기 위해 멀티턴 환경으로 구성했어요.

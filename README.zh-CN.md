@@ -24,13 +24,13 @@
 
 ## Demo
 
-![](docs/images/demo/ko-cn_screenshot.png)
+![PuriPuly（Deepgram + Qwen 3.5 Plus）与 VRCT（Google Web Speech + Google Translate）的翻译对比。PuriPuly 语音识别：“집에굴러다니는게손잡이빠진것까지합치면열개는넘을걸.”，翻译：“（家里散落的伞，加上那把没把手的，估计都超过十把了呢。）” | VRCT 语音识别：“집에 굴러다니는게 손잡이 빠진 것까지 합치면 10개는 넘을 걸”，翻译：“房子周围肯定有超过 10 个，包括那些没有把手的。”](docs/images/demo/ko-cn_screenshot.png)
 
 ---
 
 <video src="https://github.com/user-attachments/assets/c667f44d-b91d-42a9-b24a-e6a993b392d3" controls width="100%"></video>
 
-演示视频 YouTube 链接:
+如果你想看更多通过 PuriPuly 与其他外国朋友实际交流的画面：
 - [演示 1](https://www.youtube.com/watch?v=3p0CamYui0o)
 - [演示 2](https://youtu.be/DoX36Y7J_lc?si=YjbeVTS8v3jGQB1w)
 - [演示 3](https://www.youtube.com/watch?v=D0npvp68xNY)
@@ -81,7 +81,7 @@
 ---
 
 ## 翻译比较
-![comparison](docs/images/performance/1.png)
+![翻译质量基准测试图表。展示了使用 Gemba MQM 框架（评审模型：Gemini 3.1 Pro Preview）对 216 个韩语到英语、日语、中文简体多轮对话样本进行评估的单句平均错误惩罚分（越低越好）。各模型得分：Gemini 3.1 Flash-lite 0.573、Gemini 3 Flash 0.596、Gemma 4 26B A4B 0.813、Qwen 3.5 Plus 0.958、DeepSeek V4 Flash 1.025、Gemma 4 26B A4B (no-context) 1.265、DeepSeek V4 Flash (no-context) 1.647、Qwen 3.5 Flash 2.198、DeepL 4.963、DeepL (no-context) 5.717、Google Translation Basic 5.998。](docs/images/performance/1.png)
 
 - 我们使用微软的 Gemba MQM 框架进行实验。
 - 为贴近真实对话环境，采用了多轮对话设置。

@@ -24,13 +24,13 @@
 
 ## Demo
 
-![](docs/images/demo/ko-en_screenshot.png)
+![Comparison of translation results between PuriPuly (Deepgram + Gemini 3 Flash) and VRCT (Google Web Speech + Google Translate). PuriPuly STT: "아역시혼자기대하면안된다니깐", Translation: "(See, I knew I shouldn't have gotten my hopes up.)" | VRCT STT: "아 역시 혼자 기대하면 안 된다니까", Translation: "Oh, I guess you shouldn't expect it alone."](docs/images/demo/ko-en_screenshot.png)
 
 ---
 
 <video src="https://github.com/user-attachments/assets/c667f44d-b91d-42a9-b24a-e6a993b392d3" controls width="100%"></video>
 
-Demo video YouTube links:
+If you want to see more of actual communication with other foreign friends through PuriPuly:
 - [Demo 1](https://www.youtube.com/watch?v=3p0CamYui0o)
 - [Demo 2](https://youtu.be/DoX36Y7J_lc?si=YjbeVTS8v3jGQB1w)
 - [Demo 3](https://www.youtube.com/watch?v=D0npvp68xNY)
@@ -81,7 +81,7 @@ So I built one that can.
 ---
 
 ## Translation Comparison
-![comparison](docs/images/performance/1.png)
+![Translation quality benchmark chart. It shows the mean error penalty per sentence (lower is better) evaluated using the Gemba MQM framework (judge model: Gemini 3.1 Pro Preview) on 216 multi-turn Korean to EN, JA, and ZH-Hans samples. Scores: Gemini 3.1 Flash-lite 0.573, Gemini 3 Flash 0.596, Gemma 4 26B A4B 0.813, Qwen 3.5 Plus 0.958, DeepSeek V4 Flash 1.025, Gemma 4 26B A4B (no-context) 1.265, DeepSeek V4 Flash (no-context) 1.647, Qwen 3.5 Flash 2.198, DeepL 4.963, DeepL (no-context) 5.717, Google Translation Basic 5.998.](docs/images/performance/1.png)
 
 - We ran the experiment using Microsoft's Gemba MQM framework.
 - It was set up as a multi-turn environment to better resemble real conversation.
