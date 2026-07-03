@@ -46,6 +46,7 @@ from puripuly_heart.config.settings import (
     materialize_translation_settings,
     normalize_owned_referral_id,
     supported_translation_connections,
+    with_telemetry_consent,
 )
 from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
@@ -303,6 +304,7 @@ class SettingsView(ft.Column):
         self.on_desktop_overlay_position_reset: Callable[[], None] | None = None
         self.on_view_logs: Callable[[], None] | None = None
         self.on_start_microphone_test: Callable[[], None] | None = None
+        self.on_telemetry_consent_change: Callable[[str], None] | None = None
         self.show_snackbar: Callable[[str, str], None] | None = None
         self.runtime_log_basic: Callable[..., None] | None = None
         self.runtime_log_detailed: Callable[..., None] | None = None
@@ -459,6 +461,7 @@ class SettingsView(ft.Column):
             self._desktop_overlay_view_logs_action,
             self._translation_connection_text,
             self._openrouter_fallback_text,
+            self._telemetry_consent_text,
         )
 
     def _sync_clickable_text_control_fonts(self, font_family: str | None) -> None:
@@ -1129,6 +1132,21 @@ class SettingsView(ft.Column):
             value=self._clipboard_auto_translate_text,
         )
 
+        self._telemetry_consent_text = self._build_clickable_text(
+            t("settings.telemetry.state.off"),
+            self._on_telemetry_consent_click,
+        )
+        self._telemetry_consent_title = ft.Text(
+            t("settings.telemetry.title"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._telemetry_consent_card = self._wrap_unit_card(
+            title=self._telemetry_consent_title,
+            value=self._telemetry_consent_text,
+        )
+
         self._vrc_mic_text = self._build_clickable_text(
             t("settings.vrc_mic.on"),
             self._on_vrc_mic_click,
@@ -1314,7 +1332,7 @@ class SettingsView(ft.Column):
                 [
                     clipboard_auto_translate_card,
                     vrc_mic_card,
-                    self._wrap_empty_unit_card(),
+                    self._telemetry_consent_card,
                 ],
                 spacing=16,
                 expand=True,
@@ -2178,6 +2196,20 @@ class SettingsView(ft.Column):
             return t("settings.fallback.none.description")
         return t("settings.fallback.active_helper")
 
+    def _telemetry_consent_display_label(self, settings: AppSettings | None) -> str:
+        consent = getattr(getattr(settings, "telemetry", None), "consent", "unknown")
+        return t(
+            "settings.telemetry.state.on" if consent == "allow" else "settings.telemetry.state.off"
+        )
+
+    def _sync_telemetry_consent_card(self, settings: AppSettings | None = None) -> None:
+        if settings is None:
+            settings = self._settings
+        self._set_unit_card_value_text(
+            self._telemetry_consent_text,
+            self._telemetry_consent_display_label(settings),
+        )
+
     def _set_openrouter_fallback_text(self, text: str) -> None:
         text_control = self._openrouter_fallback_text.content
         text_control.value = text
@@ -2817,6 +2849,7 @@ class SettingsView(ft.Column):
             if settings.ui.clipboard_auto_translate_enabled
             else "settings.clipboard_auto_translate.off"
         )
+        self._sync_telemetry_consent_card(settings)
         # Prompt
         provider_name = self._active_prompt_key()
         self._prompt_editor.set_provider(provider_name)
@@ -2891,6 +2924,12 @@ class SettingsView(ft.Column):
 
         if self.page:
             self.update()
+
+    def sync_telemetry_settings(self, settings: AppSettings) -> None:
+        self._settings = settings
+        self._sync_telemetry_consent_card(settings)
+        if self.page:
+            _update_control_if_mounted(self._telemetry_consent_card)
 
     def _load_secrets(self, settings: AppSettings, config_path: Path) -> None:
         """Load secret values into fields."""
@@ -4524,6 +4563,41 @@ class SettingsView(ft.Column):
             self._clipboard_auto_translate_text.update()
         self._emit_settings_changed()
 
+    def _on_telemetry_consent_click(self, e) -> None:
+        _ = e
+        if not self.page or not self._settings:
+            return
+
+        def _select(value: str) -> None:
+            if value not in {"allow", "decline"} or self._settings is None:
+                return
+            updated = with_telemetry_consent(self._settings, value)
+            self._settings = updated
+            self._sync_telemetry_consent_card(updated)
+            if self.on_telemetry_consent_change is not None:
+                self.on_telemetry_consent_change(value)
+
+        options = [
+            OptionItem(
+                "allow",
+                t("settings.telemetry.option.allow"),
+                t("settings.telemetry.option.allow.description"),
+            ),
+            OptionItem(
+                "decline",
+                t("settings.telemetry.option.decline"),
+                t("settings.telemetry.option.decline.description"),
+            ),
+        ]
+        modal = SettingsModal(
+            self.page,
+            t("settings.telemetry.modal.title"),
+            options,
+            _select,
+            show_description=True,
+        )
+        modal.open("allow" if self._settings.telemetry.consent == "allow" else "decline")
+
     def _on_low_latency_click(self, e) -> None:
         """Open low latency mode selection modal."""
         if not self.page:
@@ -4765,6 +4839,7 @@ class SettingsView(ft.Column):
         self._vrc_mic_title.value = t("settings.vrc_mic_intercept")
         self._chatbox_source_title.value = t("settings.chatbox_include_source")
         self._clipboard_auto_translate_title.value = t("settings.clipboard_auto_translate")
+        self._telemetry_consent_title.value = t("settings.telemetry.title")
         self._peer_provider_title.value = t("settings.section.peer_stt")
         self._dashboard_language_redirect_text.value = t("settings.dashboard_language_redirect")
         self._peer_stt_label.value = t("settings.peer_stt_provider")
@@ -4863,6 +4938,7 @@ class SettingsView(ft.Column):
                 if display_settings.ui.clipboard_auto_translate_enabled
                 else "settings.clipboard_auto_translate.off"
             )
+            self._sync_telemetry_consent_card(display_settings)
             self._set_unit_card_value_text(
                 self._microphone_test_text,
                 t("settings.microphone_test.action"),

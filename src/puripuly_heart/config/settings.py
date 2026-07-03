@@ -36,7 +36,10 @@ from puripuly_heart.config.llm_profiles import (
     openrouter_alias_for_fields,
 )
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
-from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext  # noqa: F401
+from puripuly_heart.config.settings_vnext.schema import (  # noqa: F401
+    AppSettingsVNext,
+    new_anonymous_telemetry_identifier,
+)
 
 SETTINGS_SCHEMA_VERSION = 24
 MANAGED_AUTH_CLAIM_SOURCE_DISCORD = "discord"
@@ -51,6 +54,7 @@ LEGACY_LOW_LATENCY_VAD_HANGOVER_MS = 600
 DEFAULT_LOW_LATENCY_VAD_HANGOVER_MS = 500
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
+TELEMETRY_CONSENT_VALUES = frozenset({"unknown", "allow", "decline"})
 REFERRAL_ID_LENGTH = 6
 REFERRAL_ID_ALPHABET = frozenset("23456789ABCDEFGHJKMNPQRSTUVWXYZ")
 OVERLAY_TARGET_STEAMVR = "steamvr"
@@ -1090,6 +1094,63 @@ class ManagedIdentitySettings:
         )
 
 
+def _parse_telemetry_consent(value: object) -> str:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized in TELEMETRY_CONSENT_VALUES:
+            return normalized
+    return "unknown"
+
+
+def _normalize_telemetry_identifier(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _normalize_telemetry_sent_dates(value: object) -> list[str]:
+    if isinstance(value, str):
+        candidates: tuple[object, ...] = (value,)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        candidates = tuple(value)
+    else:
+        candidates = ()
+    normalized: list[str] = []
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        text = candidate.strip()
+        try:
+            parsed = datetime.strptime(text, "%Y-%m-%d")
+        except ValueError:
+            continue
+        date_text = parsed.strftime("%Y-%m-%d")
+        if date_text not in normalized:
+            normalized.append(date_text)
+    return normalized
+
+
+@dataclass(slots=True)
+class TelemetrySettings:
+    consent: str = "unknown"
+
+    def validate(self) -> None:
+        self.consent = _parse_telemetry_consent(self.consent)
+
+
+@dataclass(slots=True)
+class TelemetryStateSettings:
+    anonymous_id: str | None = None
+    sent_translation_success_dates_utc: list[str] = field(default_factory=list)
+
+    def validate(self) -> None:
+        self.anonymous_id = _normalize_telemetry_identifier(self.anonymous_id)
+        self.sent_translation_success_dates_utc = _normalize_telemetry_sent_dates(
+            self.sent_translation_success_dates_utc
+        )
+
+
 @dataclass(slots=True)
 class AppSettings:
     settings_version: int = SETTINGS_SCHEMA_VERSION
@@ -1117,6 +1178,8 @@ class AppSettings:
     ui: UiSettings = field(default_factory=UiSettings)
     api_key_verified: ApiKeyVerificationSettings = field(default_factory=ApiKeyVerificationSettings)
     managed_identity: ManagedIdentitySettings = field(default_factory=ManagedIdentitySettings)
+    telemetry: TelemetrySettings = field(default_factory=TelemetrySettings)
+    telemetry_state: TelemetryStateSettings = field(default_factory=TelemetryStateSettings)
     system_prompt: str = ""
     system_prompts: dict[str, str] = field(default_factory=dict)
 
@@ -1155,6 +1218,8 @@ class AppSettings:
         self.ui.validate()
         self.api_key_verified.validate()
         self.managed_identity.validate()
+        self.telemetry.validate()
+        self.telemetry_state.validate()
         for key, value in self.system_prompts.items():
             if not isinstance(key, str):
                 raise ValueError("system_prompts keys must be strings")
@@ -1561,6 +1626,13 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
                 settings.ui.github_star_prompt_eligible_launch_count
             ),
         },
+        "telemetry": {"consent": _parse_telemetry_consent(settings.telemetry.consent)},
+        "telemetry_state": {
+            "anonymous_id": _normalize_telemetry_identifier(settings.telemetry_state.anonymous_id),
+            "sent_translation_success_dates_utc": _normalize_telemetry_sent_dates(
+                settings.telemetry_state.sent_translation_success_dates_utc
+            ),
+        },
         "api_key_verified": {
             "deepgram": settings.api_key_verified.deepgram,
             "soniox": settings.api_key_verified.soniox,
@@ -1596,6 +1668,36 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         "system_prompt": settings.system_prompt,
     }
     return _enum_to_value(data)  # type: ignore[return-value]
+
+
+def with_telemetry_consent(
+    settings: AppSettings,
+    consent: str,
+    *,
+    identifier_factory: object = new_anonymous_telemetry_identifier,
+) -> AppSettings:
+    updated = copy.deepcopy(settings)
+    normalized_consent = _parse_telemetry_consent(consent)
+    updated.telemetry.consent = normalized_consent
+    if normalized_consent == "decline":
+        updated.telemetry_state.anonymous_id = None
+        updated.telemetry_state.sent_translation_success_dates_utc = []
+    elif normalized_consent == "allow":
+        factory = (
+            identifier_factory
+            if callable(identifier_factory)
+            else new_anonymous_telemetry_identifier
+        )
+        updated.telemetry_state.anonymous_id = _normalize_telemetry_identifier(
+            updated.telemetry_state.anonymous_id
+        ) or str(factory())
+        updated.telemetry_state.sent_translation_success_dates_utc = (
+            _normalize_telemetry_sent_dates(
+                updated.telemetry_state.sent_translation_success_dates_utc
+            )
+        )
+    updated.validate()
+    return updated
 
 
 def _parse_stt_provider(value: str) -> STTProviderName:
@@ -3633,6 +3735,10 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     local_llm_raw = data.get("local_llm") if isinstance(data.get("local_llm"), dict) else {}
     qwen_asr_raw = data.get("qwen_asr_stt") if isinstance(data.get("qwen_asr_stt"), dict) else {}
     openrouter_raw = data.get("openrouter") if isinstance(data.get("openrouter"), dict) else {}
+    telemetry_raw = data.get("telemetry") if isinstance(data.get("telemetry"), dict) else {}
+    telemetry_state_raw = (
+        data.get("telemetry_state") if isinstance(data.get("telemetry_state"), dict) else {}
+    )
     openrouter_model, openrouter_selected_source, openrouter_selection_alias = (
         _resolve_openrouter_main_selection(openrouter_raw, data)
     )
@@ -3913,6 +4019,15 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             referral_id=normalize_owned_referral_id(managed_identity_data.get("referral_id")),
             local_managed_claim_sources=normalize_managed_claim_sources(
                 managed_identity_data.get("local_managed_claim_sources")
+            ),
+        ),
+        telemetry=TelemetrySettings(
+            consent=_parse_telemetry_consent(telemetry_raw.get("consent")),
+        ),
+        telemetry_state=TelemetryStateSettings(
+            anonymous_id=_normalize_telemetry_identifier(telemetry_state_raw.get("anonymous_id")),
+            sent_translation_success_dates_utc=_normalize_telemetry_sent_dates(
+                telemetry_state_raw.get("sent_translation_success_dates_utc")
             ),
         ),
         system_prompt=legacy_system_prompt,

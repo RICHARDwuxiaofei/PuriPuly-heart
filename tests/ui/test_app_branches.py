@@ -109,6 +109,24 @@ class RuntimeLoggingController:
         self.detailed_messages.append(message)
 
 
+class TelemetryController:
+    def __init__(self, settings: AppSettings) -> None:
+        self.settings = settings
+        self.applied: list[AppSettings] = []
+
+    async def apply_settings(self, settings: AppSettings) -> None:
+        self.settings = settings
+        self.applied.append(settings)
+
+
+class TelemetrySettingsView:
+    def __init__(self) -> None:
+        self.synced: list[AppSettings] = []
+
+    def sync_telemetry_settings(self, settings: AppSettings) -> None:
+        self.synced.append(settings)
+
+
 def _iter_control_tree(control):
     if control is None:
         return
@@ -132,6 +150,61 @@ def _dialog_text_values(dialog) -> list[str]:
 
 def _dialog_containers(dialog) -> list[ft.Container]:
     return [node for node in _iter_control_tree(dialog) if isinstance(node, ft.Container)]
+
+
+def test_telemetry_consent_dialog_shown_only_for_unknown_and_localized() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app.controller = TelemetryController(AppSettings())
+    app._mark_launch_high_priority_feedback_shown = lambda *_args, **_kwargs: None
+
+    assert app.maybe_show_telemetry_consent_dialog() is True
+    assert len(app.page.opened) == 1
+    texts = _dialog_text_values(app.page.opened[0])
+    assert app_module.t("telemetry.consent.title") in texts
+    assert app_module.t("telemetry.consent.body") in texts
+    assert app_module.t("telemetry.consent.privacy") in texts
+
+    app.controller.settings.telemetry.consent = "decline"
+    assert app.maybe_show_telemetry_consent_dialog() is False
+
+
+def test_telemetry_consent_choice_persists_and_syncs_settings_view() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    page = DummyPage()
+    app.page = page
+    settings = AppSettings()
+    settings.telemetry_state.sent_translation_success_dates_utc = ["2026-07-01"]
+    app.controller = TelemetryController(settings)
+    app.view_settings = TelemetrySettingsView()
+
+    app._on_telemetry_consent_change("allow")
+    assert len(page.tasks) == 1
+    asyncio.run(page.tasks.pop(0)())
+    assert app.controller.settings.telemetry.consent == "allow"
+    assert app.controller.settings.telemetry_state.anonymous_id
+    assert app.controller.settings.telemetry_state.sent_translation_success_dates_utc == [
+        "2026-07-01"
+    ]
+    assert app.view_settings.synced[-1] is app.controller.settings
+
+    app._on_telemetry_consent_change("decline")
+    asyncio.run(page.tasks.pop(0)())
+    assert app.controller.settings.telemetry.consent == "decline"
+    assert app.controller.settings.telemetry_state.anonymous_id is None
+    assert app.controller.settings.telemetry_state.sent_translation_success_dates_utc == []
+
+
+def test_telemetry_consent_dialog_actions_do_not_send() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app.controller = TelemetryController(AppSettings())
+    app.view_settings = TelemetrySettingsView()
+
+    app._on_telemetry_consent_change("allow")
+
+    assert len(app.page.tasks) == 1
+    assert not hasattr(app, "telemetry_client")
 
 
 class ConstructionDummyController:

@@ -12,6 +12,7 @@ import flet as ft
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
+    with_telemetry_consent,
 )
 from puripuly_heart.core.discord_oauth_loopback import (
     render_discord_oauth_callback_completion_page,
@@ -31,6 +32,7 @@ from puripuly_heart.ui.components.local_qwen_hallucination_dialog import (
 from puripuly_heart.ui.components.microphone_test_dialog import MicrophoneTestDialog
 from puripuly_heart.ui.components.peer_translation_eula_dialog import PeerTranslationEulaDialog
 from puripuly_heart.ui.components.qq_managed_auth_dialog import QqManagedAuthDialog
+from puripuly_heart.ui.components.telemetry_consent_dialog import TelemetryConsentDialog
 from puripuly_heart.ui.components.title_bar import TitleBar
 from puripuly_heart.ui.controller import GuiController
 from puripuly_heart.ui.fonts import font_for_language, register_fonts
@@ -150,6 +152,7 @@ class TranslatorApp:
         self._launch_high_priority_snackbar = None
         self._github_star_prompt_shown_this_launch = False
         self._microphone_test_dialog: MicrophoneTestDialog | None = None
+        self._telemetry_consent_dialog: TelemetryConsentDialog | None = None
         self._setup_page()
         self._build_layout()
 
@@ -169,6 +172,7 @@ class TranslatorApp:
         self.view_settings.on_secret_cleared = self._on_secret_cleared
         self.view_settings.on_local_llm_secret_changed = self._on_local_llm_secret_changed
         self.view_settings.on_start_microphone_test = self._on_start_microphone_test
+        self.view_settings.on_telemetry_consent_change = self._on_telemetry_consent_change
         self.view_settings.on_desktop_overlay_lock_change = self._on_desktop_overlay_lock_change
         self.view_settings.on_desktop_overlay_size_change = self._on_desktop_overlay_size_change
         self.view_settings.on_desktop_overlay_recovery_action = (
@@ -596,6 +600,36 @@ class TranslatorApp:
         )
         self._peer_translation_eula_dialog = dialog
         dialog.open()
+
+    def maybe_show_telemetry_consent_dialog(self) -> bool:
+        settings = getattr(self.controller, "settings", None)
+        if settings is None or settings.telemetry.consent != "unknown":
+            return False
+        dialog = TelemetryConsentDialog(
+            self.page,
+            on_allow=lambda: self._on_telemetry_consent_change("allow"),
+            on_decline=lambda: self._on_telemetry_consent_change("decline"),
+        )
+        self._telemetry_consent_dialog = dialog
+        dialog.open()
+        self._mark_launch_high_priority_feedback_shown("telemetry_consent")
+        return True
+
+    def _on_telemetry_consent_change(self, consent: str) -> None:
+        if consent not in {"allow", "decline"}:
+            return
+
+        async def _task() -> None:
+            settings = getattr(self.controller, "settings", None)
+            if settings is None:
+                return
+            updated = with_telemetry_consent(settings, consent)
+            await self.controller.apply_settings(updated)
+            sync_telemetry = getattr(self.view_settings, "sync_telemetry_settings", None)
+            if callable(sync_telemetry) and self.controller.settings is not None:
+                sync_telemetry(self.controller.settings)
+
+        self.page.run_task(_task)
 
     def show_local_qwen_hallucination_dialog(self) -> None:
         dialog = LocalQwenHallucinationDialog(
@@ -1692,6 +1726,9 @@ async def main_gui(
         app_kwargs["allow_stable_settings_import"] = allow_stable_settings_import
     app = TranslatorApp(page, **app_kwargs)
     await app.controller.start()
+    show_telemetry_consent = getattr(app, "maybe_show_telemetry_consent_dialog", None)
+    if callable(show_telemetry_consent):
+        show_telemetry_consent()
 
     # Check for updates in background
     update_kwargs = {"log_detailed": app._log_detailed}

@@ -396,7 +396,7 @@ def from_legacy_app_settings(
             integrated_context=IntegratedContextIntent(
                 enabled=bool(data["ui"]["integrated_context_enabled"]),
             ),
-            telemetry=TelemetryConsentIntent(),
+            telemetry=TelemetryConsentIntent(data.get("telemetry", {}).get("consent", "unknown")),
             prompts=PromptIntent(system_prompt=data["system_prompt"]),
         ),
         state=PersistedOperationalState(
@@ -439,7 +439,12 @@ def from_legacy_app_settings(
             integrated_context=IntegratedContextState(
                 bootstrapped=bool(data["ui"]["integrated_context_bootstrapped"]),
             ),
-            telemetry=TelemetryOperationalState(),
+            telemetry=TelemetryOperationalState(
+                anonymous_id=data.get("telemetry_state", {}).get("anonymous_id"),
+                sent_translation_success_dates_utc=data.get("telemetry_state", {}).get(
+                    "sent_translation_success_dates_utc"
+                ),
+            ),
         ),
     )
 
