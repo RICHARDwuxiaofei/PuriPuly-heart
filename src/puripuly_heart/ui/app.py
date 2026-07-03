@@ -1691,6 +1691,14 @@ class TranslatorApp:
     def on_github_star_translation_success(self) -> None:
         self.controller.schedule_github_star_prompt_translation_success_observed()
 
+    def on_telemetry_translation_success(self) -> None:
+        async def _task() -> None:
+            record = getattr(self.controller, "record_telemetry_translation_success_day", None)
+            if callable(record):
+                await record()
+
+        self._queue_settings_mutation_task(_task)
+
     def on_overlay_state_changed(
         self,
         *,

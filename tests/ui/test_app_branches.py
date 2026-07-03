@@ -118,6 +118,9 @@ class TelemetryController:
         self.settings = settings
         self.applied.append(settings)
 
+    async def record_telemetry_translation_success_day(self) -> None:
+        self.telemetry_success_recorded = True
+
 
 class TelemetrySettingsView:
     def __init__(self) -> None:
@@ -205,6 +208,19 @@ def test_telemetry_consent_dialog_actions_do_not_send() -> None:
 
     assert len(app.page.tasks) == 1
     assert not hasattr(app, "telemetry_client")
+
+
+def test_telemetry_translation_success_uses_app_settings_mutation_queue() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    page = DummyPage()
+    app.page = page
+    app.controller = TelemetryController(AppSettings())
+
+    app.on_telemetry_translation_success()
+
+    assert len(page.tasks) == 1
+    asyncio.run(page.tasks.pop(0)())
+    assert app.controller.telemetry_success_recorded is True
 
 
 class ConstructionDummyController:

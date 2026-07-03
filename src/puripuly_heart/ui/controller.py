@@ -231,6 +231,11 @@ from puripuly_heart.core.stt.controller import (
     ManagedSTTProvider,
 )
 from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
+from puripuly_heart.core.telemetry import (
+    TranslationSuccessTelemetryClientPort,
+    TranslationSuccessTelemetryResult,
+    TranslationSuccessTelemetryService,
+)
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
 from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
@@ -701,6 +706,7 @@ class GuiController:
     allow_stable_settings_import: bool = False
     settings_mutation_service: SettingsMutationService | None = None
     provider_verifier: _ControllerProviderVerifier | None = None
+    telemetry_client: TranslationSuccessTelemetryClientPort | None = None
 
     settings: AppSettings | None = None
     last_settings_mutation_result: TransactionResult | None = field(
@@ -1066,6 +1072,9 @@ class GuiController:
             show_snackbar=getattr(self.app, "show_snackbar", None),
             on_github_star_translation_success=getattr(
                 self.app, "on_github_star_translation_success", None
+            ),
+            on_telemetry_translation_success=getattr(
+                self.app, "on_telemetry_translation_success", None
             ),
             on_overlay_state_changed=getattr(self.app, "on_overlay_state_changed", None),
         )
@@ -2125,6 +2134,39 @@ class GuiController:
         runtime = self._github_star_prompt_runtime
         if runtime is not None:
             await runtime.drain_translation_success_task()
+
+    def _get_telemetry_service(self) -> TranslationSuccessTelemetryService:
+        return TranslationSuccessTelemetryService(
+            self.telemetry_client,
+            diagnostics_sink=self._telemetry_diagnostics_sink,
+        )
+
+    def _telemetry_diagnostics_sink(
+        self,
+        event: str,
+        metadata: Mapping[str, object],
+    ) -> None:
+        self.log_detailed(
+            f"[Telemetry] event={event} metadata={dict(metadata)}",
+            level=logging.INFO,
+        )
+
+    async def record_telemetry_translation_success_day(
+        self,
+    ) -> TranslationSuccessTelemetryResult:
+        if self.settings is None:
+            return TranslationSuccessTelemetryResult(status="skipped_no_settings")
+
+        async def _persist(updated: AppSettings) -> bool:
+            await self.apply_settings(updated)
+            return self.last_settings_mutation_result is not None and _settings_mutation_committed(
+                self.last_settings_mutation_result
+            )
+
+        return await self._get_telemetry_service().record_translation_success_day(
+            self.settings,
+            persist_sent_date=_persist,
+        )
 
     async def _preserve_github_star_prompt_observation_before_settings_replace(
         self,
