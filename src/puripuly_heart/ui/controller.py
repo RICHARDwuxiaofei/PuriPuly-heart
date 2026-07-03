@@ -254,11 +254,26 @@ from puripuly_heart.ui.views.logs import FletLogHandler
 
 logger = logging.getLogger(__name__)
 
+QQ_AUTH_DIALOG_MESSAGE_KEY_BY_SERVICE_KEY = {
+    "qq_managed_auth.already_claimed_discord": "qq_auth.error.already_claimed_discord",
+    "qq_managed_auth.invalid_credential": "qq_auth.error.credential_mismatch",
+    "qq_managed_auth.mismatch": "qq_auth.error.credential_mismatch",
+    "qq_managed_auth.lifetime_used": "qq_auth.error.lifetime_used",
+    "qq_managed_auth.rate_limited": "qq_auth.error.rate_limited",
+    "qq_managed_auth.key_unavailable": "qq_auth.error.key_unavailable",
+    "qq_managed_auth.broker_unavailable": "qq_auth.error.broker_unavailable",
+    "qq_managed_auth.settings_commit_failed": "qq_auth.error.settings_commit_failed",
+    "qq_managed_auth.secret_write_failed": "qq_auth.error.secret_write_failed",
+    "qq_managed_auth.error.retry": "qq_auth.error.retry",
+}
+
 # Hardcoded STT session reset deadline (not configurable via settings)
 STT_RESET_DEADLINE_S = 300.0
 OVERLAY_STARTUP_TIMEOUT_MS = 3000
 OVERLAY_SHUTDOWN_GRACE_S = 0.05
 DESKTOP_BOUNDS_PERSIST_DEBOUNCE_S = 0.05
+MANUAL_INPUT_TYPING_IDLE_TIMEOUT_S = 3.0
+MANUAL_INPUT_TYPING_REASON = "manual_input"
 DESKTOP_INTERACTION_MODE_EDIT = "edit"
 DESKTOP_INTERACTION_MODE_PASS_THROUGH = "pass_through"
 DESKTOP_INTERACTION_MODES = frozenset(
@@ -739,6 +754,8 @@ class GuiController:
 
     _bridge_task: asyncio.Task[None] | None = None
     _mic_task: asyncio.Task[None] | None = None
+    _manual_typing_idle_task: asyncio.Task[None] | None = field(init=False, default=None)
+    _manual_submit_generation: int = field(init=False, default=0)
     _audio_source: AudioSource | None = None
     _last_mic_loop_close_exception: BaseException | None = field(
         init=False,
@@ -1436,11 +1453,11 @@ class GuiController:
         credential: str,
     ) -> bool | tuple[str, dict[str, object]]:
         if not self._managed_china_auth_relevant_for_translation_enable() or self.settings is None:
-            return "qq_managed_auth.error.retry", {}
+            return "qq_auth.error.retry", {}
         service = self._managed_openrouter_release_service
         broker_client = getattr(service, "client", None)
         if broker_client is None:
-            return "qq_managed_auth.error.retry", {}
+            return "qq_auth.error.retry", {}
         secret_store = create_secret_store(self.settings.secrets, config_path=self.config_path)
         secret_store_port = _ControllerSecretStorePortAdapter(secret_store)
         managed_state = build_managed_identity_state_port(
@@ -1473,8 +1490,11 @@ class GuiController:
             return True
         message = result.message
         if message is None:
-            return "qq_managed_auth.error.retry", {}
-        return message.key, dict(message.params)
+            return "qq_auth.error.retry", {}
+        return (
+            QQ_AUTH_DIALOG_MESSAGE_KEY_BY_SERVICE_KEY.get(message.key, message.key),
+            dict(message.params),
+        )
 
     def _discord_auth_message_key(self, result) -> str:  # noqa: ANN001
         diagnostics = getattr(result, "diagnostics", None)
@@ -3662,6 +3682,7 @@ class GuiController:
 
     async def stop(self) -> None:
         cleanup_failures: list[Exception] = []
+        await self.release_manual_typing()
         await self._close_app_github_star_prompt_runtime_for_release(cleanup_failures)
         await self._close_github_star_prompt_runtime_for_release(cleanup_failures)
         await self._close_clipboard_runtime()
@@ -4943,12 +4964,77 @@ class GuiController:
             self._log_error(f"Clipboard submit failed: {exc}")
 
     async def submit_text(self, text: str) -> None:
+        self._clear_manual_input_typing()
         if self.hub is None:
             return
+        submit_reason = self._begin_manual_submit_typing()
         try:
             await self.hub.submit_text(text, source="You")
         except Exception as exc:
             self._log_error(f"Submit failed: {exc}")
+        finally:
+            self._clear_manual_submit_typing(submit_reason)
+
+    def set_manual_input_activity(self, has_text: bool) -> None:
+        if has_text:
+            self._set_typing_reason(MANUAL_INPUT_TYPING_REASON, True)
+            self._reschedule_manual_typing_idle_timeout()
+            return
+        self._clear_manual_input_typing()
+
+    async def release_manual_typing(self) -> None:
+        self._cancel_manual_typing_idle_task()
+        if self.osc is not None:
+            self.osc.clear_typing_reasons()
+        self.log_detailed("[ManualTyping] release status=cleared")
+
+    def _begin_manual_submit_typing(self) -> str:
+        self._manual_submit_generation += 1
+        reason = f"manual_submit:{self._manual_submit_generation}"
+        self._set_typing_reason(reason, True)
+        return reason
+
+    def _clear_manual_submit_typing(self, reason: str) -> None:
+        self._set_typing_reason(reason, False)
+
+    def _clear_manual_input_typing(self) -> None:
+        self._cancel_manual_typing_idle_task()
+        self._set_typing_reason(MANUAL_INPUT_TYPING_REASON, False)
+
+    def _set_typing_reason(self, reason: str, active: bool) -> None:
+        if self.osc is None:
+            return
+        try:
+            self.osc.set_typing_reason(reason, active)
+        except Exception as exc:
+            self._log_error(f"Manual typing output update failed: {exc}")
+
+    def _reschedule_manual_typing_idle_timeout(self) -> None:
+        self._cancel_manual_typing_idle_task()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._log_error("Manual typing idle timeout scheduling failed: no running loop")
+            return
+        self._manual_typing_idle_task = loop.create_task(self._manual_typing_idle_timeout())
+
+    def _cancel_manual_typing_idle_task(self) -> None:
+        task = self._manual_typing_idle_task
+        self._manual_typing_idle_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _manual_typing_idle_timeout(self) -> None:
+        try:
+            await asyncio.sleep(MANUAL_INPUT_TYPING_IDLE_TIMEOUT_S)
+            self._set_typing_reason(MANUAL_INPUT_TYPING_REASON, False)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._log_error(f"Manual typing idle timeout failed: {exc}")
+        finally:
+            if self._manual_typing_idle_task is asyncio.current_task():
+                self._manual_typing_idle_task = None
 
     async def on_dashboard_language_change(
         self,

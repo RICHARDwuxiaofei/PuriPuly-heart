@@ -283,6 +283,46 @@ def test_typing_indicator_is_forwarded_and_failure_is_basic_log() -> None:
     ]
 
 
+def test_typing_reasons_keep_indicator_visible_until_all_reasons_clear() -> None:
+    clock = FakeClock()
+    sender = FakeSender()
+    paginator = ChatboxPaginator(sender=sender, clock=clock)
+
+    paginator.set_typing_reason("manual_input", True)
+    paginator.set_typing_reason("manual_submit:1", True)
+    paginator.set_typing_reason("manual_input", False)
+    paginator.send_typing(False)
+    paginator.set_typing_reason("manual_submit:1", False)
+
+    assert sender.typing == [True, False]
+
+
+def test_legacy_typing_keeps_indicator_visible_until_legacy_state_clears() -> None:
+    clock = FakeClock()
+    sender = FakeSender()
+    paginator = ChatboxPaginator(sender=sender, clock=clock)
+
+    paginator.send_typing(True)
+    paginator.set_typing_reason("manual_input", True)
+    paginator.set_typing_reason("manual_input", False)
+    paginator.clear_typing_reasons()
+    paginator.send_typing(False)
+
+    assert sender.typing == [True, False]
+
+
+def test_clear_typing_reasons_clears_active_aggregate_state() -> None:
+    clock = FakeClock()
+    sender = FakeSender()
+    paginator = ChatboxPaginator(sender=sender, clock=clock)
+
+    paginator.set_typing_reason("manual_input", True)
+    paginator.set_typing_reason("manual_submit:1", True)
+    paginator.clear_typing_reasons()
+
+    assert sender.typing == [True, False]
+
+
 def test_send_immediate_trims_and_does_not_delay_pagination() -> None:
     clock = FakeClock()
     sender = FakeSender()

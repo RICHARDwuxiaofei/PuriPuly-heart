@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import textwrap
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID
 
 from puripuly_heart.core.clock import Clock
@@ -31,6 +31,9 @@ class ChatboxPaginator:
     _pending_pages: list[str] | None = None
     _pending_messages: list[OSCMessage] | None = None
     _next_page_at: float = 0.0
+    _typing_reasons: set[str] = field(default_factory=set, init=False, repr=False)
+    _legacy_typing_active: bool = field(default=False, init=False, repr=False)
+    _last_typing_state: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.max_chars <= 0:
@@ -75,8 +78,42 @@ class ChatboxPaginator:
 
     def send_typing(self, is_typing: bool) -> None:
         """Forward typing indicator to the OSC sender."""
+        self._legacy_typing_active = bool(is_typing)
+        if not is_typing and self._typing_reasons:
+            self._apply_typing_state()
+            return
+        self._send_typing_state(self._is_typing_active())
+
+    def set_typing_reason(self, reason: str, active: bool) -> None:
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("reason must be non-empty")
+        was_typing = self._is_typing_active()
+        if active:
+            self._typing_reasons.add(reason)
+        else:
+            self._typing_reasons.discard(reason)
+        self._apply_typing_state(was_typing=was_typing)
+
+    def clear_typing_reasons(self) -> None:
+        if not self._typing_reasons and self._last_typing_state == self._is_typing_active():
+            return
+        self._typing_reasons.clear()
+        self._apply_typing_state()
+
+    def _is_typing_active(self) -> bool:
+        return self._legacy_typing_active or bool(self._typing_reasons)
+
+    def _apply_typing_state(self, *, was_typing: bool | None = None) -> None:
+        is_typing = self._is_typing_active()
+        previous = self._last_typing_state if was_typing is None else was_typing
+        if is_typing != previous or is_typing != self._last_typing_state:
+            self._send_typing_state(is_typing)
+
+    def _send_typing_state(self, is_typing: bool) -> None:
         try:
             self.sender.send_typing(is_typing)
+            self._last_typing_state = bool(is_typing)
         except OSError as exc:
             self._emit_basic(
                 f"[Basic][OSC] typing status=failed error={exc}", level=logging.WARNING

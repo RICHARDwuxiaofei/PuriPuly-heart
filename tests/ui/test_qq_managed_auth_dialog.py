@@ -54,16 +54,18 @@ def test_qq_managed_auth_dialog_renders_inputs_and_actions() -> None:
 
     dialog.open()
 
-    assert dialog.action_labels == ["qq_managed_auth.close", "qq_managed_auth.continue"]
+    assert dialog.action_labels == ["qq_auth.close", "qq_auth.submit"]
     assert page.dialog is dialog._dialog
     assert dialog._qq_identity_field is not None
     assert dialog._credential_field is not None
-    assert dialog._qq_identity_field.label == t("qq_managed_auth.identity.label")
-    assert dialog._credential_field.label == t("qq_managed_auth.credential.label")
+    assert dialog._qq_identity_field.label == t("qq_auth.qq_identity.label")
+    assert dialog._qq_identity_field.helper_text == t("qq_auth.qq_identity.helper")
+    assert dialog._credential_field.label == t("qq_auth.credential.label")
+    assert dialog._credential_field.helper_text == t("qq_auth.credential.helper")
     assert dialog._credential_field.password is True
     assert [control.text for control in dialog._actions.controls] == [
-        t("qq_managed_auth.close"),
-        t("qq_managed_auth.continue"),
+        t("qq_auth.close"),
+        t("qq_auth.submit"),
     ]
 
 
@@ -79,7 +81,7 @@ def test_qq_managed_auth_dialog_validates_required_fields_without_closing() -> N
     assert page.closed == []
     assert dialog._error_text is not None
     assert dialog._error_text.visible is True
-    assert dialog._error_text.value == t("qq_managed_auth.error.invalid_input")
+    assert dialog._error_text.value == t("qq_auth.error.invalid_input")
 
 
 def test_qq_managed_auth_dialog_submit_waiting_error_and_cancel_states() -> None:
@@ -98,13 +100,13 @@ def test_qq_managed_auth_dialog_submit_waiting_error_and_cancel_states() -> None
     assert dialog.is_waiting is True
     assert dialog._qq_identity_field.disabled is True
     assert dialog._credential_field.disabled is True
-    assert [control.text for control in dialog._actions.controls] == [t("qq_managed_auth.cancel")]
+    assert [control.text for control in dialog._actions.controls] == [t("qq_auth.cancel")]
 
-    dialog.set_error("qq_managed_auth.mismatch")
+    dialog.set_error("qq_auth.error.credential_mismatch")
     assert dialog.is_waiting is False
     assert dialog._qq_identity_field.disabled is False
     assert dialog._credential_field.disabled is False
-    assert dialog._error_text.value == t("qq_managed_auth.mismatch")
+    assert dialog._error_text.value == t("qq_auth.error.credential_mismatch")
 
     dialog.set_waiting()
     dialog._cancel_button.on_click(None)

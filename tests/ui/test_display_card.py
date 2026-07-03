@@ -107,6 +107,31 @@ def test_display_card_tracks_input_focus_and_can_refocus(
     assert focus_calls == ["focus"]
 
 
+def test_display_card_reports_input_activity_without_exposing_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    activity: list[bool] = []
+    submitted: list[str] = []
+    card = DisplayCard(
+        on_submit=submitted.append,
+        on_input_activity=activity.append,
+    )
+    monkeypatch.setattr(type(card._input_field), "update", lambda self: None)
+
+    card._handle_input_change(SimpleNamespace(control=SimpleNamespace(value="  hello  ")))
+    card._handle_input_change(SimpleNamespace(control=SimpleNamespace(value="   ")))
+    card._handle_input_blur(SimpleNamespace(control=SimpleNamespace(value="ignored")))
+    card._handle_submit(
+        SimpleNamespace(
+            control=SimpleNamespace(value=" secret text ", update=lambda: None, focus=lambda: None)
+        )
+    )
+
+    assert activity == [True, False, False, False]
+    assert submitted == ["secret text"]
+    assert all(isinstance(item, bool) for item in activity)
+
+
 def test_display_card_input_font_locale_and_sync_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     card = DisplayCard(on_submit=lambda _text: None)
     monkeypatch.setattr(type(card._input_field), "update", lambda self: None)

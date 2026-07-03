@@ -40,6 +40,29 @@ MESSAGE_ERROR_BOUNDARY_KEYS = (
     "stt.failure",
     "settings.mutation.runtime_apply_failed",
 )
+QQ_AUTH_I18N_KEYS = (
+    "qq_auth.body",
+    "qq_auth.submit",
+    "qq_auth.close",
+    "qq_auth.cancel",
+    "qq_auth.waiting_body",
+    "qq_auth.success",
+    "qq_auth.qq_identity.label",
+    "qq_auth.qq_identity.helper",
+    "qq_auth.credential.label",
+    "qq_auth.credential.helper",
+    "qq_auth.error.invalid_input",
+    "qq_auth.error.credential_mismatch",
+    "qq_auth.error.lifetime_used",
+    "qq_auth.error.already_claimed_discord",
+    "qq_auth.error.retry",
+    "qq_auth.error.key_unavailable",
+    "qq_auth.error.rate_limited",
+    "qq_auth.error.broker_unavailable",
+    "qq_auth.error.settings_commit_failed",
+    "qq_auth.error.secret_write_failed",
+    "discord_auth.error.already_claimed_qq",
+)
 
 EXPECTED_GITHUB_STAR_SNACKBAR_KO_COPY = {
     "github_star.snackbar.message": "PuriPuly가 도움이 됐다면 GitHub에서 Star를 눌러주세요! 큰 힘이 되어요!",
@@ -266,6 +289,30 @@ def test_message_error_boundary_keys_are_localized_for_all_supported_locales() -
         for key in MESSAGE_ERROR_BOUNDARY_KEYS:
             assert bundle[key].strip()
             assert bundle[key] != key
+
+
+def test_qq_auth_copy_keys_are_localized_for_all_supported_locales() -> None:
+    bundles = _load_bundles()
+
+    for locale in ("en", "ko", "ja", "zh-CN"):
+        bundle = bundles[locale]
+        missing = sorted(set(QQ_AUTH_I18N_KEYS) - set(bundle))
+        assert missing == [], locale
+        for key in QQ_AUTH_I18N_KEYS:
+            assert bundle[key].strip(), (locale, key)
+            assert bundle[key] != key, (locale, key)
+        assert "647594597" in bundle["qq_auth.body"]
+        assert "700" in bundle["qq_auth.body"]
+        assert "QQ" in bundle["qq_auth.body"]
+        assert "Discord" in bundle["qq_auth.error.already_claimed_discord"]
+        assert "QQ" in bundle["discord_auth.error.already_claimed_qq"]
+        assert "Managed" in bundle["qq_auth.error.key_unavailable"]
+        assert (
+            "Translation" in bundle["qq_auth.error.key_unavailable"]
+            or "번역" in bundle["qq_auth.error.key_unavailable"]
+            or "翻訳" in bundle["qq_auth.error.key_unavailable"]
+            or "翻译" in bundle["qq_auth.error.key_unavailable"]
+        )
 
 
 def test_custom_vocabulary_tag_editor_copy_is_localized_for_all_supported_locales() -> None:
