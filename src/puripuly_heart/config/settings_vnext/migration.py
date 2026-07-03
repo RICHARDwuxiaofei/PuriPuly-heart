@@ -48,19 +48,16 @@ from puripuly_heart.config.settings_vnext.schema import (
 )
 
 
+def is_vnext_shape_dict(data: Mapping[str, Any]) -> bool:
+    return isinstance(data, Mapping) and ("intent" in data or "state" in data)
+
+
+def is_legacy_shape_dict(data: Mapping[str, Any]) -> bool:
+    return isinstance(data, Mapping) and not is_vnext_shape_dict(data)
+
+
 def is_vnext_settings_dict(data: Mapping[str, Any]) -> bool:
-    return (
-        isinstance(data, Mapping)
-        and _coerce_int(data.get("settings_version"), 0) >= VNEXT_SETTINGS_SCHEMA_VERSION
-    )
-
-
-def _is_lower_version_vnext_shape(data: Mapping[str, Any]) -> bool:
-    return (
-        isinstance(data, Mapping)
-        and not is_vnext_settings_dict(data)
-        and ("intent" in data or "state" in data)
-    )
+    return is_vnext_shape_dict(data)
 
 
 _PROVIDER_VERIFICATION_FIELDS = (
@@ -251,9 +248,6 @@ def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
     if not isinstance(data, Mapping):
         raise ValueError("settings must be a JSON object")
     if is_vnext_settings_dict(data):
-        _validate_vnext_top_level_shape(data)
-        return serialization.from_dict(data)
-    if _is_lower_version_vnext_shape(data):
         _validate_vnext_top_level_shape(data)
         return serialization.from_dict(_prepare_vnext_migration_dict(data))
 
@@ -671,15 +665,6 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
     return data
 
 
-def _coerce_int(value: object, default: int) -> int:
-    if isinstance(value, bool):
-        return default
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return default
-
-
 def _legacy_provider_llm_for_translation(model: str, connection: str) -> str:
     if model == "local_llm":
         return "local_llm"
@@ -713,6 +698,8 @@ def _is_evidence_bound_verified_entry(
 __all__ = [
     "from_dict",
     "from_legacy_app_settings",
+    "is_legacy_shape_dict",
+    "is_vnext_shape_dict",
     "is_vnext_settings_dict",
     "to_legacy_dict",
 ]

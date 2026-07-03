@@ -86,17 +86,11 @@ def to_json_text(settings: AppSettingsVNext) -> str:
 def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
     if not isinstance(data, Mapping):
         raise ValueError("vNext settings must be a JSON object")
-    raw_version = data.get("settings_version", VNEXT_SETTINGS_SCHEMA_VERSION)
-    if isinstance(raw_version, bool):
-        raise ValueError("vNext settings_version must be an integer")
-    try:
-        settings_version = int(raw_version)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("vNext settings_version must be an integer") from exc
-
-    default = AppSettingsVNext(settings_version=settings_version)
-    compatible_data = _project_legacy_translation_fallback_fields(
-        _downgrade_unbound_provider_verification_entries(data)
+    default = AppSettingsVNext(settings_version=VNEXT_SETTINGS_SCHEMA_VERSION)
+    compatible_data = _with_current_settings_version(
+        _project_legacy_translation_fallback_fields(
+            _downgrade_unbound_provider_verification_entries(data)
+        )
     )
     merged = _merge_dataclass(default, compatible_data, path="settings")
     if not isinstance(merged, AppSettingsVNext):
@@ -106,6 +100,12 @@ def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
         merged.intent.telemetry.consent,
     )
     return merged
+
+
+def _with_current_settings_version(data: Mapping[str, Any]) -> Mapping[str, Any]:
+    compatible = copy.deepcopy(dict(data))
+    compatible["settings_version"] = VNEXT_SETTINGS_SCHEMA_VERSION
+    return compatible
 
 
 def _downgrade_unbound_provider_verification_entries(

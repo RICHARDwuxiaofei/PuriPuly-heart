@@ -83,7 +83,7 @@ def load_vnext_settings(
             error=_error(SettingsPersistenceStatus.MIGRATION_FAILED, exc),
         )
 
-    if migration.is_vnext_settings_dict(raw):
+    if not _requires_canonical_save(raw, settings):
         return VNextSettingsLoadResult(
             status=SettingsPersistenceStatus.SUCCESS,
             settings=settings,
@@ -131,6 +131,17 @@ def save_vnext_settings(path: Path, settings: AppSettingsVNext) -> VNextSettings
             error=_error(SettingsPersistenceStatus.SAVE_FAILED, exc),
         )
     return VNextSettingsSaveResult(status=SettingsPersistenceStatus.SUCCESS)
+
+
+def _requires_canonical_save(raw: dict[str, Any], settings: AppSettingsVNext) -> bool:
+    canonical = json.loads(serialization.to_json_text(settings))
+    return _without_settings_version(raw) != _without_settings_version(canonical)
+
+
+def _without_settings_version(data: dict[str, Any]) -> dict[str, Any]:
+    comparable = dict(data)
+    comparable.pop("settings_version", None)
+    return comparable
 
 
 def create_pre_migration_backup(

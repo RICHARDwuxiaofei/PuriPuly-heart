@@ -124,6 +124,23 @@ def test_v24_maximal_fixture_migrates_to_canonical_vnext_serialization() -> None
     assert "api_key_verified" not in serialized
 
 
+def test_high_version_legacy_shape_migrates_by_shape_not_settings_version() -> None:
+    migration = _migration()
+    serialization = _serialization()
+    raw = maximal_v24_settings_fixture()
+    raw["settings_version"] = VNEXT_SETTINGS_SCHEMA_VERSION + 100
+
+    settings = migration.from_dict(raw)
+    serialized = serialization.to_dict(settings)
+
+    assert isinstance(settings, AppSettingsVNext)
+    assert settings.settings_version == VNEXT_SETTINGS_SCHEMA_VERSION
+    assert set(serialized) == {"settings_version", "intent", "state"}
+    assert serialized["settings_version"] == VNEXT_SETTINGS_SCHEMA_VERSION
+    assert serialized["intent"]["translation"]["model"] == "local_llm"
+    assert serialized["intent"]["translation"]["connection"] == "ollama"
+
+
 def test_v24_boolean_api_key_verification_migrates_every_provider_to_unknown() -> None:
     migration = _migration()
     serialization = _serialization()
@@ -575,6 +592,18 @@ def test_current_vnext_dict_reads_and_serializes_idempotently() -> None:
     assert serialized == raw
 
 
+def test_vnext_settings_version_is_loaded_as_metadata_not_input() -> None:
+    migration = _migration()
+    serialization = _serialization()
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["settings_version"] = "not-a-schema-discriminator"
+
+    loaded = migration.from_dict(raw)
+
+    assert loaded.settings_version == VNEXT_SETTINGS_SCHEMA_VERSION
+    assert serialization.to_dict(loaded)["settings_version"] == VNEXT_SETTINGS_SCHEMA_VERSION
+
+
 def test_save_vnext_settings_normalizes_stale_settings_version_to_current(
     tmp_path: Path,
 ) -> None:
@@ -709,7 +738,7 @@ def test_malformed_current_vnext_top_level_shape_fails_without_backup_or_overwri
     assert not list(tmp_path.glob("*.bak"))
 
 
-def test_lower_version_vnext_shape_migrates_with_backup_and_overwrite(
+def test_vnext_settings_version_only_difference_does_not_backup_or_overwrite(
     tmp_path: Path,
 ) -> None:
     compat = _compat()
@@ -727,12 +756,10 @@ def test_lower_version_vnext_shape_migrates_with_backup_and_overwrite(
     assert result.settings is not None
     assert result.settings.settings_version == VNEXT_SETTINGS_SCHEMA_VERSION
     assert result.settings.intent.ui.locale == "ja"
-    assert result.migrated is True
-    assert result.backup_path == tmp_path / "settings.json.pre-v25.20260609T010203Z.bak"
-    assert result.backup_path.read_bytes() == original_bytes
-    persisted = json.loads(path.read_text(encoding="utf-8"))
-    assert persisted["settings_version"] == VNEXT_SETTINGS_SCHEMA_VERSION
-    assert persisted["intent"]["ui"]["locale"] == "ja"
+    assert result.migrated is False
+    assert result.backup_path is None
+    assert path.read_bytes() == original_bytes
+    assert not list(tmp_path.glob("*.bak"))
 
 
 def test_facade_projection_failure_returns_explicit_result_without_overwrite(

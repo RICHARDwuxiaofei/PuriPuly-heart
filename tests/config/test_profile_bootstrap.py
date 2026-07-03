@@ -32,6 +32,27 @@ def test_import_stable_settings_if_missing_writes_vnext_without_touching_stable(
     assert saved["intent"]["ui"]["locale"] == "ko"
 
 
+def test_import_stable_settings_accepts_high_version_legacy_shape(tmp_path) -> None:
+    stable_path = tmp_path / "stable" / "settings.json"
+    target_path = tmp_path / "vnext" / "settings.json"
+    stable_path.parent.mkdir()
+    legacy = legacy_settings.AppSettings()
+    legacy.ui.locale = "ja"
+    raw = legacy_settings.to_dict(legacy)
+    raw["settings_version"] = 999
+    stable_path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+    result = import_stable_settings_if_missing(target_path, source_path=stable_path)
+
+    assert result.ok
+    assert result.imported
+    assert result.settings is not None
+    saved = json.loads(target_path.read_text(encoding="utf-8"))
+    assert set(saved) == serialization.CANONICAL_TOP_LEVEL_KEYS
+    assert saved["settings_version"] == serialization.VNEXT_SETTINGS_SCHEMA_VERSION
+    assert saved["intent"]["ui"]["locale"] == "ja"
+
+
 def test_import_stable_settings_if_missing_does_not_overwrite_existing_target(tmp_path) -> None:
     stable_path = tmp_path / "stable" / "settings.json"
     target_path = tmp_path / "vnext" / "settings.json"
