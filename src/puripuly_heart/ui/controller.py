@@ -249,6 +249,19 @@ from puripuly_heart.ui.views.logs import FletLogHandler
 
 logger = logging.getLogger(__name__)
 
+QQ_AUTH_DIALOG_MESSAGE_KEY_BY_SERVICE_KEY = {
+    "qq_managed_auth.already_claimed_discord": "qq_auth.error.already_claimed_discord",
+    "qq_managed_auth.invalid_credential": "qq_auth.error.credential_mismatch",
+    "qq_managed_auth.mismatch": "qq_auth.error.credential_mismatch",
+    "qq_managed_auth.lifetime_used": "qq_auth.error.lifetime_used",
+    "qq_managed_auth.rate_limited": "qq_auth.error.rate_limited",
+    "qq_managed_auth.key_unavailable": "qq_auth.error.key_unavailable",
+    "qq_managed_auth.broker_unavailable": "qq_auth.error.broker_unavailable",
+    "qq_managed_auth.settings_commit_failed": "qq_auth.error.settings_commit_failed",
+    "qq_managed_auth.secret_write_failed": "qq_auth.error.secret_write_failed",
+    "qq_managed_auth.error.retry": "qq_auth.error.retry",
+}
+
 # Hardcoded STT session reset deadline (not configurable via settings)
 STT_RESET_DEADLINE_S = 300.0
 OVERLAY_STARTUP_TIMEOUT_MS = 3000
@@ -1431,11 +1444,11 @@ class GuiController:
         credential: str,
     ) -> bool | tuple[str, dict[str, object]]:
         if not self._managed_china_auth_relevant_for_translation_enable() or self.settings is None:
-            return "qq_managed_auth.error.retry", {}
+            return "qq_auth.error.retry", {}
         service = self._managed_openrouter_release_service
         broker_client = getattr(service, "client", None)
         if broker_client is None:
-            return "qq_managed_auth.error.retry", {}
+            return "qq_auth.error.retry", {}
         secret_store = create_secret_store(self.settings.secrets, config_path=self.config_path)
         secret_store_port = _ControllerSecretStorePortAdapter(secret_store)
         managed_state = build_managed_identity_state_port(
@@ -1468,8 +1481,11 @@ class GuiController:
             return True
         message = result.message
         if message is None:
-            return "qq_managed_auth.error.retry", {}
-        return message.key, dict(message.params)
+            return "qq_auth.error.retry", {}
+        return (
+            QQ_AUTH_DIALOG_MESSAGE_KEY_BY_SERVICE_KEY.get(message.key, message.key),
+            dict(message.params),
+        )
 
     def _discord_auth_message_key(self, result) -> str:  # noqa: ANN001
         diagnostics = getattr(result, "diagnostics", None)

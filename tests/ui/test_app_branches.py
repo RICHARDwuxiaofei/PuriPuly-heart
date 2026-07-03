@@ -1326,17 +1326,17 @@ def test_debug_preview_qq_auth_states_are_pure_ui_without_tasks_or_persistence(
     assert initial_dialog._dialog is app.page.opened[-1]
     initial_dialog._continue_button.on_click(None)
     assert app.page.tasks == []
-    assert initial_dialog._error_text.value == app_module.t("qq_managed_auth.error.invalid_input")
+    assert initial_dialog._error_text.value == app_module.t("qq_auth.error.invalid_input")
     initial_dialog._close_button.on_click(None)
     assert app.page.closed[-1] is initial_dialog._dialog
 
     app._preview_qq_auth_recoverable_error()
     recoverable_dialog = app._qq_managed_auth_dialog
-    assert recoverable_dialog._error_text.value == app_module.t("qq_managed_auth.mismatch")
+    assert recoverable_dialog._error_text.value == app_module.t("qq_auth.error.credential_mismatch")
 
     app._preview_qq_auth_translation_gated()
     gated_dialog = app._qq_managed_auth_dialog
-    assert gated_dialog._error_text.value == app_module.t("qq_managed_auth.required")
+    assert gated_dialog._error_text.value == app_module.t("qq_auth.error.key_unavailable")
     assert app.page.tasks == []
     assert settings.openrouter.selected_source is OpenRouterCredentialSource.MANAGED
 
@@ -1511,7 +1511,7 @@ async def test_start_qq_managed_auth_uses_run_task_and_success_closes_dialog() -
     assert enable_calls == [True]
     assert hub.translation_enabled is True
     assert dialog.close_calls == 1
-    assert snackbar_calls == [(app_module.t("qq_managed_auth.success"), app_module.COLOR_SUCCESS)]
+    assert snackbar_calls == [(app_module.t("qq_auth.success"), app_module.COLOR_SUCCESS)]
     assert dashboard_translation_calls == [True]
 
 
@@ -1565,7 +1565,7 @@ async def test_start_qq_managed_auth_renders_recoverable_error_without_closing()
     )
 
     async def fake_start_qq_managed_auth_from_dialog(**_kwargs):
-        return "qq_managed_auth.rate_limited", {"retry_after_ms": 3000}
+        return "qq_auth.error.rate_limited", {"retry_after_ms": 3000}
 
     app.controller = SimpleNamespace(
         start_qq_managed_auth_from_dialog=fake_start_qq_managed_auth_from_dialog,
@@ -1574,7 +1574,50 @@ async def test_start_qq_managed_auth_renders_recoverable_error_without_closing()
     app._start_qq_managed_auth()
     await app.page.tasks[0]()
 
-    assert error_calls == [("qq_managed_auth.rate_limited", {"retry_after_ms": 3000})]
+    assert error_calls == [("qq_auth.error.rate_limited", {"retry_after_ms": 3000})]
+
+
+@pytest.mark.asyncio
+async def test_start_qq_managed_auth_key_unavailable_stays_recoverable_and_translation_off() -> (
+    None
+):
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    error_calls: list[tuple[str, dict[str, object]]] = []
+    dialog = SimpleNamespace(
+        qq_identity="qq-user",
+        credential="credential",
+        set_waiting=lambda: None,
+        close=lambda: pytest.fail("key unavailable must keep the QQ auth dialog open"),
+        set_error=lambda key, **kwargs: error_calls.append((key, kwargs)),
+    )
+    app._qq_managed_auth_dialog = dialog
+    app._qq_managed_auth_generation = 0
+    app._qq_managed_auth_cancelled = False
+    app._show_snackbar = lambda *_args, **_kwargs: pytest.fail(
+        "key unavailable must not render as success"
+    )
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda _enabled: pytest.fail(
+            "key unavailable must not visually enable translation"
+        )
+    )
+
+    async def fake_start_qq_managed_auth_from_dialog(**_kwargs):
+        return "qq_auth.error.key_unavailable", {}
+
+    async def fake_set_translation_enabled(_enabled: bool):
+        pytest.fail("key unavailable must not enable translation")
+
+    app.controller = SimpleNamespace(
+        start_qq_managed_auth_from_dialog=fake_start_qq_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_qq_managed_auth()
+    await app.page.tasks[0]()
+
+    assert error_calls == [("qq_auth.error.key_unavailable", {})]
 
 
 @pytest.mark.asyncio
@@ -1604,7 +1647,7 @@ async def test_start_qq_managed_auth_exception_uses_safe_bounded_log() -> None:
     app._start_qq_managed_auth()
     await app.page.tasks[0]()
 
-    assert error_calls == [("qq_managed_auth.error.retry", {})]
+    assert error_calls == [("qq_auth.error.retry", {})]
     rendered_logs = repr(logs)
     assert "raw broker payload" not in rendered_logs
     assert "raw-credential" not in rendered_logs

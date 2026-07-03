@@ -541,11 +541,11 @@ class TranslatorApp:
 
     def _preview_qq_auth_recoverable_error(self) -> None:
         dialog = self._open_qq_auth_preview_dialog()
-        dialog.set_error("qq_managed_auth.mismatch")
+        dialog.set_error("qq_auth.error.credential_mismatch")
 
     def _preview_qq_auth_translation_gated(self) -> None:
         dialog = self._open_qq_auth_preview_dialog()
-        dialog.set_error("qq_managed_auth.required")
+        dialog.set_error("qq_auth.error.key_unavailable")
 
     def _preview_discord_callback_page(self) -> None:
         webbrowser.open(_write_discord_callback_preview_page(get_locale()))
@@ -1306,18 +1306,18 @@ class TranslatorApp:
                     if not self._translation_enable_succeeded(controller, enable_result):
                         set_error = getattr(dialog, "set_error", None)
                         if callable(set_error):
-                            set_error("qq_managed_auth.error.retry")
+                            set_error("qq_auth.error.retry")
                         self._qq_managed_auth_task_handle = None
                         return
                 self._close_qq_managed_auth_dialog()
-                self._show_snackbar(t("qq_managed_auth.success"), COLOR_SUCCESS)
+                self._show_snackbar(t("qq_auth.success"), COLOR_SUCCESS)
                 self._set_dashboard_translation_visual_state(True)
                 self._qq_managed_auth_task_handle = None
                 self._get_oauth_runtime().clear_external_task(
                     "qq-managed-auth-dialog",
                 )
                 return
-            message_key = "qq_managed_auth.error.retry"
+            message_key = "qq_auth.error.retry"
             message_kwargs: dict[str, object] = {}
             if isinstance(result, tuple) and result:
                 message_key = str(result[0])

@@ -18,10 +18,10 @@ from puripuly_heart.ui.theme import COLOR_DIVIDER, COLOR_ON_BACKGROUND, COLOR_PR
 
 class QqManagedAuthDialog:
     action_labels = [
-        "qq_managed_auth.close",
-        "qq_managed_auth.continue",
+        "qq_auth.close",
+        "qq_auth.submit",
     ]
-    waiting_action_labels = ["qq_managed_auth.cancel"]
+    waiting_action_labels = ["qq_auth.cancel"]
 
     def __init__(
         self,
@@ -69,9 +69,13 @@ class QqManagedAuthDialog:
             return
 
         self._is_waiting = False
-        self._qq_identity_field = self._build_text_field("qq_managed_auth.identity.label")
+        self._qq_identity_field = self._build_text_field(
+            "qq_auth.qq_identity.label",
+            helper_key="qq_auth.qq_identity.helper",
+        )
         self._credential_field = self._build_text_field(
-            "qq_managed_auth.credential.label",
+            "qq_auth.credential.label",
+            helper_key="qq_auth.credential.helper",
             password=True,
         )
         self._error_text = ft.Text(
@@ -83,7 +87,7 @@ class QqManagedAuthDialog:
         )
         self._dialog_result = open_warm_document_dialog(
             self._page,
-            body_paragraphs=split_body_paragraphs(t("qq_managed_auth.body")),
+            body_paragraphs=split_body_paragraphs(t("qq_auth.body")),
             extra_body_controls=[
                 self._qq_identity_field,
                 self._credential_field,
@@ -93,12 +97,12 @@ class QqManagedAuthDialog:
             action_top_margin=24,
             actions=[
                 WarmDocumentDialogAction(
-                    label=t("qq_managed_auth.close"),
+                    label=t("qq_auth.close"),
                     on_select=lambda: self._close_then(self._on_close),
                     close_before_action=False,
                 ),
                 WarmDocumentDialogAction(
-                    label=t("qq_managed_auth.continue"),
+                    label=t("qq_auth.submit"),
                     on_select=self._submit,
                     close_before_action=False,
                 ),
@@ -119,12 +123,12 @@ class QqManagedAuthDialog:
         if self._dialog_result is None or self._body_text is None:
             return
         self._body_text.value = join_body_paragraphs(
-            split_body_paragraphs(t("qq_managed_auth.waiting_body"))
+            split_body_paragraphs(t("qq_auth.waiting_body"))
         )
         waiting_buttons = self._dialog_result.set_actions(
             [
                 WarmDocumentDialogAction(
-                    label=t("qq_managed_auth.cancel"),
+                    label=t("qq_auth.cancel"),
                     on_select=self._cancel_waiting,
                     close_before_action=False,
                 )
@@ -139,19 +143,17 @@ class QqManagedAuthDialog:
         self._is_waiting = False
         self._set_fields_disabled(False)
         if self._body_text is not None:
-            self._body_text.value = join_body_paragraphs(
-                split_body_paragraphs(t("qq_managed_auth.body"))
-            )
+            self._body_text.value = join_body_paragraphs(split_body_paragraphs(t("qq_auth.body")))
         if self._dialog_result is not None:
             buttons = self._dialog_result.set_actions(
                 [
                     WarmDocumentDialogAction(
-                        label=t("qq_managed_auth.close"),
+                        label=t("qq_auth.close"),
                         on_select=lambda: self._close_then(self._on_close),
                         close_before_action=False,
                     ),
                     WarmDocumentDialogAction(
-                        label=t("qq_managed_auth.continue"),
+                        label=t("qq_auth.submit"),
                         on_select=self._submit,
                         close_before_action=False,
                     ),
@@ -168,11 +170,17 @@ class QqManagedAuthDialog:
         self._page.close(self._dialog)
         self._is_open = False
 
-    def _build_text_field(self, label_key: str, *, password: bool = False) -> ft.TextField:
+    def _build_text_field(
+        self,
+        label_key: str,
+        *,
+        helper_key: str,
+        password: bool = False,
+    ) -> ft.TextField:
         return ft.TextField(
             label=t(label_key),
             value="",
-            helper_text="",
+            helper_text=t(helper_key),
             dense=False,
             border_radius=14,
             border_color=COLOR_DIVIDER,
@@ -187,7 +195,7 @@ class QqManagedAuthDialog:
 
     def _submit(self) -> None:
         if not self.qq_identity.strip() or not self.credential.strip():
-            self._set_error_key("qq_managed_auth.error.invalid_input")
+            self._set_error_key("qq_auth.error.invalid_input")
             self._update_page_if_possible()
             return
         self._on_continue()
