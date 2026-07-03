@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Protocol
 from uuid import UUID
 
@@ -137,6 +137,44 @@ def format_detailed_latency_breakdown(
     return f"[Detailed][LatencyBreakdown] {' '.join(parts)}"
 
 
+def compute_latency_dominant_stage(
+    stage_durations_ms: Mapping[str, int | None],
+) -> str | None:
+    safe_durations = {
+        str(stage): int(duration)
+        for stage, duration in stage_durations_ms.items()
+        if duration is not None and int(duration) >= 0
+    }
+    if not safe_durations:
+        return None
+    return max(safe_durations, key=lambda stage: (safe_durations[stage], stage))
+
+
+def format_latency_cause_metric(
+    *,
+    channel: str,
+    provider: str,
+    utterance_id: str,
+    stage_durations_ms: Mapping[str, int | None],
+) -> str | None:
+    dominant_stage = compute_latency_dominant_stage(stage_durations_ms)
+    if dominant_stage is None:
+        return None
+    parts = [
+        "[Metric] latency_cause",
+        f"channel={channel}",
+        f"provider={provider}",
+        f"utterance_id={utterance_id}",
+        f"dominant_stage={dominant_stage}",
+    ]
+    for stage in sorted(stage_durations_ms):
+        duration = stage_durations_ms[stage]
+        if duration is None:
+            continue
+        parts.append(f"{stage}_ms={max(0, int(duration))}")
+    return " ".join(parts)
+
+
 def format_translation_ready_for_output(
     *,
     channel: str,
@@ -172,9 +210,11 @@ __all__ = [
     "HubOverlayEventFactoryPort",
     "HubOverlaySinkPort",
     "HubRuntimeLoggingPort",
+    "compute_latency_dominant_stage",
     "format_basic_latency_summary",
     "format_detailed_latency_breakdown",
     "format_detailed_latency_trace",
+    "format_latency_cause_metric",
     "format_translation_ready_for_output",
     "runtime_logging_mode_is_detailed",
 ]

@@ -1308,6 +1308,101 @@ async def test_managed_stt_provider_multiple_pending_finals_resolve_fifo() -> No
         await stt.close()
 
 
+async def test_managed_stt_provider_emits_delayed_finalization_lag_diagnostic() -> None:
+    backend = Float32Backend()
+    clock = FakeClock(10.0)
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        clock=clock,
+        reconnect_window_s=0.1,
+        reset_deadline_s=90.0,
+        stt_provider_name=STTProviderName.SONIOX,
+        runtime_logging=runtime_logging,
+    )
+
+    utterance_id = uuid4()
+    stream = stt.events()
+
+    try:
+        await stt.handle_vad_event(
+            SpeechStart(
+                utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(1.0),
+            )
+        )
+        await _next_state(stream, STTSessionState.STREAMING)
+        await stt.handle_vad_event(SpeechEnd(utterance_id))
+        clock.advance(0.25)
+
+        await backend.sessions[0]._queue.put(
+            STTBackendTranscriptEvent(text="safe final text must not appear", is_final=True)
+        )
+        event = await _next_typed_event(stream, STTFinalEvent)
+
+        messages = _runtime_log_messages(log_stream)
+        lag_message = next(message for message in messages if "[STT][FinalizationLag]" in message)
+
+        assert event.utterance_id == utterance_id
+        assert "channel=self" in lag_message
+        assert "provider=soniox" in lag_message
+        assert f"utterance_id={str(utterance_id)[:8]}" in lag_message
+        assert "pending_ms=250" in lag_message
+        assert "threshold_ms=100" in lag_message
+        assert "dominant_stage=stt_finalization_pending" in lag_message
+        assert "speech_end_to_stt_final_ms=250" in lag_message
+        assert "safe final text" not in lag_message
+    finally:
+        await stt.close()
+        runtime_logging.close()
+
+
+async def test_managed_stt_provider_does_not_emit_normal_finalization_lag() -> None:
+    backend = Float32Backend()
+    clock = FakeClock(10.0)
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        clock=clock,
+        reconnect_window_s=0.5,
+        reset_deadline_s=90.0,
+        runtime_logging=runtime_logging,
+    )
+
+    utterance_id = uuid4()
+    stream = stt.events()
+
+    try:
+        await stt.handle_vad_event(
+            SpeechStart(
+                utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(1.0),
+            )
+        )
+        await _next_state(stream, STTSessionState.STREAMING)
+        await stt.handle_vad_event(SpeechEnd(utterance_id))
+        clock.advance(0.1)
+
+        await backend.sessions[0]._queue.put(
+            STTBackendTranscriptEvent(text="normal final", is_final=True)
+        )
+        event = await _next_typed_event(stream, STTFinalEvent)
+
+        assert event.utterance_id == utterance_id
+        assert not any(
+            "[STT][FinalizationLag]" in message for message in _runtime_log_messages(log_stream)
+        )
+    finally:
+        await stt.close()
+        runtime_logging.close()
+
+
 async def test_managed_stt_provider_empty_final_boundary_consumes_pending_id_before_next_final() -> (
     None
 ):

@@ -689,6 +689,12 @@ class ManagedSTTProvider:
 
             self._pending_final_utterance_ids.popleft()
             self._pending_final_utterance_times.pop(utterance_id, None)
+            self._emit_finalization_lag_diagnostic(
+                utterance_id=utterance_id,
+                pending_duration_s=age_s,
+                threshold_s=stale_after_s,
+                outcome="stale_drop",
+            )
             self._emit_detailed(
                 "[STT] Dropped stale pending final id=%s age_s=%.1f",
                 str(utterance_id)[:8],
@@ -696,6 +702,33 @@ class ManagedSTTProvider:
                 level=logging.WARNING,
                 fallback_level=logging.WARNING,
             )
+
+    def _emit_finalization_lag_diagnostic(
+        self,
+        *,
+        utterance_id: UUID,
+        pending_duration_s: float,
+        threshold_s: float,
+        outcome: str,
+    ) -> None:
+        pending_ms = max(0, int(round(pending_duration_s * 1000)))
+        threshold_ms = max(0, int(round(threshold_s * 1000)))
+        if pending_ms <= threshold_ms:
+            return
+        self._emit_detailed(
+            "[STT][FinalizationLag] channel=%s provider=%s utterance_id=%s "
+            "pending_ms=%s threshold_ms=%s dominant_stage=stt_finalization_pending "
+            "speech_end_to_stt_final_ms=%s outcome=%s",
+            self.channel,
+            self._provider_label(),
+            str(utterance_id)[:8],
+            pending_ms,
+            threshold_ms,
+            pending_ms,
+            outcome,
+            level=logging.WARNING,
+            fallback_level=logging.WARNING,
+        )
 
     def _should_suppress_final_transcript(self, text: str) -> bool:
         return (
@@ -759,7 +792,14 @@ class ManagedSTTProvider:
                         else self._active_utterance_id
                     )
                     if utterance_id is not None:
-                        self._pending_final_utterance_times.pop(utterance_id, None)
+                        ended_at = self._pending_final_utterance_times.pop(utterance_id, None)
+                        if ended_at is not None:
+                            self._emit_finalization_lag_diagnostic(
+                                utterance_id=utterance_id,
+                                pending_duration_s=self.clock.now() - ended_at,
+                                threshold_s=max(0.0, float(self.reconnect_window_s)),
+                                outcome="final_received",
+                            )
                 else:
                     utterance_id = self._active_utterance_id or (
                         self._pending_final_utterance_ids[0]
