@@ -274,6 +274,7 @@
     "debug_preview.brake_notice": "Brake notice",
     "debug_preview.revoked_notice": "Revoked notice",
     "debug_preview.github_star_snackbar": "GitHub Star",
+    "debug_preview.telemetry_consent": "遥测同意",
     "debug_preview.founder_letter": "Founder letter",
     "debug_preview.pkce_failure": "PKCE failure",
     "debug_preview.peer_translation_eula": "对方翻译 EULA",

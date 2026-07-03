@@ -61,6 +61,7 @@ class DebugPreviewPanel(ft.Container):
         on_stt_fault_cycle: Callable[[], None],
         on_audio_fault_clear: Callable[[], None],
         on_github_star_snackbar: Callable[[], None],
+        on_telemetry_consent: Callable[[], None],
     ) -> None:
         self._actions = (
             _PreviewAction("brake_notice", "debug_preview.brake_notice", on_brake_notice),
@@ -69,6 +70,11 @@ class DebugPreviewPanel(ft.Container):
                 "github_star_snackbar",
                 "debug_preview.github_star_snackbar",
                 on_github_star_snackbar,
+            ),
+            _PreviewAction(
+                "telemetry_consent",
+                "debug_preview.telemetry_consent",
+                on_telemetry_consent,
             ),
             _PreviewAction("founder_letter", "debug_preview.founder_letter", on_founder_letter),
             _PreviewAction("pkce_failure", "debug_preview.pkce_failure", on_pkce_failure),

@@ -295,6 +295,7 @@ class TranslatorApp:
             on_stt_fault_cycle=self._preview_stt_fault_cycle,
             on_audio_fault_clear=self._preview_audio_fault_clear,
             on_github_star_snackbar=self._preview_github_star_snackbar,
+            on_telemetry_consent=self._preview_telemetry_consent,
         )
 
     def _mark_launch_high_priority_feedback_shown(
@@ -507,6 +508,15 @@ class TranslatorApp:
 
         snackbar = self._build_github_star_prompt_snackbar(_open_repository)
         self.page.open(snackbar)
+
+    def _preview_telemetry_consent(self) -> None:
+        dialog = TelemetryConsentDialog(
+            self.page,
+            on_allow=self._debug_preview_noop,
+            on_decline=self._debug_preview_noop,
+        )
+        self._telemetry_consent_dialog = dialog
+        dialog.open()
 
     def _preview_brake_notice(self) -> None:
         self._show_snackbar(t("managed_release.brake"), ft.Colors.ORANGE_700)

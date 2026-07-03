@@ -531,6 +531,7 @@ def test_translator_app_mounts_debug_preview_when_enabled(
         "on_brake_notice",
         "on_revoked_notice",
         "on_github_star_snackbar",
+        "on_telemetry_consent",
         "on_founder_letter",
         "on_pkce_failure",
         "on_discord_auth",
@@ -557,6 +558,9 @@ def test_translator_app_mounts_debug_preview_when_enabled(
     github_star = seen["callbacks"]["on_github_star_snackbar"]
     assert getattr(github_star, "__self__", None) is app
     assert getattr(github_star, "__func__", None) is TranslatorApp._preview_github_star_snackbar
+    telemetry_consent = seen["callbacks"]["on_telemetry_consent"]
+    assert getattr(telemetry_consent, "__self__", None) is app
+    assert getattr(telemetry_consent, "__func__", None) is TranslatorApp._preview_telemetry_consent
     local_qwen_modal = seen["callbacks"]["on_local_qwen_hallucination_modal"]
     assert getattr(local_qwen_modal, "__self__", None) is app
     assert (
@@ -580,6 +584,56 @@ def test_translator_app_mounts_debug_preview_when_enabled(
     root = page.added[0]
     assert isinstance(root.content, ft.Stack)
     assert root.content.controls[-1] is app.debug_preview_panel
+
+
+def test_debug_preview_telemetry_consent_opens_without_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.telemetry.consent = "unknown"
+    settings.telemetry_state.anonymous_id = "existing-id"
+    settings.telemetry_state.sent_translation_success_dates_utc = ["2026-07-03"]
+    app.controller = SimpleNamespace(
+        settings=settings,
+        apply_settings=lambda *_args, **_kwargs: pytest.fail(
+            "telemetry preview must not persist settings"
+        ),
+        apply_providers=lambda *_args, **_kwargs: pytest.fail(
+            "telemetry preview must not apply providers"
+        ),
+        record_telemetry_translation_success_day=lambda *_args, **_kwargs: pytest.fail(
+            "telemetry preview must not send telemetry"
+        ),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: pytest.fail("telemetry preview must not mutate secrets"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module.webbrowser,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail("telemetry preview must not open network URLs"),
+    )
+
+    app._preview_telemetry_consent()
+
+    assert len(app.page.opened) == 1
+    action_buttons = [
+        node
+        for node in _iter_control_tree(app.page.opened[0])
+        if isinstance(node, ft.TextButton | ft.ElevatedButton)
+    ]
+    for button in action_buttons:
+        if getattr(button, "on_click", None) is not None:
+            button.on_click(None)
+    assert app.page.tasks == []
+    assert settings.telemetry.consent == "unknown"
+    assert settings.telemetry_state.anonymous_id == "existing-id"
+    assert settings.telemetry_state.sent_translation_success_dates_utc == ["2026-07-03"]
 
 
 def test_debug_preview_local_qwen_modal_opens_production_dialog_without_state_or_side_effects(
