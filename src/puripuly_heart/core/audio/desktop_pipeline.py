@@ -8,19 +8,11 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from puripuly_heart.core.audio.diagnostics import compute_audio_frame_metrics
-from puripuly_heart.core.audio.format import AudioFrameF32, float32_to_pcm16le_bytes
+from puripuly_heart.core.audio.format import AudioFrameF32
 from puripuly_heart.core.audio.source import AudioSource
 from puripuly_heart.core.audio.streaming_resampler import MonoFirstStreamingResampler
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class DesktopPeerAudioFrame:
-    samples: np.ndarray
-    sample_rate_hz: int
-    deepgram_pcm16le: bytes
-    channels: int = 1
 
 
 @dataclass(slots=True)
@@ -32,7 +24,7 @@ class DesktopPeerPipeline:
     _logged_formats: set[tuple[int, int]] = field(default_factory=set, init=False, repr=False)
     _diag_accumulated_audio_ms: float = field(default=0.0, init=False, repr=False)
 
-    async def frames(self) -> AsyncIterator[DesktopPeerAudioFrame]:
+    async def frames(self) -> AsyncIterator[AudioFrameF32]:
         resampler: MonoFirstStreamingResampler | None = None
         source_format: tuple[int, int] | None = None
 
@@ -117,10 +109,9 @@ class DesktopPeerPipeline:
                 f"zero_ratio={metrics.zero_ratio:.3f}"
             )
 
-    def _build_output_frame(self, samples: np.ndarray) -> DesktopPeerAudioFrame:
-        return DesktopPeerAudioFrame(
+    def _build_output_frame(self, samples: np.ndarray) -> AudioFrameF32:
+        return AudioFrameF32(
             samples=samples,
             sample_rate_hz=self.target_sample_rate_hz,
             channels=1,
-            deepgram_pcm16le=float32_to_pcm16le_bytes(samples),
         )

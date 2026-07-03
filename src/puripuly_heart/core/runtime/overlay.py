@@ -27,7 +27,6 @@ class OverlayRuntimeHandle:
         "OverlayPresenter._expiration_tasks",
         "OverlayPresenter._peer_presentation_refresh_burst_task",
         "OverlayPresenter._self_presentation_refresh_burst_task",
-        "OverlayStreamCoalescer._flush_task",
     )
     stop_ingress = "broadcast shutdown and reject new overlay commands"
     shutdown_policy = (

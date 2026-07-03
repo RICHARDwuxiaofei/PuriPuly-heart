@@ -31,7 +31,6 @@ LEGACY_TASK_CREATION_ALLOWLIST = Counter(
         ("src/puripuly_heart/core/overlay/bridge.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/overlay/presenter.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/overlay/process.py", ASYNCIO_CREATE_TASK): 2,
-        ("src/puripuly_heart/core/overlay/sink.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/providers/stt/soniox.py", ASYNCIO_CREATE_TASK): 3,
         ("src/puripuly_heart/ui/app.py", RUN_TASK): 13,
         ("src/puripuly_heart/ui/components/settings/api_key_field.py", RUN_TASK): 1,
@@ -92,10 +91,6 @@ TASK_CREATION_ALLOWLIST_RATIONALES = {
         "src/puripuly_heart/core/overlay/process.py",
         ASYNCIO_CREATE_TASK,
     ): "overlay process manager wraps subprocess monitor tasks with named factories and shutdown cleanup",
-    (
-        "src/puripuly_heart/core/overlay/sink.py",
-        ASYNCIO_CREATE_TASK,
-    ): "overlay stream coalescer owns its short-lived coalescing task factory and cancels through sink close",
     (
         "src/puripuly_heart/providers/stt/soniox.py",
         ASYNCIO_CREATE_TASK,

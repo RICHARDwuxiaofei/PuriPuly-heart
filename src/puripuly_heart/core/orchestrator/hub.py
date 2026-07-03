@@ -199,7 +199,6 @@ class ClientHub:
         init=False,
         default_factory=lambda: {"self": None, "peer": None},
     )
-    overlay_stream_coalesce_ms: int = 300
     last_error_source: str | None = None
     _last_overlay_secondary_runtime_signature: tuple[object, ...] | None = field(
         init=False,

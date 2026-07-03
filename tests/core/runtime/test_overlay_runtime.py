@@ -140,7 +140,6 @@ def test_overlay_runtime_handle_exposes_lifecycle_inventory_and_policy() -> None
         "OverlayPresenter._expiration_tasks",
         "OverlayPresenter._peer_presentation_refresh_burst_task",
         "OverlayPresenter._self_presentation_refresh_burst_task",
-        "OverlayStreamCoalescer._flush_task",
     ):
         assert field_name in snapshot["resource_fields"]
     assert snapshot["stop_ingress"] == "broadcast shutdown and reject new overlay commands"

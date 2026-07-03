@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Coroutine, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, ClassVar, Literal, Protocol
+from typing import ClassVar, Literal, Protocol
 from uuid import UUID, uuid4
 
 from puripuly_heart.core.clock import Clock, SystemClock
@@ -159,77 +158,6 @@ class OverlaySink(Protocol):
 class NullOverlaySink:
     async def emit(self, event: OverlayEventUnion) -> None:
         _ = event
-
-
-@dataclass(slots=True)
-class OverlayStreamCoalescer:
-    interval_ms: int = 300
-    _pending_event: OverlayEventUnion | None = None
-    _flush_task: asyncio.Task[None] | None = None
-    task_factory: Any | None = None
-
-    async def push(
-        self,
-        event: OverlayEventUnion,
-        emit: Callable[[OverlayEventUnion], Awaitable[None]],
-    ) -> None:
-        self._pending_event = event
-        if self._flush_task is None or self._flush_task.done():
-            self._flush_task = self._create_task(
-                self._delayed_flush(emit),
-                task_name="overlay-stream-coalescer-flush",
-            )
-
-    async def flush(
-        self,
-        emit: Callable[[OverlayEventUnion], Awaitable[None]],
-    ) -> None:
-        flush_task = self._flush_task
-        self._flush_task = None
-        if flush_task is not None and not flush_task.done():
-            flush_task.cancel()
-            await asyncio.gather(flush_task, return_exceptions=True)
-
-        pending = self._take_pending_event()
-        if pending is not None:
-            await emit(pending)
-
-    async def cancel(self) -> None:
-        flush_task = self._flush_task
-        self._flush_task = None
-        self._pending_event = None
-        if flush_task is not None and not flush_task.done():
-            flush_task.cancel()
-            await asyncio.gather(flush_task, return_exceptions=True)
-
-    async def _delayed_flush(
-        self,
-        emit: Callable[[OverlayEventUnion], Awaitable[None]],
-    ) -> None:
-        try:
-            await asyncio.sleep(self.interval_ms / 1000.0)
-            pending = self._take_pending_event()
-            if pending is not None:
-                await emit(pending)
-        except asyncio.CancelledError:
-            raise
-        finally:
-            self._flush_task = None
-
-    def _take_pending_event(self) -> OverlayEventUnion | None:
-        pending = self._pending_event
-        self._pending_event = None
-        return pending
-
-    def _create_task(
-        self,
-        coroutine: Coroutine[Any, Any, Any],
-        *,
-        task_name: str,
-    ) -> asyncio.Task[Any]:
-        if self.task_factory is not None:
-            return self.task_factory(coroutine, task_name=task_name)
-        return asyncio.create_task(coroutine, name=f"OverlayStreamCoalescer:{task_name}")
 
 
 @dataclass(slots=True)

@@ -10,7 +10,7 @@ import pytest
 import puripuly_heart.core.audio.streaming_resampler as streaming_resampler
 import puripuly_heart.core.runtime.audio_vad_loop as audio_vad_loop
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
-from puripuly_heart.core.audio.format import AudioFrameF32, float32_to_pcm16le_bytes
+from puripuly_heart.core.audio.format import AudioFrameF32
 from puripuly_heart.core.audio.streaming_resampler import MonoFirstStreamingResampler
 
 
@@ -518,10 +518,10 @@ async def test_desktop_pipeline_uses_one_streaming_resampler_and_yields_flush_ta
     assert len(frames) == 2
     np.testing.assert_allclose(frames[0].samples, np.array([0.1, -0.1], dtype=np.float32))
     assert frames[0].sample_rate_hz == 16000
-    assert frames[0].deepgram_pcm16le == float32_to_pcm16le_bytes(frames[0].samples)
+    assert frames[0].channels == 1
     np.testing.assert_allclose(frames[1].samples, np.array([0.25], dtype=np.float32))
     assert frames[1].sample_rate_hz == 16000
-    assert frames[1].deepgram_pcm16le == float32_to_pcm16le_bytes(frames[1].samples)
+    assert frames[1].channels == 1
 
 
 @pytest.mark.asyncio
