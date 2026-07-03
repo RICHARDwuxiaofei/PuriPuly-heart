@@ -155,6 +155,7 @@ class TranslatorApp:
 
         # Link Dashboard callbacks
         self.view_dashboard.on_send_message = self._on_manual_submit
+        self.view_dashboard.on_message_input_activity = self._on_message_input_activity
         self.view_dashboard.on_toggle_translation = self._on_translation_toggle
         self.view_dashboard.on_toggle_stt = self._on_stt_toggle
         self.view_dashboard.on_toggle_overlay = self._on_overlay_toggle
@@ -840,6 +841,12 @@ class TranslatorApp:
     def _on_manual_submit(self, _source: str, text: str) -> None:
         async def _task():
             await self.controller.submit_text(text)
+
+        self.page.run_task(_task)
+
+    def _on_message_input_activity(self, has_text: bool) -> None:
+        async def _task():
+            self.controller.set_manual_input_activity(has_text)
 
         self.page.run_task(_task)
 

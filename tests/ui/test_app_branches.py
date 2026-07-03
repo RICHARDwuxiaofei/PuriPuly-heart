@@ -286,6 +286,7 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert page.window.height >= page.window.min_height
     assert page.added
     assert app.view_dashboard.on_send_message == app._on_manual_submit
+    assert app.view_dashboard.on_message_input_activity == app._on_message_input_activity
     assert app.view_dashboard.on_toggle_overlay == app._on_overlay_toggle
     assert app.view_dashboard.on_toggle_peer_translation == app._on_peer_translation_toggle
     assert app.view_settings.on_verify_api_key == app._on_verify_api_key
@@ -3150,8 +3151,12 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
     async def fake_apply_providers() -> None:
         seen.append(("apply_providers", True))
 
+    def fake_manual_activity(has_text: bool) -> None:
+        seen.append(("manual_activity", has_text))
+
     app.controller = SimpleNamespace(
         submit_text=fake_submit,
+        set_manual_input_activity=fake_manual_activity,
         set_translation_enabled=fake_translation,
         set_stt_enabled=fake_stt,
         set_overlay_enabled=fake_overlay,
@@ -3161,6 +3166,7 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
     )
 
     app._on_manual_submit("You", "hello")
+    app._on_message_input_activity(True)
     app._on_translation_toggle(True)
     app._on_stt_toggle(False)
     app._on_overlay_toggle(True)
@@ -3168,12 +3174,13 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
     app._on_settings_changed("settings")
     app._on_providers_changed()
 
-    assert len(app.page.tasks) == 6
+    assert len(app.page.tasks) == 7
     for task_fn in app.page.tasks:
         await task_fn()
 
     assert seen == [
         ("submit", "hello"),
+        ("manual_activity", True),
         ("translation", True),
         ("stt", False),
         ("overlay", True),

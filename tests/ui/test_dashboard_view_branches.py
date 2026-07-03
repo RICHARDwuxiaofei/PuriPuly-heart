@@ -44,9 +44,10 @@ class FakePowerButton:
 
 
 class FakeDisplayCard:
-    def __init__(self, on_submit, on_input_focus_change=None):
+    def __init__(self, on_submit, on_input_focus_change=None, on_input_activity=None):
         self._on_submit = on_submit
         self._on_input_focus_change = on_input_focus_change
+        self._on_input_activity = on_input_activity
         self.statuses: list[tuple[str, str | None]] = []
         self.display_calls: list[tuple[str, bool, str | None]] = []
         self.translation_calls: list[tuple[str | None, str | None]] = []
@@ -92,6 +93,10 @@ class FakeDisplayCard:
         self.input_is_focused = focused
         if self._on_input_focus_change is not None:
             self._on_input_focus_change(focused)
+
+    def set_input_activity_for_test(self, has_text: bool) -> None:
+        if self._on_input_activity is not None:
+            self._on_input_activity(has_text)
 
     def focus_input(self) -> None:
         self.focus_calls += 1
@@ -313,6 +318,19 @@ def test_dashboard_submit_and_language_selection_paths(monkeypatch: pytest.Monke
     assert view._recent_target_langs == ["fr"]
     assert lang_changes[-1] == ("fr", "ja", "en", "ko")
     assert view.language_card.languages[-1] == ("name-fr", "name-ja", "name-en", "name-ko")
+
+
+def test_dashboard_forwards_non_content_message_input_activity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    activity: list[bool] = []
+    view.on_message_input_activity = activity.append
+
+    view.display_card.set_input_activity_for_test(True)
+    view.display_card.set_input_activity_for_test(False)
+
+    assert activity == [True, False]
 
 
 def test_dashboard_tab_in_focused_message_input_swaps_self_languages_only(

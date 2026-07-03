@@ -32,10 +32,10 @@ LEGACY_TASK_CREATION_ALLOWLIST = Counter(
         ("src/puripuly_heart/core/overlay/presenter.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/overlay/process.py", ASYNCIO_CREATE_TASK): 2,
         ("src/puripuly_heart/providers/stt/soniox.py", ASYNCIO_CREATE_TASK): 3,
-        ("src/puripuly_heart/ui/app.py", RUN_TASK): 13,
+        ("src/puripuly_heart/ui/app.py", RUN_TASK): 14,
         ("src/puripuly_heart/ui/components/settings/api_key_field.py", RUN_TASK): 1,
         ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 3,
-        ("src/puripuly_heart/ui/controller.py", LOOP_CREATE_TASK): 4,
+        ("src/puripuly_heart/ui/controller.py", LOOP_CREATE_TASK): 5,
         ("src/puripuly_heart/ui/controller.py", BARE_RUN_TASK): 5,
         ("src/puripuly_heart/ui/desktop_overlay.py", ASYNCIO_CREATE_TASK): 11,
         ("src/puripuly_heart/ui/desktop_overlay.py", BARE_RUN_TASK): 1,
@@ -110,7 +110,7 @@ TASK_CREATION_ALLOWLIST_RATIONALES = {
     (
         "src/puripuly_heart/ui/controller.py",
         LOOP_CREATE_TASK,
-    ): "controller has exactly four loop-bound UI scheduling call sites for overlay state/logging updates and fallback task dispatch",
+    ): "controller has exactly five loop-bound UI scheduling call sites for overlay state/logging updates, fallback task dispatch, and the owner-scoped manual typing idle timeout",
     (
         "src/puripuly_heart/ui/controller.py",
         BARE_RUN_TASK,
