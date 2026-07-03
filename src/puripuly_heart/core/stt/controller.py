@@ -75,6 +75,7 @@ class ManagedSTTProvider:
     _consumer_task: asyncio.Task[None] | None = None
     _draining: set[asyncio.Task[None]] = field(default_factory=set)
     _events: asyncio.Queue = field(default_factory=asyncio.Queue)
+    _session_open_lock: asyncio.Lock = field(init=False, repr=False)
 
     _active_utterance_id: UUID | None = None
     _pending_final_utterance_ids: deque[UUID] = field(default_factory=deque)
@@ -113,6 +114,7 @@ class ManagedSTTProvider:
         if self.connect_retry_max_s <= 0:
             raise ValueError("connect_retry_max_s must be > 0")
 
+        self._session_open_lock = asyncio.Lock()
         capacity_samples = int(self.sample_rate_hz * (self.bridging_ms / 1000.0))
         self._audio_ring = RingBufferF32(capacity_samples=capacity_samples)
 
@@ -403,86 +405,97 @@ class ManagedSTTProvider:
         if self._active_session is not None:
             return True
 
-        await self._set_state(STTSessionState.CONNECTING)
-        last_exc: Exception | None = None
-
-        for attempt in range(1, self.connect_attempts + 1):
-            self._emit_detailed(
-                "[STT] Opening new session (attempt %s/%s)...",
-                attempt,
-                self.connect_attempts,
-                fallback_level=logging.INFO,
-            )
-            try:
-                session = await self.backend.open_session()
-            except Exception as exc:
-                last_exc = exc
-                attempt_report = stt_failure_report(
-                    exc,
-                    provider=self._provider_label(),
-                    operation="open_session",
-                    channel=self.channel,
-                    attempts=attempt,
-                )
-                self._emit_detailed(
-                    "[STT] Failed to open session (attempt %s/%s): %s",
-                    attempt,
-                    self.connect_attempts,
-                    format_error_report_for_log(attempt_report),
-                    level=logging.WARNING,
-                    fallback_level=logging.WARNING,
-                )
-                if attempt < self.connect_attempts:
-                    delay = min(
-                        self.connect_retry_base_s * (2 ** (attempt - 1)),
-                        self.connect_retry_max_s,
-                    )
-                    self._emit_detailed(
-                        "[STT] Retrying session in %.1fs",
-                        delay,
-                        fallback_level=logging.INFO,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                break
-            else:
-                self._active_session = session
-                self._session_started_at = self.clock.now()
-                self._consumer_task = asyncio.create_task(self._consume_session_events(session))
-                self._schedule_reset_timer()
-                await self._set_state(STTSessionState.STREAMING)
-                self._log_session_connected(attempts=attempt)
-                self._emit_detailed(
-                    "[STT] Session ready (reset_deadline=%ss)",
-                    self.reset_deadline_s,
-                    fallback_level=logging.INFO,
-                )
+        async with self._session_open_lock:
+            if self._active_session is not None:
                 return True
 
-        report = stt_failure_report(
-            last_exc,
-            provider=self._provider_label(),
-            operation="open_session",
-            channel=self.channel,
-            attempts=self.connect_attempts,
-        )
-        self._emit_basic(
-            "[STT] Failed to open session after %s attempts: %s",
-            self.connect_attempts,
-            format_error_report_for_log(report),
-            level=logging.ERROR,
-            fallback_level=logging.ERROR,
-        )
-        await self._set_state(STTSessionState.DISCONNECTED)
-        await self._events.put(
-            STTErrorEvent(
-                message=report.message,
-                diagnostics=report.diagnostics,
+            await self._set_state(STTSessionState.CONNECTING)
+            last_exc: Exception | None = None
+
+            try:
+                for attempt in range(1, self.connect_attempts + 1):
+                    self._emit_detailed(
+                        "[STT] Opening new session (attempt %s/%s)...",
+                        attempt,
+                        self.connect_attempts,
+                        fallback_level=logging.INFO,
+                    )
+                    try:
+                        session = await self.backend.open_session()
+                    except Exception as exc:
+                        last_exc = exc
+                        attempt_report = stt_failure_report(
+                            exc,
+                            provider=self._provider_label(),
+                            operation="open_session",
+                            channel=self.channel,
+                            attempts=attempt,
+                        )
+                        self._emit_detailed(
+                            "[STT] Failed to open session (attempt %s/%s): %s",
+                            attempt,
+                            self.connect_attempts,
+                            format_error_report_for_log(attempt_report),
+                            level=logging.WARNING,
+                            fallback_level=logging.WARNING,
+                        )
+                        if attempt < self.connect_attempts:
+                            delay = min(
+                                self.connect_retry_base_s * (2 ** (attempt - 1)),
+                                self.connect_retry_max_s,
+                            )
+                            self._emit_detailed(
+                                "[STT] Retrying session in %.1fs",
+                                delay,
+                                fallback_level=logging.INFO,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        break
+                    else:
+                        self._active_session = session
+                        self._session_started_at = self.clock.now()
+                        self._consumer_task = asyncio.create_task(
+                            self._consume_session_events(session)
+                        )
+                        self._schedule_reset_timer()
+                        await self._set_state(STTSessionState.STREAMING)
+                        self._log_session_connected(attempts=attempt)
+                        self._emit_detailed(
+                            "[STT] Session ready (reset_deadline=%ss)",
+                            self.reset_deadline_s,
+                            fallback_level=logging.INFO,
+                        )
+                        return True
+            except asyncio.CancelledError:
+                if self._active_session is None:
+                    await self._set_state(STTSessionState.DISCONNECTED)
+                raise
+
+            report = stt_failure_report(
+                last_exc,
+                provider=self._provider_label(),
+                operation="open_session",
                 channel=self.channel,
-                runtime_log_handled=True,
+                attempts=self.connect_attempts,
             )
-        )
-        return False
+            self._emit_basic(
+                "[STT] Failed to open session after %s attempts: %s",
+                self.connect_attempts,
+                format_error_report_for_log(report),
+                level=logging.ERROR,
+                fallback_level=logging.ERROR,
+            )
+            await self._set_state(STTSessionState.DISCONNECTED)
+            await self._events.put(
+                STTErrorEvent(
+                    message=report.message,
+                    diagnostics=report.diagnostics,
+                    channel=self.channel,
+                    runtime_log_handled=True,
+                )
+            )
+            return False
 
     async def _reset_with_bridging(self) -> None:
         old_session = self._active_session

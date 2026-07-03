@@ -309,6 +309,33 @@ class FailingOpenBackend:
         raise self.error
 
 
+class ControlledOpenBackend:
+    def __init__(self) -> None:
+        self.sessions: list[FakeSession] = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.open_calls = 0
+        self.active_opens = 0
+        self.max_active_opens = 0
+
+    async def open_session(self):
+        self.open_calls += 1
+        self.active_opens += 1
+        self.max_active_opens = max(self.max_active_opens, self.active_opens)
+        self.started.set()
+        try:
+            await self.release.wait()
+        finally:
+            self.active_opens -= 1
+        session = FakeSession()
+        self.sessions.append(session)
+        return session
+
+    def reset_controls(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+
 @dataclass(slots=True)
 class TerminalFailureSession:
     closed: bool = False
@@ -1094,6 +1121,70 @@ async def test_managed_stt_provider_open_failure_uses_message_ref_and_safe_runti
     finally:
         await stt.close()
         runtime_logging.close()
+
+
+async def test_stt_controller_serializes_concurrent_session_open() -> None:
+    backend = ControlledOpenBackend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        reset_deadline_s=90.0,
+        connect_attempts=1,
+    )
+
+    try:
+        first_open = asyncio.create_task(stt.warmup())
+        await asyncio.wait_for(backend.started.wait(), timeout=0.2)
+        second_open = asyncio.create_task(stt.warmup())
+
+        await asyncio.sleep(0.01)
+
+        assert backend.open_calls == 1
+        assert backend.max_active_opens == 1
+        assert stt.state == STTSessionState.CONNECTING
+
+        backend.release.set()
+        await asyncio.gather(first_open, second_open)
+
+        assert backend.open_calls == 1
+        assert backend.max_active_opens == 1
+        assert len(backend.sessions) == 1
+        assert stt.state == STTSessionState.STREAMING
+    finally:
+        await stt.close()
+
+
+async def test_stt_controller_open_cancellation_releases_serialization() -> None:
+    backend = ControlledOpenBackend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        reset_deadline_s=90.0,
+        connect_attempts=1,
+    )
+
+    try:
+        cancelled_open = asyncio.create_task(stt.warmup())
+        await asyncio.wait_for(backend.started.wait(), timeout=0.2)
+
+        cancelled_open.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled_open
+
+        assert stt.state == STTSessionState.DISCONNECTED
+        assert backend.active_opens == 0
+
+        backend.reset_controls()
+        reopened = asyncio.create_task(stt.warmup())
+        await asyncio.wait_for(backend.started.wait(), timeout=0.2)
+        backend.release.set()
+        await reopened
+
+        assert backend.open_calls == 2
+        assert len(backend.sessions) == 1
+        assert stt.state == STTSessionState.STREAMING
+    finally:
+        await stt.close()
 
 
 async def test_stt_controller_without_runtime_logging_stays_basic_only(caplog) -> None:
