@@ -90,7 +90,7 @@ def test_resolve_openrouter_credentials_uses_selected_managed_key_without_byok_f
     assert resolution.requires_managed_challenge is False
 
 
-def test_resolve_openrouter_credentials_separates_standard_and_qq_managed_keys() -> None:
+def test_resolve_openrouter_credentials_blocks_dual_standard_and_qq_managed_keys() -> None:
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     settings.managed_identity.active_managed_credential_ref = "managed-ref-qq"
@@ -98,19 +98,18 @@ def test_resolve_openrouter_credentials_separates_standard_and_qq_managed_keys()
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "standard-managed-key")
     store.set(OPENROUTER_MANAGED_QQ_API_KEY_SECRET, "qq-managed-key")
 
-    standard = resolve_openrouter_credentials(_credential_config(settings), secrets=store)
-    qq = resolve_openrouter_credentials(
-        OpenRouterCredentialRuntimeConfig(
-            selected_source=settings.openrouter.selected_source,
-            installation_id=settings.managed_identity.installation_id,
-            managed_credential_kind="qq",
-            active_managed_credential_ref=settings.managed_identity.active_managed_credential_ref,
-        ),
-        secrets=store,
-    )
-
-    assert standard.api_key == "standard-managed-key"
-    assert qq.api_key == "qq-managed-key"
+    with pytest.raises(ValueError, match="managed local claim conflict"):
+        resolve_openrouter_credentials(_credential_config(settings), secrets=store)
+    with pytest.raises(ValueError, match="managed local claim conflict"):
+        resolve_openrouter_credentials(
+            OpenRouterCredentialRuntimeConfig(
+                selected_source=settings.openrouter.selected_source,
+                installation_id=settings.managed_identity.installation_id,
+                managed_credential_kind="qq",
+                active_managed_credential_ref=settings.managed_identity.active_managed_credential_ref,
+            ),
+            secrets=store,
+        )
 
 
 def test_resolve_openrouter_credentials_never_falls_back_between_managed_key_kinds() -> None:
@@ -119,58 +118,58 @@ def test_resolve_openrouter_credentials_never_falls_back_between_managed_key_kin
     store = InMemorySecretStore()
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "standard-managed-key")
 
-    qq = resolve_openrouter_credentials(
-        OpenRouterCredentialRuntimeConfig(
-            selected_source=settings.openrouter.selected_source,
-            installation_id=settings.managed_identity.installation_id,
-            managed_credential_kind="qq",
-            active_managed_credential_ref="managed-ref-qq",
-        ),
-        secrets=store,
-        request_intent="TRANS",
-    )
-
-    assert qq.api_key is None
-    assert qq.requires_managed_challenge is False
+    with pytest.raises(ValueError, match="managed local claim conflict"):
+        resolve_openrouter_credentials(
+            OpenRouterCredentialRuntimeConfig(
+                selected_source=settings.openrouter.selected_source,
+                installation_id=settings.managed_identity.installation_id,
+                managed_credential_kind="qq",
+                active_managed_credential_ref="managed-ref-qq",
+            ),
+            secrets=store,
+            request_intent="TRANS",
+        )
 
 
-def test_resolve_openrouter_credentials_standard_managed_does_not_read_qq_key() -> None:
+def test_resolve_openrouter_credentials_standard_managed_blocks_qq_key() -> None:
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     store = TrackingSecretStore()
     store.set(OPENROUTER_MANAGED_QQ_API_KEY_SECRET, "qq-managed-key")
 
-    resolution = resolve_openrouter_credentials(
-        _credential_config(settings),
-        secrets=store,
-        request_intent="TRANS",
-    )
+    with pytest.raises(ValueError, match="managed local claim conflict"):
+        resolve_openrouter_credentials(
+            _credential_config(settings),
+            secrets=store,
+            request_intent="TRANS",
+        )
+    assert store.get_calls == [
+        OPENROUTER_MANAGED_API_KEY_SECRET,
+        OPENROUTER_MANAGED_QQ_API_KEY_SECRET,
+    ]
 
-    assert resolution.api_key is None
-    assert resolution.requires_managed_challenge is True
-    assert store.get_calls == [OPENROUTER_MANAGED_API_KEY_SECRET]
 
-
-def test_resolve_openrouter_credentials_qq_managed_does_not_read_standard_key() -> None:
+def test_resolve_openrouter_credentials_qq_managed_blocks_standard_key() -> None:
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     store = TrackingSecretStore()
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "standard-managed-key")
 
-    resolution = resolve_openrouter_credentials(
-        OpenRouterCredentialRuntimeConfig(
-            selected_source=settings.openrouter.selected_source,
-            installation_id=settings.managed_identity.installation_id,
-            managed_credential_kind="qq",
-            active_managed_credential_ref="managed-ref-qq",
-        ),
-        secrets=store,
-        request_intent="TRANS",
-    )
-
-    assert resolution.api_key is None
-    assert resolution.requires_managed_challenge is False
-    assert store.get_calls == [OPENROUTER_MANAGED_QQ_API_KEY_SECRET]
+    with pytest.raises(ValueError, match="managed local claim conflict"):
+        resolve_openrouter_credentials(
+            OpenRouterCredentialRuntimeConfig(
+                selected_source=settings.openrouter.selected_source,
+                installation_id=settings.managed_identity.installation_id,
+                managed_credential_kind="qq",
+                active_managed_credential_ref="managed-ref-qq",
+            ),
+            secrets=store,
+            request_intent="TRANS",
+        )
+    assert store.get_calls == [
+        OPENROUTER_MANAGED_QQ_API_KEY_SECRET,
+        OPENROUTER_MANAGED_API_KEY_SECRET,
+    ]
 
 
 def test_resolve_openrouter_credentials_qq_requires_active_managed_state() -> None:

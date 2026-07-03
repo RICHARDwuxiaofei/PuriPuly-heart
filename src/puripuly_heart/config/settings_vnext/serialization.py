@@ -23,6 +23,30 @@ _PROVIDER_VERIFICATION_FIELDS: Final = (
     "alibaba_singapore",
 )
 _PROVIDER_VERIFICATION_NON_UNKNOWN_STATUSES: Final = frozenset({"verified", "failed", "skipped"})
+_FALLBACK_DISABLED: Final = {"enabled": False}
+_TEMPORARY_GENERIC_FALLBACK_ALIASES: Final = {
+    "none": {"enabled": False},
+    "deepseek_v4_flash_official": {
+        "enabled": True,
+        "model": "deepseek_v4_flash",
+        "connection": "official_byok",
+    },
+    "openrouter_deepseek_v4_flash": {
+        "enabled": True,
+        "model": "deepseek_v4_flash",
+        "connection": "openrouter",
+    },
+    "openrouter_gemma4_26b_a4b": {
+        "enabled": True,
+        "model": "gemma4",
+        "connection": "openrouter",
+    },
+    "cerebras_gemma4_31b": {
+        "enabled": True,
+        "model": "gemma4_31b_cerebras",
+        "connection": "official_byok",
+    },
+}
 
 
 def to_dict(settings: AppSettingsVNext) -> dict[str, Any]:
@@ -58,7 +82,9 @@ def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
         raise ValueError("vNext settings_version must be an integer") from exc
 
     default = AppSettingsVNext(settings_version=settings_version)
-    compatible_data = _downgrade_unbound_provider_verification_entries(data)
+    compatible_data = _project_legacy_translation_fallback_fields(
+        _downgrade_unbound_provider_verification_entries(data)
+    )
     merged = _merge_dataclass(default, compatible_data, path="settings")
     if not isinstance(merged, AppSettingsVNext):
         raise TypeError("vNext settings merge produced unexpected type")
@@ -91,6 +117,73 @@ def _downgrade_unbound_provider_verification_entries(
     compatible_state["provider_verification"] = compatible_provider_verification
     compatible["state"] = compatible_state
     return compatible
+
+
+def _project_legacy_translation_fallback_fields(data: Mapping[str, Any]) -> Mapping[str, Any]:
+    intent = data.get("intent")
+    if not isinstance(intent, Mapping):
+        return data
+    translation = intent.get("translation")
+    if not isinstance(translation, Mapping):
+        return data
+    if (
+        "fallback" in translation
+        and "fallback_selection_alias" not in translation
+        and "openrouter_fallback_selection_alias" not in translation
+    ):
+        return data
+
+    compatible = copy.deepcopy(dict(data))
+    compatible_intent = dict(compatible.get("intent", {}))
+    compatible_translation = dict(compatible_intent.get("translation", {}))
+    explicit_fallback = compatible_translation.get("fallback")
+    if not isinstance(explicit_fallback, Mapping):
+        alias = compatible_translation.get("fallback_selection_alias")
+        if isinstance(alias, str):
+            compatible_translation["fallback"] = _fallback_from_temporary_alias(alias)
+        else:
+            compatible_translation["fallback"] = _fallback_from_legacy_openrouter_alias(
+                compatible_translation.get("openrouter_fallback_selection_alias"),
+                selected_source=compatible_translation.get("openrouter_selected_source"),
+            )
+    compatible_translation.pop("fallback_selection_alias", None)
+    compatible_translation.pop("openrouter_fallback_selection_alias", None)
+    compatible_intent["translation"] = compatible_translation
+    compatible["intent"] = compatible_intent
+    return compatible
+
+
+def _fallback_from_temporary_alias(value: str) -> dict[str, object]:
+    return dict(_TEMPORARY_GENERIC_FALLBACK_ALIASES.get(value.strip(), _FALLBACK_DISABLED))
+
+
+def _fallback_from_legacy_openrouter_alias(
+    value: object,
+    *,
+    selected_source: object,
+) -> dict[str, object]:
+    alias = value.strip() if isinstance(value, str) else ""
+    if alias in ("", "none", "qwen35_flash"):
+        return dict(_FALLBACK_DISABLED)
+    if alias == "deepseek_v4_flash_china":
+        return {
+            "enabled": True,
+            "model": "deepseek_v4_flash",
+            "connection": "managed_china",
+        }
+    if alias == "deepseek_v4_flash":
+        if selected_source == "managed":
+            connection = "managed"
+        elif selected_source == "byok":
+            connection = "openrouter"
+        else:
+            return dict(_FALLBACK_DISABLED)
+        return {
+            "enabled": True,
+            "model": "deepseek_v4_flash",
+            "connection": connection,
+        }
+    return dict(_FALLBACK_DISABLED)
 
 
 def _is_unbound_non_unknown_provider_verification_entry(entry: object) -> bool:

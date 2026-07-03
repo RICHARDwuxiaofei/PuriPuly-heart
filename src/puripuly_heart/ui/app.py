@@ -140,6 +140,7 @@ class TranslatorApp:
         self._discord_managed_auth_task_handle = None
         self._qq_managed_auth_generation = 0
         self._qq_managed_auth_cancelled = False
+        self._qq_managed_auth_task_handle = None
         self._github_star_prompt_launch_pending = True
         self._github_star_prompt_runtime = GithubStarPromptRuntime(
             diagnostics_sink=self._github_star_prompt_runtime_diagnostics_sink,
@@ -1299,10 +1300,15 @@ class TranslatorApp:
                         set_error = getattr(dialog, "set_error", None)
                         if callable(set_error):
                             set_error("qq_managed_auth.error.retry")
+                        self._qq_managed_auth_task_handle = None
                         return
                 self._close_qq_managed_auth_dialog()
                 self._show_snackbar(t("qq_managed_auth.success"), COLOR_SUCCESS)
                 self._set_dashboard_translation_visual_state(True)
+                self._qq_managed_auth_task_handle = None
+                self._get_oauth_runtime().clear_external_task(
+                    "qq-managed-auth-dialog",
+                )
                 return
             message_key = "qq_managed_auth.error.retry"
             message_kwargs: dict[str, object] = {}
@@ -1313,11 +1319,33 @@ class TranslatorApp:
             set_error = getattr(dialog, "set_error", None)
             if callable(set_error):
                 set_error(message_key, **message_kwargs)
+            if self._is_current_qq_managed_auth_generation(generation):
+                self._qq_managed_auth_task_handle = None
+                self._get_oauth_runtime().clear_external_task(
+                    "qq-managed-auth-dialog",
+                )
 
-        self.page.run_task(_task)
+        self._qq_managed_auth_task_handle = self._get_oauth_runtime().start_external_task(
+            task_runner=self.page.run_task,
+            task_factory=_task,
+            task_name="qq-managed-auth-dialog",
+            generation=generation,
+        )
 
     def _cancel_qq_managed_auth(self) -> None:
         self._qq_managed_auth_cancelled = True
+        task_handle = getattr(self, "_qq_managed_auth_task_handle", None)
+        runtime = getattr(self, "_oauth_runtime", None)
+        if runtime is not None:
+            runtime.cancel_external_task(
+                task_handle,
+                task_name="qq-managed-auth-dialog",
+            )
+        cancel = getattr(task_handle, "cancel", None)
+        if callable(cancel):
+            with contextlib.suppress(Exception):
+                cancel()
+        self._qq_managed_auth_task_handle = None
         self._close_qq_managed_auth_dialog()
 
     def _run_optional_discord_auth_controller_hook(self, hook_name: str) -> None:
@@ -1428,14 +1456,22 @@ class TranslatorApp:
 
     async def close_oauth_runtime(self) -> None:
         self._discord_managed_auth_cancelled = True
+        self._qq_managed_auth_cancelled = True
         self._discord_managed_auth_generation = (
             int(getattr(self, "_discord_managed_auth_generation", 0)) + 1
         )
+        self._qq_managed_auth_generation = int(getattr(self, "_qq_managed_auth_generation", 0)) + 1
         task_handle = getattr(self, "_discord_managed_auth_task_handle", None)
+        qq_task_handle = getattr(self, "_qq_managed_auth_task_handle", None)
         self._discord_managed_auth_task_handle = None
+        self._qq_managed_auth_task_handle = None
         runtime = getattr(self, "_oauth_runtime", None)
         if runtime is None:
             return
+        runtime.cancel_external_task(
+            qq_task_handle,
+            task_name="qq-managed-auth-dialog",
+        )
         runtime.cancel_external_task(
             task_handle,
             task_name="discord-managed-auth-dialog",

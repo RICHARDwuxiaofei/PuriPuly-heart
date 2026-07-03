@@ -16,6 +16,10 @@ from puripuly_heart.app.ports.managed_identity_state import (
     ManagedIdentityStatePort,
 )
 from puripuly_heart.app.ports.secret_store import SecretSnapshot, SecretStorePort
+from puripuly_heart.app.services.managed_auth_claims import (
+    MANAGED_AUTH_CLAIM_SOURCE_QQ,
+    ManagedAuthClaimGuard,
+)
 from puripuly_heart.core.messages import (
     CONTENT_POLICY_METADATA_ONLY,
     DIAGNOSTIC_CATEGORY_AUTH,
@@ -75,8 +79,13 @@ class QqManagedAuthService:
     broker_client: BrokerClientPort
     secret_store: SecretStorePort
     managed_state: ManagedIdentityStatePort
+    claim_guard: ManagedAuthClaimGuard | None = None
 
     async def authenticate(self, request: QqManagedAuthRequest) -> TransactionResult:
+        claim_result = await self._preflight_claim_source()
+        if claim_result is not None:
+            return claim_result
+
         broker_result = await self._assert_qq_identity(request)
         if isinstance(broker_result, TransactionResult):
             return broker_result
@@ -104,6 +113,8 @@ class QqManagedAuthService:
             return secret_write
 
         self._apply_entitlement_snapshot(broker_result.entitlement)
+        if self.claim_guard is not None:
+            self.claim_guard.record_success(MANAGED_AUTH_CLAIM_SOURCE_QQ)
         try:
             self.managed_state.persist()
         except Exception:
@@ -131,6 +142,11 @@ class QqManagedAuthService:
                 },
             ),
         )
+
+    async def _preflight_claim_source(self) -> TransactionResult | None:
+        if self.claim_guard is None:
+            return None
+        return await self.claim_guard.preflight(MANAGED_AUTH_CLAIM_SOURCE_QQ)
 
     async def _assert_qq_identity(
         self,

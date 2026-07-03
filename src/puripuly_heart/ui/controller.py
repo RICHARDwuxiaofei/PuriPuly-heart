@@ -34,6 +34,14 @@ from puripuly_heart.app.ports.settings_repository import (
     SettingsCommitResult,
     SettingsSnapshot,
 )
+from puripuly_heart.app.services.managed_auth_claims import (
+    MANAGED_AUTH_CLAIM_SOURCE_DISCORD,
+    ManagedAuthClaimGuard,
+)
+from puripuly_heart.app.services.managed_connection_auth import (
+    ManagedConnectionAuthRequest,
+    ManagedConnectionAuthService,
+)
 from puripuly_heart.app.services.provider_runtime_apply import (
     _ControllerNoopRuntimeApply,
     _ControllerOverlayOscOutputRuntimeApply,
@@ -79,6 +87,9 @@ from puripuly_heart.app.services.settings_mutation_legacy import (
     settings_path_snapshot_for_ui_prompt_clipboard_state,
 )
 from puripuly_heart.app.wiring import (
+    DiscordManagedBrokerClientAdapter,
+    DiscordOAuthAuthAdapter,
+    ManagedIdentityPreflightAdapter,
     build_custom_vocabulary_runtime_config,
     build_managed_identity_state_port,
     build_openrouter_credential_runtime_config,
@@ -120,6 +131,7 @@ from puripuly_heart.config.settings import (
     QwenRegion,
     STTProviderName,
     TranslationConnection,
+    TranslationModel,
     load_settings,
     new_settings_for_first_run,
     normalize_owned_referral_id,
@@ -174,6 +186,7 @@ from puripuly_heart.core.messages import (
 )
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_BYOK_API_KEY_SECRET,
+    OPENROUTER_MANAGED_API_KEY_SECRET,
     resolve_openrouter_credentials,
 )
 from puripuly_heart.core.openrouter_handoff import (
@@ -280,6 +293,16 @@ _GITHUB_STAR_PROMPT_MANAGED_CONNECTIONS = frozenset(
         TranslationConnection.MANAGED_CHINA,
     }
 )
+_MANAGED_OPENROUTER_CONNECTIONS = frozenset(
+    {
+        TranslationConnection.MANAGED,
+        TranslationConnection.MANAGED_CHINA,
+    }
+)
+_MANAGED_OPENROUTER_MODEL_BY_TRANSLATION_MODEL = {
+    TranslationModel.GEMMA4: OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+    TranslationModel.DEEPSEEK_V4_FLASH: OpenRouterLLMModel.DEEPSEEK_V4_FLASH,
+}
 _GITHUB_STAR_PROMPT_USER_OWNED_CLOUD_CONNECTIONS = frozenset(
     {
         TranslationConnection.OPENROUTER,
@@ -383,6 +406,34 @@ def _settings_snapshot_value(value: object) -> object:
 
 def _settings_snapshot_values(settings: AppSettings) -> dict[str, Any]:
     return cast(dict[str, Any], _settings_snapshot_value(asdict(settings)))
+
+
+def _managed_connection_auth_settings_values(settings: AppSettings) -> dict[str, Any]:
+    managed = settings.managed_identity
+    selection_alias = settings.openrouter.selection_alias
+    return {
+        "intent": {
+            "translation": {
+                "connection": settings.translation.connection.value,
+                "model": settings.translation.model.value,
+            },
+            "openrouter": {
+                "selected_source": settings.openrouter.selected_source.value,
+                "llm_model": settings.openrouter.llm_model.value,
+                "selection_alias": selection_alias.value if selection_alias is not None else None,
+            },
+        },
+        "state": {
+            "managed_connection": {
+                "installation_id": managed.installation_id,
+                "active_managed_credential_ref": managed.active_managed_credential_ref,
+                "active_managed_expires_at": managed.active_managed_expires_at,
+                "founder_letter_seen_credential_ref": managed.founder_letter_seen_credential_ref,
+                "referral_id": managed.referral_id,
+                "local_managed_claim_sources": list(managed.local_managed_claim_sources),
+            }
+        },
+    }
 
 
 def _callable_accepts_keyword(callable_obj: object, keyword: str) -> bool:
@@ -1230,25 +1281,79 @@ class GuiController:
             self._translation_toggle_intent_enabled == bool(enabled)
         )
 
+    def _managed_openrouter_fallback_branch_settings_for(
+        self,
+        settings: AppSettings,
+    ) -> AppSettings | None:
+        fallback = settings.translation.fallback
+        if not fallback.enabled or fallback.connection not in _MANAGED_OPENROUTER_CONNECTIONS:
+            return None
+        llm_model = _MANAGED_OPENROUTER_MODEL_BY_TRANSLATION_MODEL.get(fallback.model)
+        if llm_model is None:
+            return None
+        branch_settings = copy.deepcopy(settings)
+        branch_settings.provider.llm = LLMProviderName.OPENROUTER
+        branch_settings.translation.connection = fallback.connection
+        branch_settings.openrouter.llm_model = llm_model
+        branch_settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+        alias = get_openrouter_selection_alias_for_model_and_source(
+            llm_model.value,
+            OpenRouterCredentialSource.MANAGED.value,
+        )
+        branch_settings.openrouter.selection_alias = (
+            OpenRouterSelectionAlias(alias) if alias is not None else None
+        )
+        return branch_settings
+
+    def _managed_openrouter_branch_settings_for(
+        self,
+        settings: AppSettings,
+    ) -> tuple[AppSettings, ...]:
+        branches: list[AppSettings] = []
+        if (
+            settings.provider.llm == LLMProviderName.OPENROUTER
+            and settings.translation.connection in _MANAGED_OPENROUTER_CONNECTIONS
+            and settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+        ):
+            branches.append(settings)
+        fallback_branch = self._managed_openrouter_fallback_branch_settings_for(settings)
+        if fallback_branch is not None:
+            branches.append(fallback_branch)
+        return tuple(branches)
+
+    def _managed_openrouter_release_settings(self) -> AppSettings | None:
+        if self.settings is None:
+            return None
+        branches = self._managed_openrouter_branch_settings_for(self.settings)
+        for branch in branches:
+            if branch.translation.connection == TranslationConnection.MANAGED_CHINA:
+                return branch
+        return branches[0] if branches else None
+
     def _should_show_managed_auth_pending_before_prepare(self) -> bool:
         if self.settings is None:
             return False
         try:
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-            resolution = resolve_openrouter_credentials(
-                build_openrouter_credential_runtime_config(self.settings),
-                secrets=secrets,
-                request_intent="TRANS",
-            )
+            branches = self._managed_openrouter_branch_settings_for(self.settings)
+            if not branches:
+                return False
+            for branch in branches:
+                resolution = resolve_openrouter_credentials(
+                    build_openrouter_credential_runtime_config(branch),
+                    secrets=secrets,
+                    request_intent="TRANS",
+                )
+                if resolution.api_key is None:
+                    return True
         except Exception:
             return True
-        return resolution.api_key is None
+        return False
 
     def _managed_openrouter_selected(self) -> bool:
         return bool(
             self.settings is not None
-            and self.settings.provider.llm == LLMProviderName.OPENROUTER
-            and self.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+            and self._managed_openrouter_branch_settings_for(self.settings)
         )
 
     def _managed_openrouter_local_key_available(self) -> bool:
@@ -1256,14 +1361,20 @@ class GuiController:
             return False
         try:
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-            resolution = resolve_openrouter_credentials(
-                build_openrouter_credential_runtime_config(self.settings),
-                secrets=secrets,
-                request_intent="TRANS",
-            )
+            branches = self._managed_openrouter_branch_settings_for(self.settings)
+            if not branches:
+                return False
+            for branch in branches:
+                resolution = resolve_openrouter_credentials(
+                    build_openrouter_credential_runtime_config(branch),
+                    secrets=secrets,
+                    request_intent="TRANS",
+                )
+                if resolution.api_key is None:
+                    return False
         except Exception:
             return False
-        return resolution.api_key is not None
+        return True
 
     def dashboard_managed_auth_action(self) -> str:
         if not self._managed_openrouter_selected():
@@ -1280,11 +1391,11 @@ class GuiController:
         return "discord"
 
     def _managed_china_auth_relevant_for_translation_enable(self) -> bool:
-        return bool(
-            self.settings is not None
-            and self.settings.translation.connection == TranslationConnection.MANAGED_CHINA
-            and self.settings.provider.llm == LLMProviderName.OPENROUTER
-            and self.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+        if self.settings is None:
+            return False
+        return any(
+            branch.translation.connection == TranslationConnection.MANAGED_CHINA
+            for branch in self._managed_openrouter_branch_settings_for(self.settings)
         )
 
     def _show_qq_managed_auth_dialog(self) -> None:
@@ -1293,6 +1404,21 @@ class GuiController:
         show_dialog = getattr(self.app, "show_qq_managed_auth_dialog", None)
         if callable(show_dialog):
             show_dialog()
+
+    def _managed_auth_claim_guard_for_settings(
+        self,
+        settings: AppSettings,
+    ) -> ManagedAuthClaimGuard:
+        secret_store = create_secret_store(settings.secrets, config_path=self.config_path)
+        secret_store_port = _ControllerSecretStorePortAdapter(secret_store)
+        managed_state = build_managed_identity_state_port(
+            settings,
+            lambda updated: save_settings(self.config_path, updated),
+        )
+        return ManagedAuthClaimGuard(
+            managed_state=managed_state,
+            secret_store=secret_store_port,
+        )
 
     async def start_qq_managed_auth_from_dialog(
         self,
@@ -1307,12 +1433,18 @@ class GuiController:
         if broker_client is None:
             return "qq_managed_auth.error.retry", {}
         secret_store = create_secret_store(self.settings.secrets, config_path=self.config_path)
+        secret_store_port = _ControllerSecretStorePortAdapter(secret_store)
+        managed_state = build_managed_identity_state_port(
+            self.settings,
+            lambda updated: save_settings(self.config_path, updated),
+        )
         auth_service = QqManagedAuthService(
             broker_client=broker_client,
-            secret_store=_ControllerSecretStorePortAdapter(secret_store),
-            managed_state=build_managed_identity_state_port(
-                self.settings,
-                lambda updated: save_settings(self.config_path, updated),
+            secret_store=secret_store_port,
+            managed_state=managed_state,
+            claim_guard=ManagedAuthClaimGuard(
+                managed_state=managed_state,
+                secret_store=secret_store_port,
             ),
         )
         result = await auth_service.authenticate(
@@ -1353,8 +1485,8 @@ class GuiController:
         referral_id: str | None = None,
     ) -> bool:
         self.last_discord_managed_auth_referral_bonus_applied = False
-        service = self._managed_openrouter_release_service
-        if service is None:
+        release_service = self._managed_openrouter_release_service
+        if release_service is None or self.settings is None:
             self._discord_managed_auth_in_progress = False
             self._set_managed_trial_pending_auth(False)
             self._show_short_message("discord_auth.error.retry")
@@ -1365,47 +1497,102 @@ class GuiController:
         self._discord_managed_auth_in_progress = True
         self._set_managed_trial_pending_auth(True)
         try:
-            try:
-                result = await service.prepare_for_translation(referral_id=referral_id)
-            except Exception as exc:
-                self.log_basic(
-                    f"[ManagedAuth] Discord auth start failed: {exc}",
-                    level=logging.ERROR,
+            if not self._discord_release_service_supports_transaction_auth(release_service):
+                return await self._start_discord_managed_auth_via_release_service(
+                    release_service,
+                    referral_id=referral_id,
                 )
-                self._show_short_message("discord_auth.error.retry")
-                return False
-
-            if (
-                result.behavior == ManagedOpenRouterReleaseBehavior.READY
-                and result.local_key_available
-            ):
-                self.last_discord_managed_auth_referral_bonus_applied = (
-                    getattr(result, "referral_bonus_applied", False) is True
+            updated = copy.deepcopy(self.settings)
+            secret_store = create_secret_store(updated.secrets, config_path=self.config_path)
+            secret_store_port = _ControllerSecretStorePortAdapter(secret_store)
+            managed_state = build_managed_identity_state_port(
+                updated,
+                lambda next_settings: save_settings(self.config_path, next_settings),
+            )
+            identity = ManagedIdentityPreflightAdapter(
+                managed_state=managed_state,
+                secrets=secret_store,
+            )
+            discord_auth = DiscordOAuthAuthAdapter(
+                identity=identity,
+                client=release_service.client,
+                app_version=release_service.app_version,
+                raw_hardware_fingerprint_provider=release_service.raw_hardware_fingerprint_provider,
+                hardware_hash_provider=getattr(
+                    release_service,
+                    "_legacy_hardware_hash_provider",
+                    None,
+                ),
+                oauth_runtime=release_service.oauth_runtime,
+                listener_factory=release_service.discord_oauth_listener_factory,
+                callback_runner=release_service.discord_oauth_callback_runner,
+                referral_id=referral_id,
+                on_callback_received=on_callback_received,
+            )
+            broker = DiscordManagedBrokerClientAdapter(
+                identity=identity,
+                client=release_service.client,
+                openrouter_config=release_service.openrouter_config,
+                app_version=release_service.app_version,
+                signed_at_provider=release_service.signed_at_provider,
+            )
+            auth_service = ManagedConnectionAuthService(
+                local_identity=identity,
+                discord_auth=discord_auth,
+                broker_client=broker,
+                secret_store=secret_store_port,
+                settings_repository=_ControllerSettingsPatchRepository(
+                    controller=self,
+                    committed_settings=updated,
+                    surface="managed_connection_auth",
+                ),
+                claim_guard=ManagedAuthClaimGuard(
+                    managed_state=managed_state,
+                    secret_store=secret_store_port,
+                ),
+            )
+            result = await auth_service.authorize(
+                ManagedConnectionAuthRequest(
+                    local_secret_key=OPENROUTER_MANAGED_API_KEY_SECRET,
+                    settings_values=_managed_connection_auth_settings_values(updated),
+                    expected_settings_revision=None,
+                    reason="managed_connection_auth",
+                    correlation_id=None,
+                    broker_metadata={"flow": "managed_connection_auth"},
+                )
+            )
+            self.last_settings_mutation_result = result
+            if _settings_mutation_committed(result):
+                issue = broker.last_issue_response
+                self.settings = updated
+                self.last_discord_managed_auth_referral_bonus_applied = bool(
+                    getattr(issue, "referral_bonus_applied", False)
                 )
                 if self.hub is None:
                     self._show_short_message("discord_auth.error.retry")
                     return False
-                if self.hub.llm is None:
-                    await self._rebuild_llm_provider()
+                await self._rebuild_llm_provider()
                 if self.hub.llm is None:
                     self._show_short_message("discord_auth.error.retry")
                     return False
                 result_referral_id = normalize_owned_referral_id(
-                    getattr(result, "referral_id", None)
+                    getattr(issue, "referral_id", None)
                 )
                 self._set_managed_usage_view_state(
                     view_settings=getattr(self.app, "view_settings", None),
                     visible=True,
                     remaining_percent=None,
                     referral_id=result_referral_id or self._current_owned_referral_id(),
-                    pass_status=getattr(result, "pass_status", None),
+                    pass_status=getattr(issue, "pass_status", None),
                 )
                 self._schedule_managed_trial_usage_refresh()
                 return True
 
-            message_key = self._discord_auth_message_key(result)
+            message = result.message
+            message_key = message.key if message is not None else "discord_auth.error.retry"
+            message_kwargs = dict(message.params) if message is not None else {}
             diagnostics = result.diagnostics
-            error_class = getattr(diagnostics, "error_class", None)
+            error_class = getattr(diagnostics, "category", None)
             self.log_basic(
                 "[ManagedAuth] Discord auth failed: "
                 f"message_key={message_key} class={error_class or 'unknown'}",
@@ -1413,7 +1600,7 @@ class GuiController:
             )
             self._show_short_message(
                 message_key,
-                **dict(result.message_kwargs),
+                **message_kwargs,
             )
             return False
         finally:
@@ -1421,6 +1608,92 @@ class GuiController:
                 self._discord_managed_auth_callback_received_hook = previous_callback
             self._discord_managed_auth_in_progress = False
             self._set_managed_trial_pending_auth(False)
+
+    def _discord_release_service_supports_transaction_auth(self, release_service: object) -> bool:
+        return all(
+            hasattr(release_service, attr)
+            for attr in (
+                "app_version",
+                "client",
+                "discord_oauth_callback_runner",
+                "discord_oauth_listener_factory",
+                "oauth_runtime",
+                "openrouter_config",
+                "signed_at_provider",
+            )
+        )
+
+    async def _start_discord_managed_auth_via_release_service(
+        self,
+        release_service: object,
+        *,
+        referral_id: str | None,
+    ) -> bool:
+        claim_guard: ManagedAuthClaimGuard | None = None
+        if self.settings is not None:
+            try:
+                claim_guard = self._managed_auth_claim_guard_for_settings(self.settings)
+                claim_result = await claim_guard.preflight(MANAGED_AUTH_CLAIM_SOURCE_DISCORD)
+            except Exception:
+                self._show_short_message("discord_auth.error.retry")
+                return False
+            if claim_result is not None:
+                self.last_settings_mutation_result = claim_result
+                message = claim_result.message
+                message_key = message.key if message is not None else "discord_auth.error.retry"
+                message_kwargs = dict(message.params) if message is not None else {}
+                self._show_short_message(message_key, **message_kwargs)
+                return False
+        try:
+            result = await release_service.prepare_for_translation(referral_id=referral_id)
+        except Exception as exc:
+            self.log_basic(
+                f"[ManagedAuth] Discord auth start failed: {exc}",
+                level=logging.ERROR,
+            )
+            self._show_short_message("discord_auth.error.retry")
+            return False
+
+        if result.behavior == ManagedOpenRouterReleaseBehavior.READY and result.local_key_available:
+            if claim_guard is not None:
+                with contextlib.suppress(Exception):
+                    claim_guard.record_success(MANAGED_AUTH_CLAIM_SOURCE_DISCORD)
+                    claim_guard.managed_state.persist()
+            self.last_discord_managed_auth_referral_bonus_applied = (
+                getattr(result, "referral_bonus_applied", False) is True
+            )
+            if self.hub is None:
+                self._show_short_message("discord_auth.error.retry")
+                return False
+            if self.hub.llm is None:
+                await self._rebuild_llm_provider()
+            if self.hub.llm is None:
+                self._show_short_message("discord_auth.error.retry")
+                return False
+            result_referral_id = normalize_owned_referral_id(getattr(result, "referral_id", None))
+            self._set_managed_usage_view_state(
+                view_settings=getattr(self.app, "view_settings", None),
+                visible=True,
+                remaining_percent=None,
+                referral_id=result_referral_id or self._current_owned_referral_id(),
+                pass_status=getattr(result, "pass_status", None),
+            )
+            self._schedule_managed_trial_usage_refresh()
+            return True
+
+        message_key = self._discord_auth_message_key(result)
+        diagnostics = result.diagnostics
+        error_class = getattr(diagnostics, "error_class", None)
+        self.log_basic(
+            "[ManagedAuth] Discord auth failed: "
+            f"message_key={message_key} class={error_class or 'unknown'}",
+            level=logging.ERROR,
+        )
+        self._show_short_message(
+            message_key,
+            **dict(result.message_kwargs),
+        )
+        return False
 
     def _managed_trial_remaining_percent(
         self, usage_metadata: OpenRouterKeyMetadata | None
@@ -1980,10 +2253,7 @@ class GuiController:
     def _managed_key_card_visible_from_settings(self) -> bool:
         if self.settings is None:
             return False
-        return self.settings.translation.connection in (
-            TranslationConnection.MANAGED,
-            TranslationConnection.MANAGED_CHINA,
-        )
+        return bool(self._managed_openrouter_branch_settings_for(self.settings))
 
     async def _refresh_managed_status_best_effort(
         self,
@@ -2068,9 +2338,7 @@ class GuiController:
                     return
                 if (
                     self.settings is None
-                    or self.settings.provider.llm != LLMProviderName.OPENROUTER
-                    or self.settings.openrouter.selected_source
-                    != OpenRouterCredentialSource.MANAGED
+                    or self._managed_openrouter_release_settings() is None
                     or not self._managed_key_card_visible_from_settings()
                 ):
                     return
@@ -2175,10 +2443,8 @@ class GuiController:
                 referral_id=self._current_owned_referral_id(),
             )
             return
-        if (
-            self.settings.provider.llm != LLMProviderName.OPENROUTER
-            or self.settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED
-        ):
+        release_settings = self._managed_openrouter_release_settings()
+        if release_settings is None:
             self._clear_managed_trial_usage_metadata_cache()
             self._set_managed_trial_pending_auth(False)
             self._set_managed_usage_view_state(
@@ -2194,7 +2460,7 @@ class GuiController:
         try:
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
             resolution = resolve_openrouter_credentials(
-                build_openrouter_credential_runtime_config(self.settings), secrets=secrets
+                build_openrouter_credential_runtime_config(release_settings), secrets=secrets
             )
         except Exception:
             resolution = None
@@ -2279,25 +2545,46 @@ class GuiController:
         return True
 
     def _build_llm_provider_signature(self, settings: AppSettings) -> tuple[object, ...]:
-        uses_openrouter = settings.provider.llm == LLMProviderName.OPENROUTER
-        uses_managed_openrouter = (
-            uses_openrouter
-            and settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+        primary_uses_openrouter = settings.provider.llm == LLMProviderName.OPENROUTER
+        fallback_uses_openrouter = bool(
+            settings.translation.fallback.enabled
+            and settings.translation.fallback.connection
+            in (
+                TranslationConnection.OPENROUTER,
+                TranslationConnection.MANAGED,
+                TranslationConnection.MANAGED_CHINA,
+            )
+        )
+        uses_openrouter = primary_uses_openrouter or fallback_uses_openrouter
+        uses_managed_openrouter = bool(
+            (
+                primary_uses_openrouter
+                and settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+            )
+            or (
+                settings.translation.fallback.enabled
+                and settings.translation.fallback.connection
+                in (TranslationConnection.MANAGED, TranslationConnection.MANAGED_CHINA)
+            )
         )
         return (
             settings.provider.llm,
             settings.llm.concurrency_limit,
             settings.gemini.llm_model if settings.provider.llm == LLMProviderName.GEMINI else None,
-            (settings.openrouter.llm_model if uses_openrouter else None),
+            (settings.openrouter.llm_model if primary_uses_openrouter else None),
             (settings.openrouter.routing_mode if uses_openrouter else None),
             (
                 settings.openrouter.provider_routing
                 if uses_openrouter
                 else OpenRouterProviderRouting.DEFAULT
             ),
-            (settings.openrouter.selected_source if uses_openrouter else None),
-            (settings.openrouter.selection_alias if uses_openrouter else None),
-            (settings.openrouter.fallback_selection_alias if uses_openrouter else None),
+            (settings.openrouter.selected_source if primary_uses_openrouter else None),
+            (settings.openrouter.selection_alias if primary_uses_openrouter else None),
+            (
+                settings.translation.fallback.enabled,
+                settings.translation.fallback.model,
+                settings.translation.fallback.connection,
+            ),
             (settings.openrouter.broker_base_url if uses_openrouter else None),
             (_managed_openrouter_identity_signature(settings) if uses_managed_openrouter else None),
             settings.qwen.llm_model if settings.provider.llm == LLMProviderName.QWEN else None,
@@ -2346,7 +2633,6 @@ class GuiController:
         target.openrouter.provider_routing = source.openrouter.provider_routing
         target.openrouter.selected_source = source.openrouter.selected_source
         target.openrouter.selection_alias = source.openrouter.selection_alias
-        target.openrouter.fallback_selection_alias = source.openrouter.fallback_selection_alias
         target.openrouter.broker_base_url = source.openrouter.broker_base_url
         target.qwen.llm_model = source.qwen.llm_model
         target.qwen.region = source.qwen.region
@@ -4097,15 +4383,30 @@ class GuiController:
     async def _handle_managed_translation_enable(self, request_generation: int) -> bool:
         if self.settings is None or self.hub is None:
             return True
-        if self.settings.provider.llm != LLMProviderName.OPENROUTER:
-            return True
-        if self.settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED:
+        if not self._managed_openrouter_branch_settings_for(self.settings):
             return True
         if await self._should_route_managed_trans_to_founder_letter():
             return False
         service = self._managed_openrouter_release_service
         if service is None:
             return True
+        discord_claim_guard: ManagedAuthClaimGuard | None = None
+        if not self._managed_china_auth_relevant_for_translation_enable():
+            try:
+                discord_claim_guard = self._managed_auth_claim_guard_for_settings(self.settings)
+                claim_result = await discord_claim_guard.preflight(
+                    MANAGED_AUTH_CLAIM_SOURCE_DISCORD
+                )
+            except Exception:
+                self._show_short_message("discord_auth.error.retry")
+                return False
+            if claim_result is not None:
+                self.last_settings_mutation_result = claim_result
+                message = claim_result.message
+                message_key = message.key if message is not None else "discord_auth.error.retry"
+                message_kwargs = dict(message.params) if message is not None else {}
+                self._show_short_message(message_key, **message_kwargs)
+                return False
 
         self._set_managed_trial_pending_auth(
             self._should_show_managed_auth_pending_before_prepare()
@@ -4128,6 +4429,10 @@ class GuiController:
             return False
 
         if result.behavior == ManagedOpenRouterReleaseBehavior.READY and result.local_key_available:
+            if discord_claim_guard is not None:
+                with contextlib.suppress(Exception):
+                    discord_claim_guard.record_success(MANAGED_AUTH_CLAIM_SOURCE_DISCORD)
+                    discord_claim_guard.managed_state.persist()
             if self.hub.llm is None:
                 await self._rebuild_llm_provider()
             else:
@@ -6622,9 +6927,8 @@ class GuiController:
     ) -> ManagedOpenRouterReleaseService | None:
         if self.settings is None:
             return None
-        if self.settings.provider.llm != LLMProviderName.OPENROUTER:
-            return None
-        if self.settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED:
+        release_settings = self._managed_openrouter_release_settings()
+        if release_settings is None:
             return None
 
         from puripuly_heart import __version__
@@ -6642,7 +6946,7 @@ class GuiController:
             client = UnavailableManagedOpenRouterReleaseClient()
 
         return ManagedOpenRouterReleaseService(
-            openrouter_config=build_openrouter_release_runtime_config(self.settings),
+            openrouter_config=build_openrouter_release_runtime_config(release_settings),
             managed_state=build_managed_identity_state_port(
                 self.settings,
                 lambda updated: save_settings(self.config_path, updated),

@@ -20,6 +20,8 @@ from puripuly_heart.config.resolved import (
     CREDENTIAL_SOURCE_SECRET_STORE,
     ResolvedCredentialRequirement,
     ResolvedLLMConfig,
+    ResolvedLLMFallbackPlan,
+    ResolvedLLMTarget,
     ResolvedSTTConfig,
 )
 from puripuly_heart.config.settings import (
@@ -28,6 +30,7 @@ from puripuly_heart.config.settings import (
     CerebrasSettings,
     DeepgramSTTSettings,
     DeepSeekLLMModel,
+    DeepSeekSettings,
     GeminiLLMModel,
     GeminiSettings,
     LLMProviderName,
@@ -47,6 +50,10 @@ from puripuly_heart.config.settings import (
     SonioxSTTSettings,
     STTProviderName,
     STTSettings,
+    TranslationConnection,
+    TranslationFallbackSettings,
+    TranslationModel,
+    TranslationSettings,
 )
 from puripuly_heart.core.language import (
     get_deepgram_language,
@@ -73,6 +80,29 @@ from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
 from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaSTTBackend
 from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
 from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
+
+
+def _translation_with_fallback(
+    *,
+    model: TranslationModel,
+    connection: TranslationConnection,
+) -> TranslationSettings:
+    return TranslationSettings(
+        fallback=TranslationFallbackSettings(
+            enabled=True,
+            model=model,
+            connection=connection,
+        )
+    )
+
+
+def _unwrap_release_service(release_service: object) -> object:
+    while hasattr(release_service, "release_service") and not isinstance(
+        release_service,
+        ManagedOpenRouterReleaseService,
+    ):
+        release_service = getattr(release_service, "release_service")
+    return release_service
 
 
 def _resolved_stt_config(
@@ -380,12 +410,14 @@ def test_create_llm_provider_cerebras_uses_secret_and_model() -> None:
 
 def test_create_llm_provider_cerebras_from_resolved_config_uses_dto_and_secret_store() -> None:
     resolved = ResolvedLLMConfig(
-        provider="cerebras",
-        model="gemma-4-31b",
-        credential=ResolvedCredentialRequirement(
-            source=CREDENTIAL_SOURCE_SECRET_STORE,
-            required=True,
-            reference="cerebras:byok",
+        primary=ResolvedLLMTarget(
+            provider="cerebras",
+            model="gemma-4-31b",
+            credential=ResolvedCredentialRequirement(
+                source=CREDENTIAL_SOURCE_SECRET_STORE,
+                required=True,
+                reference="cerebras:byok",
+            ),
         ),
         concurrency_limit=2,
     )
@@ -459,16 +491,18 @@ def test_create_llm_provider_from_resolved_local_llm_uses_dto_values_and_optiona
     legacy_settings.local_llm.extra_body = {"legacy": True}
     legacy_settings.llm.concurrency_limit = 1
     resolved = ResolvedLLMConfig(
-        provider="local_llm",
-        model="dto-model",
-        credential=ResolvedCredentialRequirement(
-            source=CREDENTIAL_SOURCE_NONE,
-            required=False,
-            reference=None,
+        primary=ResolvedLLMTarget(
+            provider="local_llm",
+            model="dto-model",
+            credential=ResolvedCredentialRequirement(
+                source=CREDENTIAL_SOURCE_NONE,
+                required=False,
+                reference=None,
+            ),
+            base_url="http://dto.local/v1",
+            provider_options={"extra_body": {"think": False}},
         ),
-        base_url="http://dto.local/v1",
         concurrency_limit=7,
-        provider_options={"extra_body": {"think": False}},
     )
     secrets = InMemorySecretStore()
     secrets.set("local_llm_api_key", "dto-local-secret")
@@ -500,16 +534,18 @@ def test_create_llm_provider_legacy_facade_uses_runtime_resolution(
     settings.local_llm.model = "legacy-local-model"
     settings.local_llm.extra_body = {"legacy": True}
     resolved = ResolvedLLMConfig(
-        provider="local_llm",
-        model="resolved-local-model",
-        credential=ResolvedCredentialRequirement(
-            source=CREDENTIAL_SOURCE_NONE,
-            required=False,
-            reference=None,
+        primary=ResolvedLLMTarget(
+            provider="local_llm",
+            model="resolved-local-model",
+            credential=ResolvedCredentialRequirement(
+                source=CREDENTIAL_SOURCE_NONE,
+                required=False,
+                reference=None,
+            ),
+            base_url="http://resolved.local/v1",
+            provider_options={"extra_body": {"resolved": True}},
         ),
-        base_url="http://resolved.local/v1",
         concurrency_limit=9,
-        provider_options={"extra_body": {"resolved": True}},
     )
     captured_inputs: list[object] = []
 
@@ -572,15 +608,17 @@ def test_create_llm_provider_from_resolved_openrouter_gemini_byok_uses_google_la
     None
 ):
     resolved = ResolvedLLMConfig(
-        provider="openrouter",
-        model=OpenRouterLLMModel.GEMINI_31_FLASH_LITE.value,
-        credential=ResolvedCredentialRequirement(
-            source=CREDENTIAL_SOURCE_SECRET_STORE,
-            required=True,
-            reference="openrouter:byok",
+        primary=ResolvedLLMTarget(
+            provider="openrouter",
+            model=OpenRouterLLMModel.GEMINI_31_FLASH_LITE.value,
+            credential=ResolvedCredentialRequirement(
+                source=CREDENTIAL_SOURCE_SECRET_STORE,
+                required=True,
+                reference="openrouter:byok",
+            ),
+            routing_mode="latency",
+            provider_routing="google_gemini_latency",
         ),
-        routing_mode="latency",
-        provider_routing="google_gemini_latency",
         concurrency_limit=3,
     )
     secrets = InMemorySecretStore()
@@ -648,7 +686,7 @@ def test_create_llm_provider_openrouter_qwen_byok_deepseek_only_skips_fallback_r
         openrouter=OpenRouterSettings(
             selected_source=OpenRouterCredentialSource.BYOK,
             selection_alias=OpenRouterSelectionAlias.QWEN35_FLASH_BYOK,
-            fallback_selection_alias=OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
             provider_routing=OpenRouterProviderRouting.DEEPSEEK_ONLY,
         ),
     )
@@ -732,12 +770,13 @@ def test_create_llm_provider_openrouter_deepseek_only_skips_openrouter_fallback_
             llm_model=OpenRouterLLMModel.DEEPSEEK_V4_FLASH,
             selected_source=OpenRouterCredentialSource.MANAGED,
             selection_alias=OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED,
-            fallback_selection_alias=OpenRouterFallbackSelectionAlias.QWEN35_FLASH,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
             provider_routing=OpenRouterProviderRouting.DEEPSEEK_ONLY,
         ),
     )
     secrets = InMemorySecretStore()
-    secrets.set("openrouter_managed_api_key", "managed-key")
+    secrets.set("openrouter_managed_qq_api_key", "managed-qq-key")
+    settings.managed_identity.active_managed_credential_ref = "managed-ref-qq"
 
     provider = create_llm_provider(
         settings,
@@ -758,7 +797,7 @@ def test_create_llm_provider_openrouter_deepseek_byok_deepseek_only_skips_fallba
             llm_model=OpenRouterLLMModel.DEEPSEEK_V4_FLASH,
             selected_source=OpenRouterCredentialSource.BYOK,
             selection_alias=OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_BYOK,
-            fallback_selection_alias=OpenRouterFallbackSelectionAlias.QWEN35_FLASH,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
             provider_routing=OpenRouterProviderRouting.DEEPSEEK_ONLY,
         ),
     )
@@ -775,28 +814,54 @@ def test_create_llm_provider_openrouter_deepseek_byok_deepseek_only_skips_fallba
     assert provider.inner.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
 
 
+def test_create_llm_provider_deepseek_flash_official_fallback_uses_flash_model() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.DEEPSEEK),
+        deepseek=DeepSeekSettings(llm_model=DeepSeekLLMModel.DEEPSEEK_V4_PRO),
+        translation=_translation_with_fallback(
+            model=TranslationModel.DEEPSEEK_V4_FLASH,
+            connection=TranslationConnection.OFFICIAL_BYOK,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("deepseek_api_key", "deepseek-key")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.primary, DeepSeekLLMProvider)
+    assert provider.inner.primary.model == DeepSeekLLMModel.DEEPSEEK_V4_PRO.value
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+
+    fallback_delegate = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_delegate, DeepSeekLLMProvider)
+    assert fallback_delegate.model == DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value
+
+
 def test_create_llm_provider_openrouter_deepseek_china_fallback_uses_deepseek_only_routing() -> (
     None
 ):
-    deepseek_china_fallback = getattr(
-        OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH_CHINA", None
-    )
-    assert deepseek_china_fallback is not None
-
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
         openrouter=OpenRouterSettings(
             llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
             selected_source=OpenRouterCredentialSource.BYOK,
             selection_alias=OpenRouterSelectionAlias.GEMMA4_BYOK,
-            fallback_selection_alias=deepseek_china_fallback,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
             provider_routing=OpenRouterProviderRouting.DEFAULT,
+        ),
+        translation=_translation_with_fallback(
+            model=TranslationModel.DEEPSEEK_V4_FLASH,
+            connection=TranslationConnection.MANAGED_CHINA,
         ),
     )
     secrets = InMemorySecretStore()
     secrets.set("openrouter_api_key", "byok-key")
+    secrets.set("openrouter_managed_qq_api_key", "managed-qq-key")
 
-    provider = create_llm_provider(settings, secrets=secrets)
+    provider = create_llm_provider(settings, secrets=secrets, managed_release_service=object())
 
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, FallbackRacingLLMProvider)
@@ -806,30 +871,39 @@ def test_create_llm_provider_openrouter_deepseek_china_fallback_uses_deepseek_on
 
     fallback_provider = provider.inner.fallback.factory()
 
-    assert isinstance(fallback_provider, OpenRouterLLMProvider)
-    assert fallback_provider.model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
-    assert fallback_provider.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
+    assert isinstance(fallback_provider, ManagedOpenRouterLLMProvider)
+    fallback_delegate = fallback_provider.delegate_factory("managed-qq-key")
+    assert isinstance(fallback_delegate, OpenRouterLLMProvider)
+    assert fallback_delegate.model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
+    assert fallback_delegate.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
 
 
 def test_create_llm_provider_from_resolved_openrouter_fallback_uses_resolved_routing() -> None:
     resolved = ResolvedLLMConfig(
-        provider="openrouter",
-        model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
-        credential=ResolvedCredentialRequirement(
-            source=CREDENTIAL_SOURCE_SECRET_STORE,
-            required=True,
-            reference="openrouter:byok",
+        primary=ResolvedLLMTarget(
+            provider="openrouter",
+            model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
+            credential=ResolvedCredentialRequirement(
+                source=CREDENTIAL_SOURCE_SECRET_STORE,
+                required=True,
+                reference="openrouter:byok",
+            ),
+            routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST.value,
+            provider_routing=OpenRouterProviderRouting.DEFAULT.value,
         ),
-        fallback_provider="openrouter",
-        fallback_model=OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value,
-        fallback_credential=ResolvedCredentialRequirement(
-            source=CREDENTIAL_SOURCE_SECRET_STORE,
-            required=True,
-            reference="openrouter:byok",
+        fallback=ResolvedLLMFallbackPlan(
+            target=ResolvedLLMTarget(
+                provider="openrouter",
+                model=OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value,
+                credential=ResolvedCredentialRequirement(
+                    source=CREDENTIAL_SOURCE_SECRET_STORE,
+                    required=True,
+                    reference="openrouter:byok",
+                ),
+                routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST.value,
+                provider_routing="deepseek_only",
+            )
         ),
-        fallback_provider_routing="deepseek_only",
-        routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST.value,
-        provider_routing=OpenRouterProviderRouting.DEFAULT.value,
         concurrency_limit=3,
     )
     secrets = InMemorySecretStore()
@@ -936,7 +1010,7 @@ def test_create_llm_provider_openrouter_uses_managed_wrapper_when_release_servic
 
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, ManagedOpenRouterLLMProvider)
-    assert provider.inner.release_service is managed_release_service
+    assert _unwrap_release_service(provider.inner.release_service) is managed_release_service
     delegate = provider.inner.delegate_factory("delegate-key")
     assert isinstance(delegate, OpenRouterLLMProvider)
     assert delegate.runtime_logging is runtime_logging
@@ -1001,7 +1075,11 @@ def test_create_llm_provider_openrouter_wraps_primary_with_source_locked_openrou
             selected_source=OpenRouterCredentialSource.BYOK,
             routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
             selection_alias=OpenRouterSelectionAlias.GEMMA4_BYOK,
-            fallback_selection_alias=OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
+        translation=_translation_with_fallback(
+            model=TranslationModel.DEEPSEEK_V4_FLASH,
+            connection=TranslationConnection.OPENROUTER,
         ),
     )
     secrets = InMemorySecretStore()
@@ -1043,7 +1121,11 @@ def test_create_llm_provider_openrouter_byok_paths_omit_managed_user_identifier(
             selected_source=OpenRouterCredentialSource.BYOK,
             routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
             selection_alias=OpenRouterSelectionAlias.GEMMA4_BYOK,
-            fallback_selection_alias=OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
+        translation=_translation_with_fallback(
+            model=TranslationModel.DEEPSEEK_V4_FLASH,
+            connection=TranslationConnection.OPENROUTER,
         ),
     )
     secrets = InMemorySecretStore()
@@ -1078,9 +1160,7 @@ def test_create_llm_provider_openrouter_byok_paths_omit_managed_user_identifier(
     assert fallback_delegate.user_identifier is None
 
 
-def test_create_llm_provider_openrouter_managed_qwen_fallback_uses_fallback_specific_release_service() -> (
-    None
-):
+def test_create_llm_provider_openrouter_legacy_qwen_fallback_alias_is_ignored() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
         openrouter=OpenRouterSettings(
@@ -1108,47 +1188,18 @@ def test_create_llm_provider_openrouter_managed_qwen_fallback_uses_fallback_spec
     )
 
     assert isinstance(provider, SemaphoreLLMProvider)
-    assert isinstance(provider.inner, FallbackRacingLLMProvider)
-    assert isinstance(provider.inner.primary, ManagedOpenRouterLLMProvider)
-    assert provider.inner.primary.release_service is managed_release_service
-    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
-    assert provider.inner.fallback._delegate is None
-
-    fallback_delegate = provider.inner.fallback.factory()
-
-    assert isinstance(fallback_delegate, ManagedOpenRouterLLMProvider)
-    assert isinstance(fallback_delegate.release_service, ManagedOpenRouterReleaseService)
-    assert fallback_delegate.release_service is not managed_release_service
-    assert (
-        fallback_delegate.release_service.managed_state is not managed_release_service.managed_state
-    )
-    assert fallback_delegate.release_service.openrouter_config.selection_alias is None
-    assert (
-        fallback_delegate.release_service.openrouter_config.llm_model
-        == OpenRouterLLMModel.QWEN_35_FLASH_02_23
-    )
-    assert (
-        _resolve_managed_issue_model(fallback_delegate.release_service.openrouter_config)
-        == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
-    )
+    assert isinstance(provider.inner, ManagedOpenRouterLLMProvider)
+    assert _unwrap_release_service(provider.inner.release_service) is managed_release_service
     assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
     assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
-
-    fallback_openrouter_delegate = fallback_delegate.delegate_factory("managed-key")
-
-    assert isinstance(fallback_openrouter_delegate, OpenRouterLLMProvider)
-    assert fallback_openrouter_delegate.model == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
-    assert fallback_openrouter_delegate.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
 
 
 def test_create_llm_provider_openrouter_managed_deepseek_fallback_uses_fallback_specific_release_service() -> (
     None
 ):
     deepseek_model = getattr(OpenRouterLLMModel, "DEEPSEEK_V4_FLASH", None)
-    deepseek_fallback = getattr(OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH", None)
 
     assert deepseek_model is not None
-    assert deepseek_fallback is not None
 
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
@@ -1157,7 +1208,11 @@ def test_create_llm_provider_openrouter_managed_deepseek_fallback_uses_fallback_
             selected_source=OpenRouterCredentialSource.MANAGED,
             routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
             selection_alias=OpenRouterSelectionAlias.GEMMA4_MANAGED,
-            fallback_selection_alias=deepseek_fallback,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
+        translation=_translation_with_fallback(
+            model=TranslationModel.DEEPSEEK_V4_FLASH,
+            connection=TranslationConnection.MANAGED,
         ),
     )
     secrets = InMemorySecretStore()
@@ -1179,21 +1234,22 @@ def test_create_llm_provider_openrouter_managed_deepseek_fallback_uses_fallback_
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, FallbackRacingLLMProvider)
     assert isinstance(provider.inner.primary, ManagedOpenRouterLLMProvider)
-    assert provider.inner.primary.release_service is managed_release_service
+    assert (
+        _unwrap_release_service(provider.inner.primary.release_service) is managed_release_service
+    )
     assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
 
     fallback_delegate = provider.inner.fallback.factory()
 
     assert isinstance(fallback_delegate, ManagedOpenRouterLLMProvider)
-    assert isinstance(fallback_delegate.release_service, ManagedOpenRouterReleaseService)
-    assert fallback_delegate.release_service is not managed_release_service
+    fallback_release_service = _unwrap_release_service(fallback_delegate.release_service)
+    assert isinstance(fallback_release_service, ManagedOpenRouterReleaseService)
+    assert fallback_release_service is not managed_release_service
+    assert fallback_release_service.managed_state is not managed_release_service.managed_state
+    assert fallback_release_service.openrouter_config.selection_alias is None
+    assert fallback_release_service.openrouter_config.llm_model == deepseek_model
     assert (
-        fallback_delegate.release_service.managed_state is not managed_release_service.managed_state
-    )
-    assert fallback_delegate.release_service.openrouter_config.selection_alias is None
-    assert fallback_delegate.release_service.openrouter_config.llm_model == deepseek_model
-    assert (
-        _resolve_managed_issue_model(fallback_delegate.release_service.openrouter_config)
+        _resolve_managed_issue_model(fallback_release_service.openrouter_config)
         == deepseek_model.value
     )
     assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
@@ -1213,7 +1269,11 @@ def test_create_llm_provider_openrouter_managed_fallback_delegate_factory_loads_
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
         openrouter=OpenRouterSettings(
             selected_source=OpenRouterCredentialSource.MANAGED,
-            fallback_selection_alias=OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
+        translation=_translation_with_fallback(
+            model=TranslationModel.DEEPSEEK_V4_FLASH,
+            connection=TranslationConnection.MANAGED,
         ),
     )
     secrets = InMemorySecretStore()
@@ -1271,7 +1331,11 @@ def test_create_llm_provider_openrouter_managed_deepseek_fallback_clears_primary
             selected_source=OpenRouterCredentialSource.MANAGED,
             routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
             selection_alias=OpenRouterSelectionAlias.GEMMA4_MANAGED,
-            fallback_selection_alias=OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
+        translation=_translation_with_fallback(
+            model=TranslationModel.DEEPSEEK_V4_FLASH,
+            connection=TranslationConnection.MANAGED,
         ),
     )
     secrets = InMemorySecretStore()
@@ -1297,15 +1361,15 @@ def test_create_llm_provider_openrouter_managed_deepseek_fallback_clears_primary
     fallback_delegate = provider.inner.fallback.factory()
 
     assert isinstance(fallback_delegate, ManagedOpenRouterLLMProvider)
-    assert isinstance(fallback_delegate.release_service, ManagedOpenRouterReleaseService)
-    assert fallback_delegate.release_service is not managed_release_service
-    assert fallback_delegate.release_service.openrouter_config.selection_alias is None
+    fallback_release_service = _unwrap_release_service(fallback_delegate.release_service)
+    assert isinstance(fallback_release_service, ManagedOpenRouterReleaseService)
+    assert fallback_release_service is not managed_release_service
+    assert fallback_release_service.openrouter_config.selection_alias is None
     assert (
-        fallback_delegate.release_service.openrouter_config.llm_model
-        == OpenRouterLLMModel.DEEPSEEK_V4_FLASH
+        fallback_release_service.openrouter_config.llm_model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH
     )
     assert (
-        _resolve_managed_issue_model(fallback_delegate.release_service.openrouter_config)
+        _resolve_managed_issue_model(fallback_release_service.openrouter_config)
         == OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
     )
     assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Protocol
 
@@ -33,6 +33,12 @@ class DiscordAuthResult:
     discord_user_id: str | None
     message: UserMessageRef | None
     diagnostics: ErrorDiagnostics | None
+    authorization_code: str | None = field(default=None, repr=False)
+    oauth_state: str | None = field(default=None, repr=False)
+    redirect_uri: str | None = None
+    issue_nonce: str | None = field(default=None, repr=False)
+    hardware_hash: str | None = field(default=None, repr=False)
+    hardware_hash_salt_version: int | None = None
 
 
 class DiscordAuthPort(Protocol):

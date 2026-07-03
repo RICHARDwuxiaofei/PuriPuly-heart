@@ -6,20 +6,15 @@ from types import MappingProxyType
 from typing import Final, Literal, TypeAlias, cast
 
 from puripuly_heart.config.llm_profiles import (
-    FALLBACK_PROFILE_BY_ALIAS,
     OPENROUTER_CREDENTIAL_SOURCE_BYOK,
     OPENROUTER_CREDENTIAL_SOURCE_MANAGED,
     OPENROUTER_CREDENTIAL_SOURCE_NONE,
-    OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH,
-    OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_CHINA,
-    OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE,
     OPENROUTER_MODEL_DEEPSEEK_V4_FLASH,
     OPENROUTER_MODEL_GEMINI_3_FLASH,
     OPENROUTER_MODEL_GEMINI_31_FLASH_LITE,
     OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT,
     OPENROUTER_MODEL_QWEN_35_FLASH_02_23,
     get_openrouter_llm_profile,
-    normalize_openrouter_fallback_selection_alias,
     openrouter_alias_for_fields,
 )
 from puripuly_heart.config.resolved import (
@@ -32,6 +27,8 @@ from puripuly_heart.config.resolved import (
     RUNTIME_CHANNEL_SELF,
     ResolvedCredentialRequirement,
     ResolvedLLMConfig,
+    ResolvedLLMFallbackPlan,
+    ResolvedLLMTarget,
     ResolvedOptionValue,
     ResolvedOverlayConfig,
     ResolvedSTTConfig,
@@ -143,11 +140,6 @@ OpenRouterManagedCredentialKind: TypeAlias = Literal["standard", "qq"]
 OPENROUTER_MANAGED_CREDENTIAL_KINDS: Final[tuple[OpenRouterManagedCredentialKind, ...]] = (
     OPENROUTER_MANAGED_CREDENTIAL_STANDARD,
     OPENROUTER_MANAGED_CREDENTIAL_QQ,
-)
-
-OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE_VALUE: Final = OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE
-OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_VALUE: Final = (
-    OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH
 )
 
 PROVIDER_OPENROUTER: Final = "openrouter"
@@ -403,14 +395,6 @@ def _canonical_openrouter_alias(model: str, source: OpenRouterSource) -> str | N
     return openrouter_alias_for_fields(model=model, source=source)
 
 
-def _normalize_openrouter_fallback_alias(value: object) -> str:
-    if isinstance(value, str):
-        normalized = normalize_openrouter_fallback_selection_alias(value)
-        if normalized is not None and normalized in FALLBACK_PROFILE_BY_ALIAS:
-            return normalized
-    return OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH
-
-
 def _normalize_openrouter_broker_base_url(value: object) -> str | None:
     if isinstance(value, str):
         normalized = value.strip()
@@ -503,11 +487,27 @@ class TranslationRuntimeIntent:
 
 
 @dataclass(frozen=True, slots=True)
+class TranslationFallbackRuntimeIntent:
+    enabled: bool = False
+    model: TranslationModelName = TRANSLATION_MODEL_DEEPSEEK_V4_FLASH
+    connection: TranslationConnectionName = TRANSLATION_CONNECTION_OFFICIAL_BYOK
+
+    def __post_init__(self) -> None:
+        model = _normalize_translation_model(self.model)
+        connection = _normalize_translation_connection(self.connection, model=model)
+        object.__setattr__(self, "enabled", bool(self.enabled))
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "connection", connection)
+        _require_allowed(model, TRANSLATION_MODELS, field_name="fallback model")
+        if connection not in TRANSLATION_CONNECTIONS_BY_MODEL[model]:
+            raise ValueError("translation fallback connection is not supported for model")
+
+
+@dataclass(frozen=True, slots=True)
 class OpenRouterRuntimeIntent:
     model: str = OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT
     selected_source: OpenRouterSource = OPENROUTER_SOURCE_MANAGED
     selection_alias: str | None = None
-    fallback_selection_alias: str = OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH
     routing_mode: str = "latency"
     provider_routing: str = "default"
     managed_credential_kind: OpenRouterManagedCredentialKind = (
@@ -522,9 +522,6 @@ class OpenRouterRuntimeIntent:
             default=OPENROUTER_SOURCE_MANAGED,
         )
         selection_alias = _canonical_openrouter_alias(model, source)
-        fallback_selection_alias = _normalize_openrouter_fallback_alias(
-            self.fallback_selection_alias
-        )
         routing_mode = _normalize_allowed(
             self.routing_mode,
             allowed=_OPENROUTER_ROUTING_MODES,
@@ -541,7 +538,6 @@ class OpenRouterRuntimeIntent:
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "selected_source", source)
         object.__setattr__(self, "selection_alias", selection_alias)
-        object.__setattr__(self, "fallback_selection_alias", fallback_selection_alias)
         object.__setattr__(self, "routing_mode", routing_mode)
         object.__setattr__(self, "provider_routing", provider_routing)
         object.__setattr__(self, "managed_credential_kind", managed_credential_kind)
@@ -732,6 +728,9 @@ class OverlayRuntimeIntent:
 @dataclass(frozen=True, slots=True)
 class RuntimeResolutionInput:
     translation: TranslationRuntimeIntent = field(default_factory=TranslationRuntimeIntent)
+    translation_fallback: TranslationFallbackRuntimeIntent = field(
+        default_factory=TranslationFallbackRuntimeIntent
+    )
     openrouter: OpenRouterRuntimeIntent = field(default_factory=OpenRouterRuntimeIntent)
     direct: DirectProviderRuntimeIntent = field(default_factory=DirectProviderRuntimeIntent)
     self_stt: STTRuntimeIntent = field(default_factory=STTRuntimeIntent)
@@ -765,6 +764,7 @@ def normalize_openrouter_runtime_intent(
     managed_credential_kind: object = None,
     broker_base_url: object = None,
 ) -> OpenRouterRuntimeIntent:
+    _ = fallback_selection_alias
     selection_profile = None
     if isinstance(selection_alias, str):
         normalized_alias = selection_alias.strip()
@@ -793,7 +793,6 @@ def normalize_openrouter_runtime_intent(
         model=resolved_model,
         selected_source=resolved_source,
         selection_alias=_canonical_openrouter_alias(resolved_model, resolved_source),
-        fallback_selection_alias=_normalize_openrouter_fallback_alias(fallback_selection_alias),
         routing_mode=_normalize_allowed(
             routing_mode,
             allowed=_OPENROUTER_ROUTING_MODES,
@@ -975,10 +974,9 @@ def _openrouter_source_for_translation(
     connection: TranslationConnectionName,
     openrouter: OpenRouterRuntimeIntent,
 ) -> OpenRouterSource:
+    _ = openrouter
     if connection in (TRANSLATION_CONNECTION_MANAGED, TRANSLATION_CONNECTION_MANAGED_CHINA):
         return OPENROUTER_SOURCE_MANAGED
-    if openrouter.selected_source == OPENROUTER_SOURCE_NONE:
-        return OPENROUTER_SOURCE_NONE
     return OPENROUTER_SOURCE_BYOK
 
 
@@ -992,92 +990,44 @@ def _openrouter_managed_credential_kind_for_translation(
     return OPENROUTER_MANAGED_CREDENTIAL_STANDARD
 
 
-def _openrouter_fallback_fields(
-    openrouter: OpenRouterRuntimeIntent,
-    source: OpenRouterSource,
-    *,
-    provider_routing: str,
-    managed_credential_kind: OpenRouterManagedCredentialKind,
-) -> tuple[str | None, str | None, ResolvedCredentialRequirement, str | None]:
-    if (
-        openrouter.fallback_selection_alias == OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE
-        or provider_routing == "deepseek_only"
-    ):
-        return None, None, _no_credential(), None
-    fallback_profile = FALLBACK_PROFILE_BY_ALIAS[openrouter.fallback_selection_alias]
-    if fallback_profile.openrouter_model is None:
-        return None, None, _no_credential(), None
-    fallback_provider_routing = (
-        "deepseek_only"
-        if openrouter.fallback_selection_alias
-        == OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_CHINA
-        else "default"
-    )
-    return (
-        PROVIDER_OPENROUTER,
-        fallback_profile.openrouter_model,
-        _openrouter_credential(source, managed_credential_kind=managed_credential_kind),
-        fallback_provider_routing,
-    )
-
-
-def _resolved_openrouter_config(
+def _resolved_openrouter_target(
     *,
     model: str,
     source: OpenRouterSource,
     openrouter: OpenRouterRuntimeIntent,
     provider_routing: str,
     managed_credential_kind: OpenRouterManagedCredentialKind,
-    concurrency_limit: int,
-) -> ResolvedLLMConfig:
-    (
-        fallback_provider,
-        fallback_model,
-        fallback_credential,
-        fallback_provider_routing,
-    ) = _openrouter_fallback_fields(
-        openrouter,
-        source,
-        provider_routing=provider_routing,
-        managed_credential_kind=managed_credential_kind,
-    )
-    return ResolvedLLMConfig(
+) -> ResolvedLLMTarget:
+    return ResolvedLLMTarget(
         provider=PROVIDER_OPENROUTER,
         model=model,
         credential=_openrouter_credential(
             source,
             managed_credential_kind=managed_credential_kind,
         ),
-        fallback_provider=fallback_provider,
-        fallback_model=fallback_model,
-        fallback_credential=fallback_credential,
-        fallback_provider_routing=fallback_provider_routing,
         service_endpoint=openrouter.broker_base_url,
         routing_mode=openrouter.routing_mode,
         provider_routing=provider_routing,
-        concurrency_limit=concurrency_limit,
     )
 
 
-def _resolved_direct_provider_config(
+def _resolved_direct_provider_target(
     *,
     provider: str,
     model: str,
     credential: ResolvedCredentialRequirement,
-    concurrency_limit: int,
     base_url: str | None = None,
     service_endpoint: str | None = None,
     region: str | None = None,
     provider_options: Mapping[str, object] | None = None,
-) -> ResolvedLLMConfig:
-    return ResolvedLLMConfig(
+) -> ResolvedLLMTarget:
+    return ResolvedLLMTarget(
         provider=provider,
         model=model,
         credential=credential,
         base_url=base_url,
         service_endpoint=service_endpoint,
         region=region,
-        concurrency_limit=concurrency_limit,
         provider_options={} if provider_options is None else provider_options,
     )
 
@@ -1150,14 +1100,14 @@ def resolve_overlay_config(intent: OverlayRuntimeIntent) -> ResolvedOverlayConfi
     )
 
 
-def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConfig:
-    translation = runtime_input.translation
-    openrouter = runtime_input.openrouter
-    direct = runtime_input.direct
-    concurrency_limit = translation.concurrency_limit
-
+def _resolve_translation_target(
+    translation: TranslationRuntimeIntent,
+    *,
+    openrouter: OpenRouterRuntimeIntent,
+    direct: DirectProviderRuntimeIntent,
+) -> ResolvedLLMTarget:
     if translation.model == TRANSLATION_MODEL_GEMMA4:
-        return _resolved_openrouter_config(
+        return _resolved_openrouter_target(
             model=OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT,
             source=_openrouter_source_for_translation(translation.connection, openrouter),
             openrouter=openrouter,
@@ -1166,19 +1116,17 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
                 translation.connection,
                 openrouter,
             ),
-            concurrency_limit=concurrency_limit,
         )
 
     if translation.model == TRANSLATION_MODEL_DEEPSEEK_V4_FLASH:
         if translation.connection == TRANSLATION_CONNECTION_OFFICIAL_BYOK:
-            return _resolved_direct_provider_config(
+            return _resolved_direct_provider_target(
                 provider=PROVIDER_DEEPSEEK,
                 model=direct.deepseek_v4_flash_model,
                 credential=_required_credential(
                     CREDENTIAL_SOURCE_SECRET_STORE,
                     CREDENTIAL_REF_DEEPSEEK_BYOK,
                 ),
-                concurrency_limit=concurrency_limit,
             )
         provider_routing = (
             "deepseek_only"
@@ -1189,7 +1137,7 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
                 else "default"
             )
         )
-        return _resolved_openrouter_config(
+        return _resolved_openrouter_target(
             model=OPENROUTER_MODEL_DEEPSEEK_V4_FLASH,
             source=_openrouter_source_for_translation(translation.connection, openrouter),
             openrouter=openrouter,
@@ -1198,23 +1146,21 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
                 translation.connection,
                 openrouter,
             ),
-            concurrency_limit=concurrency_limit,
         )
 
     if translation.model == TRANSLATION_MODEL_DEEPSEEK_V4_PRO:
-        return _resolved_direct_provider_config(
+        return _resolved_direct_provider_target(
             provider=PROVIDER_DEEPSEEK,
             model=direct.deepseek_v4_pro_model,
             credential=_required_credential(
                 CREDENTIAL_SOURCE_SECRET_STORE,
                 CREDENTIAL_REF_DEEPSEEK_BYOK,
             ),
-            concurrency_limit=concurrency_limit,
         )
 
     if translation.model == TRANSLATION_MODEL_GEMINI_3_FLASH:
         if translation.connection == TRANSLATION_CONNECTION_OPENROUTER:
-            return _resolved_openrouter_config(
+            return _resolved_openrouter_target(
                 model=OPENROUTER_MODEL_GEMINI_3_FLASH,
                 source=_openrouter_source_for_translation(translation.connection, openrouter),
                 openrouter=openrouter,
@@ -1223,21 +1169,19 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
                     translation.connection,
                     openrouter,
                 ),
-                concurrency_limit=concurrency_limit,
             )
-        return _resolved_direct_provider_config(
+        return _resolved_direct_provider_target(
             provider=PROVIDER_GEMINI,
             model=direct.gemini_3_flash_model,
             credential=_required_credential(
                 CREDENTIAL_SOURCE_SECRET_STORE,
                 CREDENTIAL_REF_GEMINI_BYOK,
             ),
-            concurrency_limit=concurrency_limit,
         )
 
     if translation.model == TRANSLATION_MODEL_GEMINI_31_FLASH_LITE:
         if translation.connection == TRANSLATION_CONNECTION_OPENROUTER:
-            return _resolved_openrouter_config(
+            return _resolved_openrouter_target(
                 model=OPENROUTER_MODEL_GEMINI_31_FLASH_LITE,
                 source=_openrouter_source_for_translation(translation.connection, openrouter),
                 openrouter=openrouter,
@@ -1246,20 +1190,18 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
                     translation.connection,
                     openrouter,
                 ),
-                concurrency_limit=concurrency_limit,
             )
-        return _resolved_direct_provider_config(
+        return _resolved_direct_provider_target(
             provider=PROVIDER_GEMINI,
             model=direct.gemini_31_flash_lite_model,
             credential=_required_credential(
                 CREDENTIAL_SOURCE_SECRET_STORE,
                 CREDENTIAL_REF_GEMINI_BYOK,
             ),
-            concurrency_limit=concurrency_limit,
         )
 
     if translation.model == TRANSLATION_MODEL_QWEN_35_PLUS:
-        return _resolved_direct_provider_config(
+        return _resolved_direct_provider_target(
             provider=PROVIDER_QWEN,
             model=direct.qwen_35_plus_model,
             credential=_required_credential(
@@ -1268,11 +1210,10 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
             ),
             service_endpoint=_qwen_service_endpoint(direct.qwen_region),
             region=direct.qwen_region,
-            concurrency_limit=concurrency_limit,
         )
 
     if translation.model == TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH:
-        return _resolved_openrouter_config(
+        return _resolved_openrouter_target(
             model=OPENROUTER_MODEL_QWEN_35_FLASH_02_23,
             source=_openrouter_source_for_translation(translation.connection, openrouter),
             openrouter=openrouter,
@@ -1281,30 +1222,71 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
                 translation.connection,
                 openrouter,
             ),
-            concurrency_limit=concurrency_limit,
         )
 
     if translation.model == TRANSLATION_MODEL_GEMMA4_31B_CEREBRAS:
-        return _resolved_direct_provider_config(
+        return _resolved_direct_provider_target(
             provider=PROVIDER_CEREBRAS,
             model=direct.cerebras_model,
             credential=_required_credential(
                 CREDENTIAL_SOURCE_SECRET_STORE,
                 CREDENTIAL_REF_CEREBRAS_BYOK,
             ),
-            concurrency_limit=concurrency_limit,
         )
 
-    return _resolved_direct_provider_config(
+    return _resolved_direct_provider_target(
         provider=PROVIDER_LOCAL_LLM,
         model=direct.local_llm_model,
         credential=_no_credential(),
         base_url=direct.local_llm_base_url,
-        concurrency_limit=concurrency_limit,
         provider_options={
             "backend": direct.local_llm_backend,
             "extra_body": direct.local_llm_extra_body,
         },
+    )
+
+
+def _llm_targets_equivalent(left: ResolvedLLMTarget, right: ResolvedLLMTarget) -> bool:
+    return left == right
+
+
+def _fallback_plan_for_target(
+    target: ResolvedLLMTarget,
+) -> ResolvedLLMFallbackPlan:
+    return ResolvedLLMFallbackPlan(
+        target=target,
+        force_managed_wrapper=(
+            target.provider == PROVIDER_OPENROUTER
+            and target.credential.source == CREDENTIAL_SOURCE_MANAGED
+        ),
+    )
+
+
+def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConfig:
+    translation = runtime_input.translation
+    openrouter = runtime_input.openrouter
+    direct = runtime_input.direct
+    primary = _resolve_translation_target(translation, openrouter=openrouter, direct=direct)
+    fallback_plan: ResolvedLLMFallbackPlan | None = None
+
+    if runtime_input.translation_fallback.enabled:
+        fallback_translation = TranslationRuntimeIntent(
+            model=runtime_input.translation_fallback.model,
+            connection=runtime_input.translation_fallback.connection,
+            concurrency_limit=translation.concurrency_limit,
+        )
+        fallback_target = _resolve_translation_target(
+            fallback_translation,
+            openrouter=openrouter,
+            direct=direct,
+        )
+        if not _llm_targets_equivalent(primary, fallback_target):
+            fallback_plan = _fallback_plan_for_target(fallback_target)
+
+    return ResolvedLLMConfig(
+        primary=primary,
+        fallback=fallback_plan,
+        concurrency_limit=translation.concurrency_limit,
     )
 
 
@@ -1330,11 +1312,6 @@ __all__ = [
     "LOCAL_LLM_DEFAULT_BASE_URL",
     "LOCAL_LLM_DEFAULT_MODEL",
     "LLM_PROVIDERS",
-    "OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH",
-    "OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_CHINA",
-    "OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_VALUE",
-    "OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE",
-    "OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE_VALUE",
     "OPENROUTER_SOURCE_BYOK",
     "OPENROUTER_MANAGED_CREDENTIAL_KINDS",
     "OPENROUTER_MANAGED_CREDENTIAL_QQ",
@@ -1397,6 +1374,7 @@ __all__ = [
     "TRANSLATION_MODEL_QWEN_35_PLUS",
     "TRANSLATION_MODELS",
     "TranslationConnectionName",
+    "TranslationFallbackRuntimeIntent",
     "TranslationModelName",
     "TranslationRuntimeIntent",
     "derive_translation_runtime_intent_from_compatibility",

@@ -46,6 +46,7 @@ from puripuly_heart.config.settings import (
     QwenRegion,
     STTProviderName,
     TranslationConnection,
+    TranslationFallbackSettings,
     TranslationModel,
     TranslationSettings,
     _migrate_settings_dict,
@@ -66,6 +67,12 @@ from tests.config.settings_vnext_test_helpers import (
     legacy_projected_settings_file,
     load_raw_json_file,
 )
+
+DEFAULT_TRANSLATION_FALLBACK_DICT = {
+    "enabled": False,
+    "model": TranslationModel.DEEPSEEK_V4_FLASH.value,
+    "connection": TranslationConnection.OFFICIAL_BYOK.value,
+}
 
 
 def test_settings_roundtrip(tmp_path):
@@ -527,6 +534,7 @@ def test_translation_settings_defaults_to_gemma_managed_with_only_gemma_history(
         "connection_history": {
             TranslationModel.GEMMA4.value: TranslationConnection.MANAGED.value,
         },
+        "fallback": DEFAULT_TRANSLATION_FALLBACK_DICT,
     }
 
 
@@ -969,7 +977,7 @@ def test_to_dict_roundtrips_deepseek_managed_china_provider_routing(tmp_path) ->
     )
 
 
-def test_app_settings_defaults_to_managed_openrouter_gemma_with_deepseek_fallback() -> None:
+def test_app_settings_defaults_to_managed_openrouter_gemma_without_fallback() -> None:
     settings = AppSettings()
 
     assert settings.translation.model == TranslationModel.GEMMA4
@@ -978,10 +986,8 @@ def test_app_settings_defaults_to_managed_openrouter_gemma_with_deepseek_fallbac
     assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
-    assert (
-        settings.openrouter.fallback_selection_alias
-        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
-    )
+    assert settings.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.NONE
+    assert settings.translation.fallback == TranslationFallbackSettings()
 
 
 def test_app_settings_accepts_deepseek_llm_provider_defaults() -> None:
@@ -1096,17 +1102,13 @@ def test_openrouter_fallback_aliases_include_curated_openrouter_models() -> None
     assert deepseek_fallback is not None
     assert deepseek_china_fallback is not None
 
-    assert tuple(alias.value for alias in OpenRouterFallbackSelectionAlias) == (
+    assert OPENROUTER_FALLBACK_SELECTION_ALIASES == (
         OpenRouterFallbackSelectionAlias.NONE.value,
-        OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value,
         deepseek_fallback.value,
         deepseek_china_fallback.value,
     )
-    assert OPENROUTER_FALLBACK_SELECTION_ALIASES == (
-        OpenRouterFallbackSelectionAlias.NONE.value,
-        OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value,
-        deepseek_fallback.value,
-        deepseek_china_fallback.value,
+    assert OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value not in (
+        OPENROUTER_FALLBACK_SELECTION_ALIASES
     )
 
 
@@ -1940,6 +1942,7 @@ def test_translation_settings_roundtrip_materializes_deepseek_openrouter_byok(tm
         "model": "deepseek_v4_flash",
         "connection": "openrouter",
         "connection_history": {"deepseek_v4_flash": "openrouter"},
+        "fallback": DEFAULT_TRANSLATION_FALLBACK_DICT,
     }
     assert loaded.translation.model == TranslationModel.DEEPSEEK_V4_FLASH
     assert loaded.translation.connection == TranslationConnection.OPENROUTER
@@ -2136,9 +2139,7 @@ def test_from_dict_migrates_openrouter_qwen_flash_main_to_deepseek_managed() -> 
 
     assert loaded.translation.model == TranslationModel.DEEPSEEK_V4_FLASH
     assert loaded.translation.connection == TranslationConnection.MANAGED
-    assert (
-        loaded.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.QWEN35_FLASH
-    )
+    assert loaded.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.NONE
     assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
 
 
@@ -2160,16 +2161,13 @@ def test_from_dict_migrates_openrouter_qwen_flash_main_preserving_routing_and_fa
     assert loaded.translation.model == TranslationModel.DEEPSEEK_V4_FLASH
     assert loaded.translation.connection == TranslationConnection.MANAGED
     assert loaded.openrouter.routing_mode == OpenRouterRoutingMode.NOVITA_FIRST
-    assert (
-        loaded.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.QWEN35_FLASH
-    )
+    assert loaded.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.NONE
     assert loaded.openrouter.llm_model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH
     assert loaded.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
     assert persisted["openrouter"]["routing_mode"] == OpenRouterRoutingMode.NOVITA_FIRST.value
-    assert (
-        persisted["openrouter"]["fallback_selection_alias"]
-        == OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value
+    assert persisted["openrouter"]["fallback_selection_alias"] == (
+        OpenRouterFallbackSelectionAlias.NONE.value
     )
 
 
@@ -2366,6 +2364,7 @@ def test_load_settings_persists_default_translation_for_malformed_non_dict_secti
         "connection_history": {
             TranslationModel.GEMMA4.value: TranslationConnection.MANAGED.value,
         },
+        "fallback": DEFAULT_TRANSLATION_FALLBACK_DICT,
     }
 
 
@@ -2403,6 +2402,7 @@ def test_invalid_translation_connection_falls_back_to_model_default() -> None:
         "connection_history": {
             TranslationModel.GEMINI_3_FLASH.value: TranslationConnection.OFFICIAL_BYOK.value,
         },
+        "fallback": DEFAULT_TRANSLATION_FALLBACK_DICT,
     }
 
 
@@ -2429,6 +2429,7 @@ def test_load_settings_persists_normalized_translation_section(tmp_path) -> None
         "connection_history": {
             TranslationModel.GEMINI_31_FLASH_LITE.value: TranslationConnection.OPENROUTER.value,
         },
+        "fallback": DEFAULT_TRANSLATION_FALLBACK_DICT,
     }
 
 
@@ -2464,9 +2465,8 @@ def test_load_settings_persists_materialized_runtime_fields_for_current_translat
     assert persisted["provider"]["llm"] == LLMProviderName.DEEPSEEK.value
     assert persisted["deepseek"]["llm_model"] == DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value
     assert persisted["openrouter"]["routing_mode"] == OpenRouterRoutingMode.PARASAIL_FIRST.value
-    assert (
-        persisted["openrouter"]["fallback_selection_alias"]
-        == OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value
+    assert persisted["openrouter"]["fallback_selection_alias"] == (
+        OpenRouterFallbackSelectionAlias.NONE.value
     )
 
 
@@ -2543,7 +2543,7 @@ def test_openrouter_explicit_inactive_state_keeps_selection_alias_none(tmp_path)
         OpenRouterSelectionAlias.GEMMA4_BYOK.value,
     ],
 )
-def test_from_dict_migrates_legacy_openrouter_fallbacks_to_deepseek_v4_flash(
+def test_from_dict_disables_legacy_openrouter_fallback_aliases(
     legacy_alias: str,
 ) -> None:
     data = to_dict(AppSettings())
@@ -2551,46 +2551,33 @@ def test_from_dict_migrates_legacy_openrouter_fallbacks_to_deepseek_v4_flash(
 
     loaded = from_dict(data)
 
-    assert (
-        loaded.openrouter.fallback_selection_alias
-        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
-    )
-    assert (
-        to_dict(loaded)["openrouter"]["fallback_selection_alias"]
-        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH.value
+    assert loaded.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.NONE
+    assert to_dict(loaded)["openrouter"]["fallback_selection_alias"] == (
+        OpenRouterFallbackSelectionAlias.NONE.value
     )
 
 
-def test_from_dict_defaults_invalid_openrouter_fallback_to_deepseek_v4_flash() -> None:
+def test_from_dict_defaults_invalid_openrouter_fallback_to_none() -> None:
     data = to_dict(AppSettings())
     data["openrouter"]["fallback_selection_alias"] = "broken-fallback"
 
     loaded = from_dict(data)
 
-    assert (
-        loaded.openrouter.fallback_selection_alias
-        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
-    )
+    assert loaded.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.NONE
 
 
-def test_openrouter_legacy_gemini25_flash_lite_fallback_normalizes_to_deepseek() -> None:
-    deepseek_fallback = OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
-
-    assert resolve_openrouter_fallback_model(
-        "gemini25_flash_lite"
-    ) == resolve_openrouter_fallback_model(deepseek_fallback.value)
+def test_openrouter_legacy_gemini25_flash_lite_fallback_is_not_live_alias() -> None:
+    with pytest.raises(KeyError):
+        resolve_openrouter_fallback_model("gemini25_flash_lite")
 
 
-def test_from_dict_normalizes_legacy_gemini25_flash_lite_fallback_to_deepseek() -> None:
+def test_from_dict_disables_legacy_gemini25_flash_lite_fallback() -> None:
     data = to_dict(AppSettings())
     data["openrouter"]["fallback_selection_alias"] = "gemini25_flash_lite"
 
     loaded = from_dict(data)
 
-    assert (
-        loaded.openrouter.fallback_selection_alias
-        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
-    )
+    assert loaded.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.NONE
 
 
 def test_openrouter_deepseek_v4_flash_aliases_use_stable_slug() -> None:
@@ -2628,21 +2615,24 @@ def test_openrouter_deepseek_v4_flash_aliases_use_stable_slug() -> None:
     assert resolve_openrouter_fallback_model(deepseek_china_fallback.value) == expected
 
 
-def test_openrouter_settings_roundtrip_persists_deepseek_china_fallback(
+def test_openrouter_settings_roundtrip_persists_deepseek_china_translation_fallback(
     tmp_path,
 ) -> None:
     path = tmp_path / "settings.json"
-    deepseek_china_fallback = getattr(
-        OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH_CHINA", None
-    )
-    assert deepseek_china_fallback is not None
 
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        translation=TranslationSettings(
+            fallback=TranslationFallbackSettings(
+                enabled=True,
+                model=TranslationModel.DEEPSEEK_V4_FLASH,
+                connection=TranslationConnection.MANAGED_CHINA,
+            )
+        ),
         openrouter=OpenRouterSettings(
             selected_source=OpenRouterCredentialSource.BYOK,
             selection_alias=OpenRouterSelectionAlias.GEMMA4_BYOK,
-            fallback_selection_alias=deepseek_china_fallback,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
         ),
     )
 
@@ -2651,21 +2641,31 @@ def test_openrouter_settings_roundtrip_persists_deepseek_china_fallback(
     loaded = load_settings(path)
     persisted = legacy_projected_settings_file(path)
 
-    assert loaded.openrouter.fallback_selection_alias == deepseek_china_fallback
-    assert persisted["openrouter"]["fallback_selection_alias"] == deepseek_china_fallback.value
+    assert loaded.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.NONE
+    assert loaded.translation.fallback == TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.MANAGED_CHINA,
+    )
+    assert persisted["openrouter"]["fallback_selection_alias"] == (
+        OpenRouterFallbackSelectionAlias.NONE.value
+    )
+    assert persisted["translation"]["fallback"] == {
+        "enabled": True,
+        "model": TranslationModel.DEEPSEEK_V4_FLASH.value,
+        "connection": TranslationConnection.MANAGED_CHINA.value,
+    }
 
 
-def test_openrouter_settings_roundtrip_persists_deepseek_selection_and_fallback(
+def test_openrouter_settings_roundtrip_persists_deepseek_selection_and_translation_fallback(
     tmp_path,
 ) -> None:
     path = tmp_path / "settings.json"
     deepseek_model = getattr(OpenRouterLLMModel, "DEEPSEEK_V4_FLASH", None)
     deepseek_managed = getattr(OpenRouterSelectionAlias, "DEEPSEEK_V4_FLASH_MANAGED", None)
-    deepseek_fallback = getattr(OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH", None)
 
     assert deepseek_model is not None
     assert deepseek_managed is not None
-    assert deepseek_fallback is not None
 
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
@@ -2675,13 +2675,18 @@ def test_openrouter_settings_roundtrip_persists_deepseek_selection_and_fallback(
             connection_history={
                 TranslationModel.DEEPSEEK_V4_FLASH.value: TranslationConnection.MANAGED,
             },
+            fallback=TranslationFallbackSettings(
+                enabled=True,
+                model=TranslationModel.DEEPSEEK_V4_FLASH,
+                connection=TranslationConnection.OPENROUTER,
+            ),
         ),
         openrouter=OpenRouterSettings(
             llm_model=deepseek_model,
             routing_mode=OpenRouterRoutingMode.LATENCY,
             selected_source=OpenRouterCredentialSource.MANAGED,
             selection_alias=deepseek_managed,
-            fallback_selection_alias=deepseek_fallback,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
         ),
     )
 
@@ -2690,7 +2695,14 @@ def test_openrouter_settings_roundtrip_persists_deepseek_selection_and_fallback(
     assert serialized["openrouter"]["selection_alias"] == deepseek_managed.value
     assert serialized["openrouter"]["llm_model"] == deepseek_model.value
     assert serialized["openrouter"]["selected_source"] == OpenRouterCredentialSource.MANAGED.value
-    assert serialized["openrouter"]["fallback_selection_alias"] == deepseek_fallback.value
+    assert serialized["openrouter"]["fallback_selection_alias"] == (
+        OpenRouterFallbackSelectionAlias.NONE.value
+    )
+    assert serialized["translation"]["fallback"] == {
+        "enabled": True,
+        "model": TranslationModel.DEEPSEEK_V4_FLASH.value,
+        "connection": TranslationConnection.OPENROUTER.value,
+    }
 
     save_settings(path, settings)
 
@@ -2700,11 +2712,18 @@ def test_openrouter_settings_roundtrip_persists_deepseek_selection_and_fallback(
     assert loaded.openrouter.selection_alias == deepseek_managed
     assert loaded.openrouter.llm_model == deepseek_model
     assert loaded.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
-    assert loaded.openrouter.fallback_selection_alias == deepseek_fallback
+    assert loaded.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.NONE
+    assert loaded.translation.fallback == TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.OPENROUTER,
+    )
     assert persisted["openrouter"]["selection_alias"] == deepseek_managed.value
     assert persisted["openrouter"]["llm_model"] == deepseek_model.value
     assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.MANAGED.value
-    assert persisted["openrouter"]["fallback_selection_alias"] == deepseek_fallback.value
+    assert persisted["openrouter"]["fallback_selection_alias"] == (
+        OpenRouterFallbackSelectionAlias.NONE.value
+    )
 
 
 def test_openrouter_settings_derives_deepseek_byok_alias_without_explicit_alias() -> None:
@@ -2724,7 +2743,7 @@ def test_openrouter_settings_derives_deepseek_byok_alias_without_explicit_alias(
     assert settings.selection_alias == deepseek_byok
 
 
-def test_openrouter_qwen_flash_main_roundtrip_migrates_to_deepseek_and_preserves_fallback(
+def test_openrouter_qwen_flash_main_roundtrip_migrates_to_deepseek_and_disables_legacy_fallback(
     tmp_path,
 ) -> None:
     path = tmp_path / "settings.json"
@@ -2746,10 +2765,8 @@ def test_openrouter_qwen_flash_main_roundtrip_migrates_to_deepseek_and_preserves
     assert loaded.translation.model == TranslationModel.DEEPSEEK_V4_FLASH
     assert loaded.translation.connection == TranslationConnection.MANAGED
     assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
-    assert (
-        loaded.openrouter.fallback_selection_alias
-        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
-    )
+    assert loaded.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.NONE
+    assert loaded.translation.fallback == TranslationFallbackSettings()
     assert loaded.openrouter.llm_model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH
     assert loaded.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert (
@@ -2758,10 +2775,10 @@ def test_openrouter_qwen_flash_main_roundtrip_migrates_to_deepseek_and_preserves
     )
     assert persisted["openrouter"]["llm_model"] == OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
     assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.MANAGED.value
-    assert (
-        persisted["openrouter"]["fallback_selection_alias"]
-        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH.value
+    assert persisted["openrouter"]["fallback_selection_alias"] == (
+        OpenRouterFallbackSelectionAlias.NONE.value
     )
+    assert persisted["translation"]["fallback"] == DEFAULT_TRANSLATION_FALLBACK_DICT
 
 
 def test_load_settings_backfills_openrouter_blocks_and_persists(tmp_path):
@@ -2810,17 +2827,13 @@ def test_load_settings_backfills_openrouter_aliases_from_legacy_fields(tmp_path)
     assert loaded.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     assert loaded.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
-    assert (
-        loaded.openrouter.fallback_selection_alias
-        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
-    )
+    assert loaded.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.NONE
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert (
         persisted["openrouter"]["selection_alias"] == OpenRouterSelectionAlias.GEMMA4_MANAGED.value
     )
-    assert (
-        persisted["openrouter"]["fallback_selection_alias"]
-        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH.value
+    assert persisted["openrouter"]["fallback_selection_alias"] == (
+        OpenRouterFallbackSelectionAlias.NONE.value
     )
 
 

@@ -9,7 +9,7 @@ from typing import Final
 from puripuly_heart.config.audio_host_api import WINDOWS_WASAPI_COMPATIBILITY_HOST_API
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
 
-VNEXT_SETTINGS_SCHEMA_VERSION: Final = 25
+VNEXT_SETTINGS_SCHEMA_VERSION: Final = 26
 
 DEFAULT_OPENROUTER_BROKER_BASE_URL: Final = "https://puripuly-heart-broker.kapitalismho.workers.dev"
 DEFAULT_CUSTOM_VOCAB_TERMS: Final[Mapping[str, tuple[str, ...]]] = {
@@ -18,6 +18,12 @@ DEFAULT_CUSTOM_VOCAB_TERMS: Final[Mapping[str, tuple[str, ...]]] = {
     "zh-CN": ("airi", "shinano"),
     "ja": ("airi", "shinano"),
 }
+MANAGED_AUTH_CLAIM_SOURCE_DISCORD: Final = "discord"
+MANAGED_AUTH_CLAIM_SOURCE_QQ: Final = "qq"
+MANAGED_AUTH_CLAIM_SOURCES: Final = (
+    MANAGED_AUTH_CLAIM_SOURCE_DISCORD,
+    MANAGED_AUTH_CLAIM_SOURCE_QQ,
+)
 
 RUNTIME_ONLY_LEGACY_SETTINGS_PATHS: Final = frozenset(
     {"ui.overlay_enabled", "ui.peer_translation_enabled"}
@@ -102,6 +108,21 @@ def _default_local_llm_extra_body() -> dict[str, object]:
 
 def _default_custom_terms() -> dict[str, list[str]]:
     return {language: list(terms) for language, terms in DEFAULT_CUSTOM_VOCAB_TERMS.items()}
+
+
+def normalize_managed_claim_sources(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        candidates: tuple[object, ...] = (value,)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        candidates = tuple(value)
+    else:
+        candidates = ()
+    normalized = {
+        item.strip().lower()
+        for item in candidates
+        if isinstance(item, str) and item.strip().lower() in MANAGED_AUTH_CLAIM_SOURCES
+    }
+    return tuple(source for source in MANAGED_AUTH_CLAIM_SOURCES if source in normalized)
 
 
 def _normalize_extra_body_key(key: str) -> str:
@@ -215,6 +236,13 @@ class CerebrasTranslationIntent:
 
 
 @dataclass(frozen=True, slots=True)
+class TranslationFallbackIntent:
+    enabled: bool = False
+    model: str = "deepseek_v4_flash"
+    connection: str = "official_byok"
+
+
+@dataclass(frozen=True, slots=True)
 class TranslationIntent:
     model: str = "gemma4"
     connection: str = "managed"
@@ -222,7 +250,7 @@ class TranslationIntent:
         default_factory=_default_translation_connection_history
     )
     concurrency_limit: int = 5
-    openrouter_fallback_selection_alias: str = "deepseek-v4-flash"
+    fallback: TranslationFallbackIntent = field(default_factory=TranslationFallbackIntent)
     openrouter_broker_base_url: str = DEFAULT_OPENROUTER_BROKER_BASE_URL
     openrouter_routing_mode: str = "latency"
     openrouter_model: str = "google/gemma-4-26b-a4b-it"
@@ -490,6 +518,14 @@ class ManagedConnectionState:
     active_managed_expires_at: str | None = None
     founder_letter_seen_credential_ref: str | None = None
     referral_id: str | None = None
+    local_managed_claim_sources: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "local_managed_claim_sources",
+            normalize_managed_claim_sources(self.local_managed_claim_sources),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -545,6 +581,9 @@ __all__ = [
     "LanguageIntent",
     "LocalLLMIntent",
     "ManagedConnectionState",
+    "MANAGED_AUTH_CLAIM_SOURCE_DISCORD",
+    "MANAGED_AUTH_CLAIM_SOURCE_QQ",
+    "MANAGED_AUTH_CLAIM_SOURCES",
     "OscIntent",
     "OverlayIntent",
     "PeerSTTIntent",
@@ -560,6 +599,7 @@ __all__ = [
     "SecretsIntent",
     "SonioxSTTIntent",
     "TranslationIntent",
+    "TranslationFallbackIntent",
     "UiIntent",
     "UserIntentSettings",
     "VNEXT_SETTINGS_SCHEMA_VERSION",

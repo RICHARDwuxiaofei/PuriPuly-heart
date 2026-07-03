@@ -94,7 +94,6 @@ def test_v24_maximal_fixture_migrates_to_canonical_vnext_serialization() -> None
     serialized = serialization.to_dict(settings)
 
     assert isinstance(settings, AppSettingsVNext)
-    assert settings.settings_version == SETTINGS_SCHEMA_VERSION + 1
     assert settings.settings_version == VNEXT_SETTINGS_SCHEMA_VERSION
     assert set(serialized) == {"settings_version", "intent", "state"}
     assert serialized["settings_version"] == VNEXT_SETTINGS_SCHEMA_VERSION
@@ -274,9 +273,12 @@ def test_china_first_run_defaults_project_to_vnext_intent() -> None:
         "deepseek_v4_flash_managed"
     )
     assert serialized["intent"]["translation"]["openrouter_provider_routing"] == ("deepseek_only")
-    assert serialized["intent"]["translation"]["openrouter_fallback_selection_alias"] == (
-        "deepseek_v4_flash_china"
-    )
+    assert serialized["intent"]["translation"]["fallback"] == {
+        "enabled": False,
+        "model": "deepseek_v4_flash",
+        "connection": "official_byok",
+    }
+    assert "openrouter_fallback_selection_alias" not in serialized["intent"]["translation"]
 
 
 def test_current_vnext_status_only_provider_verification_entries_load_as_unknown() -> None:
@@ -513,26 +515,30 @@ def test_malformed_current_vnext_top_level_shape_fails_without_backup_or_overwri
     assert not list(tmp_path.glob("*.bak"))
 
 
-def test_lower_version_vnext_shape_is_explicitly_unsupported_without_backup_or_overwrite(
+def test_lower_version_vnext_shape_migrates_with_backup_and_overwrite(
     tmp_path: Path,
 ) -> None:
     compat = _compat()
     serialization = _serialization()
+    fixed_now = datetime(2026, 6, 9, 1, 2, 3, tzinfo=timezone.utc)
     path = tmp_path / "settings.json"
     raw = serialization.to_dict(AppSettingsVNext())
     raw["settings_version"] = VNEXT_SETTINGS_SCHEMA_VERSION - 1
     raw["intent"]["ui"]["locale"] = "ja"
     original_bytes = _write_json_bytes(path, raw)
 
-    result = compat.load_vnext_settings(path)
+    result = compat.load_vnext_settings(path, now=fixed_now)
 
-    assert result.status == compat.SettingsPersistenceStatus.MIGRATION_FAILED
-    assert result.settings is None
-    assert result.backup_path is None
-    assert path.read_bytes() == original_bytes
-    assert not list(tmp_path.glob("*.bak"))
-    assert result.error is not None
-    assert "lower-version vNext settings" in result.error.message
+    assert result.status == compat.SettingsPersistenceStatus.SUCCESS
+    assert result.settings is not None
+    assert result.settings.settings_version == VNEXT_SETTINGS_SCHEMA_VERSION
+    assert result.settings.intent.ui.locale == "ja"
+    assert result.migrated is True
+    assert result.backup_path == tmp_path / "settings.json.pre-v25.20260609T010203Z.bak"
+    assert result.backup_path.read_bytes() == original_bytes
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["settings_version"] == VNEXT_SETTINGS_SCHEMA_VERSION
+    assert persisted["intent"]["ui"]["locale"] == "ja"
 
 
 def test_facade_projection_failure_returns_explicit_result_without_overwrite(

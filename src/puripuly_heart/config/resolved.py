@@ -142,26 +142,80 @@ class ResolvedCredentialRequirement:
 
 
 @dataclass(frozen=True, slots=True)
-class ResolvedLLMConfig:
+class ResolvedLLMTarget:
     provider: str
     model: str
     credential: ResolvedCredentialRequirement = field(default_factory=_no_credential)
-    fallback_provider: str | None = None
-    fallback_model: str | None = None
-    fallback_credential: ResolvedCredentialRequirement = field(default_factory=_no_credential)
-    fallback_provider_routing: str | None = None
     base_url: str | None = None
     service_endpoint: str | None = None
     region: str | None = None
     routing_mode: str | None = None
     provider_routing: str | None = None
-    concurrency_limit: int = 1
     provider_options: Mapping[str, ResolvedOptionValue] = field(default_factory=_empty_options)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "provider_options", _freeze_option_mapping(self.provider_options))
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedLLMFallbackPlan:
+    target: ResolvedLLMTarget
+    timeout_ms: int = 2000
+    loser_grace_ms: int = 50
+    force_managed_wrapper: bool = False
+
+    def __post_init__(self) -> None:
+        if self.timeout_ms < 0:
+            raise ValueError("timeout_ms must be >= 0")
+        if self.loser_grace_ms < 0:
+            raise ValueError("loser_grace_ms must be >= 0")
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedLLMConfig:
+    primary: ResolvedLLMTarget
+    fallback: ResolvedLLMFallbackPlan | None = None
+    concurrency_limit: int = 5
 
     def __post_init__(self) -> None:
         if self.concurrency_limit <= 0:
             raise ValueError("concurrency_limit must be > 0")
-        object.__setattr__(self, "provider_options", _freeze_option_mapping(self.provider_options))
+
+    @property
+    def provider(self) -> str:
+        return self.primary.provider
+
+    @property
+    def model(self) -> str:
+        return self.primary.model
+
+    @property
+    def credential(self) -> ResolvedCredentialRequirement:
+        return self.primary.credential
+
+    @property
+    def base_url(self) -> str | None:
+        return self.primary.base_url
+
+    @property
+    def service_endpoint(self) -> str | None:
+        return self.primary.service_endpoint
+
+    @property
+    def region(self) -> str | None:
+        return self.primary.region
+
+    @property
+    def routing_mode(self) -> str | None:
+        return self.primary.routing_mode
+
+    @property
+    def provider_routing(self) -> str | None:
+        return self.primary.provider_routing
+
+    @property
+    def provider_options(self) -> Mapping[str, ResolvedOptionValue]:
+        return self.primary.provider_options
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,6 +339,8 @@ __all__ = [
     "ResolvedCredentialRequirement",
     "ResolvedFeatureState",
     "ResolvedLLMConfig",
+    "ResolvedLLMFallbackPlan",
+    "ResolvedLLMTarget",
     "ResolvedOptionValue",
     "ResolvedOverlayConfig",
     "ResolvedRuntimePolicy",

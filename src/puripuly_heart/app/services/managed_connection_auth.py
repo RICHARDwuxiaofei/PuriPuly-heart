@@ -25,6 +25,13 @@ from puripuly_heart.app.ports.settings_repository import (
     SettingsCommitRequest,
     SettingsRepositoryPort,
 )
+from puripuly_heart.app.services.managed_auth_claims import (
+    MANAGED_AUTH_CLAIM_SOURCE_DISCORD,
+    OPENROUTER_MANAGED_USER_ID_MAX_LENGTH,
+    OPENROUTER_MANAGED_USER_ID_SECRET,
+    OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+    ManagedAuthClaimGuard,
+)
 from puripuly_heart.core.messages import (
     CONTENT_POLICY_METADATA_ONLY,
     DIAGNOSTIC_CATEGORY_TRANSACTION,
@@ -83,10 +90,15 @@ class ManagedConnectionAuthService:
     broker_client: BrokerClientPort
     secret_store: SecretStorePort
     settings_repository: SettingsRepositoryPort
+    claim_guard: ManagedAuthClaimGuard | None = None
 
     async def authorize(self, request: ManagedConnectionAuthRequest) -> TransactionResult:
         if _caller_settings_values_are_unsafe(request.settings_values):
             return _unsafe_settings_values_result(request)
+
+        claim_result = await self._preflight_claim_source()
+        if claim_result is not None:
+            return claim_result
 
         identity_result = await self._preflight_local_identity(request)
         if isinstance(identity_result, TransactionResult):
@@ -134,12 +146,33 @@ class ManagedConnectionAuthService:
         if isinstance(secret_write_result, TransactionResult):
             return secret_write_result
 
-        return await self._commit_settings(
+        await self._store_managed_user_identifier(
+            identity_result=identity_result,
+            broker_result=broker_result,
+        )
+
+        commit_result = await self._commit_settings(
             request=request,
             broker_result=broker_result,
             secret_message=secret_write_result.message,
             secret_diagnostics_present=secret_write_result.diagnostics is not None,
         )
+        if commit_result.status != TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+            return commit_result
+
+        claim_persist_result = self._record_successful_claim_after_commit(
+            request=request,
+            broker_result=broker_result,
+            message=commit_result.message,
+        )
+        if claim_persist_result is not None:
+            return claim_persist_result
+        return commit_result
+
+    async def _preflight_claim_source(self) -> TransactionResult | None:
+        if self.claim_guard is None:
+            return None
+        return await self.claim_guard.preflight(MANAGED_AUTH_CLAIM_SOURCE_DISCORD)
 
     async def _preflight_local_identity(
         self,
@@ -196,7 +229,7 @@ class ManagedConnectionAuthService:
                 diagnostics_present=False,
             )
 
-        if not discord_result.succeeded or not discord_result.discord_user_id:
+        if not discord_result.succeeded or not _discord_auth_issue_material_present(discord_result):
             return _pre_issue_failed_result(
                 request=request,
                 operation="start_discord_auth",
@@ -216,13 +249,19 @@ class ManagedConnectionAuthService:
         discord_result: DiscordAuthResult,
     ) -> BrokerIssueResult | TransactionResult:
         assert identity_result.local_public_key is not None
-        assert discord_result.discord_user_id is not None
+        assert _discord_auth_issue_material_present(discord_result)
         try:
             broker_result = await self.broker_client.issue_managed_connection(
                 BrokerIssueRequest(
                     discord_user_id=discord_result.discord_user_id,
                     local_public_key=identity_result.local_public_key,
                     local_identity_revision=identity_result.local_identity_revision,
+                    authorization_code=discord_result.authorization_code,
+                    oauth_state=discord_result.oauth_state,
+                    redirect_uri=discord_result.redirect_uri,
+                    issue_nonce=discord_result.issue_nonce,
+                    hardware_hash=discord_result.hardware_hash,
+                    hardware_hash_salt_version=discord_result.hardware_hash_salt_version,
                     metadata=request.broker_metadata,
                 )
             )
@@ -353,9 +392,97 @@ class ManagedConnectionAuthService:
             ),
         )
 
+    async def _store_managed_user_identifier(
+        self,
+        *,
+        identity_result: ManagedIdentityPreflightResult,
+        broker_result: BrokerIssueResult,
+    ) -> None:
+        user_id = _normalize_managed_user_identifier(broker_result.openrouter_user_id)
+        installation_id = _normalize_optional_text(identity_result.local_identity_revision)
+        if user_id is None or installation_id is None:
+            return
+        try:
+            user_write = await self.secret_store.set_secret(
+                OPENROUTER_MANAGED_USER_ID_SECRET,
+                user_id,
+            )
+            installation_write = await self.secret_store.set_secret(
+                OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+                installation_id,
+            )
+        except Exception:
+            await self._clear_managed_user_identifier()
+            return
+        if not user_write.succeeded or not installation_write.succeeded:
+            await self._clear_managed_user_identifier()
+
+    async def _clear_managed_user_identifier(self) -> None:
+        for key in (
+            OPENROUTER_MANAGED_USER_ID_SECRET,
+            OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+        ):
+            try:
+                await self.secret_store.clear_secret(key)
+            except Exception:
+                pass
+
+    def _record_successful_claim_after_commit(
+        self,
+        *,
+        request: ManagedConnectionAuthRequest,
+        broker_result: BrokerIssueResult,
+        message: UserMessageRef | None,
+    ) -> TransactionResult | None:
+        if self.claim_guard is None:
+            return None
+        self.claim_guard.record_success(MANAGED_AUTH_CLAIM_SOURCE_DISCORD)
+        try:
+            self.claim_guard.managed_state.persist()
+        except Exception:
+            return _remote_active_local_missing_result(
+                request=request,
+                broker_result=broker_result,
+                operation="persist_managed_claim_source",
+                code="remote_active_local_claim_persist_failed",
+                phase="local_claim_persist",
+                secret_write_succeeded=True,
+                settings_commit_succeeded=True,
+                diagnostics_present=False,
+                message=message,
+            )
+        return None
+
 
 def _normalized_settings_key(key: str) -> str:
     return "".join(character.lower() if character.isalnum() else "_" for character in key)
+
+
+def _discord_auth_issue_material_present(result: DiscordAuthResult) -> bool:
+    if result.discord_user_id:
+        return True
+    return bool(
+        result.authorization_code
+        and result.oauth_state
+        and result.redirect_uri
+        and result.issue_nonce
+        and result.hardware_hash
+        and result.hardware_hash_salt_version is not None
+    )
+
+
+def _normalize_optional_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _normalize_managed_user_identifier(value: object) -> str | None:
+    normalized = _normalize_optional_text(value)
+    if normalized is None or len(normalized) > OPENROUTER_MANAGED_USER_ID_MAX_LENGTH:
+        return None
+    return normalized
 
 
 def _settings_key_is_unsafe(key: object) -> bool:

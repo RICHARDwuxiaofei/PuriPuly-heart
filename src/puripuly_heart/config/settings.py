@@ -39,6 +39,12 @@ from puripuly_heart.config.overlay_calibration import OverlayCalibration
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext  # noqa: F401
 
 SETTINGS_SCHEMA_VERSION = 24
+MANAGED_AUTH_CLAIM_SOURCE_DISCORD = "discord"
+MANAGED_AUTH_CLAIM_SOURCE_QQ = "qq"
+MANAGED_AUTH_CLAIM_SOURCES = (
+    MANAGED_AUTH_CLAIM_SOURCE_DISCORD,
+    MANAGED_AUTH_CLAIM_SOURCE_QQ,
+)
 STT_INTERNAL_SAMPLE_RATE_HZ = 16000
 DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS = 500
 LEGACY_LOW_LATENCY_VAD_HANGOVER_MS = 600
@@ -120,6 +126,22 @@ def normalize_owned_referral_id(value: object) -> str | None:
     if any(char not in REFERRAL_ID_ALPHABET for char in normalized):
         return None
     return normalized
+
+
+def normalize_managed_claim_sources(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        candidates: tuple[object, ...] = (value,)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        candidates = tuple(value)
+    else:
+        candidates = ()
+
+    normalized = {
+        item.strip().lower()
+        for item in candidates
+        if isinstance(item, str) and item.strip().lower() in MANAGED_AUTH_CLAIM_SOURCES
+    }
+    return tuple(source for source in MANAGED_AUTH_CLAIM_SOURCES if source in normalized)
 
 
 class STTProviderName(str, Enum):
@@ -235,12 +257,29 @@ class TranslationConnection(str, Enum):
 
 
 @dataclass(slots=True)
+class TranslationFallbackSettings:
+    enabled: bool = False
+    model: TranslationModel = TranslationModel.DEEPSEEK_V4_FLASH
+    connection: TranslationConnection = TranslationConnection.OFFICIAL_BYOK
+
+    def validate(self) -> None:
+        self.enabled = bool(self.enabled)
+        if not isinstance(self.model, TranslationModel):
+            raise ValueError("invalid translation fallback model")
+        if not isinstance(self.connection, TranslationConnection):
+            raise ValueError("invalid translation fallback connection")
+        if self.connection not in _supported_translation_connections(self.model):
+            raise ValueError("translation fallback connection is not supported for model")
+
+
+@dataclass(slots=True)
 class TranslationSettings:
     model: TranslationModel = TranslationModel.GEMMA4
     connection: TranslationConnection = TranslationConnection.MANAGED
     connection_history: dict[str, TranslationConnection] = field(
         default_factory=lambda: _default_translation_connection_history()
     )
+    fallback: TranslationFallbackSettings = field(default_factory=TranslationFallbackSettings)
 
     def validate(self) -> None:
         if not isinstance(self.model, TranslationModel):
@@ -259,6 +298,7 @@ class TranslationSettings:
                 raise ValueError("invalid translation connection_history connection")
             if connection not in _supported_translation_connections(model):
                 raise ValueError("translation connection_history connection is not supported")
+        self.fallback.validate()
 
 
 TRANSLATION_CONNECTIONS_BY_MODEL: dict[TranslationModel, tuple[TranslationConnection, ...]] = {
@@ -362,10 +402,31 @@ def _parse_translation_connection_history(value: object) -> dict[str, Translatio
     return history
 
 
+def _parse_translation_fallback(value: object) -> TranslationFallbackSettings:
+    if isinstance(value, TranslationFallbackSettings):
+        fallback = copy.deepcopy(value)
+        fallback.validate()
+        return fallback
+    if not isinstance(value, dict):
+        return TranslationFallbackSettings()
+    model = _parse_translation_model(value.get("model")) or TranslationModel.DEEPSEEK_V4_FLASH
+    connection = _parse_translation_connection(value.get("connection"))
+    if connection not in _supported_translation_connections(model):
+        connection = _default_translation_connection(model)
+    fallback = TranslationFallbackSettings(
+        enabled=bool(value.get("enabled", False)),
+        model=model,
+        connection=connection,
+    )
+    fallback.validate()
+    return fallback
+
+
 def _normalize_translation_settings(
     *,
     model: TranslationModel | None,
     connection: TranslationConnection | None,
+    fallback: object = None,
     history: object = None,
 ) -> TranslationSettings:
     normalized_model = model or TranslationModel.GEMMA4
@@ -377,6 +438,7 @@ def _normalize_translation_settings(
         model=normalized_model,
         connection=connection,
         connection_history=normalized_history,
+        fallback=_parse_translation_fallback(fallback),
     )
 
 
@@ -419,6 +481,11 @@ def _translation_settings_to_dict(settings: TranslationSettings) -> dict[str, An
         "connection_history": {
             model: connection.value for model, connection in settings.connection_history.items()
         },
+        "fallback": {
+            "enabled": settings.fallback.enabled,
+            "model": settings.fallback.model.value,
+            "connection": settings.fallback.connection.value,
+        },
     }
 
 
@@ -428,6 +495,11 @@ def _default_translation_settings_dict() -> dict[str, Any]:
         "connection": TranslationConnection.MANAGED.value,
         "connection_history": {
             TranslationModel.GEMMA4.value: TranslationConnection.MANAGED.value,
+        },
+        "fallback": {
+            "enabled": False,
+            "model": TranslationModel.DEEPSEEK_V4_FLASH.value,
+            "connection": TranslationConnection.OFFICIAL_BYOK.value,
         },
     }
 
@@ -756,7 +828,7 @@ class OpenRouterSettings:
     selected_source: OpenRouterCredentialSource = OpenRouterCredentialSource.MANAGED
     selection_alias: OpenRouterSelectionAlias | None = None
     fallback_selection_alias: OpenRouterFallbackSelectionAlias = (
-        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
+        OpenRouterFallbackSelectionAlias.NONE
     )
     broker_base_url: str = DEFAULT_OPENROUTER_BROKER_BASE_URL
 
@@ -980,6 +1052,7 @@ class ManagedIdentitySettings:
     active_managed_expires_at: str | None = None
     founder_letter_seen_credential_ref: str | None = None
     referral_id: str | None = None
+    local_managed_claim_sources: tuple[str, ...] = field(default_factory=tuple)
 
     def validate(self) -> None:
         if not isinstance(self.installation_id, str):
@@ -1012,6 +1085,9 @@ class ManagedIdentitySettings:
         ):
             raise ValueError("managed founder_letter_seen_credential_ref must be a string or None")
         self.referral_id = normalize_owned_referral_id(self.referral_id)
+        self.local_managed_claim_sources = normalize_managed_claim_sources(
+            self.local_managed_claim_sources
+        )
 
 
 @dataclass(slots=True)
@@ -1431,7 +1507,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "provider_routing": settings.openrouter.provider_routing.value,
             "selected_source": normalized_openrouter_selected_source.value,
             "selection_alias": normalized_openrouter_selection_alias_value,
-            "fallback_selection_alias": settings.openrouter.fallback_selection_alias.value,
+            "fallback_selection_alias": OpenRouterFallbackSelectionAlias.NONE.value,
             "broker_base_url": settings.openrouter.broker_base_url,
         },
         "qwen": {
@@ -1511,6 +1587,11 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
                 settings.managed_identity.founder_letter_seen_credential_ref
             ),
             "referral_id": normalize_owned_referral_id(settings.managed_identity.referral_id),
+            "local_managed_claim_sources": list(
+                normalize_managed_claim_sources(
+                    settings.managed_identity.local_managed_claim_sources
+                )
+            ),
         },
         "system_prompt": settings.system_prompt,
     }
@@ -1683,7 +1764,7 @@ def _parse_openrouter_fallback_selection_alias(value: object) -> OpenRouterFallb
                 return OpenRouterFallbackSelectionAlias(normalized)
             except ValueError:
                 pass
-    return OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
+    return OpenRouterFallbackSelectionAlias.NONE
 
 
 def _resolve_openrouter_runtime_main_selection(
@@ -2055,6 +2136,7 @@ def materialize_translation_settings(settings: AppSettings) -> AppSettings:
     settings.translation = _normalize_translation_settings(
         model=_parse_translation_model(settings.translation.model),
         connection=_parse_translation_connection(settings.translation.connection),
+        fallback=settings.translation.fallback,
         history=settings.translation.connection_history,
     )
     model = settings.translation.model
@@ -2456,7 +2538,7 @@ def _apply_china_managed_first_run_defaults(settings: AppSettings) -> None:
         settings.openrouter,
         selection_alias=OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED,
         provider_routing=OpenRouterProviderRouting.DEEPSEEK_ONLY,
-        fallback_selection_alias=OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH_CHINA,
+        fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
     )
     settings.translation = _derive_translation_settings_from_runtime_values(
         provider_llm=settings.provider.llm,
@@ -3178,6 +3260,7 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         normalized_translation_settings = _normalize_translation_settings(
             model=_parse_translation_model(translation_data.get("model")),
             connection=_parse_translation_connection(translation_data.get("connection")),
+            fallback=translation_data.get("fallback"),
             history=translation_history,
         )
     else:
@@ -3449,6 +3532,19 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     normalized_referral_id = normalize_owned_referral_id(raw_referral_id)
     if "referral_id" not in managed_identity_data or raw_referral_id != normalized_referral_id:
         managed_identity_data["referral_id"] = normalized_referral_id
+        changed = True
+
+    raw_local_managed_claim_sources = managed_identity_data.get("local_managed_claim_sources")
+    normalized_local_managed_claim_sources = list(
+        normalize_managed_claim_sources(raw_local_managed_claim_sources)
+    )
+    if (
+        "local_managed_claim_sources" not in managed_identity_data
+        or raw_local_managed_claim_sources != normalized_local_managed_claim_sources
+    ):
+        managed_identity_data["local_managed_claim_sources"] = (
+            normalized_local_managed_claim_sources
+        )
         changed = True
 
     if "system_prompts" in data:
@@ -3804,6 +3900,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 managed_identity_data.get("founder_letter_seen_credential_ref")
             ),
             referral_id=normalize_owned_referral_id(managed_identity_data.get("referral_id")),
+            local_managed_claim_sources=normalize_managed_claim_sources(
+                managed_identity_data.get("local_managed_claim_sources")
+            ),
         ),
         system_prompt=legacy_system_prompt,
         system_prompts={},
@@ -3817,6 +3916,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         settings.translation = _normalize_translation_settings(
             model=_parse_translation_model(translation_data.get("model")),
             connection=_parse_translation_connection(translation_data.get("connection")),
+            fallback=translation_data.get("fallback"),
             history=translation_history,
         )
     else:

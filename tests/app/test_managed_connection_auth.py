@@ -3,13 +3,26 @@ from __future__ import annotations
 import ast
 import importlib
 from collections.abc import Mapping
-from dataclasses import FrozenInstanceError, fields, is_dataclass
+from dataclasses import FrozenInstanceError, dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from puripuly_heart.app.ports import broker_client, secret_store, settings_repository
+from puripuly_heart.app.ports import (
+    broker_client,
+    managed_identity_state,
+    secret_store,
+    settings_repository,
+)
+from puripuly_heart.app.services.managed_auth_claims import (
+    MANAGED_AUTH_CLAIM_SOURCE_DISCORD,
+    MANAGED_AUTH_CLAIM_SOURCE_QQ,
+    OPENROUTER_MANAGED_QQ_API_KEY_SECRET,
+    OPENROUTER_MANAGED_USER_ID_SECRET,
+    OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+    ManagedAuthClaimGuard,
+)
 from puripuly_heart.core import messages
 
 SERVICE_MODULE = "puripuly_heart.app.services.managed_connection_auth"
@@ -215,6 +228,50 @@ class RecordingSettingsRepository:
         return self.result
 
 
+@dataclass
+class RecordingManagedState:
+    installation_id: str = "install-123"
+    release_token: str | None = None
+    release_token_expires_at: str | None = None
+    verified_hardware_hash: str | None = None
+    verified_hardware_hash_salt_version: int | None = None
+    active_managed_credential_ref: str | None = None
+    active_managed_expires_at: str | None = None
+    founder_letter_seen_credential_ref: str | None = None
+    referral_id: str | None = None
+    local_managed_claim_sources: tuple[str, ...] = ()
+    persist_calls: int = 0
+
+    def persist(self) -> None:
+        self.persist_calls += 1
+
+    def snapshot(self) -> managed_identity_state.ManagedIdentitySnapshot:
+        return managed_identity_state.ManagedIdentitySnapshot(
+            installation_id=self.installation_id,
+            release_token=self.release_token,
+            release_token_expires_at=self.release_token_expires_at,
+            verified_hardware_hash=self.verified_hardware_hash,
+            verified_hardware_hash_salt_version=self.verified_hardware_hash_salt_version,
+            active_managed_credential_ref=self.active_managed_credential_ref,
+            active_managed_expires_at=self.active_managed_expires_at,
+            founder_letter_seen_credential_ref=self.founder_letter_seen_credential_ref,
+            referral_id=self.referral_id,
+            local_managed_claim_sources=self.local_managed_claim_sources,
+        )
+
+    def restore(self, snapshot: managed_identity_state.ManagedIdentitySnapshot) -> None:
+        self.installation_id = snapshot.installation_id
+        self.release_token = snapshot.release_token
+        self.release_token_expires_at = snapshot.release_token_expires_at
+        self.verified_hardware_hash = snapshot.verified_hardware_hash
+        self.verified_hardware_hash_salt_version = snapshot.verified_hardware_hash_salt_version
+        self.active_managed_credential_ref = snapshot.active_managed_credential_ref
+        self.active_managed_expires_at = snapshot.active_managed_expires_at
+        self.founder_letter_seen_credential_ref = snapshot.founder_letter_seen_credential_ref
+        self.referral_id = snapshot.referral_id
+        self.local_managed_claim_sources = snapshot.local_managed_claim_sources
+
+
 def _service_module() -> Any:
     return importlib.import_module(SERVICE_MODULE)
 
@@ -234,6 +291,7 @@ def _service(
     broker: RecordingBrokerClient,
     store: RecordingSecretStore,
     repository: RecordingSettingsRepository,
+    claim_guard: ManagedAuthClaimGuard | None = None,
 ) -> Any:
     auth = _service_module()
     return auth.ManagedConnectionAuthService(
@@ -242,6 +300,7 @@ def _service(
         broker_client=broker,
         secret_store=store,
         settings_repository=repository,
+        claim_guard=claim_guard,
     )
 
 
@@ -304,6 +363,22 @@ def _discord_success() -> Any:
     )
 
 
+def _discord_oauth_material_success() -> Any:
+    discord_auth = _discord_auth_module()
+    return discord_auth.DiscordAuthResult(
+        succeeded=True,
+        discord_user_id=None,
+        message=None,
+        diagnostics=None,
+        authorization_code="discord-code-1",
+        oauth_state="discord-state-1",
+        redirect_uri="http://127.0.0.1:62187/discord/callback",
+        issue_nonce="issue-nonce-1",
+        hardware_hash="hardware-hash-1",
+        hardware_hash_salt_version=7,
+    )
+
+
 def _discord_failure() -> Any:
     discord_auth = _discord_auth_module()
     return discord_auth.DiscordAuthResult(
@@ -314,7 +389,10 @@ def _discord_failure() -> Any:
     )
 
 
-def _broker_success() -> broker_client.BrokerIssueResult:
+def _broker_success(
+    *,
+    openrouter_user_id: str | None = None,
+) -> broker_client.BrokerIssueResult:
     return broker_client.BrokerIssueResult(
         succeeded=True,
         broker_connection_id="broker-conn-1",
@@ -322,6 +400,7 @@ def _broker_success() -> broker_client.BrokerIssueResult:
         remote_key_revision="remote-r1",
         message=None,
         diagnostics=None,
+        openrouter_user_id=openrouter_user_id,
     )
 
 
@@ -672,6 +751,125 @@ async def test_success_preflights_identity_then_discord_auth_then_broker_issue_a
     assert saved_request.expected_revision == "settings-r1"
     assert saved_request.reason == "managed_connection_auth"
     assert saved_request.values["intent"]["translation"]["connection"] == "managed"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_success_records_and_persists_discord_claim_after_settings_commit() -> None:
+    events: list[tuple[str, str]] = []
+    identity = RecordingLocalIdentity(_identity_success(), events=events)
+    discord = RecordingDiscordAuth(_discord_success(), events=events)
+    broker = RecordingBrokerClient(_broker_success(), events=events)
+    store = RecordingSecretStore(events=events)
+    repository = RecordingSettingsRepository(_commit_success(), events=events)
+    managed_state = RecordingManagedState()
+
+    result = await _service(
+        identity=identity,
+        discord=discord,
+        broker=broker,
+        store=store,
+        repository=repository,
+        claim_guard=ManagedAuthClaimGuard(managed_state, store),
+    ).authorize(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    assert managed_state.local_managed_claim_sources == (MANAGED_AUTH_CLAIM_SOURCE_DISCORD,)
+    assert managed_state.persist_calls == 1
+    assert events[-1] == ("save_settings", "managed_connection_auth")
+
+
+@pytest.mark.asyncio
+async def test_success_stores_managed_openrouter_user_identifier_cache() -> None:
+    events: list[tuple[str, str]] = []
+    identity = RecordingLocalIdentity(_identity_success(), events=events)
+    discord = RecordingDiscordAuth(_discord_success(), events=events)
+    broker = RecordingBrokerClient(
+        _broker_success(openrouter_user_id=" openrouter-user-1 "),
+        events=events,
+    )
+    store = RecordingSecretStore(events=events)
+    repository = RecordingSettingsRepository(_commit_success(), events=events)
+
+    result = await _service(
+        identity=identity,
+        discord=discord,
+        broker=broker,
+        store=store,
+        repository=repository,
+    ).authorize(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    assert store.values[OPENROUTER_MANAGED_USER_ID_SECRET] == "openrouter-user-1"
+    assert store.values[OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET] == "identity-r1"
+    assert (
+        OPENROUTER_MANAGED_USER_ID_SECRET,
+        "openrouter-user-1",
+    ) in store.set_calls
+    assert (
+        OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+        "identity-r1",
+    ) in store.set_calls
+
+
+@pytest.mark.asyncio
+async def test_success_accepts_discord_oauth_issue_material_without_user_id() -> None:
+    events: list[tuple[str, str]] = []
+    identity = RecordingLocalIdentity(_identity_success(), events=events)
+    discord = RecordingDiscordAuth(_discord_oauth_material_success(), events=events)
+    broker = RecordingBrokerClient(_broker_success(), events=events)
+    store = RecordingSecretStore(events=events)
+    repository = RecordingSettingsRepository(_commit_success(), events=events)
+
+    result = await _service(
+        identity=identity,
+        discord=discord,
+        broker=broker,
+        store=store,
+        repository=repository,
+    ).authorize(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    broker_request = _only_item(broker.requests, label="broker issue requests")
+    assert broker_request.discord_user_id is None
+    assert broker_request.authorization_code == "discord-code-1"
+    assert broker_request.oauth_state == "discord-state-1"
+    assert broker_request.redirect_uri == "http://127.0.0.1:62187/discord/callback"
+    assert broker_request.issue_nonce == "issue-nonce-1"
+    assert broker_request.hardware_hash == "hardware-hash-1"
+    assert broker_request.hardware_hash_salt_version == 7
+
+
+@pytest.mark.asyncio
+async def test_discord_managed_auth_claim_preflight_blocks_existing_qq_claim() -> None:
+    events: list[tuple[str, str]] = []
+    identity = RecordingLocalIdentity(_identity_success(), events=events)
+    discord = RecordingDiscordAuth(_discord_success(), events=events)
+    broker = RecordingBrokerClient(_broker_success(), events=events)
+    store = RecordingSecretStore(events=events)
+    store.values[OPENROUTER_MANAGED_QQ_API_KEY_SECRET] = "existing-qq-key"
+    repository = RecordingSettingsRepository(_commit_success(), events=events)
+    managed_state = RecordingManagedState()
+
+    result = await _service(
+        identity=identity,
+        discord=discord,
+        broker=broker,
+        store=store,
+        repository=repository,
+        claim_guard=ManagedAuthClaimGuard(managed_state, store),
+    ).authorize(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED
+    assert result.message is not None
+    assert result.message.key == "discord_auth.error.already_claimed_qq"
+    assert managed_state.local_managed_claim_sources == (MANAGED_AUTH_CLAIM_SOURCE_QQ,)
+    assert managed_state.persist_calls == 1
+    assert events == []
+    _assert_no_items(identity.requests, label="identity preflight requests")
+    _assert_no_items(discord.requests, label="discord auth requests")
+    _assert_no_items(broker.requests, label="broker issue requests")
+    _assert_no_items(store.set_calls, label="secret writes")
+    _assert_no_items(repository.saved_requests, label="settings saves")
 
 
 @pytest.mark.asyncio

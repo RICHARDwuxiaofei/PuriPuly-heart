@@ -11,7 +11,6 @@ from puripuly_heart.config.audio_host_api import WINDOWS_WASAPI_COMPATIBILITY_HO
 from puripuly_heart.config.settings import (
     DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS,
     DEFAULT_OPENROUTER_BROKER_BASE_URL,
-    SETTINGS_SCHEMA_VERSION,
 )
 
 
@@ -55,7 +54,7 @@ def test_vnext_schema_imports_required_roots_and_default_adr_destinations() -> N
 
     settings = schema.AppSettingsVNext()
 
-    assert settings.settings_version == SETTINGS_SCHEMA_VERSION + 1
+    assert settings.settings_version == schema.VNEXT_SETTINGS_SCHEMA_VERSION
     assert isinstance(settings.intent, schema.UserIntentSettings)
     assert isinstance(settings.state, schema.PersistedOperationalState)
     assert settings.intent.integrated_context.enabled is True
@@ -144,9 +143,11 @@ def test_vnext_schema_represents_current_intent_and_state_leaves() -> None:
         "intent.translation.connection",
         "intent.translation.connection_history",
         "intent.translation.cerebras.llm_model",
+        "intent.translation.fallback.connection",
+        "intent.translation.fallback.enabled",
+        "intent.translation.fallback.model",
         "intent.translation.model",
         "intent.translation.openrouter_broker_base_url",
-        "intent.translation.openrouter_fallback_selection_alias",
         "intent.translation.openrouter_model",
         "intent.translation.openrouter_provider_routing",
         "intent.translation.openrouter_routing_mode",

@@ -170,6 +170,7 @@ def test_load_settings_backfills_managed_identity_defaults(tmp_path) -> None:
         "active_managed_expires_at": None,
         "founder_letter_seen_credential_ref": None,
         "referral_id": None,
+        "local_managed_claim_sources": [],
     }
 
 

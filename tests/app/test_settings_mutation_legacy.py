@@ -19,6 +19,7 @@ def test_order21_translation_provider_patch_records_initial_covered_surface_list
         "translation.model",
         "translation.connection",
         "translation.connection_history",
+        "translation.fallback",
         "provider.llm",
         "gemini.llm_model",
         "openrouter.llm_model",
@@ -26,7 +27,6 @@ def test_order21_translation_provider_patch_records_initial_covered_surface_list
         "openrouter.provider_routing",
         "openrouter.selected_source",
         "openrouter.selection_alias",
-        "openrouter.fallback_selection_alias",
         "openrouter.broker_base_url",
         "qwen.llm_model",
         "qwen.region",
@@ -272,7 +272,11 @@ async def test_order21_path_validator_accepts_only_translation_provider_paths() 
     request = settings_mutation.SettingsMutationRequest(
         values={
             "translation.connection": "openrouter",
-            "openrouter.fallback_selection_alias": "qwen35_flash",
+            "translation.fallback": {
+                "enabled": True,
+                "model": "deepseek_v4_flash",
+                "connection": "openrouter",
+            },
             "local_llm.base_url": "http://127.0.0.1:11434/v1",
             "llm.concurrency_limit": 3,
         },

@@ -5,6 +5,11 @@ from dataclasses import dataclass
 import pytest
 
 from puripuly_heart.app.ports import broker_client, managed_identity_state, secret_store
+from puripuly_heart.app.services.managed_auth_claims import (
+    MANAGED_AUTH_CLAIM_SOURCE_DISCORD,
+    OPENROUTER_MANAGED_API_KEY_SECRET,
+    ManagedAuthClaimGuard,
+)
 from puripuly_heart.app.services.qq_managed_auth import (
     OPENROUTER_MANAGED_QQ_API_KEY_SECRET,
     QqManagedAuthRequest,
@@ -139,6 +144,7 @@ class RecordingManagedState:
     active_managed_expires_at: str | None = "2026-07-01T00:00:00.000Z"
     founder_letter_seen_credential_ref: str | None = "previous-ref"
     referral_id: str | None = None
+    local_managed_claim_sources: tuple[str, ...] = ()
     fail_persist_calls: int = 0
     persist_calls: int = 0
     restore_calls: int = 0
@@ -160,6 +166,7 @@ class RecordingManagedState:
             active_managed_expires_at=self.active_managed_expires_at,
             founder_letter_seen_credential_ref=self.founder_letter_seen_credential_ref,
             referral_id=self.referral_id,
+            local_managed_claim_sources=self.local_managed_claim_sources,
         )
 
     def restore(self, snapshot: managed_identity_state.ManagedIdentitySnapshot) -> None:
@@ -173,6 +180,7 @@ class RecordingManagedState:
         self.active_managed_expires_at = snapshot.active_managed_expires_at
         self.founder_letter_seen_credential_ref = snapshot.founder_letter_seen_credential_ref
         self.referral_id = snapshot.referral_id
+        self.local_managed_claim_sources = snapshot.local_managed_claim_sources
 
 
 def _success_result(
@@ -263,6 +271,28 @@ async def test_qq_managed_auth_success_stores_qq_key_and_persists_entitlement_st
     assert broker.requests[0].qq_identity == RAW_QQ_IDENTITY
     assert broker.requests[0].credential == RAW_QQ_CREDENTIAL
     _assert_no_raw_values(result)
+
+
+@pytest.mark.asyncio
+async def test_qq_managed_auth_claim_preflight_blocks_existing_discord_claim() -> None:
+    _service_instance, broker, store, state = _service(_success_result())
+    store.values[OPENROUTER_MANAGED_API_KEY_SECRET] = "existing-discord-key"
+    service = QqManagedAuthService(
+        broker,
+        store,
+        state,
+        ManagedAuthClaimGuard(state, store),
+    )
+
+    result = await service.authenticate(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED
+    assert result.message is not None
+    assert result.message.key == "qq_managed_auth.already_claimed_discord"
+    assert state.local_managed_claim_sources == (MANAGED_AUTH_CLAIM_SOURCE_DISCORD,)
+    assert state.persist_calls == 1
+    assert broker.requests == []
+    assert store.set_calls == []
 
 
 @pytest.mark.asyncio

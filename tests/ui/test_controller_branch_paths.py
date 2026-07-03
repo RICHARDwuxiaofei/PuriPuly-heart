@@ -44,6 +44,7 @@ from puripuly_heart.config.settings import (
     SecretsBackend,
     STTProviderName,
     TranslationConnection,
+    TranslationFallbackSettings,
     TranslationModel,
     TranslationSettings,
     to_dict,
@@ -752,6 +753,110 @@ async def test_managed_china_required_prepare_does_not_open_qq_dialog_when_not_r
     assert result is False
     assert qq_dialog_calls == []
     assert snackbars != []
+
+
+@pytest.mark.asyncio
+async def test_standard_managed_prepare_blocks_existing_qq_claim_before_release_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snackbars: list[tuple[str, object]] = []
+    saved_settings: list[AppSettings] = []
+    app = SimpleNamespace(
+        view_dashboard=SimpleNamespace(set_translation_enabled=lambda _enabled: None),
+        _show_snackbar=lambda *args: snackbars.append(args),
+    )
+    controller = _make_controller(app=app)
+    controller.settings = _managed_china_settings()
+    controller.settings.translation.connection = TranslationConnection.MANAGED
+    controller.hub = SimpleNamespace(llm=None, translation_enabled=False)
+    controller._translation_toggle_generation = 1
+    controller._translation_toggle_intent_enabled = True
+    prepare_calls = 0
+
+    async def prepare_unexpected() -> ManagedOpenRouterReleaseResult:
+        nonlocal prepare_calls
+        prepare_calls += 1
+        return ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            local_key_available=True,
+        )
+
+    controller._managed_openrouter_release_service = SimpleNamespace(
+        prepare_for_translation=prepare_unexpected
+    )
+
+    async def no_founder_letter(_self) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        GuiController, "_should_route_managed_trans_to_founder_letter", no_founder_letter
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({"openrouter_managed_qq_api_key": "qq-key"}),
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "save_settings",
+        lambda _path, settings: saved_settings.append(copy.deepcopy(settings)),
+    )
+
+    result = await controller._handle_managed_translation_enable(1)
+
+    assert result is False
+    assert prepare_calls == 0
+    assert controller.settings.managed_identity.local_managed_claim_sources == ("qq",)
+    assert saved_settings[-1].managed_identity.local_managed_claim_sources == ("qq",)
+    assert snackbars[0][0] == t("discord_auth.error.already_claimed_qq")
+
+
+@pytest.mark.asyncio
+async def test_standard_managed_prepare_records_discord_claim_after_release_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved_settings: list[AppSettings] = []
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = _managed_china_settings()
+    controller.settings.translation.connection = TranslationConnection.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._translation_toggle_generation = 1
+    controller._translation_toggle_intent_enabled = True
+
+    async def prepare_ready() -> ManagedOpenRouterReleaseResult:
+        return ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            local_key_available=True,
+        )
+
+    controller._managed_openrouter_release_service = SimpleNamespace(
+        prepare_for_translation=prepare_ready
+    )
+
+    async def no_founder_letter(_self) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        GuiController, "_should_route_managed_trans_to_founder_letter", no_founder_letter
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "save_settings",
+        lambda _path, settings: saved_settings.append(copy.deepcopy(settings)),
+    )
+
+    result = await controller._handle_managed_translation_enable(1)
+
+    assert result is True
+    assert controller.settings.managed_identity.local_managed_claim_sources == ("discord",)
+    assert saved_settings[-1].managed_identity.local_managed_claim_sources == ("discord",)
 
 
 def test_local_qwen_suppression_first_gui_detection_counts_without_modal() -> None:
@@ -2702,6 +2807,149 @@ def test_dashboard_trans_in_progress_managed_oauth_prevents_second_dialog(
     assert controller._managed_openrouter_release_service.prepare_calls == 0
 
 
+def test_managed_connection_auth_settings_values_are_service_safe() -> None:
+    from puripuly_heart.app.services import managed_connection_auth
+
+    settings = AppSettings()
+    settings.secrets.backend = SecretsBackend.ENCRYPTED_FILE
+
+    values = controller_module._managed_connection_auth_settings_values(settings)
+
+    assert managed_connection_auth._caller_settings_values_are_unsafe(
+        controller_module._settings_snapshot_values(settings)
+    )
+    assert not managed_connection_auth._caller_settings_values_are_unsafe(values)
+
+
+@pytest.mark.asyncio
+async def test_discord_managed_auth_fallback_blocks_existing_qq_claim_before_prepare(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snackbars: list[tuple[str, object]] = []
+    saved_settings: list[AppSettings] = []
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=DummyDashboard(), _show_snackbar=lambda *args: snackbars.append(args)
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            local_key_available=True,
+        )
+    )
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({"openrouter_managed_qq_api_key": "qq-key"}),
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "save_settings",
+        lambda _path, settings: saved_settings.append(copy.deepcopy(settings)),
+    )
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is False
+    assert controller._managed_openrouter_release_service.prepare_calls == 0
+    assert controller.settings.managed_identity.local_managed_claim_sources == ("qq",)
+    assert saved_settings[-1].managed_identity.local_managed_claim_sources == ("qq",)
+    assert snackbars[0][0] == t("discord_auth.error.already_claimed_qq")
+
+
+@pytest.mark.asyncio
+async def test_discord_managed_auth_fallback_records_discord_claim_after_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved_settings: list[AppSettings] = []
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            local_key_available=True,
+        )
+    )
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "save_settings",
+        lambda _path, settings: saved_settings.append(copy.deepcopy(settings)),
+    )
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is True
+    assert controller._managed_openrouter_release_service.prepare_calls == 1
+    assert controller.settings.managed_identity.local_managed_claim_sources == ("discord",)
+    assert saved_settings[-1].managed_identity.local_managed_claim_sources == ("discord",)
+
+
+@pytest.mark.asyncio
+async def test_discord_managed_auth_transaction_rebuilds_existing_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = SimpleNamespace(
+        app_version="test",
+        client=object(),
+        raw_hardware_fingerprint_provider=None,
+        _legacy_hardware_hash_provider=None,
+        oauth_runtime=object(),
+        discord_oauth_listener_factory=object(),
+        discord_oauth_callback_runner=object(),
+        openrouter_config=controller_module.build_openrouter_release_runtime_config(
+            controller.settings
+        ),
+        signed_at_provider=lambda: "2026-01-01T00:00:00Z",
+    )
+    rebuild_calls: list[str] = []
+
+    async def fake_authorize(_self, _request):
+        return messages.TransactionResult(
+            status=messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
+            message=None,
+            diagnostics=None,
+        )
+
+    async def fake_rebuild_llm_provider(self: GuiController) -> None:
+        rebuild_calls.append("rebuild")
+        assert self.hub is not None
+        self.hub.llm = object()
+
+    monkeypatch.setattr(
+        controller_module, "create_secret_store", lambda *_args, **_kwargs: DummySecrets({})
+    )
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(controller_module.ManagedConnectionAuthService, "authorize", fake_authorize)
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is True
+    assert rebuild_calls == ["rebuild"]
+
+
 @pytest.mark.asyncio
 async def test_start_discord_managed_auth_from_dialog_success_rebuilds_missing_provider(
     monkeypatch: pytest.MonkeyPatch,
@@ -3242,19 +3490,23 @@ def test_verified_key_and_runtime_signature_depend_on_region_and_settings() -> N
     assert baseline != changed
 
 
-def test_build_llm_provider_signature_tracks_openrouter_selection_and_fallback_aliases() -> None:
+def test_build_llm_provider_signature_tracks_openrouter_selection_and_fallback_branch() -> None:
     controller = _make_controller(app=SimpleNamespace())
     base = AppSettings()
     base.provider.llm = LLMProviderName.OPENROUTER
     base.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     base.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_MANAGED
-    base.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
+    base.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.OPENROUTER,
+    )
 
     different_selection = copy.deepcopy(base)
     different_selection.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
 
     different_fallback = copy.deepcopy(base)
-    different_fallback.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.NONE
+    different_fallback.translation.fallback = TranslationFallbackSettings(enabled=False)
 
     assert controller._build_llm_provider_signature(
         base
@@ -3262,6 +3514,24 @@ def test_build_llm_provider_signature_tracks_openrouter_selection_and_fallback_a
     assert controller._build_llm_provider_signature(
         base
     ) != controller._build_llm_provider_signature(different_fallback)
+
+
+def test_build_llm_provider_signature_tracks_managed_fallback_identity() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    base = AppSettings()
+    base.provider.llm = LLMProviderName.GEMINI
+    base.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.MANAGED_CHINA,
+    )
+
+    different_identity = copy.deepcopy(base)
+    different_identity.managed_identity.verified_hardware_hash = "fallback-managed-hash"
+
+    assert controller._build_llm_provider_signature(
+        base
+    ) != controller._build_llm_provider_signature(different_identity)
 
 
 def test_build_llm_provider_signature_tracks_openrouter_provider_routing() -> None:
@@ -11811,6 +12081,50 @@ async def test_status_refresh_updates_pass_status_when_referral_id_is_unchanged(
 
 
 @pytest.mark.asyncio
+async def test_status_refresh_updates_pass_status_for_fallback_only_managed_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pass_status = TalkTogetherPassStatus(
+        pass_id="7KQ9M2",
+        invite_count=2,
+        invite_limit=5,
+        bonus_translations_per_friend=200,
+    )
+    settings_view = CapturingManagedKeySettingsView()
+    status_service = ManagedStatusRefreshService(
+        ManagedOpenRouterStatusRefreshResult(
+            referral_id="7KQ9M2",
+            pass_status=pass_status,
+            succeeded=True,
+        )
+    )
+    controller = _make_managed_usage_controller(
+        monkeypatch,
+        settings_view=settings_view,
+        status_service=status_service,
+    )
+    controller.settings.provider.llm = LLMProviderName.GEMINI
+    controller.settings.translation.connection = TranslationConnection.OFFICIAL_BYOK
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
+    controller.settings.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.MANAGED,
+    )
+
+    await controller._refresh_managed_trial_usage_state()
+
+    await _wait_until(lambda: status_service.calls == 1)
+    assert settings_view.managed_key_state_calls[-1] == {
+        "visible": True,
+        "remaining_percent": 71,
+        "referral_id": "7KQ9M2",
+        "pass_status": pass_status,
+    }
+
+
+@pytest.mark.asyncio
 async def test_status_refresh_clears_pass_status_on_successful_absent_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -14856,8 +15170,10 @@ def test_merge_settings_tab_apply_with_current_languages_preserves_all_language_
     controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
     controller.settings = AppSettings()
     controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
-    controller.settings.openrouter.fallback_selection_alias = (
-        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
+    controller.settings.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.OPENROUTER,
     )
     controller.settings.languages.source_language = "fr"
     controller.settings.languages.target_language = "de"
@@ -14884,7 +15200,11 @@ def test_merge_settings_tab_apply_with_current_languages_preserves_all_language_
     pending.provider.llm = LLMProviderName.OPENROUTER
     pending.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     pending.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
-    pending.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    pending.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.GEMMA4_31B_CEREBRAS,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     pending.openrouter.routing_mode = OpenRouterRoutingMode.NOVITA_FIRST
     pending.qwen.llm_model = QwenLLMModel.QWEN_35_FLASH
     pending.qwen.region = QwenRegion.SINGAPORE
@@ -14908,8 +15228,10 @@ def test_merge_settings_tab_apply_with_current_languages_preserves_all_language_
     assert merged.provider.llm == LLMProviderName.OPENROUTER
     assert merged.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert merged.openrouter.selection_alias == OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
-    assert (
-        merged.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    assert merged.translation.fallback == TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.GEMMA4_31B_CEREBRAS,
+        connection=TranslationConnection.OFFICIAL_BYOK,
     )
     assert merged.openrouter.routing_mode == OpenRouterRoutingMode.NOVITA_FIRST
     assert merged.qwen.llm_model == QwenLLMModel.QWEN_35_FLASH
@@ -14949,7 +15271,11 @@ async def test_apply_providers_routes_translation_provider_patch_through_setting
     )
     pending.openrouter.selected_source = OpenRouterCredentialSource.BYOK
     pending.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
-    pending.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    pending.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.OPENROUTER,
+    )
 
     def fail_direct_save(*_args, **_kwargs) -> None:
         raise AssertionError("direct save should not persist routed translation/provider settings")
@@ -14966,9 +15292,10 @@ async def test_apply_providers_routes_translation_provider_patch_through_setting
     assert request.values["translation.connection"] == TranslationConnection.OPENROUTER
     assert request.values["openrouter.selected_source"] == OpenRouterCredentialSource.BYOK
     assert request.values["openrouter.selection_alias"] == OpenRouterSelectionAlias.GEMMA4_BYOK
-    assert (
-        request.values["openrouter.fallback_selection_alias"]
-        == OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    assert request.values["translation.fallback"] == TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.OPENROUTER,
     )
     assert "provider.stt" not in request.values
     assert "stt.low_latency_mode" not in request.values
@@ -15002,13 +15329,15 @@ async def test_apply_providers_surfaces_degraded_service_result_without_rollback
     controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
     controller.settings = AppSettings()
     controller.settings.provider.llm = LLMProviderName.OPENROUTER
-    controller.settings.openrouter.fallback_selection_alias = (
-        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
-    )
+    controller.settings.translation.fallback = TranslationFallbackSettings(enabled=False)
     controller.settings_mutation_service = RecordingSettingsMutationService(degraded_result)
 
     pending = copy.deepcopy(controller.settings)
-    pending.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    pending.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.GEMMA4_31B_CEREBRAS,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
 
     def fail_direct_save(*_args, **_kwargs) -> None:
         raise AssertionError("direct save should not run after routed service commit")
@@ -15018,9 +15347,10 @@ async def test_apply_providers_surfaces_degraded_service_result_without_rollback
     await controller.apply_providers(pending)
 
     assert controller.last_settings_mutation_result == degraded_result
-    assert (
-        controller.settings.openrouter.fallback_selection_alias
-        == OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    assert controller.settings.translation.fallback == TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.GEMMA4_31B_CEREBRAS,
+        connection=TranslationConnection.OFFICIAL_BYOK,
     )
     assert degraded_result.message.key == "settings.mutation.runtime_apply_failed"
     assert "runtime_failed" in repr(controller.last_settings_mutation_result)
@@ -15103,11 +15433,13 @@ async def test_order21_snapshot_full_default_service_runtime_adapter_receives_co
     controller.settings.provider.llm = LLMProviderName.OPENROUTER
     controller.settings.languages.source_language = "ja"
     controller.settings.languages.target_language = "en"
-    controller.settings.openrouter.fallback_selection_alias = (
-        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
-    )
+    controller.settings.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.NONE
     pending = copy.deepcopy(controller.settings)
-    pending.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    pending.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.OPENROUTER,
+    )
     runtime_snapshots: list[object] = []
 
     async def capture_apply_runtime(self, request) -> messages.RuntimeApplyResult:
@@ -15134,10 +15466,14 @@ async def test_order21_snapshot_full_default_service_runtime_adapter_receives_co
     assert values["provider"]["llm"] == LLMProviderName.OPENROUTER.value
     assert values["languages"]["source_language"] == "ja"
     assert values["languages"]["target_language"] == "en"
-    assert (
-        values["openrouter"]["fallback_selection_alias"]
-        == OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value
+    assert values["openrouter"]["fallback_selection_alias"] == (
+        OpenRouterFallbackSelectionAlias.NONE.value
     )
+    assert values["translation"]["fallback"] == {
+        "enabled": True,
+        "model": TranslationModel.DEEPSEEK_V4_FLASH.value,
+        "connection": TranslationConnection.OPENROUTER.value,
+    }
     assert values["llm"]["concurrency_limit"] == pending.llm.concurrency_limit
 
 
@@ -15148,7 +15484,11 @@ async def test_order21_snapshot_full_repository_save_offloads_persistence_thread
     controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
     committed = AppSettings()
     committed.provider.llm = LLMProviderName.OPENROUTER
-    committed.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    committed.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.OPENROUTER,
+    )
     event_loop_thread_id = threading.get_ident()
     save_thread_ids: list[int] = []
 
@@ -15165,7 +15505,11 @@ async def test_order21_snapshot_full_repository_save_offloads_persistence_thread
         controller_module.SettingsCommitRequest(
             values={
                 "provider.llm": LLMProviderName.OPENROUTER,
-                "openrouter.fallback_selection_alias": OpenRouterFallbackSelectionAlias.QWEN35_FLASH,
+                "translation.fallback": {
+                    "enabled": True,
+                    "model": TranslationModel.DEEPSEEK_V4_FLASH.value,
+                    "connection": TranslationConnection.OPENROUTER.value,
+                },
             },
             expected_revision=None,
             reason=settings_mutation.SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
@@ -15179,8 +15523,13 @@ async def test_order21_snapshot_full_repository_save_offloads_persistence_thread
     assert result.snapshot.values["provider"]["llm"] == LLMProviderName.OPENROUTER.value
     assert (
         result.snapshot.values["openrouter"]["fallback_selection_alias"]
-        == OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value
+        == OpenRouterFallbackSelectionAlias.NONE.value
     )
+    assert result.snapshot.values["translation"]["fallback"] == {
+        "enabled": True,
+        "model": TranslationModel.DEEPSEEK_V4_FLASH.value,
+        "connection": TranslationConnection.OPENROUTER.value,
+    }
 
 
 @pytest.mark.asyncio
@@ -15442,6 +15791,77 @@ async def test_apply_providers_broker_base_url_rebuilds_managed_broker_service(
     assert service.client.base_url == "https://new-broker.example.test"
 
 
+def test_create_managed_openrouter_release_service_uses_managed_fallback_branch() -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.GEMINI
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
+    controller.settings.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.MANAGED_CHINA,
+    )
+
+    service = controller._create_managed_openrouter_release_service(secrets=DummySecrets({}))
+
+    assert isinstance(service, ManagedOpenRouterReleaseService)
+    assert service.openrouter_config.llm_model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH
+    assert service.openrouter_config.selected_source == OpenRouterCredentialSource.MANAGED
+    assert (
+        service.openrouter_config.selection_alias
+        == OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
+    )
+    assert service.openrouter_config.managed_credential_kind == "qq"
+    service.managed_state.verified_hardware_hash = "fallback-hash"
+    assert controller.settings.managed_identity.verified_hardware_hash == "fallback-hash"
+
+
+@pytest.mark.asyncio
+async def test_handle_managed_translation_enable_runs_for_managed_fallback_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.GEMINI
+    controller.settings.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.MANAGED_CHINA,
+    )
+    controller.hub = DummyHub(llm=object())
+    service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            local_key_available=True,
+        )
+    )
+    controller._managed_openrouter_release_service = service
+
+    async def no_founder_letter(self) -> bool:
+        _ = self
+        return False
+
+    monkeypatch.setattr(
+        GuiController,
+        "_should_route_managed_trans_to_founder_letter",
+        no_founder_letter,
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_schedule_managed_trial_usage_refresh",
+        lambda self: None,
+    )
+
+    generation = controller._record_translation_toggle_intent(True)
+    result = await controller._handle_managed_translation_enable(generation)
+
+    assert result is True
+    assert service.prepare_calls == 1
+    assert controller._managed_china_auth_relevant_for_translation_enable() is True
+
+
 @pytest.mark.asyncio
 async def test_apply_providers_managed_identity_rebuilds_service_with_pending_identity(
     monkeypatch: pytest.MonkeyPatch,
@@ -15495,9 +15915,7 @@ async def test_apply_providers_mixed_degraded_default_service_persists_full_prov
     controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
     controller.settings = AppSettings()
     controller.settings.provider.llm = LLMProviderName.OPENROUTER
-    controller.settings.openrouter.fallback_selection_alias = (
-        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
-    )
+    controller.settings.translation.fallback = TranslationFallbackSettings(enabled=False)
     controller.settings.system_prompt = "base prompt"
     controller.hub = DummyHub()
     controller._last_self_stt_provider_signature = controller._build_self_stt_provider_signature(
@@ -15510,7 +15928,11 @@ async def test_apply_providers_mixed_degraded_default_service_persists_full_prov
         controller.settings
     )
     pending = copy.deepcopy(controller.settings)
-    pending.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    pending.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.OPENROUTER,
+    )
     pending.system_prompt = "draft prompt"
     saved_settings: list[AppSettings] = []
     rebuild_prompts: list[str] = []
@@ -17067,8 +17489,10 @@ async def test_apply_providers_preserves_current_languages_while_applying_provid
     controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
     controller.settings = AppSettings()
     controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
-    controller.settings.openrouter.fallback_selection_alias = (
-        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
+    controller.settings.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.OPENROUTER,
     )
     controller.settings.languages.source_language = "fr"
     controller.settings.languages.target_language = "de"
@@ -17106,7 +17530,11 @@ async def test_apply_providers_preserves_current_languages_while_applying_provid
     pending.provider.llm = LLMProviderName.OPENROUTER
     pending.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     pending.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
-    pending.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    pending.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.GEMMA4,
+        connection=TranslationConnection.OPENROUTER,
+    )
     pending.openrouter.routing_mode = OpenRouterRoutingMode.NOVITA_FIRST
     pending.system_prompt = "draft prompt"
     pending.system_prompts = {"openrouter": "draft prompt"}
@@ -17146,10 +17574,7 @@ async def test_apply_providers_preserves_current_languages_while_applying_provid
         controller.settings.openrouter.selection_alias
         == OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
     )
-    assert (
-        controller.settings.openrouter.fallback_selection_alias
-        == OpenRouterFallbackSelectionAlias.QWEN35_FLASH
-    )
+    assert controller.settings.translation.fallback == pending.translation.fallback
     assert controller.settings.openrouter.routing_mode == OpenRouterRoutingMode.NOVITA_FIRST
     assert controller.settings.system_prompt == "draft prompt"
     assert controller.settings.system_prompts == {}
@@ -17159,15 +17584,17 @@ async def test_apply_providers_preserves_current_languages_while_applying_provid
 
 
 @pytest.mark.asyncio
-async def test_apply_providers_rebuilds_only_llm_for_openrouter_fallback_alias_change(
+async def test_apply_providers_rebuilds_only_llm_for_translation_fallback_branch_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
     controller.settings = AppSettings()
     controller.settings.provider.llm = LLMProviderName.OPENROUTER
     controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_MANAGED
-    controller.settings.openrouter.fallback_selection_alias = (
-        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
+    controller.settings.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.OPENROUTER,
     )
     controller.hub = DummyHub()
     controller._last_self_stt_provider_signature = controller._build_self_stt_provider_signature(
@@ -17182,7 +17609,11 @@ async def test_apply_providers_rebuilds_only_llm_for_openrouter_fallback_alias_c
     calls: list[str] = []
 
     updated = copy.deepcopy(controller.settings)
-    updated.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    updated.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.GEMMA4_31B_CEREBRAS,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
 
     monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
 
@@ -17207,8 +17638,10 @@ async def test_apply_providers_rebuilds_only_llm_for_openrouter_fallback_alias_c
 
     await controller.apply_providers(updated)
 
-    assert controller.settings.openrouter.fallback_selection_alias == (
-        OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    assert controller.settings.translation.fallback == TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.GEMMA4_31B_CEREBRAS,
+        connection=TranslationConnection.OFFICIAL_BYOK,
     )
     assert calls == ["llm"]
 

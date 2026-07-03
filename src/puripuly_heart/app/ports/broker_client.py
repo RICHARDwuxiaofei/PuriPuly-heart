@@ -20,10 +20,16 @@ def _freeze_fields(
 
 @dataclass(frozen=True, slots=True)
 class BrokerIssueRequest:
-    discord_user_id: str
+    discord_user_id: str | None
     local_public_key: str
     local_identity_revision: str | None
     metadata: Mapping[str, DiagnosticFieldValue]
+    authorization_code: str | None = field(default=None, repr=False)
+    oauth_state: str | None = field(default=None, repr=False)
+    redirect_uri: str | None = None
+    issue_nonce: str | None = field(default=None, repr=False)
+    hardware_hash: str | None = field(default=None, repr=False)
+    hardware_hash_salt_version: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metadata", _freeze_fields(self.metadata))
@@ -37,6 +43,12 @@ class BrokerIssueResult:
     remote_key_revision: str | None
     message: UserMessageRef | None
     diagnostics: ErrorDiagnostics | None
+    managed_credential_ref: str | None = None
+    expires_at: str | None = None
+    openrouter_user_id: str | None = None
+    referral_id: str | None = None
+    referral_bonus_applied: bool = False
+    pass_status: object | None = field(default=None, repr=False)
 
 
 QqManagedAssertionFailureSubcode = Literal[

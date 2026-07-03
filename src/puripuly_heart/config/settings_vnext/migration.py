@@ -36,9 +36,11 @@ from puripuly_heart.config.settings_vnext.schema import (
     SecretsIntent,
     SonioxSTTIntent,
     STTIntent,
+    TranslationFallbackIntent,
     TranslationIntent,
     UiIntent,
     UserIntentSettings,
+    normalize_managed_claim_sources,
 )
 
 
@@ -68,6 +70,134 @@ _PROVIDER_VERIFICATION_FIELDS = (
     "alibaba_singapore",
 )
 
+_TEMPORARY_GENERIC_FALLBACK_ALIASES: dict[str, TranslationFallbackIntent] = {
+    "none": TranslationFallbackIntent(enabled=False),
+    "deepseek_v4_flash_official": TranslationFallbackIntent(
+        enabled=True,
+        model="deepseek_v4_flash",
+        connection="official_byok",
+    ),
+    "openrouter_deepseek_v4_flash": TranslationFallbackIntent(
+        enabled=True,
+        model="deepseek_v4_flash",
+        connection="openrouter",
+    ),
+    "openrouter_gemma4_26b_a4b": TranslationFallbackIntent(
+        enabled=True,
+        model="gemma4",
+        connection="openrouter",
+    ),
+    "cerebras_gemma4_31b": TranslationFallbackIntent(
+        enabled=True,
+        model="gemma4_31b_cerebras",
+        connection="official_byok",
+    ),
+}
+
+
+def _prepare_vnext_migration_dict(data: Mapping[str, Any]) -> dict[str, Any]:
+    prepared = dict(copy.deepcopy(data))
+    prepared["settings_version"] = VNEXT_SETTINGS_SCHEMA_VERSION
+    intent = prepared.get("intent") if isinstance(prepared.get("intent"), dict) else {}
+    translation = intent.get("translation") if isinstance(intent.get("translation"), dict) else {}
+    if isinstance(intent, dict) and isinstance(translation, dict):
+        fallback = translation.get("fallback")
+        if not isinstance(fallback, Mapping):
+            translation["fallback"] = _fallback_intent_to_dict(
+                _fallback_intent_from_legacy_translation_data(
+                    translation,
+                    openrouter_data=None,
+                )
+            )
+        translation.pop("fallback_selection_alias", None)
+        translation.pop("openrouter_fallback_selection_alias", None)
+        intent["translation"] = translation
+        prepared["intent"] = intent
+    return prepared
+
+
+def _fallback_intent_to_dict(intent: TranslationFallbackIntent) -> dict[str, object]:
+    return {
+        "enabled": intent.enabled,
+        "model": intent.model,
+        "connection": intent.connection,
+    }
+
+
+def _fallback_intent_from_temporary_alias(value: object) -> TranslationFallbackIntent | None:
+    if not isinstance(value, str):
+        return None
+    return _TEMPORARY_GENERIC_FALLBACK_ALIASES.get(value.strip(), TranslationFallbackIntent())
+
+
+def _fallback_intent_from_legacy_openrouter_alias(
+    value: object,
+    *,
+    selected_source: object,
+) -> TranslationFallbackIntent:
+    alias = value.strip() if isinstance(value, str) else ""
+    if alias in ("", "none", "qwen35_flash"):
+        return TranslationFallbackIntent(enabled=False)
+    if alias == "deepseek_v4_flash_china":
+        return TranslationFallbackIntent(
+            enabled=True,
+            model="deepseek_v4_flash",
+            connection="managed_china",
+        )
+    if alias == "deepseek_v4_flash":
+        if selected_source == "managed":
+            connection = "managed"
+        elif selected_source == "byok":
+            connection = "openrouter"
+        else:
+            return TranslationFallbackIntent(enabled=False)
+        return TranslationFallbackIntent(
+            enabled=True,
+            model="deepseek_v4_flash",
+            connection=connection,
+        )
+    return TranslationFallbackIntent(enabled=False)
+
+
+def _fallback_intent_from_legacy_translation_data(
+    translation_data: object,
+    *,
+    openrouter_data: object,
+) -> TranslationFallbackIntent:
+    translation = translation_data if isinstance(translation_data, Mapping) else {}
+    fallback = translation.get("fallback")
+    if isinstance(fallback, Mapping):
+        return TranslationFallbackIntent(
+            enabled=bool(fallback.get("enabled", False)),
+            model=str(fallback.get("model", "deepseek_v4_flash")),
+            connection=str(fallback.get("connection", "official_byok")),
+        )
+    temporary = _fallback_intent_from_temporary_alias(translation.get("fallback_selection_alias"))
+    if temporary is not None:
+        return temporary
+    openrouter = openrouter_data if isinstance(openrouter_data, Mapping) else None
+    return _fallback_intent_from_legacy_openrouter_alias(
+        (
+            openrouter.get("fallback_selection_alias")
+            if isinstance(openrouter, Mapping)
+            else translation.get("openrouter_fallback_selection_alias")
+        ),
+        selected_source=(
+            openrouter.get("selected_source")
+            if isinstance(openrouter, Mapping)
+            else translation.get("openrouter_selected_source")
+        ),
+    )
+
+
+def _fallback_intent_from_legacy_raw_dict(data: Mapping[str, Any]) -> TranslationFallbackIntent:
+    translation_data = data.get("translation")
+    openrouter_data = data.get("openrouter")
+    return _fallback_intent_from_legacy_translation_data(
+        translation_data,
+        openrouter_data=openrouter_data,
+    )
+
 
 def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
     """Read either canonical vNext settings or an accepted legacy settings dict."""
@@ -78,22 +208,25 @@ def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
         _validate_vnext_top_level_shape(data)
         return serialization.from_dict(data)
     if _is_lower_version_vnext_shape(data):
-        raise ValueError(
-            "lower-version vNext settings are unsupported; restore a pre-vNext backup or "
-            "upgrade with a compatible build"
-        )
+        _validate_vnext_top_level_shape(data)
+        return serialization.from_dict(_prepare_vnext_migration_dict(data))
 
     # Legacy compatibility belongs here: use the public legacy migration chain first, then
     # project the normalized AppSettings values into canonical vNext intent/state values.
     from puripuly_heart.config import settings as legacy_settings
 
+    fallback_intent = _fallback_intent_from_legacy_raw_dict(data)
     migrated, _changed = legacy_settings._migrate_settings_dict(dict(copy.deepcopy(data)))
-    return from_legacy_app_settings(legacy_settings.from_dict(migrated))
+    return from_legacy_app_settings(
+        legacy_settings.from_dict(migrated),
+        fallback_intent=fallback_intent,
+    )
 
 
 def from_legacy_app_settings(
     settings: object,
     *,
+    fallback_intent: TranslationFallbackIntent | None = None,
     preserve_provider_verification: bool = False,
 ) -> AppSettingsVNext:
     from puripuly_heart.config import settings as legacy_settings
@@ -102,6 +235,10 @@ def from_legacy_app_settings(
         raise TypeError("legacy settings migration requires AppSettings")
 
     data = legacy_settings.to_dict(settings)
+    fallback = fallback_intent or _fallback_intent_from_legacy_translation_data(
+        data.get("translation"),
+        openrouter_data=data.get("openrouter"),
+    )
     return AppSettingsVNext(
         settings_version=VNEXT_SETTINGS_SCHEMA_VERSION,
         intent=UserIntentSettings(
@@ -110,7 +247,7 @@ def from_legacy_app_settings(
                 connection=data["translation"]["connection"],
                 connection_history=dict(data["translation"]["connection_history"]),
                 concurrency_limit=int(data["llm"]["concurrency_limit"]),
-                openrouter_fallback_selection_alias=data["openrouter"]["fallback_selection_alias"],
+                fallback=fallback,
                 openrouter_broker_base_url=data["openrouter"]["broker_base_url"],
                 openrouter_routing_mode=data["openrouter"]["routing_mode"],
                 openrouter_model=data["openrouter"]["llm_model"],
@@ -232,6 +369,9 @@ def from_legacy_app_settings(
                     "founder_letter_seen_credential_ref"
                 ],
                 referral_id=data["managed_identity"]["referral_id"],
+                local_managed_claim_sources=normalize_managed_claim_sources(
+                    data["managed_identity"].get("local_managed_claim_sources")
+                ),
             ),
             github_star_prompt=GithubStarPromptState(
                 clicked=bool(data["ui"]["github_star_prompt_clicked"]),
@@ -295,6 +435,11 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
         "model": intent.translation.model,
         "connection": intent.translation.connection,
         "connection_history": dict(intent.translation.connection_history),
+        "fallback": {
+            "enabled": intent.translation.fallback.enabled,
+            "model": intent.translation.fallback.model,
+            "connection": intent.translation.fallback.connection,
+        },
     }
     data["languages"] = {
         "source_language": intent.languages.source_language,
@@ -358,7 +503,7 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
             "selected_source": intent.translation.openrouter_selected_source,
             "selection_alias": intent.translation.openrouter_selection_alias,
             "provider_routing": intent.translation.openrouter_provider_routing,
-            "fallback_selection_alias": intent.translation.openrouter_fallback_selection_alias,
+            "fallback_selection_alias": "none",
             "broker_base_url": intent.translation.openrouter_broker_base_url,
         }
     )
@@ -454,6 +599,9 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
             state.managed_connection.founder_letter_seen_credential_ref
         ),
         "referral_id": state.managed_connection.referral_id,
+        "local_managed_claim_sources": list(
+            normalize_managed_claim_sources(state.managed_connection.local_managed_claim_sources)
+        ),
     }
     data["system_prompt"] = intent.prompts.system_prompt
     return data

@@ -176,6 +176,9 @@ CURRENT_OPERATIONAL_STATE_DESTINATIONS = {
         "state.managed_connection.founder_letter_seen_credential_ref"
     ),
     "managed_identity.installation_id": "state.managed_connection.installation_id",
+    "managed_identity.local_managed_claim_sources": (
+        "state.managed_connection.local_managed_claim_sources"
+    ),
     "managed_identity.referral_id": "state.managed_connection.referral_id",
     "managed_identity.release_token": "state.managed_connection.release_token",
     "managed_identity.release_token_expires_at": (
@@ -390,6 +393,7 @@ def maximal_v24_settings_fixture() -> dict[str, Any]:
     settings.managed_identity.active_managed_expires_at = "2026-07-09T00:00:00Z"
     settings.managed_identity.founder_letter_seen_credential_ref = "fixture-founder-ref"
     settings.managed_identity.referral_id = "7KQ9M2"
+    settings.managed_identity.local_managed_claim_sources = ("discord",)
     settings.system_prompt = "Fixture system prompt text."
     settings.validate()
 

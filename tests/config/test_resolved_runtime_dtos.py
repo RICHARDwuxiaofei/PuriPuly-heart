@@ -105,19 +105,23 @@ def _credential(resolved: ModuleType, *, required: bool = True) -> Any:
 
 def _llm_config(resolved: ModuleType, *, provider_options: dict[str, object] | None = None) -> Any:
     return resolved.ResolvedLLMConfig(
-        provider="openrouter",
-        model="google/gemma-4-26b-a4b-it",
-        credential=_credential(resolved),
-        fallback_provider="openrouter",
-        fallback_model="qwen/qwen3.5-flash-02-23",
-        fallback_credential=_credential(resolved, required=False),
-        base_url=None,
-        service_endpoint=None,
-        region=None,
-        routing_mode="latency",
-        provider_routing="default",
+        primary=resolved.ResolvedLLMTarget(
+            provider="openrouter",
+            model="google/gemma-4-26b-a4b-it",
+            credential=_credential(resolved),
+            routing_mode="latency",
+            provider_routing="default",
+            provider_options={} if provider_options is None else provider_options,
+        ),
+        fallback=resolved.ResolvedLLMFallbackPlan(
+            target=resolved.ResolvedLLMTarget(
+                provider="openrouter",
+                model="deepseek/deepseek-v4-flash",
+                credential=_credential(resolved, required=False),
+                provider_routing="deepseek_only",
+            )
+        ),
         concurrency_limit=5,
-        provider_options={} if provider_options is None else provider_options,
     )
 
 
@@ -177,6 +181,8 @@ def test_resolved_contracts_expose_dtos_and_literal_constants() -> None:
     for class_name in (
         "ResolvedCredentialRequirement",
         "ResolvedLLMConfig",
+        "ResolvedLLMFallbackPlan",
+        "ResolvedLLMTarget",
         "ResolvedOverlayConfig",
         "ResolvedRuntimePolicy",
         "ResolvedSTTConfig",
@@ -191,28 +197,37 @@ def test_resolved_contracts_expose_dtos_and_literal_constants() -> None:
     assert resolved.OVERLAY_TARGETS == ("steamvr", "desktop")
 
 
-def test_resolved_llm_config_carries_explicit_fallback_provider_routing() -> None:
+def test_resolved_llm_config_carries_explicit_fallback_branch_target() -> None:
     resolved = _resolved_module()
 
     llm_config = resolved.ResolvedLLMConfig(
-        provider="openrouter",
-        model="google/gemma-4-26b-a4b-it",
-        credential=_credential(resolved),
-        fallback_provider="openrouter",
-        fallback_model="deepseek/deepseek-v4-flash",
-        fallback_credential=_credential(resolved),
-        fallback_provider_routing="deepseek_only",
-        routing_mode="latency",
-        provider_routing="default",
+        primary=resolved.ResolvedLLMTarget(
+            provider="openrouter",
+            model="google/gemma-4-26b-a4b-it",
+            credential=_credential(resolved),
+            routing_mode="latency",
+            provider_routing="default",
+        ),
+        fallback=resolved.ResolvedLLMFallbackPlan(
+            target=resolved.ResolvedLLMTarget(
+                provider="openrouter",
+                model="deepseek/deepseek-v4-flash",
+                credential=_credential(resolved),
+                provider_routing="deepseek_only",
+            )
+        ),
     )
     no_fallback = resolved.ResolvedLLMConfig(
-        provider="openrouter",
-        model="google/gemma-4-26b-a4b-it",
-        credential=_credential(resolved),
+        primary=resolved.ResolvedLLMTarget(
+            provider="openrouter",
+            model="google/gemma-4-26b-a4b-it",
+            credential=_credential(resolved),
+        ),
     )
 
-    assert llm_config.fallback_provider_routing == "deepseek_only"
-    assert no_fallback.fallback_provider_routing is None
+    assert llm_config.fallback is not None
+    assert llm_config.fallback.target.provider_routing == "deepseek_only"
+    assert no_fallback.fallback is None
 
 
 def test_resolved_dtos_are_frozen_and_slotted() -> None:
@@ -220,6 +235,8 @@ def test_resolved_dtos_are_frozen_and_slotted() -> None:
     dto_classes = (
         resolved.ResolvedCredentialRequirement,
         resolved.ResolvedLLMConfig,
+        resolved.ResolvedLLMFallbackPlan,
+        resolved.ResolvedLLMTarget,
         resolved.ResolvedOverlayConfig,
         resolved.ResolvedRuntimePolicy,
         resolved.ResolvedSTTConfig,
@@ -233,7 +250,7 @@ def test_resolved_dtos_are_frozen_and_slotted() -> None:
 
     llm_config = _llm_config(resolved)
     with pytest.raises(FrozenInstanceError):
-        llm_config.provider = "qwen"
+        llm_config.primary = llm_config.primary
 
 
 def test_nested_mappings_are_deep_frozen_and_detached_from_inputs() -> None:
@@ -244,13 +261,13 @@ def test_nested_mappings_are_deep_frozen_and_detached_from_inputs() -> None:
     original_options["outer"]["inner"].append("mutated")
     original_options["outer"]["new"] = "mutated"
 
-    assert isinstance(llm_config.provider_options, MappingProxyType)
-    assert isinstance(llm_config.provider_options["outer"], MappingProxyType)
-    assert llm_config.provider_options["outer"]["inner"] == ("alpha",)
+    assert isinstance(llm_config.primary.provider_options, MappingProxyType)
+    assert isinstance(llm_config.primary.provider_options["outer"], MappingProxyType)
+    assert llm_config.primary.provider_options["outer"]["inner"] == ("alpha",)
     with pytest.raises(TypeError):
-        llm_config.provider_options["new"] = "value"
+        llm_config.primary.provider_options["new"] = "value"
     with pytest.raises(TypeError):
-        llm_config.provider_options["outer"]["new"] = "value"
+        llm_config.primary.provider_options["outer"]["new"] = "value"
 
     custom_terms = {"en": ["airi"]}
     stt_config = _stt_config(
@@ -343,6 +360,8 @@ def test_raw_secret_bearing_names_are_excluded_from_dto_fields_and_options() -> 
     dto_classes = (
         resolved.ResolvedCredentialRequirement,
         resolved.ResolvedLLMConfig,
+        resolved.ResolvedLLMFallbackPlan,
+        resolved.ResolvedLLMTarget,
         resolved.ResolvedOverlayConfig,
         resolved.ResolvedRuntimePolicy,
         resolved.ResolvedSTTConfig,

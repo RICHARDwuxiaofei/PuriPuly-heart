@@ -25,6 +25,7 @@ class ManagedIdentitySnapshot:
     active_managed_expires_at: str | None
     founder_letter_seen_credential_ref: str | None
     referral_id: str | None
+    local_managed_claim_sources: tuple[str, ...]
 
 
 class ManagedIdentityStatePort(Protocol):
@@ -45,6 +46,7 @@ class ManagedIdentityStatePort(Protocol):
     active_managed_expires_at: str | None
     founder_letter_seen_credential_ref: str | None
     referral_id: str | None
+    local_managed_claim_sources: tuple[str, ...]
 
     def persist(self) -> None: ...
 

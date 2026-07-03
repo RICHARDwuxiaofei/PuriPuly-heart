@@ -7,7 +7,11 @@ from puripuly_heart.app.wiring_llm_factory import (
     _LazyFactoryLLMProvider,
 )
 from puripuly_heart.app.wiring_managed_auth_factory import (
+    DiscordManagedBrokerClientAdapter,
+    DiscordOAuthAuthAdapter,
+    ManagedIdentityPreflightAdapter,
     ManagedIdentityStateAdapter,
+    apply_discord_issue_result_to_managed_state,
     build_managed_identity_state_port,
     build_openrouter_credential_runtime_config,
     build_openrouter_release_runtime_config,
@@ -88,7 +92,11 @@ __all__ = (
     "resolve_overlay_config",
     "resolve_peer_stt_config",
     "resolve_peer_stt_runtime_config",
+    "DiscordManagedBrokerClientAdapter",
+    "DiscordOAuthAuthAdapter",
+    "ManagedIdentityPreflightAdapter",
     "ManagedIdentityStateAdapter",
+    "apply_discord_issue_result_to_managed_state",
     "build_managed_identity_state_port",
     "build_openrouter_credential_runtime_config",
     "build_openrouter_release_runtime_config",
