@@ -269,6 +269,30 @@ async def test_soniox_empty_final_boundary_clears_previous_segment_before_next_f
 
 
 @pytest.mark.asyncio
+async def test_soniox_whitespace_final_boundary_emits_empty_final_ack() -> None:
+    session = _make_session()
+
+    await session.on_speech_end(trailing_silence_ms=0)
+    finalize = await session._audio_q.get()
+    assert isinstance(finalize, _FinalizeRequest)
+
+    session._handle_message(
+        json.dumps(
+            {
+                "tokens": [
+                    {"text": "   ", "is_final": True, "end_ms": 100},
+                    {"text": "<fin>", "is_final": True},
+                ]
+            }
+        )
+    )
+
+    event = session._events.get_nowait()
+    assert event.text == ""
+    assert event.is_final is True
+
+
+@pytest.mark.asyncio
 async def test_soniox_session_send_audio_and_stop() -> None:
     session = _make_session()
 
