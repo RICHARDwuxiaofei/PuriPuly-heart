@@ -122,6 +122,20 @@ _TRANSLATION_CONNECTION_DESCRIPTION_KEYS = {
     TranslationConnection.OLLAMA: "settings.translation_connection.ollama.description",
 }
 _TRANSLATION_CONNECTION_ONLY_SUPPORTED_KEY = "settings.translation_connection.only_supported"
+_TRANSLATION_MODEL_RECOMMENDED_SECTION_KEY = "settings.translation_model.section.recommended"
+_TRANSLATION_MODEL_OTHERS_SECTION_KEY = "settings.translation_model.section.others"
+_RECOMMENDED_TRANSLATION_MODELS = (
+    TranslationModel.GEMMA4,
+    TranslationModel.DEEPSEEK_V4_FLASH,
+)
+_OTHER_TRANSLATION_MODELS = (
+    TranslationModel.GEMMA4_31B_CEREBRAS,
+    TranslationModel.LOCAL_LLM,
+    TranslationModel.DEEPSEEK_V4_PRO,
+    TranslationModel.GEMINI_3_FLASH,
+    TranslationModel.GEMINI_31_FLASH_LITE,
+    TranslationModel.QWEN_35_PLUS,
+)
 _TRANSLATION_FALLBACK_PRESETS: tuple[tuple[str, TranslationFallbackSettings, str], ...] = (
     (
         "none",
@@ -170,6 +184,9 @@ _TRANSLATION_FALLBACK_PRESET_BY_VALUE = {
 }
 _TRANSLATION_FALLBACK_LABEL_KEY_BY_VALUE = {
     value: label_key for value, _fallback, label_key in _TRANSLATION_FALLBACK_PRESETS
+}
+_TRANSLATION_FALLBACK_DESCRIPTION_KEY_BY_VALUE = {
+    "cerebras_gemma4_31b": "settings.fallback.cerebras_gemma4_31b.description",
 }
 
 
@@ -2099,6 +2116,11 @@ class SettingsView(ft.Column):
                 and preset.connection == fallback.connection
             ):
                 return value
+        if fallback.connection in (
+            TranslationConnection.MANAGED,
+            TranslationConnection.MANAGED_CHINA,
+        ):
+            return "none"
         return "custom"
 
     def _translation_fallback_display_label(
@@ -3153,17 +3175,13 @@ class SettingsView(ft.Column):
                 value=model.value,
                 label=self._translation_model_display_label(model),
                 description=t(f"settings.translation_model.{model.value}.description", default=""),
+                section=t(section_key),
             )
-            for model in (
-                TranslationModel.GEMMA4,
-                TranslationModel.DEEPSEEK_V4_FLASH,
-                TranslationModel.DEEPSEEK_V4_PRO,
-                TranslationModel.GEMINI_3_FLASH,
-                TranslationModel.GEMINI_31_FLASH_LITE,
-                TranslationModel.QWEN_35_PLUS,
-                TranslationModel.GEMMA4_31B_CEREBRAS,
-                TranslationModel.LOCAL_LLM,
+            for section_key, models in (
+                (_TRANSLATION_MODEL_RECOMMENDED_SECTION_KEY, _RECOMMENDED_TRANSLATION_MODELS),
+                (_TRANSLATION_MODEL_OTHERS_SECTION_KEY, _OTHER_TRANSLATION_MODELS),
             )
+            for model in models
         ]
         display_settings = self._build_settings_with_provider_draft()
         current = (
@@ -3346,7 +3364,14 @@ class SettingsView(ft.Column):
         if not self.page:
             return
         options: list[OptionItem] = [
-            OptionItem(value=value, label=t(label_key))
+            OptionItem(
+                value=value,
+                label=t(label_key),
+                description=t(
+                    _TRANSLATION_FALLBACK_DESCRIPTION_KEY_BY_VALUE.get(value, ""),
+                    default="",
+                ),
+            )
             for value, _fallback, label_key in _TRANSLATION_FALLBACK_PRESETS
         ]
         display_settings = self._build_settings_with_provider_draft()
@@ -3360,7 +3385,7 @@ class SettingsView(ft.Column):
             t("settings.fallback.modal_title"),
             options,
             self._on_openrouter_fallback_selected,
-            show_description=False,
+            show_description=True,
         )
         modal.open(current)
 

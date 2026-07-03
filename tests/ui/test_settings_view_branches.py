@@ -2949,6 +2949,44 @@ def test_update_api_visibility_shows_openrouter_key_for_openrouter_fallback_when
     assert view._openrouter_key.visible is True
 
 
+def test_update_api_visibility_shows_openrouter_key_for_openrouter_gemma_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PURIPULY_HEART_OPENROUTER_LEGACY_CONNECT", raising=False)
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.translation.fallback = _enabled_fallback(
+        TranslationModel.GEMMA4,
+        TranslationConnection.OPENROUTER,
+    )
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._update_api_visibility()
+
+    assert view._google_key.visible is True
+    assert view._openrouter_key.visible is True
+    assert view._cerebras_key.visible is False
+
+
+def test_update_api_visibility_shows_cerebras_key_for_cerebras_fallback_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PURIPULY_HEART_OPENROUTER_LEGACY_CONNECT", raising=False)
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.translation.fallback = _enabled_fallback(
+        TranslationModel.GEMMA4_31B_CEREBRAS,
+        TranslationConnection.OFFICIAL_BYOK,
+    )
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._update_api_visibility()
+
+    assert view._google_key.visible is True
+    assert view._openrouter_key.visible is False
+    assert view._cerebras_key.visible is True
+
+
 def test_openrouter_key_field_and_pkce_button_are_visible_for_byok_without_break_glass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3178,7 +3216,7 @@ def test_openrouter_fallback_modal_lists_curated_openrouter_fallbacks(
 
     view._on_openrouter_fallback_click(None)
 
-    assert captured["show_description"] is False
+    assert captured["show_description"] is True
     options = captured["options"]
 
     assert [option.value for option in options] == [
@@ -3194,6 +3232,13 @@ def test_openrouter_fallback_modal_lists_curated_openrouter_fallbacks(
         t("settings.fallback.openrouter_deepseek_v4_flash"),
         t("settings.fallback.openrouter_gemma4_26b_a4b"),
         t("settings.fallback.cerebras_gemma4_31b"),
+    ]
+    assert [option.description for option in options] == [
+        "",
+        "",
+        "",
+        "",
+        t("settings.fallback.cerebras_gemma4_31b.description"),
     ]
 
 
@@ -3239,12 +3284,22 @@ def test_llm_modal_lists_logical_translation_models_once(
     assert [option.value for option in options] == [
         TranslationModel.GEMMA4.value,
         TranslationModel.DEEPSEEK_V4_FLASH.value,
+        TranslationModel.GEMMA4_31B_CEREBRAS.value,
+        TranslationModel.LOCAL_LLM.value,
         TranslationModel.DEEPSEEK_V4_PRO.value,
         TranslationModel.GEMINI_3_FLASH.value,
         TranslationModel.GEMINI_31_FLASH_LITE.value,
         TranslationModel.QWEN_35_PLUS.value,
-        TranslationModel.GEMMA4_31B_CEREBRAS.value,
-        TranslationModel.LOCAL_LLM.value,
+    ]
+    assert [option.section for option in options] == [
+        t("settings.translation_model.section.recommended"),
+        t("settings.translation_model.section.recommended"),
+        t("settings.translation_model.section.others"),
+        t("settings.translation_model.section.others"),
+        t("settings.translation_model.section.others"),
+        t("settings.translation_model.section.others"),
+        t("settings.translation_model.section.others"),
+        t("settings.translation_model.section.others"),
     ]
     assert captured["current"] == TranslationModel.GEMINI_3_FLASH.value
     assert OpenRouterSelectionAlias.GEMMA4_MANAGED.value not in option_by_value
@@ -3375,10 +3430,28 @@ def test_openrouter_fallback_modal_uses_label_only_generic_options(
     view._on_openrouter_fallback_click(None)
 
     options = {option.value: option for option in captured["options"]}
-    assert captured["show_description"] is False
+    assert captured["show_description"] is True
     assert options["none"].description == ""
     assert options["openrouter_deepseek_v4_flash"].description == ""
+    assert options["cerebras_gemma4_31b"].description == t(
+        "settings.fallback.cerebras_gemma4_31b.description"
+    )
     assert "qwen35_flash" not in options
+
+
+def test_hidden_legacy_deepseek_china_fallback_displays_safe_current_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.translation.fallback = _enabled_fallback(
+        TranslationModel.DEEPSEEK_V4_FLASH,
+        TranslationConnection.MANAGED_CHINA,
+    )
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    assert view._translation_fallback_preset_value(settings.translation.fallback) == "none"
+    assert view._get_openrouter_fallback_display_label(settings) == t("settings.fallback.none")
 
 
 def test_openrouter_fallback_off_does_not_show_active_helper_copy(

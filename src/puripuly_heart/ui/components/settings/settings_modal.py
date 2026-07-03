@@ -31,6 +31,7 @@ class OptionItem:
     label: str
     description: str = ""
     disabled: bool = False
+    section: str = ""
 
 
 class SettingsModal:
@@ -117,7 +118,22 @@ class SettingsModal:
     def _build_option_list(self, current: str) -> ft.ListView:
         """Build scrollable list of options."""
         items = []
+        current_section = ""
         for option in self._options:
+            if option.section and option.section != current_section:
+                current_section = option.section
+                items.append(
+                    ft.Container(
+                        content=ft.Text(
+                            option.section,
+                            size=14,
+                            weight=ft.FontWeight.BOLD,
+                            color=COLOR_NEUTRAL,
+                            text_align=ft.TextAlign.LEFT,
+                        ),
+                        padding=ft.padding.only(left=8, top=8, bottom=0),
+                    )
+                )
             is_selected = option.value == current and not option.disabled
 
             # Colors
