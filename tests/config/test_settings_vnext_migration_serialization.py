@@ -277,10 +277,10 @@ def test_china_first_run_defaults_project_to_vnext_intent() -> None:
     )
     assert serialized["intent"]["translation"]["openrouter_provider_routing"] == ("deepseek_only")
     assert serialized["intent"]["translation"]["fallback"] == {
-        "enabled": False,
-        "model": "deepseek_v4_flash",
-        "connection": "official_byok",
-        "selection_alias": "none",
+        "enabled": True,
+        "model": "gemma4",
+        "connection": "openrouter",
+        "selection_alias": "openrouter_gemma4_26b_a4b",
     }
     assert "openrouter_fallback_selection_alias" not in serialized["intent"]["translation"]
 

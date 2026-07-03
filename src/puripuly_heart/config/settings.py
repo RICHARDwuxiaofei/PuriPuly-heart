@@ -2551,6 +2551,11 @@ def _apply_china_managed_first_run_defaults(settings: AppSettings) -> None:
         cerebras_model=settings.cerebras.llm_model,
         history=settings.translation.connection_history,
     )
+    settings.translation.fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.GEMMA4,
+        connection=TranslationConnection.OPENROUTER,
+    )
 
 
 def new_settings_for_first_run(system_locale: str | None = None) -> AppSettings:
@@ -2560,6 +2565,12 @@ def new_settings_for_first_run(system_locale: str | None = None) -> AppSettings:
     settings.ui.locale = resolve_first_run_ui_locale(system_locale)
     if _is_china_first_run_locale(system_locale):
         _apply_china_managed_first_run_defaults(settings)
+    else:
+        settings.translation.fallback = TranslationFallbackSettings(
+            enabled=True,
+            model=TranslationModel.DEEPSEEK_V4_FLASH,
+            connection=TranslationConnection.OPENROUTER,
+        )
     ensure_prompt_defaults(settings)
     settings.validate()
     return settings

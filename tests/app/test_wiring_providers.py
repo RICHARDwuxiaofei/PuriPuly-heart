@@ -928,6 +928,42 @@ def test_create_llm_provider_from_resolved_openrouter_fallback_uses_resolved_rou
     assert provider.semaphore._value == 3  # type: ignore[attr-defined]
 
 
+def test_create_llm_provider_from_resolved_cerebras_fallback_uses_resolved_secret() -> None:
+    resolved = ResolvedLLMConfig(
+        primary=ResolvedLLMTarget(
+            provider="deepseek",
+            model=DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value,
+            credential=ResolvedCredentialRequirement(
+                source=CREDENTIAL_SOURCE_SECRET_STORE,
+                required=True,
+                reference="deepseek:byok",
+            ),
+        ),
+        fallback=ResolvedLLMFallbackPlan(
+            target=ResolvedLLMTarget(
+                provider="cerebras",
+                model=CerebrasLLMModel.GEMMA_4_31B.value,
+                credential=ResolvedCredentialRequirement(
+                    source=CREDENTIAL_SOURCE_SECRET_STORE,
+                    required=True,
+                    reference="cerebras:byok",
+                ),
+            )
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("deepseek_api_key", "deepseek-key")
+    secrets.set("cerebras_api_key", "cerebras-key")
+
+    provider = create_llm_provider_from_resolved_config(resolved, secrets=secrets)
+
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    fallback_provider = provider.inner.fallback.factory()
+    assert isinstance(fallback_provider, CerebrasLLMProvider)
+    assert fallback_provider.api_key == "cerebras-key"
+    assert fallback_provider.model == CerebrasLLMModel.GEMMA_4_31B.value
+
+
 def test_create_llm_provider_openrouter_direct_managed_reuse_forwards_cached_user_identifier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

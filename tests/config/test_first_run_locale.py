@@ -10,6 +10,8 @@ from puripuly_heart.config.settings import (
     LLMProviderName,
     OpenRouterCredentialSource,
     STTProviderName,
+    TranslationConnection,
+    TranslationModel,
     from_dict,
     load_settings,
     save_settings,
@@ -123,6 +125,25 @@ def test_first_run_settings_preserve_provider_defaults() -> None:
     assert settings.provider.stt == STTProviderName.LOCAL_QWEN
     assert settings.provider.llm == LLMProviderName.OPENROUTER
     assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert settings.translation.model == TranslationModel.DEEPSEEK_V4_FLASH
+    assert settings.translation.connection == TranslationConnection.MANAGED_CHINA
+    assert settings.translation.fallback.enabled is True
+    assert settings.translation.fallback.model == TranslationModel.GEMMA4
+    assert settings.translation.fallback.connection == TranslationConnection.OPENROUTER
+
+
+@pytest.mark.parametrize("system_locale", ["en_US", "ko_KR", "ja_JP", None])
+def test_first_run_settings_use_openrouter_deepseek_fallback_default(
+    system_locale: str | None,
+) -> None:
+    settings = _new_first_run_settings(system_locale)
+
+    assert settings.provider.llm == LLMProviderName.OPENROUTER
+    assert settings.translation.model == TranslationModel.GEMMA4
+    assert settings.translation.connection == TranslationConnection.MANAGED
+    assert settings.translation.fallback.enabled is True
+    assert settings.translation.fallback.model == TranslationModel.DEEPSEEK_V4_FLASH
+    assert settings.translation.fallback.connection == TranslationConnection.OPENROUTER
 
 
 def test_first_run_settings_roundtrip_through_dict_serialization() -> None:
@@ -172,6 +193,27 @@ def test_main_first_run_uses_detected_system_locale(
     loaded = _load_settings_or_default(path)
 
     assert loaded.intent.ui.locale == "zh-CN"
+    assert loaded.intent.translation.model == "deepseek_v4_flash"
+    assert loaded.intent.translation.connection == "managed_china"
+    assert loaded.intent.translation.openrouter_selection_alias == "deepseek_v4_flash_managed"
+    assert loaded.intent.translation.openrouter_provider_routing == "deepseek_only"
+    assert loaded.intent.translation.fallback.selection_alias == "openrouter_gemma4_26b_a4b"
+    assert not path.exists()
+
+
+def test_main_first_run_non_china_uses_openrouter_deepseek_fallback_default(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings_module, "detect_system_locale", lambda: "ko_KR", raising=False)
+    path = tmp_path / "settings.json"
+
+    loaded = _load_settings_or_default(path)
+
+    assert loaded.intent.ui.locale == "ko"
+    assert loaded.intent.translation.model == "gemma4"
+    assert loaded.intent.translation.connection == "managed"
+    assert loaded.intent.translation.fallback.selection_alias == "openrouter_deepseek_v4_flash"
     assert not path.exists()
 
 

@@ -125,12 +125,12 @@ def _load_settings_or_default(
     from dataclasses import replace
 
     from puripuly_heart.config.profile_bootstrap import import_stable_settings_if_missing
-    from puripuly_heart.config.settings import (
-        detect_system_locale,
-        resolve_first_run_ui_locale,
-    )
+    from puripuly_heart.config.settings import detect_system_locale, resolve_first_run_ui_locale
     from puripuly_heart.config.settings_vnext.facade import load_vnext_settings
-    from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
+    from puripuly_heart.config.settings_vnext.schema import (
+        AppSettingsVNext,
+        TranslationFallbackIntent,
+    )
 
     if path.exists():
         result = load_vnext_settings(path)
@@ -148,7 +148,25 @@ def _load_settings_or_default(
             return import_result.settings
 
     settings = AppSettingsVNext()
-    locale_value = resolve_first_run_ui_locale(detect_system_locale())
+    system_locale = detect_system_locale()
+    locale_value = resolve_first_run_ui_locale(system_locale)
+    fallback_alias = (
+        "openrouter_gemma4_26b_a4b" if locale_value == "zh-CN" else "openrouter_deepseek_v4_flash"
+    )
+    translation = replace(
+        settings.intent.translation,
+        fallback=TranslationFallbackIntent(selection_alias=fallback_alias),
+    )
+    if locale_value == "zh-CN":
+        translation = replace(
+            translation,
+            model="deepseek_v4_flash",
+            connection="managed_china",
+            openrouter_model="deepseek/deepseek-v4-flash",
+            openrouter_selection_alias="deepseek_v4_flash_managed",
+            openrouter_provider_routing="deepseek_only",
+        )
+    settings = replace(settings, intent=replace(settings.intent, translation=translation))
     if locale_value:
         settings = replace(
             settings,

@@ -532,64 +532,110 @@ def test_translation_model_connection_matrix_resolves_llm_config(
 
 @pytest.mark.parametrize(
     (
+        "selection_alias",
+        "fallback_enabled",
         "fallback_model",
         "fallback_connection",
         "expected_fallback_source",
         "expected_fallback_reference",
         "expected_fallback_provider",
         "expected_fallback_model",
+        "expected_provider_routing",
     ),
     [
         (
+            "none",
+            False,
+            "deepseek_v4_flash",
+            "official_byok",
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            "deepseek_v4_flash_official",
+            True,
             "deepseek_v4_flash",
             "official_byok",
             "secret_store",
             "deepseek:byok",
             "deepseek",
             "deepseek-v4-flash",
+            None,
         ),
         (
+            "openrouter_deepseek_v4_flash",
+            True,
             "deepseek_v4_flash",
             "openrouter",
             "secret_store",
             "openrouter:byok",
             "openrouter",
             "deepseek/deepseek-v4-flash",
+            "default",
         ),
         (
+            "openrouter_gemma4_26b_a4b",
+            True,
+            "gemma4",
+            "openrouter",
+            "secret_store",
+            "openrouter:byok",
+            "openrouter",
+            "google/gemma-4-26b-a4b-it",
+            "default",
+        ),
+        (
+            "cerebras_gemma4_31b",
+            True,
             "gemma4_31b_cerebras",
             "official_byok",
             "secret_store",
             "cerebras:byok",
             "cerebras",
             "gemma-4-31b",
+            None,
         ),
     ],
 )
-def test_translation_fallback_branch_resolves_provider_neutrally(
+def test_canonical_translation_fallback_branch_resolves_explicit_provider_route(
+    selection_alias: str,
+    fallback_enabled: bool,
     fallback_model: str,
     fallback_connection: str,
     expected_fallback_source: str,
     expected_fallback_reference: str | None,
     expected_fallback_provider: str,
     expected_fallback_model: str,
+    expected_provider_routing: str | None,
 ) -> None:
     runtime_resolution = _runtime_resolution_module()
     resolved = _resolved_module()
+    original_fallback = runtime_resolution.TranslationFallbackRuntimeIntent(
+        enabled=fallback_enabled,
+        model=fallback_model,
+        connection=fallback_connection,
+    )
 
     config = runtime_resolution.resolve_llm_config(
         _runtime_input(
             runtime_resolution,
             model=runtime_resolution.TRANSLATION_MODEL_GEMMA4,
             connection=runtime_resolution.TRANSLATION_CONNECTION_MANAGED,
-            translation_fallback=runtime_resolution.TranslationFallbackRuntimeIntent(
-                enabled=True,
-                model=fallback_model,
-                connection=fallback_connection,
-            ),
+            translation_fallback=original_fallback,
         )
     )
 
+    assert original_fallback == runtime_resolution.TranslationFallbackRuntimeIntent(
+        enabled=fallback_enabled,
+        model=fallback_model,
+        connection=fallback_connection,
+    )
+    if selection_alias == "none":
+        assert config.fallback is None
+        return
     assert config.fallback is not None
     assert config.fallback.target.provider == expected_fallback_provider
     assert config.fallback.target.model == expected_fallback_model
@@ -598,6 +644,7 @@ def test_translation_fallback_branch_resolves_provider_neutrally(
         expected_fallback_source,
         expected_fallback_reference,
     )
+    assert config.fallback.target.provider_routing == expected_provider_routing
 
 
 def test_openrouter_no_fallback_selected_has_no_fallback_credential() -> None:
