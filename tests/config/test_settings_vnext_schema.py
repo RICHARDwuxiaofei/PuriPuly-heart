@@ -89,6 +89,7 @@ def test_vnext_schema_represents_current_intent_and_state_leaves() -> None:
         "intent.desktop_audio.vad_pre_roll_ms",
         "intent.desktop_audio.vad_speech_threshold",
         "intent.integrated_context.enabled",
+        "intent.telemetry.consent",
         "intent.languages.peer_source_language",
         "intent.languages.peer_target_language",
         "intent.languages.recent_source_languages",
@@ -146,6 +147,7 @@ def test_vnext_schema_represents_current_intent_and_state_leaves() -> None:
         "intent.translation.fallback.connection",
         "intent.translation.fallback.enabled",
         "intent.translation.fallback.model",
+        "intent.translation.fallback.selection_alias",
         "intent.translation.model",
         "intent.translation.openrouter_broker_base_url",
         "intent.translation.openrouter_model",
@@ -162,6 +164,8 @@ def test_vnext_schema_represents_current_intent_and_state_leaves() -> None:
         "state.github_star_prompt.show_count",
         "state.github_star_prompt.translation_success_observed",
         "state.integrated_context.bootstrapped",
+        "state.telemetry.anonymous_id",
+        "state.telemetry.sent_translation_success_dates_utc",
         "state.managed_connection.active_managed_credential_ref",
         "state.managed_connection.active_managed_expires_at",
         "state.managed_connection.founder_letter_seen_credential_ref",
@@ -195,6 +199,17 @@ def test_vnext_schema_excludes_runtime_only_legacy_ui_state() -> None:
     assert "state.ui.overlay_enabled" not in leaf_paths
     assert "intent.ui.peer_translation_enabled" not in leaf_paths
     assert "state.ui.peer_translation_enabled" not in leaf_paths
+
+
+def test_telemetry_schema_defaults_keep_intent_and_operational_state_separate() -> None:
+    schema = _load_schema_module()
+
+    settings = schema.AppSettingsVNext()
+
+    assert settings.intent.telemetry.consent == "unknown"
+    assert settings.state.telemetry.anonymous_id is None
+    assert settings.state.telemetry.sent_translation_success_dates_utc == ()
+    assert schema.TELEMETRY_CONSENT_VALUES == frozenset({"unknown", "allow", "decline"})
 
 
 def test_vnext_schema_default_tree_excludes_raw_provider_api_key_fields() -> None:

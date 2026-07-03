@@ -9,6 +9,7 @@ from typing import Any, Final
 from puripuly_heart.config.settings_vnext.schema import (
     VNEXT_SETTINGS_SCHEMA_VERSION,
     AppSettingsVNext,
+    with_telemetry_consent,
 )
 
 CANONICAL_TOP_LEVEL_KEYS: Final = frozenset({"settings_version", "intent", "state"})
@@ -30,22 +31,34 @@ _TEMPORARY_GENERIC_FALLBACK_ALIASES: Final = {
         "enabled": True,
         "model": "deepseek_v4_flash",
         "connection": "official_byok",
+        "selection_alias": "deepseek_v4_flash_official",
     },
     "openrouter_deepseek_v4_flash": {
         "enabled": True,
         "model": "deepseek_v4_flash",
         "connection": "openrouter",
+        "selection_alias": "openrouter_deepseek_v4_flash",
     },
     "openrouter_gemma4_26b_a4b": {
         "enabled": True,
         "model": "gemma4",
         "connection": "openrouter",
+        "selection_alias": "openrouter_gemma4_26b_a4b",
     },
     "cerebras_gemma4_31b": {
         "enabled": True,
         "model": "gemma4_31b_cerebras",
         "connection": "official_byok",
+        "selection_alias": "cerebras_gemma4_31b",
     },
+}
+_FALLBACK_FIELDS_ALIAS: Final = {
+    (False, "deepseek_v4_flash", "official_byok"): "none",
+    (True, "deepseek_v4_flash", "official_byok"): "deepseek_v4_flash_official",
+    (True, "deepseek_v4_flash", "openrouter"): "openrouter_deepseek_v4_flash",
+    (True, "gemma4", "openrouter"): "openrouter_gemma4_26b_a4b",
+    (True, "gemma4_31b_cerebras", "official_byok"): "cerebras_gemma4_31b",
+    (True, "deepseek_v4_flash", "managed_china"): "deepseek_v4_flash_china",
 }
 
 
@@ -88,6 +101,10 @@ def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
     merged = _merge_dataclass(default, compatible_data, path="settings")
     if not isinstance(merged, AppSettingsVNext):
         raise TypeError("vNext settings merge produced unexpected type")
+    merged = with_telemetry_consent(
+        merged,
+        merged.intent.telemetry.consent,
+    )
     return merged
 
 
@@ -130,6 +147,10 @@ def _project_legacy_translation_fallback_fields(data: Mapping[str, Any]) -> Mapp
         "fallback" in translation
         and "fallback_selection_alias" not in translation
         and "openrouter_fallback_selection_alias" not in translation
+        and (
+            not isinstance(translation.get("fallback"), Mapping)
+            or "selection_alias" in translation.get("fallback", {})
+        )
     ):
         return data
 
@@ -137,7 +158,11 @@ def _project_legacy_translation_fallback_fields(data: Mapping[str, Any]) -> Mapp
     compatible_intent = dict(compatible.get("intent", {}))
     compatible_translation = dict(compatible_intent.get("translation", {}))
     explicit_fallback = compatible_translation.get("fallback")
-    if not isinstance(explicit_fallback, Mapping):
+    if isinstance(explicit_fallback, Mapping):
+        compatible_translation["fallback"] = _fallback_with_inferred_selection_alias(
+            explicit_fallback
+        )
+    else:
         alias = compatible_translation.get("fallback_selection_alias")
         if isinstance(alias, str):
             compatible_translation["fallback"] = _fallback_from_temporary_alias(alias)
@@ -153,8 +178,24 @@ def _project_legacy_translation_fallback_fields(data: Mapping[str, Any]) -> Mapp
     return compatible
 
 
+def _fallback_with_inferred_selection_alias(value: Mapping[object, object]) -> dict[str, object]:
+    fallback = copy.deepcopy(dict(value))
+    if "selection_alias" not in fallback:
+        fallback["selection_alias"] = _FALLBACK_FIELDS_ALIAS.get(
+            (
+                bool(fallback.get("enabled", False)),
+                str(fallback.get("model", "deepseek_v4_flash")),
+                str(fallback.get("connection", "official_byok")),
+            ),
+            "none",
+        )
+    return fallback
+
+
 def _fallback_from_temporary_alias(value: str) -> dict[str, object]:
-    return dict(_TEMPORARY_GENERIC_FALLBACK_ALIASES.get(value.strip(), _FALLBACK_DISABLED))
+    fallback = dict(_TEMPORARY_GENERIC_FALLBACK_ALIASES.get(value.strip(), _FALLBACK_DISABLED))
+    fallback.setdefault("selection_alias", "none")
+    return fallback
 
 
 def _fallback_from_legacy_openrouter_alias(
@@ -164,26 +205,26 @@ def _fallback_from_legacy_openrouter_alias(
 ) -> dict[str, object]:
     alias = value.strip() if isinstance(value, str) else ""
     if alias in ("", "none", "qwen35_flash"):
-        return dict(_FALLBACK_DISABLED)
+        return {**_FALLBACK_DISABLED, "selection_alias": "none"}
     if alias == "deepseek_v4_flash_china":
         return {
             "enabled": True,
             "model": "deepseek_v4_flash",
             "connection": "managed_china",
+            "selection_alias": "deepseek_v4_flash_china",
         }
     if alias == "deepseek_v4_flash":
-        if selected_source == "managed":
-            connection = "managed"
-        elif selected_source == "byok":
+        if selected_source in {"managed", "byok"}:
             connection = "openrouter"
         else:
-            return dict(_FALLBACK_DISABLED)
+            return {**_FALLBACK_DISABLED, "selection_alias": "none"}
         return {
             "enabled": True,
             "model": "deepseek_v4_flash",
             "connection": connection,
+            "selection_alias": "openrouter_deepseek_v4_flash",
         }
-    return dict(_FALLBACK_DISABLED)
+    return {**_FALLBACK_DISABLED, "selection_alias": "none"}
 
 
 def _is_unbound_non_unknown_provider_verification_entry(entry: object) -> bool:

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import date
 from typing import Final
 
 from puripuly_heart.config.audio_host_api import WINDOWS_WASAPI_COMPATIBILITY_HOST_API
@@ -76,6 +78,26 @@ _LOCAL_LLM_SECRET_BEARING_EXTRA_BODY_KEY_PREFIXES: Final = (
     "secret_",
 )
 _PROVIDER_VERIFICATION_STATUSES: Final = frozenset({"unknown", "verified", "failed", "skipped"})
+TELEMETRY_CONSENT_VALUES: Final = frozenset({"unknown", "allow", "decline"})
+CANONICAL_TRANSLATION_FALLBACK_ALIASES: Final = frozenset(
+    {
+        "none",
+        "deepseek_v4_flash_official",
+        "openrouter_deepseek_v4_flash",
+        "openrouter_gemma4_26b_a4b",
+        "cerebras_gemma4_31b",
+    }
+)
+COMPAT_TRANSLATION_FALLBACK_ALIASES: Final = frozenset({"deepseek_v4_flash_china"})
+_FALLBACK_ALIAS_FIELDS: Final = {
+    "none": (False, "deepseek_v4_flash", "official_byok"),
+    "deepseek_v4_flash_official": (True, "deepseek_v4_flash", "official_byok"),
+    "openrouter_deepseek_v4_flash": (True, "deepseek_v4_flash", "openrouter"),
+    "openrouter_gemma4_26b_a4b": (True, "gemma4", "openrouter"),
+    "cerebras_gemma4_31b": (True, "gemma4_31b_cerebras", "official_byok"),
+    "deepseek_v4_flash_china": (True, "deepseek_v4_flash", "managed_china"),
+}
+_FALLBACK_FIELDS_ALIAS: Final = {fields: alias for alias, fields in _FALLBACK_ALIAS_FIELDS.items()}
 _PROVIDER_VERIFICATION_SECRET_BEARING_KEY_FRAGMENTS: Final = (
     "api_key",
     "apikey",
@@ -224,6 +246,56 @@ def _optional_provider_verification_string(value: object, *, field_name: str) ->
     return normalized or None
 
 
+def _normalize_translation_fallback_alias(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if normalized in CANONICAL_TRANSLATION_FALLBACK_ALIASES | COMPAT_TRANSLATION_FALLBACK_ALIASES:
+        return normalized
+    return None
+
+
+def _infer_translation_fallback_alias(
+    *,
+    enabled: object,
+    model: object,
+    connection: object,
+) -> str:
+    fields_key = (bool(enabled), str(model), str(connection))
+    return _FALLBACK_FIELDS_ALIAS.get(fields_key, "none")
+
+
+def _normalize_telemetry_sent_dates(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        candidates: tuple[object, ...] = (value,)
+    elif isinstance(value, list | tuple | set | frozenset):
+        candidates = tuple(value)
+    else:
+        candidates = ()
+    normalized: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        raw = candidate.strip()
+        try:
+            parsed = date.fromisoformat(raw)
+        except ValueError:
+            continue
+        normalized.add(parsed.isoformat())
+    return tuple(sorted(normalized))
+
+
+def _normalize_telemetry_identifier(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def new_anonymous_telemetry_identifier() -> str:
+    return uuid.uuid4().hex
+
+
 @dataclass(frozen=True, slots=True)
 class QwenTranslationIntent:
     region: str = "beijing"
@@ -240,6 +312,17 @@ class TranslationFallbackIntent:
     enabled: bool = False
     model: str = "deepseek_v4_flash"
     connection: str = "official_byok"
+    selection_alias: str = "none"
+
+    def __post_init__(self) -> None:
+        alias = _normalize_translation_fallback_alias(self.selection_alias)
+        if alias is None:
+            alias = "none"
+        enabled, model, connection = _FALLBACK_ALIAS_FIELDS[alias]
+        object.__setattr__(self, "selection_alias", alias)
+        object.__setattr__(self, "enabled", enabled)
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "connection", connection)
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,6 +482,18 @@ class IntegratedContextIntent:
 
 
 @dataclass(frozen=True, slots=True)
+class TelemetryConsentIntent:
+    consent: str = "unknown"
+
+    def __post_init__(self) -> None:
+        consent = self.consent if isinstance(self.consent, str) else "unknown"
+        consent = consent.strip()
+        if consent not in TELEMETRY_CONSENT_VALUES:
+            consent = "unknown"
+        object.__setattr__(self, "consent", consent)
+
+
+@dataclass(frozen=True, slots=True)
 class PromptIntent:
     system_prompt: str = ""
 
@@ -418,6 +513,7 @@ class UserIntentSettings:
     ui: UiIntent = field(default_factory=UiIntent)
     clipboard: ClipboardIntent = field(default_factory=ClipboardIntent)
     integrated_context: IntegratedContextIntent = field(default_factory=IntegratedContextIntent)
+    telemetry: TelemetryConsentIntent = field(default_factory=TelemetryConsentIntent)
     prompts: PromptIntent = field(default_factory=PromptIntent)
 
 
@@ -548,6 +644,20 @@ class IntegratedContextState:
 
 
 @dataclass(frozen=True, slots=True)
+class TelemetryOperationalState:
+    anonymous_id: str | None = None
+    sent_translation_success_dates_utc: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "anonymous_id", _normalize_telemetry_identifier(self.anonymous_id))
+        object.__setattr__(
+            self,
+            "sent_translation_success_dates_utc",
+            _normalize_telemetry_sent_dates(self.sent_translation_success_dates_utc),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PersistedOperationalState:
     provider_verification: ProviderVerificationState = field(
         default_factory=ProviderVerificationState
@@ -556,6 +666,7 @@ class PersistedOperationalState:
     github_star_prompt: GithubStarPromptState = field(default_factory=GithubStarPromptState)
     peer_translation: PeerTranslationState = field(default_factory=PeerTranslationState)
     integrated_context: IntegratedContextState = field(default_factory=IntegratedContextState)
+    telemetry: TelemetryOperationalState = field(default_factory=TelemetryOperationalState)
 
 
 @dataclass(frozen=True, slots=True)
@@ -563,6 +674,35 @@ class AppSettingsVNext:
     settings_version: int = VNEXT_SETTINGS_SCHEMA_VERSION
     intent: UserIntentSettings = field(default_factory=UserIntentSettings)
     state: PersistedOperationalState = field(default_factory=PersistedOperationalState)
+
+
+def with_telemetry_consent(
+    settings: AppSettingsVNext,
+    consent: str,
+    *,
+    identifier_factory: object = new_anonymous_telemetry_identifier,
+) -> AppSettingsVNext:
+    normalized_consent = TelemetryConsentIntent(consent).consent
+    current_state = settings.state.telemetry
+    if normalized_consent == "decline":
+        next_state = TelemetryOperationalState()
+    elif normalized_consent == "allow":
+        factory = (
+            identifier_factory
+            if callable(identifier_factory)
+            else new_anonymous_telemetry_identifier
+        )
+        next_state = TelemetryOperationalState(
+            anonymous_id=current_state.anonymous_id or str(factory()),
+            sent_translation_success_dates_utc=current_state.sent_translation_success_dates_utc,
+        )
+    else:
+        next_state = current_state
+    return replace(
+        settings,
+        intent=replace(settings.intent, telemetry=TelemetryConsentIntent(normalized_consent)),
+        state=replace(settings.state, telemetry=next_state),
+    )
 
 
 __all__ = [
@@ -578,6 +718,8 @@ __all__ = [
     "GithubStarPromptState",
     "IntegratedContextIntent",
     "IntegratedContextState",
+    "CANONICAL_TRANSLATION_FALLBACK_ALIASES",
+    "COMPAT_TRANSLATION_FALLBACK_ALIASES",
     "LanguageIntent",
     "LocalLLMIntent",
     "ManagedConnectionState",
@@ -600,7 +742,11 @@ __all__ = [
     "SonioxSTTIntent",
     "TranslationIntent",
     "TranslationFallbackIntent",
+    "TelemetryConsentIntent",
+    "TelemetryOperationalState",
+    "TELEMETRY_CONSENT_VALUES",
     "UiIntent",
     "UserIntentSettings",
     "VNEXT_SETTINGS_SCHEMA_VERSION",
+    "with_telemetry_consent",
 ]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
@@ -36,11 +37,14 @@ from puripuly_heart.config.settings_vnext.schema import (
     SecretsIntent,
     SonioxSTTIntent,
     STTIntent,
+    TelemetryConsentIntent,
+    TelemetryOperationalState,
     TranslationFallbackIntent,
     TranslationIntent,
     UiIntent,
     UserIntentSettings,
     normalize_managed_claim_sources,
+    with_telemetry_consent,
 )
 
 
@@ -76,22 +80,34 @@ _TEMPORARY_GENERIC_FALLBACK_ALIASES: dict[str, TranslationFallbackIntent] = {
         enabled=True,
         model="deepseek_v4_flash",
         connection="official_byok",
+        selection_alias="deepseek_v4_flash_official",
     ),
     "openrouter_deepseek_v4_flash": TranslationFallbackIntent(
         enabled=True,
         model="deepseek_v4_flash",
         connection="openrouter",
+        selection_alias="openrouter_deepseek_v4_flash",
     ),
     "openrouter_gemma4_26b_a4b": TranslationFallbackIntent(
         enabled=True,
         model="gemma4",
         connection="openrouter",
+        selection_alias="openrouter_gemma4_26b_a4b",
     ),
     "cerebras_gemma4_31b": TranslationFallbackIntent(
         enabled=True,
         model="gemma4_31b_cerebras",
         connection="official_byok",
+        selection_alias="cerebras_gemma4_31b",
     ),
+}
+_FALLBACK_FIELDS_ALIAS: dict[tuple[bool, str, str], str] = {
+    (False, "deepseek_v4_flash", "official_byok"): "none",
+    (True, "deepseek_v4_flash", "official_byok"): "deepseek_v4_flash_official",
+    (True, "deepseek_v4_flash", "openrouter"): "openrouter_deepseek_v4_flash",
+    (True, "gemma4", "openrouter"): "openrouter_gemma4_26b_a4b",
+    (True, "gemma4_31b_cerebras", "official_byok"): "cerebras_gemma4_31b",
+    (True, "deepseek_v4_flash", "managed_china"): "deepseek_v4_flash_china",
 }
 
 
@@ -121,6 +137,7 @@ def _fallback_intent_to_dict(intent: TranslationFallbackIntent) -> dict[str, obj
         "enabled": intent.enabled,
         "model": intent.model,
         "connection": intent.connection,
+        "selection_alias": intent.selection_alias,
     }
 
 
@@ -143,11 +160,10 @@ def _fallback_intent_from_legacy_openrouter_alias(
             enabled=True,
             model="deepseek_v4_flash",
             connection="managed_china",
+            selection_alias="deepseek_v4_flash_china",
         )
     if alias == "deepseek_v4_flash":
-        if selected_source == "managed":
-            connection = "managed"
-        elif selected_source == "byok":
+        if selected_source in {"managed", "byok"}:
             connection = "openrouter"
         else:
             return TranslationFallbackIntent(enabled=False)
@@ -155,6 +171,7 @@ def _fallback_intent_from_legacy_openrouter_alias(
             enabled=True,
             model="deepseek_v4_flash",
             connection=connection,
+            selection_alias="openrouter_deepseek_v4_flash",
         )
     return TranslationFallbackIntent(enabled=False)
 
@@ -167,10 +184,22 @@ def _fallback_intent_from_legacy_translation_data(
     translation = translation_data if isinstance(translation_data, Mapping) else {}
     fallback = translation.get("fallback")
     if isinstance(fallback, Mapping):
+        model = str(fallback.get("model", "deepseek_v4_flash"))
+        connection = str(fallback.get("connection", "official_byok"))
+        selection_alias = str(
+            fallback.get(
+                "selection_alias",
+                _FALLBACK_FIELDS_ALIAS.get(
+                    (bool(fallback.get("enabled", False)), model, connection),
+                    "none",
+                ),
+            )
+        )
         return TranslationFallbackIntent(
             enabled=bool(fallback.get("enabled", False)),
-            model=str(fallback.get("model", "deepseek_v4_flash")),
-            connection=str(fallback.get("connection", "official_byok")),
+            model=model,
+            connection=connection,
+            selection_alias=selection_alias,
         )
     temporary = _fallback_intent_from_temporary_alias(translation.get("fallback_selection_alias"))
     if temporary is not None:
@@ -199,6 +228,23 @@ def _fallback_intent_from_legacy_raw_dict(data: Mapping[str, Any]) -> Translatio
     )
 
 
+def _telemetry_consent_from_legacy_raw_dict(data: Mapping[str, Any]) -> str:
+    telemetry = data.get("telemetry") if isinstance(data.get("telemetry"), Mapping) else {}
+    return TelemetryConsentIntent(telemetry.get("consent", "unknown")).consent
+
+
+def _telemetry_state_from_legacy_raw_dict(data: Mapping[str, Any]) -> TelemetryOperationalState:
+    telemetry_state = (
+        data.get("telemetry_state") if isinstance(data.get("telemetry_state"), Mapping) else {}
+    )
+    return TelemetryOperationalState(
+        anonymous_id=telemetry_state.get("anonymous_id"),
+        sent_translation_success_dates_utc=telemetry_state.get(
+            "sent_translation_success_dates_utc", ()
+        ),
+    )
+
+
 def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
     """Read either canonical vNext settings or an accepted legacy settings dict."""
 
@@ -216,11 +262,15 @@ def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
     from puripuly_heart.config import settings as legacy_settings
 
     fallback_intent = _fallback_intent_from_legacy_raw_dict(data)
+    telemetry_consent = _telemetry_consent_from_legacy_raw_dict(data)
+    telemetry_state = _telemetry_state_from_legacy_raw_dict(data)
     migrated, _changed = legacy_settings._migrate_settings_dict(dict(copy.deepcopy(data)))
-    return from_legacy_app_settings(
+    settings = from_legacy_app_settings(
         legacy_settings.from_dict(migrated),
         fallback_intent=fallback_intent,
     )
+    settings = replace(settings, state=replace(settings.state, telemetry=telemetry_state))
+    return with_telemetry_consent(settings, telemetry_consent)
 
 
 def from_legacy_app_settings(
@@ -346,6 +396,7 @@ def from_legacy_app_settings(
             integrated_context=IntegratedContextIntent(
                 enabled=bool(data["ui"]["integrated_context_enabled"]),
             ),
+            telemetry=TelemetryConsentIntent(),
             prompts=PromptIntent(system_prompt=data["system_prompt"]),
         ),
         state=PersistedOperationalState(
@@ -388,6 +439,7 @@ def from_legacy_app_settings(
             integrated_context=IntegratedContextState(
                 bootstrapped=bool(data["ui"]["integrated_context_bootstrapped"]),
             ),
+            telemetry=TelemetryOperationalState(),
         ),
     )
 
@@ -549,6 +601,13 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
         ),
         "github_star_prompt_eligible_launch_count": (
             state.github_star_prompt.eligible_launch_count
+        ),
+    }
+    data["telemetry"] = {"consent": intent.telemetry.consent}
+    data["telemetry_state"] = {
+        "anonymous_id": state.telemetry.anonymous_id,
+        "sent_translation_success_dates_utc": list(
+            state.telemetry.sent_translation_success_dates_utc
         ),
     }
     data["api_key_verified"] = {

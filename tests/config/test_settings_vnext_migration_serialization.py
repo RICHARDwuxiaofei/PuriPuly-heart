@@ -26,6 +26,9 @@ from puripuly_heart.config.settings_vnext.schema import (
     PersistedOperationalState,
     ProviderVerificationEntry,
     ProviderVerificationState,
+    TelemetryOperationalState,
+    TranslationFallbackIntent,
+    with_telemetry_consent,
 )
 from tests.config.settings_migration_fixtures import (
     legacy_compatibility_settings_fixture,
@@ -277,8 +280,199 @@ def test_china_first_run_defaults_project_to_vnext_intent() -> None:
         "enabled": False,
         "model": "deepseek_v4_flash",
         "connection": "official_byok",
+        "selection_alias": "none",
     }
     assert "openrouter_fallback_selection_alias" not in serialized["intent"]["translation"]
+
+
+@pytest.mark.parametrize(
+    ("alias", "expected"),
+    [
+        ("none", (False, "deepseek_v4_flash", "official_byok", "none")),
+        (
+            "deepseek_v4_flash_official",
+            (True, "deepseek_v4_flash", "official_byok", "deepseek_v4_flash_official"),
+        ),
+        (
+            "openrouter_deepseek_v4_flash",
+            (True, "deepseek_v4_flash", "openrouter", "openrouter_deepseek_v4_flash"),
+        ),
+        (
+            "openrouter_gemma4_26b_a4b",
+            (True, "gemma4", "openrouter", "openrouter_gemma4_26b_a4b"),
+        ),
+        (
+            "cerebras_gemma4_31b",
+            (True, "gemma4_31b_cerebras", "official_byok", "cerebras_gemma4_31b"),
+        ),
+    ],
+)
+def test_vnext_fallback_selection_alias_is_canonical_product_intent(
+    alias: str,
+    expected: tuple[bool, str, str, str],
+) -> None:
+    serialization = _serialization()
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["intent"]["translation"]["fallback"] = {"selection_alias": alias}
+
+    loaded = serialization.from_dict(raw)
+    fallback = loaded.intent.translation.fallback
+
+    assert (
+        fallback.enabled,
+        fallback.model,
+        fallback.connection,
+        fallback.selection_alias,
+    ) == expected
+    assert serialization.to_dict(loaded)["intent"]["translation"]["fallback"] == {
+        "enabled": expected[0],
+        "model": expected[1],
+        "connection": expected[2],
+        "selection_alias": expected[3],
+    }
+
+
+@pytest.mark.parametrize(
+    ("container", "alias", "selected_source", "expected_alias"),
+    [
+        ("openrouter", "deepseek_v4_flash", "byok", "openrouter_deepseek_v4_flash"),
+        ("openrouter", "deepseek_v4_flash", "managed", "openrouter_deepseek_v4_flash"),
+        ("openrouter", "deepseek_v4_flash_china", "managed", "deepseek_v4_flash_china"),
+        ("openrouter", "qwen35_flash", "byok", "none"),
+        ("openrouter", "broken-alias", "byok", "none"),
+        ("translation", "deepseek_v4_flash_official", "byok", "deepseek_v4_flash_official"),
+        ("translation", "openrouter_gemma4_26b_a4b", "byok", "openrouter_gemma4_26b_a4b"),
+        ("translation", "cerebras_gemma4_31b", "byok", "cerebras_gemma4_31b"),
+    ],
+)
+def test_legacy_fallback_aliases_load_to_safe_vnext_fallback_intent(
+    container: str,
+    alias: str,
+    selected_source: str,
+    expected_alias: str,
+) -> None:
+    migration = _migration()
+    serialization = _serialization()
+    raw = maximal_v24_settings_fixture()
+    raw["translation"].pop("fallback", None)
+    raw["openrouter"]["selected_source"] = selected_source
+    if container == "openrouter":
+        raw["openrouter"]["fallback_selection_alias"] = alias
+    else:
+        raw["translation"]["fallback_selection_alias"] = alias
+
+    serialized = serialization.to_dict(migration.from_dict(raw))
+    fallback = serialized["intent"]["translation"]["fallback"]
+
+    assert fallback["selection_alias"] == expected_alias
+    assert "fallback_selection_alias" not in serialized["intent"]["translation"]
+    assert "openrouter_fallback_selection_alias" not in serialized["intent"]["translation"]
+
+
+def test_current_vnext_unknown_fallback_alias_falls_back_to_none() -> None:
+    serialization = _serialization()
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["intent"]["translation"]["fallback"] = {
+        "enabled": True,
+        "model": "deepseek_v4_flash",
+        "connection": "openrouter",
+        "selection_alias": "not-real",
+    }
+
+    loaded = serialization.from_dict(raw)
+
+    assert loaded.intent.translation.fallback == TranslationFallbackIntent()
+
+
+def test_current_vnext_explicit_none_fallback_alias_disables_stale_enabled_fields() -> None:
+    serialization = _serialization()
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["intent"]["translation"]["fallback"] = {
+        "enabled": True,
+        "model": "gemma4_31b_cerebras",
+        "connection": "official_byok",
+        "selection_alias": "none",
+    }
+
+    loaded = serialization.from_dict(raw)
+
+    assert loaded.intent.translation.fallback == TranslationFallbackIntent()
+
+
+def test_current_vnext_missing_fallback_alias_still_infers_compatibility_fields() -> None:
+    serialization = _serialization()
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["intent"]["translation"]["fallback"] = {
+        "enabled": True,
+        "model": "deepseek_v4_flash",
+        "connection": "managed_china",
+    }
+
+    loaded = serialization.from_dict(raw)
+
+    assert loaded.intent.translation.fallback == TranslationFallbackIntent(
+        selection_alias="deepseek_v4_flash_china"
+    )
+
+
+def test_existing_settings_default_to_unknown_telemetry_without_identifier() -> None:
+    migration = _migration()
+    serialization = _serialization()
+
+    serialized = serialization.to_dict(migration.from_dict(maximal_v24_settings_fixture()))
+
+    assert serialized["intent"]["telemetry"] == {"consent": "unknown"}
+    assert serialized["state"]["telemetry"] == {
+        "anonymous_id": None,
+        "sent_translation_success_dates_utc": (),
+    }
+
+
+def test_telemetry_consent_transitions_manage_operational_state() -> None:
+    base = AppSettingsVNext(
+        state=PersistedOperationalState(
+            telemetry=TelemetryOperationalState(
+                anonymous_id="existing-id",
+                sent_translation_success_dates_utc=("2026-07-01",),
+            )
+        )
+    )
+
+    allowed = with_telemetry_consent(base, "allow", identifier_factory=lambda: "new-id")
+    declined = with_telemetry_consent(allowed, "decline")
+    allowed_again = with_telemetry_consent(declined, "allow", identifier_factory=lambda: "new-id")
+
+    assert allowed.intent.telemetry.consent == "allow"
+    assert allowed.state.telemetry.anonymous_id == "existing-id"
+    assert allowed.state.telemetry.sent_translation_success_dates_utc == ("2026-07-01",)
+    assert declined.intent.telemetry.consent == "decline"
+    assert declined.state.telemetry.anonymous_id is None
+    assert declined.state.telemetry.sent_translation_success_dates_utc == ()
+    assert allowed_again.intent.telemetry.consent == "allow"
+    assert allowed_again.state.telemetry.anonymous_id == "new-id"
+
+
+def test_malformed_telemetry_sent_dates_are_ignored_and_deduplicated() -> None:
+    serialization = _serialization()
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["state"]["telemetry"] = {
+        "anonymous_id": " telemetry-id ",
+        "sent_translation_success_dates_utc": [
+            "2026-07-01",
+            "bad-date",
+            "2026-07-01",
+            7,
+            "2026-07-02",
+        ],
+    }
+
+    loaded = serialization.from_dict(raw)
+
+    assert loaded.state.telemetry.anonymous_id == "telemetry-id"
+    assert loaded.state.telemetry.sent_translation_success_dates_utc == (
+        "2026-07-01",
+        "2026-07-02",
+    )
 
 
 def test_current_vnext_status_only_provider_verification_entries_load_as_unknown() -> None:
