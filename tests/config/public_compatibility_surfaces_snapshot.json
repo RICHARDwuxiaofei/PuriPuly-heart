@@ -626,7 +626,6 @@
     ],
     "openrouter_fallback_selection_aliases": [
       "none",
-      "qwen35_flash",
       "deepseek_v4_flash",
       "deepseek_v4_flash_china"
     ],
@@ -637,21 +636,12 @@
       "openrouter:none:google/gemma-4-26b-a4b-it",
       "openrouter:none:qwen/qwen3.5-flash-02-23"
     ],
-    "legacy_fallback_aliases": {
-      "gemini25_flash_lite": "deepseek_v4_flash",
-      "gemini31_flash_lite": "deepseek_v4_flash",
-      "gemma4": "deepseek_v4_flash",
-      "gemma4_managed": "deepseek_v4_flash",
-      "gemma4_byok": "deepseek_v4_flash",
-      "qwen35_flash_managed": "qwen35_flash",
-      "qwen35_flash_byok": "qwen35_flash",
-      "deepseek_v4_flash_managed": "deepseek_v4_flash",
-      "deepseek_v4_flash_byok": "deepseek_v4_flash"
-    }
+    "legacy_fallback_aliases": {}
   },
   "provider_runtime_public_config": {
     "runtime_resolution_input_fields": [
       "translation",
+      "translation_fallback",
       "openrouter",
       "direct",
       "self_stt",
@@ -667,27 +657,15 @@
       "model",
       "selected_source",
       "selection_alias",
-      "fallback_selection_alias",
       "routing_mode",
       "provider_routing",
       "managed_credential_kind",
       "broker_base_url"
     ],
     "resolved_llm_config_fields": [
-      "provider",
-      "model",
-      "credential",
-      "fallback_provider",
-      "fallback_model",
-      "fallback_credential",
-      "fallback_provider_routing",
-      "base_url",
-      "service_endpoint",
-      "region",
-      "routing_mode",
-      "provider_routing",
-      "concurrency_limit",
-      "provider_options"
+      "primary",
+      "fallback",
+      "concurrency_limit"
     ],
     "resolved_credential_requirement_fields": [
       "source",
@@ -760,8 +738,8 @@
     "provider_aliases": [
       "tests/config/test_public_compatibility_surfaces.py::test_provider_alias_snapshot_matches_current_aliases_and_legacy_acceptance",
       "tests/config/test_config_and_secrets.py::test_openrouter_fallback_aliases_include_curated_openrouter_models",
-      "tests/config/test_config_and_secrets.py::test_from_dict_migrates_legacy_openrouter_fallbacks_to_deepseek_v4_flash",
-      "tests/config/test_config_and_secrets.py::test_openrouter_legacy_gemini25_flash_lite_fallback_normalizes_to_deepseek",
+      "tests/config/test_config_and_secrets.py::test_from_dict_disables_legacy_openrouter_fallback_aliases",
+      "tests/config/test_config_and_secrets.py::test_openrouter_legacy_gemini25_flash_lite_fallback_is_not_live_alias",
       "tests/config/test_config_and_secrets.py::test_openrouter_deepseek_v4_flash_aliases_use_stable_slug"
     ],
     "provider_runtime_public_config": [

@@ -703,10 +703,12 @@ def _assert_openrouter_byok_env_lookup(
 
 
 def _assert_local_llm_optional_secret_store_only(entry: dict[str, Any]) -> None:
+    llm_factory = importlib.import_module("puripuly_heart.app.wiring_llm_factory")
     source = "\n".join(
         (
             inspect.getsource(wiring.create_llm_provider),
             inspect.getsource(wiring._base_llm_provider_from_resolved_config),
+            inspect.getsource(llm_factory._provider_from_resolved_target),
         )
     )
 
@@ -717,8 +719,10 @@ def _assert_local_llm_optional_secret_store_only(entry: dict[str, Any]) -> None:
 
 
 def _assert_qwen_resolved_credential_helper_preserves_legacy_fallbacks() -> None:
+    llm_factory = importlib.import_module("puripuly_heart.app.wiring_llm_factory")
     helper_source = inspect.getsource(wiring._qwen_api_key_for_resolved_credential)
     base_llm_source = inspect.getsource(wiring._base_llm_provider_from_resolved_config)
+    provider_target_source = inspect.getsource(llm_factory._provider_from_resolved_target)
     stt_source = inspect.getsource(wiring.create_stt_backend_from_resolved_config)
     self_stt_source = inspect.getsource(wiring.create_stt_backend)
     peer_stt_source = inspect.getsource(wiring.create_peer_stt_backend)
@@ -731,7 +735,8 @@ def _assert_qwen_resolved_credential_helper_preserves_legacy_fallbacks() -> None
     assert '"ALIBABA_API_KEY"' in helper_source
     assert '"DASHSCOPE_API_KEY"' in helper_source
     assert helper_source.count('legacy_keys=("alibaba_api_key",)') == 2
-    assert "_qwen_api_key_for_resolved_credential(config.credential" in base_llm_source
+    assert "_provider_from_resolved_target(" in base_llm_source
+    assert "_qwen_api_key_for_resolved_credential(target.credential" in provider_target_source
     assert "_qwen_api_key_for_resolved_credential(config.credential" in stt_source
     assert "create_stt_backend_from_resolved_config(" in self_stt_source
     assert "create_peer_stt_backend_from_resolved_config(" in peer_stt_source
