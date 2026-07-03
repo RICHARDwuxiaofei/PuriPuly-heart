@@ -75,6 +75,7 @@ class ManagedSTTProvider:
     _consumer_task: asyncio.Task[None] | None = None
     _draining: set[asyncio.Task[None]] = field(default_factory=set)
     _events: asyncio.Queue = field(default_factory=asyncio.Queue)
+    _session_open_lock: asyncio.Lock = field(init=False, repr=False)
 
     _active_utterance_id: UUID | None = None
     _pending_final_utterance_ids: deque[UUID] = field(default_factory=deque)
@@ -113,6 +114,7 @@ class ManagedSTTProvider:
         if self.connect_retry_max_s <= 0:
             raise ValueError("connect_retry_max_s must be > 0")
 
+        self._session_open_lock = asyncio.Lock()
         capacity_samples = int(self.sample_rate_hz * (self.bridging_ms / 1000.0))
         self._audio_ring = RingBufferF32(capacity_samples=capacity_samples)
 
@@ -403,86 +405,97 @@ class ManagedSTTProvider:
         if self._active_session is not None:
             return True
 
-        await self._set_state(STTSessionState.CONNECTING)
-        last_exc: Exception | None = None
-
-        for attempt in range(1, self.connect_attempts + 1):
-            self._emit_detailed(
-                "[STT] Opening new session (attempt %s/%s)...",
-                attempt,
-                self.connect_attempts,
-                fallback_level=logging.INFO,
-            )
-            try:
-                session = await self.backend.open_session()
-            except Exception as exc:
-                last_exc = exc
-                attempt_report = stt_failure_report(
-                    exc,
-                    provider=self._provider_label(),
-                    operation="open_session",
-                    channel=self.channel,
-                    attempts=attempt,
-                )
-                self._emit_detailed(
-                    "[STT] Failed to open session (attempt %s/%s): %s",
-                    attempt,
-                    self.connect_attempts,
-                    format_error_report_for_log(attempt_report),
-                    level=logging.WARNING,
-                    fallback_level=logging.WARNING,
-                )
-                if attempt < self.connect_attempts:
-                    delay = min(
-                        self.connect_retry_base_s * (2 ** (attempt - 1)),
-                        self.connect_retry_max_s,
-                    )
-                    self._emit_detailed(
-                        "[STT] Retrying session in %.1fs",
-                        delay,
-                        fallback_level=logging.INFO,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                break
-            else:
-                self._active_session = session
-                self._session_started_at = self.clock.now()
-                self._consumer_task = asyncio.create_task(self._consume_session_events(session))
-                self._schedule_reset_timer()
-                await self._set_state(STTSessionState.STREAMING)
-                self._log_session_connected(attempts=attempt)
-                self._emit_detailed(
-                    "[STT] Session ready (reset_deadline=%ss)",
-                    self.reset_deadline_s,
-                    fallback_level=logging.INFO,
-                )
+        async with self._session_open_lock:
+            if self._active_session is not None:
                 return True
 
-        report = stt_failure_report(
-            last_exc,
-            provider=self._provider_label(),
-            operation="open_session",
-            channel=self.channel,
-            attempts=self.connect_attempts,
-        )
-        self._emit_basic(
-            "[STT] Failed to open session after %s attempts: %s",
-            self.connect_attempts,
-            format_error_report_for_log(report),
-            level=logging.ERROR,
-            fallback_level=logging.ERROR,
-        )
-        await self._set_state(STTSessionState.DISCONNECTED)
-        await self._events.put(
-            STTErrorEvent(
-                message=report.message,
-                diagnostics=report.diagnostics,
+            await self._set_state(STTSessionState.CONNECTING)
+            last_exc: Exception | None = None
+
+            try:
+                for attempt in range(1, self.connect_attempts + 1):
+                    self._emit_detailed(
+                        "[STT] Opening new session (attempt %s/%s)...",
+                        attempt,
+                        self.connect_attempts,
+                        fallback_level=logging.INFO,
+                    )
+                    try:
+                        session = await self.backend.open_session()
+                    except Exception as exc:
+                        last_exc = exc
+                        attempt_report = stt_failure_report(
+                            exc,
+                            provider=self._provider_label(),
+                            operation="open_session",
+                            channel=self.channel,
+                            attempts=attempt,
+                        )
+                        self._emit_detailed(
+                            "[STT] Failed to open session (attempt %s/%s): %s",
+                            attempt,
+                            self.connect_attempts,
+                            format_error_report_for_log(attempt_report),
+                            level=logging.WARNING,
+                            fallback_level=logging.WARNING,
+                        )
+                        if attempt < self.connect_attempts:
+                            delay = min(
+                                self.connect_retry_base_s * (2 ** (attempt - 1)),
+                                self.connect_retry_max_s,
+                            )
+                            self._emit_detailed(
+                                "[STT] Retrying session in %.1fs",
+                                delay,
+                                fallback_level=logging.INFO,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        break
+                    else:
+                        self._active_session = session
+                        self._session_started_at = self.clock.now()
+                        self._consumer_task = asyncio.create_task(
+                            self._consume_session_events(session)
+                        )
+                        self._schedule_reset_timer()
+                        await self._set_state(STTSessionState.STREAMING)
+                        self._log_session_connected(attempts=attempt)
+                        self._emit_detailed(
+                            "[STT] Session ready (reset_deadline=%ss)",
+                            self.reset_deadline_s,
+                            fallback_level=logging.INFO,
+                        )
+                        return True
+            except asyncio.CancelledError:
+                if self._active_session is None:
+                    await self._set_state(STTSessionState.DISCONNECTED)
+                raise
+
+            report = stt_failure_report(
+                last_exc,
+                provider=self._provider_label(),
+                operation="open_session",
                 channel=self.channel,
-                runtime_log_handled=True,
+                attempts=self.connect_attempts,
             )
-        )
-        return False
+            self._emit_basic(
+                "[STT] Failed to open session after %s attempts: %s",
+                self.connect_attempts,
+                format_error_report_for_log(report),
+                level=logging.ERROR,
+                fallback_level=logging.ERROR,
+            )
+            await self._set_state(STTSessionState.DISCONNECTED)
+            await self._events.put(
+                STTErrorEvent(
+                    message=report.message,
+                    diagnostics=report.diagnostics,
+                    channel=self.channel,
+                    runtime_log_handled=True,
+                )
+            )
+            return False
 
     async def _reset_with_bridging(self) -> None:
         old_session = self._active_session
@@ -676,6 +689,12 @@ class ManagedSTTProvider:
 
             self._pending_final_utterance_ids.popleft()
             self._pending_final_utterance_times.pop(utterance_id, None)
+            self._emit_finalization_lag_diagnostic(
+                utterance_id=utterance_id,
+                pending_duration_s=age_s,
+                threshold_s=stale_after_s,
+                outcome="stale_drop",
+            )
             self._emit_detailed(
                 "[STT] Dropped stale pending final id=%s age_s=%.1f",
                 str(utterance_id)[:8],
@@ -683,6 +702,33 @@ class ManagedSTTProvider:
                 level=logging.WARNING,
                 fallback_level=logging.WARNING,
             )
+
+    def _emit_finalization_lag_diagnostic(
+        self,
+        *,
+        utterance_id: UUID,
+        pending_duration_s: float,
+        threshold_s: float,
+        outcome: str,
+    ) -> None:
+        pending_ms = max(0, int(round(pending_duration_s * 1000)))
+        threshold_ms = max(0, int(round(threshold_s * 1000)))
+        if pending_ms <= threshold_ms:
+            return
+        self._emit_detailed(
+            "[STT][FinalizationLag] channel=%s provider=%s utterance_id=%s "
+            "pending_ms=%s threshold_ms=%s dominant_stage=stt_finalization_pending "
+            "speech_end_to_stt_final_ms=%s outcome=%s",
+            self.channel,
+            self._provider_label(),
+            str(utterance_id)[:8],
+            pending_ms,
+            threshold_ms,
+            pending_ms,
+            outcome,
+            level=logging.WARNING,
+            fallback_level=logging.WARNING,
+        )
 
     def _should_suppress_final_transcript(self, text: str) -> bool:
         return (
@@ -746,7 +792,14 @@ class ManagedSTTProvider:
                         else self._active_utterance_id
                     )
                     if utterance_id is not None:
-                        self._pending_final_utterance_times.pop(utterance_id, None)
+                        ended_at = self._pending_final_utterance_times.pop(utterance_id, None)
+                        if ended_at is not None:
+                            self._emit_finalization_lag_diagnostic(
+                                utterance_id=utterance_id,
+                                pending_duration_s=self.clock.now() - ended_at,
+                                threshold_s=max(0.0, float(self.reconnect_window_s)),
+                                outcome="final_received",
+                            )
                 else:
                     utterance_id = self._active_utterance_id or (
                         self._pending_final_utterance_ids[0]

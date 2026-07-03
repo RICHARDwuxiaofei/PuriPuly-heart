@@ -42,6 +42,7 @@ from puripuly_heart.core.orchestrator.ports import (
     format_basic_latency_summary,
     format_detailed_latency_breakdown,
     format_detailed_latency_trace,
+    format_latency_cause_metric,
     format_translation_ready_for_output,
     runtime_logging_mode_is_detailed,
 )
@@ -112,6 +113,7 @@ class _LatencyTimeline:
     stage_times: dict[str, float] = field(default_factory=dict)
     emitted_trace_points: set[str] = field(default_factory=set)
     basic_summary_emitted: bool = False
+    latency_cause_emitted: bool = False
 
 
 class _StaleProviderCompletion(Exception):
@@ -497,7 +499,63 @@ class ClientHub:
                 stt_final_to_final_output_ms=stt_final_to_final_output_ms,
             )
         )
+        self._emit_latency_cause_if_ready(
+            channel=channel,
+            utterance_id=utterance_id,
+            final_output_stage=final_output_stage,
+        )
         timeline.basic_summary_emitted = True
+
+    def _emit_latency_cause_if_ready(
+        self,
+        *,
+        channel: ChannelId,
+        utterance_id: UUID,
+        final_output_stage: str,
+    ) -> None:
+        timeline = self._get_latency_timeline(channel=channel, utterance_id=utterance_id)
+        if timeline is None or timeline.latency_cause_emitted:
+            return
+        speech_end_at = timeline.stage_times.get("speech_end")
+        stt_final_at = timeline.stage_times.get("stt_final")
+        llm_request_start_at = timeline.stage_times.get("llm_request_start")
+        llm_first_chunk_at = timeline.stage_times.get("llm_first_chunk")
+        llm_done_at = timeline.stage_times.get("llm_done")
+        final_output_at = timeline.stage_times.get(final_output_stage)
+
+        stage_durations_ms = {
+            "speech_end_to_stt_final": self._elapsed_latency_ms(speech_end_at, stt_final_at),
+            "stt_final_to_llm_request_start": self._elapsed_latency_ms(
+                stt_final_at,
+                llm_request_start_at,
+            ),
+            "llm_request_to_first_chunk": self._elapsed_latency_ms(
+                llm_request_start_at,
+                llm_first_chunk_at,
+            ),
+            "llm_request_to_llm_done": self._elapsed_latency_ms(
+                llm_request_start_at,
+                llm_done_at,
+            ),
+            "stt_final_to_final_output": (
+                self._elapsed_latency_ms(
+                    stt_final_at,
+                    final_output_at,
+                )
+                if llm_request_start_at is None
+                else None
+            ),
+        }
+        message = format_latency_cause_metric(
+            channel=channel,
+            provider="llm" if llm_request_start_at is not None else "stt",
+            utterance_id=str(utterance_id)[:8],
+            stage_durations_ms=stage_durations_ms,
+        )
+        if message is None:
+            return
+        if self._emit_detailed(message, fallback_level=logging.DEBUG):
+            timeline.latency_cause_emitted = True
 
     def _emit_latency_contract_if_ready(
         self,

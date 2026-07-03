@@ -11,6 +11,7 @@ import httpx
 from puripuly_heart.core.error_messages import format_error_report_for_log, provider_failure_report
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.models import Translation
+from puripuly_heart.providers.llm.error_details import extract_provider_error_detail
 from puripuly_heart.providers.llm.messages import build_translation_user_message
 
 logger = logging.getLogger(__name__)
@@ -25,12 +26,12 @@ def _log_basic_request(
     target_language: str,
     context: str,
 ) -> None:
-    message = "[Basic][LLM] DeepSeek request [%s][context=%s] %s -> %s: %r" % (
+    message = "[Basic][LLM] DeepSeek request [%s][context=%s] %s -> %s: text_length=%d" % (
         operation,
         "yes" if context else "no",
         source_language,
         target_language,
-        text,
+        len(text),
     )
     if runtime_logging is not None:
         runtime_logging.emit_basic(message)
@@ -64,6 +65,7 @@ def _log_basic_request_failure(
         operation,
         format_error_report_for_log(report),
     )
+    rendered = f"{rendered} message={message}"
     if runtime_logging is not None:
         runtime_logging.emit_basic(rendered, level=logging.ERROR)
         return
@@ -297,13 +299,16 @@ class HttpxDeepSeekClient:
             json=request_body,
         )
         if response.status_code != 200:
+            detail = extract_provider_error_detail(response, sensitive_values=(self.api_key,))
             _log_basic_request_failure(
                 runtime_logging=self.runtime_logging,
                 operation="translate",
                 status=response.status_code,
-                message="provider returned non-success status",
+                message=detail,
             )
-            raise RuntimeError(f"DeepSeek request failed (status={response.status_code})")
+            raise RuntimeError(
+                f"DeepSeek request failed (status={response.status_code} message={detail})"
+            )
 
         data = response.json()
         choices = data.get("choices", [])

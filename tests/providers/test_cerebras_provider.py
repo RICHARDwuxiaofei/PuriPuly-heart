@@ -10,6 +10,7 @@ from puripuly_heart.providers.llm.cerebras import (
     CerebrasLLMProvider,
     HttpxCerebrasClient,
 )
+from puripuly_heart.providers.llm.error_details import PROVIDER_ERROR_DETAIL_MAX_LENGTH
 
 
 @dataclass
@@ -42,7 +43,7 @@ class FakeCerebrasClient(CerebrasClient):
 class FakeResponse:
     def __init__(self, *, status_code: int = 200, data: dict | None = None, text: str = ""):
         self.status_code = status_code
-        self._data = data or {"choices": [{"message": {"content": "OK"}}]}
+        self._data = {"choices": [{"message": {"content": "OK"}}]} if data is None else data
         self.text = text
 
     def json(self):
@@ -229,14 +230,97 @@ async def test_httpx_cerebras_client_translate_raises_safely_on_non_200(monkeypa
 
     rendered_error = str(exc_info.value)
     rendered_logs = "\n".join(runtime_logging.messages)
-    assert rendered_error == "Cerebras request failed (status=401)"
+    assert rendered_error == f"Cerebras request failed (status=401 message={provider_json_payload})"
     assert secret not in rendered_error
-    assert provider_json_payload not in rendered_error
     assert provider_text_payload not in rendered_error
     assert secret not in rendered_logs
-    assert provider_json_payload not in rendered_logs
+    assert f"message={provider_json_payload}" in rendered_logs
     assert provider_text_payload not in rendered_logs
     assert "status=401" in rendered_logs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_data", "response_text", "expected"),
+    [
+        ({"message": "top level detail"}, "ignored text", "top level detail"),
+        ({"error": {"message": "nested detail"}}, "ignored text", "nested detail"),
+        ({"error": "string detail"}, "ignored text", "string detail"),
+        ({"detail": "not used"}, "plain text preview", "plain text preview"),
+        ({}, "", "unknown error"),
+    ],
+)
+async def test_httpx_cerebras_client_non_200_extracts_safe_detail_order(
+    monkeypatch,
+    response_data: dict,
+    response_text: str,
+    expected: str,
+) -> None:
+    fake_client = FakeAsyncClient(
+        response_status=400,
+        response_data=response_data,
+        response_text=response_text,
+    )
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+    runtime_logging = FakeRuntimeLogging()
+
+    client = HttpxCerebrasClient(
+        api_key="test-key",
+        model="gemma-4-31b",
+        base_url="https://example",
+        runtime_logging=runtime_logging,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await client.translate(
+            text="hello", system_prompt="SYSTEM", source_language="ko", target_language="en"
+        )
+
+    rendered_error = str(exc_info.value)
+    rendered_logs = "\n".join(runtime_logging.messages)
+    assert rendered_error == f"Cerebras request failed (status=400 message={expected})"
+    assert "status=400" in rendered_logs
+    assert f"message={expected}" in rendered_logs
+    assert "ignored text" not in rendered_error
+    assert "ignored text" not in rendered_logs
+
+
+@pytest.mark.asyncio
+async def test_httpx_cerebras_client_non_200_detail_is_bounded_and_redacted(monkeypatch) -> None:
+    secret = "cerebras-api-key-123"
+    full_payload_tail = "TAIL_SHOULD_NOT_APPEAR"
+    raw_text = (
+        f"response body token={secret} Bearer {secret} "
+        + "x" * (PROVIDER_ERROR_DETAIL_MAX_LENGTH + 40)
+        + full_payload_tail
+    )
+    fake_client = FakeAsyncClient(response_status=502, response_data={}, response_text=raw_text)
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+    runtime_logging = FakeRuntimeLogging()
+
+    client = HttpxCerebrasClient(
+        api_key=secret,
+        model="gemma-4-31b",
+        base_url="https://example",
+        runtime_logging=runtime_logging,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await client.translate(
+            text="request body text",
+            system_prompt="SYSTEM",
+            source_language="ko",
+            target_language="en",
+        )
+
+    rendered = str(exc_info.value) + "\n" + "\n".join(runtime_logging.messages)
+    assert secret not in rendered
+    assert f"Bearer {secret}" not in rendered
+    assert "token=[redacted]" in rendered
+    assert "request body text" not in rendered
+    assert full_payload_tail not in rendered
+    detail = str(exc_info.value).split("message=", 1)[1].removesuffix(")")
+    assert len(detail) <= PROVIDER_ERROR_DETAIL_MAX_LENGTH
 
 
 @pytest.mark.asyncio
