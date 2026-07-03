@@ -93,7 +93,7 @@ class QqManagedAuthDialog:
                 self._credential_field,
                 self._error_text,
             ],
-            body_spacing=28,
+            body_spacing=44,
             action_top_margin=24,
             actions=[
                 WarmDocumentDialogAction(
@@ -189,7 +189,6 @@ class QqManagedAuthDialog:
             text_size=22,
             color=COLOR_ON_BACKGROUND,
             password=password,
-            can_reveal_password=password,
             on_submit=lambda _: self._submit(),
         )
 

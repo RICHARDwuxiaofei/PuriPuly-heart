@@ -118,22 +118,13 @@ class SettingsModal:
     def _build_option_list(self, current: str) -> ft.ListView:
         """Build scrollable list of options."""
         items = []
-        current_section = ""
+        previous_section: str | None = None
+        is_first_section = True
         for option in self._options:
-            if option.section and option.section != current_section:
-                current_section = option.section
-                items.append(
-                    ft.Container(
-                        content=ft.Text(
-                            option.section,
-                            size=14,
-                            weight=ft.FontWeight.BOLD,
-                            color=COLOR_NEUTRAL,
-                            text_align=ft.TextAlign.LEFT,
-                        ),
-                        padding=ft.padding.only(left=8, top=8, bottom=0),
-                    )
-                )
+            if option.section and option.section != previous_section:
+                items.append(self._build_section_header(option.section, is_first_section))
+                previous_section = option.section
+                is_first_section = False
             is_selected = option.value == current and not option.disabled
 
             # Colors
@@ -213,6 +204,24 @@ class SettingsModal:
             expand=True,
             spacing=12,
             padding=ft.padding.only(right=8, bottom=12),
+        )
+
+    def _build_section_header(self, label: str, is_first: bool) -> ft.Control:
+        """Build a section header label."""
+        controls: list[ft.Control] = []
+        if not is_first:
+            controls.append(ft.Container(height=8))
+        controls.append(
+            ft.Text(
+                label,
+                size=18,
+                weight=ft.FontWeight.BOLD,
+                color=COLOR_NEUTRAL,
+            )
+        )
+        return ft.Container(
+            content=ft.Column(controls, spacing=0),
+            padding=ft.padding.symmetric(horizontal=4),
         )
 
     def _on_item_hover(self, e: ft.ControlEvent) -> None:
