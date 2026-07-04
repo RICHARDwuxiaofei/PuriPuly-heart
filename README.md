@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.1.2-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.2.1-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -95,6 +95,7 @@ So I built one that can.
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | 14,380 | 2,920 | 3,710 | 1,180 |
 | **DeepSeek V4 Flash** | 19,410 | 3,080 | 3,980 | 1,210 |
+| **Gemma 4 31B (Cerebras)** | 920 | 730 | 770 | 540 |
 | **DeepSeek V4 Pro** | 6,400 | 2,330 | 2,810 | 1,070 |
 | **Gemini 3 Flash** | 1,710 | 1,170 | 1,280 | 740 |
 | **Gemini 3.1 Flash-Lite** | 3,430 | 1,770 | 2,030 | 940 |
@@ -107,6 +108,7 @@ So I built one that can.
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | ~$0.00007 | ~$0.0003 | ~$0.0003 | ~$0.0008 |
 | **DeepSeek V4 Flash** | ~$0.00005 | ~$0.0003 | ~$0.0003 | ~$0.0008 |
+| **Gemma 4 31B (Cerebras)** | ~$0.0011 | ~$0.0014 | ~$0.0013 | ~$0.0019 |
 | **DeepSeek V4 Pro** | ~$0.0002 | ~$0.0004 | ~$0.0004 | ~$0.0009 |
 | **Gemini 3 Flash** | ~$0.0006 | ~$0.0009 | ~$0.0008 | ~$0.0014 |
 | **Gemini 3.1 Flash-Lite** | ~$0.0003 | ~$0.0006 | ~$0.0005 | ~$0.0011 |
@@ -128,6 +130,7 @@ So I built one that can.
 | **Google AI Studio** | $10 | 1 year | Monthly for Gemini subscribers |
 | **Alibaba Cloud** | 1M tokens per model | 90 days | Singapore region |
 | **Alibaba Cloud** | ¥300 | 1 year | Students in China |
+| **Cerebras** | 1M tokens daily | None | 5 calls per minute limit |
 
 ---
 
@@ -354,6 +357,37 @@ The tier transition may take a moment.
 
 6. Copy the generated key and paste it into PuriPuly settings.
    ![step6](docs/images/soniox/6.png)
+
+</details>
+
+<details>
+<summary><h3>Cerebras</h3></summary>
+
+1. Go to [Cerebras](https://www.cerebras.ai/) and click **Get started**.
+   ![step1](docs/images/cerebras/1.png)
+
+2. Log in.
+   ![step2](docs/images/cerebras/2.png)
+
+3. Choose the plan you want. We recommend starting with the free tier.
+   ![step3](docs/images/cerebras/3.png)
+
+4. Copy the API key and paste it into PuriPuly.
+   ![step4](docs/images/cerebras/4.png)
+
+<details>
+<summary><h3>To switch to the paid tier</h3></summary>
+
+5. Go to the **Billing** tab.
+   ![step5](docs/images/cerebras/5.png)
+
+6. Enter your name.
+   ![step6](docs/images/cerebras/6.png)
+
+7. Add as much credit as you need.
+   ![step7](docs/images/cerebras/7.png)
+
+</details>
 
 </details>
 

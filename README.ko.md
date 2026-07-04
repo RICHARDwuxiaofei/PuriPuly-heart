@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.1.2-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.2.1-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -94,6 +94,7 @@ PuriPuly를 통해 다른 외국인 친구들과 실제로 소통하는 모습�
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | 14,380회 | 2,920회 | 3,710회 | 1,180회 |
 | **DeepSeek V4 Flash** | 19,410회 | 3,080회 | 3,980회 | 1,210회 |
+| **Gemma 4 31B (Cerebras)** | 920회 | 730회 | 770회 | 540회 |
 | **DeepSeek V4 Pro** | 6,400회 | 2,330회 | 2,810회 | 1,070회 |
 | **Gemini 3 Flash** | 1,710회 | 1,170회 | 1,280회 | 740회 |
 | **Gemini 3.1 Flash-Lite** | 3,430회 | 1,770회 | 2,030회 | 940회 |
@@ -106,6 +107,7 @@ PuriPuly를 통해 다른 외국인 친구들과 실제로 소통하는 모습�
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | ~0.1원 | ~0.5원 | ~0.4원 | ~1.3원 |
 | **DeepSeek V4 Flash** | ~0.08원 | ~0.5원 | ~0.4원 | ~1.2원 |
+| **Gemma 4 31B (Cerebras)** | ~1.6원 | ~2.0원 | ~1.9원 | ~2.8원 |
 | **DeepSeek V4 Pro** | ~0.2원 | ~0.6원 | ~0.5원 | ~1.4원 |
 | **Gemini 3 Flash** | ~0.9원 | ~1.3원 | ~1.2원 | ~2.0원 |
 | **Gemini 3.1 Flash-Lite** | ~0.4원 | ~0.8원 | ~0.7원 | ~1.6원 |
@@ -128,6 +130,7 @@ PuriPuly를 통해 다른 외국인 친구들과 실제로 소통하는 모습�
 | **Google AI Studio** | $10 | 1년 | Gemini 구독자에게 매월 지급 |
 | **Alibaba Cloud** | 모델당 100만 토큰 | 90일 | 싱가포르 리전 기준|
 | **Alibaba Cloud** | ¥300 | 1년 | 중국 내 학생 대상 |
+| **Cerebras** | 매일 100만 토큰 | 없음 | 분당 호출 제한 5회 |
 
 ---
 
@@ -354,6 +357,37 @@ Authorize 버튼을 눌렀는데도 인증이 안되어 있다면 재시도 하�
 
 6. 생성된 키를 복사하여 PuriPuly 설정에 붙여넣으세요.
    ![step6](docs/images/soniox/6.png)
+
+</details>
+
+<details>
+<summary><h3>Cerebras</h3></summary>
+
+1. [Cerebras](https://www.cerebras.ai/)에 접속하여 'Get started' 버튼 눌러주세요.
+   ![step1](docs/images/cerebras/1.png)
+
+2. 로그인을 해주세요.
+   ![step2](docs/images/cerebras/2.png)
+
+3. 원하는 플랜을 선택해주세요. 처음은 무료 티어를 추천해요.
+   ![step3](docs/images/cerebras/3.png)
+
+4. API 키를 복사하여 PuriPuly에 붙여넣으세요.
+   ![step4](docs/images/cerebras/4.png)
+
+<details>
+<summary><h3>유료 티어로 전환하려면</h3></summary>
+
+5. 'Billing' 탭으로 이동하세요.
+   ![step5](docs/images/cerebras/5.png)
+
+6. 자신의 이름을 적어주세요.
+   ![step6](docs/images/cerebras/6.png)
+
+7. 필요한만큼 크레딧을 충전하세요.
+   ![step7](docs/images/cerebras/7.png)
+
+</details>
 
 </details>
 

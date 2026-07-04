@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.1.2-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.2.1-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -95,6 +95,7 @@
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | 14,380 次 | 2,920 次 | 3,710 次 | 1,180 次 |
 | **DeepSeek V4 Flash** | 19,410 次 | 3,080 次 | 3,980 次 | 1,210 次 |
+| **Gemma 4 31B (Cerebras)** | 920 次 | 730 次 | 770 次 | 540 次 |
 | **DeepSeek V4 Pro** | 6,400 次 | 2,330 次 | 2,810 次 | 1,070 次 |
 | **Gemini 3 Flash** | 1,710 次 | 1,170 次 | 1,280 次 | 740 次 |
 | **Gemini 3.1 Flash-Lite** | 3,430 次 | 1,770 次 | 2,030 次 | 940 次 |
@@ -107,6 +108,7 @@
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | ~0.0005 元 | ~0.002 元 | ~0.002 元 | ~0.006 元 |
 | **DeepSeek V4 Flash** | ~0.0004 元 | ~0.002 元 | ~0.002 元 | ~0.006 元 |
+| **Gemma 4 31B (Cerebras)** | ~0.008 元 | ~0.010 元 | ~0.009 元 | ~0.013 元 |
 | **DeepSeek V4 Pro** | ~0.001 元 | ~0.003 元 | ~0.003 元 | ~0.007 元 |
 | **Gemini 3 Flash** | ~0.004 元 | ~0.006 元 | ~0.006 元 | ~0.010 元 |
 | **Gemini 3.1 Flash-Lite** | ~0.002 元 | ~0.004 元 | ~0.004 元 | ~0.008 元 |
@@ -129,6 +131,7 @@
 | **Google AI Studio** | $10 | 1 年 | 面向 Gemini 订阅者每月发放 |
 | **阿里云** | 每个模型 100 万 token | 90 天 | 新加坡区域为准 |
 | **阿里云** | ¥300 | 1 年 | 面向中国境内学生 |
+| **Cerebras** | 每天 100 万 token | 无限制 | 每分钟调用限制 5 次 |
 
 ---
 
@@ -352,6 +355,37 @@ PuriPuly 与云端 STT 结合时能提供最佳体验。
 
 6. 复制生成的密钥并粘贴到 PuriPuly 设置中。
    ![step6](docs/images/soniox/6.png)
+
+</details>
+
+<details>
+<summary><h3>Cerebras</h3></summary>
+
+1. 访问 [Cerebras](https://www.cerebras.ai/) 并点击 **Get started** 按钮。
+   ![step1](docs/images/cerebras/1.png)
+
+2. 登录。
+   ![step2](docs/images/cerebras/2.png)
+
+3. 选择想要的方案。首次使用建议选择免费层级。
+   ![step3](docs/images/cerebras/3.png)
+
+4. 复制 API 密钥并粘贴到 PuriPuly。
+   ![step4](docs/images/cerebras/4.png)
+
+<details>
+<summary><h3>切换到付费层级</h3></summary>
+
+5. 前往 **Billing** 标签。
+   ![step5](docs/images/cerebras/5.png)
+
+6. 填写您的姓名。
+   ![step6](docs/images/cerebras/6.png)
+
+7. 按需充值额度。
+   ![step7](docs/images/cerebras/7.png)
+
+</details>
 
 </details>
 

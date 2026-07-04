@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.1.2-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.2.1-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -94,6 +94,7 @@ PuriPulyを通じて他の外国人の友達と実際に交流している様子
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | 14,380回 | 2,920回 | 3,710回 | 1,180回 |
 | **DeepSeek V4 Flash** | 19,410回 | 3,080回 | 3,980回 | 1,210回 |
+| **Gemma 4 31B (Cerebras)** | 920回 | 730回 | 770回 | 540回 |
 | **DeepSeek V4 Pro** | 6,400回 | 2,330回 | 2,810回 | 1,070回 |
 | **Gemini 3 Flash** | 1,710回 | 1,170回 | 1,280回 | 740回 |
 | **Gemini 3.1 Flash-Lite** | 3,430回 | 1,770回 | 2,030回 | 940回 |
@@ -106,6 +107,7 @@ PuriPulyを通じて他の外国人の友達と実際に交流している様子
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | ~0.01円 | ~0.05円 | ~0.04円 | ~0.13円 |
 | **DeepSeek V4 Flash** | ~0.008円 | ~0.05円 | ~0.04円 | ~0.12円 |
+| **Gemma 4 31B (Cerebras)** | ~0.16円 | ~0.20円 | ~0.19円 | ~0.28円 |
 | **DeepSeek V4 Pro** | ~0.02円 | ~0.06円 | ~0.05円 | ~0.14円 |
 | **Gemini 3 Flash** | ~0.09円 | ~0.13円 | ~0.12円 | ~0.20円 |
 | **Gemini 3.1 Flash-Lite** | ~0.04円 | ~0.08円 | ~0.07円 | ~0.16円 |
@@ -128,6 +130,7 @@ PuriPulyを通じて他の外国人の友達と実際に交流している様子
 | **Google AI Studio** | $10 | 1年 | Gemini加入者に毎月付与 |
 | **Alibaba Cloud** | モデルごと100万トークン | 90日 | シンガポールリージョン基準 |
 | **Alibaba Cloud** | ¥300 | 1年 | 中国国内の学生向け |
+| **Cerebras** | 毎日100万トークン | なし | 1分あたり5回の呼び出し制限 |
 
 ---
 
@@ -354,6 +357,37 @@ Authorizeボタンを押しても認証されない場合は、再試行する�
 
 6. 作成されたキーをコピーして、PuriPulyの設定に貼り付けます。
    ![step6](docs/images/soniox/6.png)
+
+</details>
+
+<details>
+<summary><h3>Cerebras</h3></summary>
+
+1. [Cerebras](https://www.cerebras.ai/)にアクセスし、**Get started** ボタンを押してください。
+   ![step1](docs/images/cerebras/1.png)
+
+2. ログインしてください。
+   ![step2](docs/images/cerebras/2.png)
+
+3. 希望するプランを選択してください。最初は無料プランをおすすめします。
+   ![step3](docs/images/cerebras/3.png)
+
+4. APIキーをコピーしてPuriPulyに貼り付けてください。
+   ![step4](docs/images/cerebras/4.png)
+
+<details>
+<summary><h3>有料プランに切り替えるには</h3></summary>
+
+5. **Billing** タブに移動してください。
+   ![step5](docs/images/cerebras/5.png)
+
+6. 自分の名前を入力してください。
+   ![step6](docs/images/cerebras/6.png)
+
+7. 必要な分だけクレジットをチャージしてください。
+   ![step7](docs/images/cerebras/7.png)
+
+</details>
 
 </details>
 
