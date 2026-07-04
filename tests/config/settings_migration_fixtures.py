@@ -342,7 +342,7 @@ def maximal_v24_settings_fixture() -> dict[str, Any]:
     settings.soniox_stt.trailing_silence_ms = 250
     settings.gemini.llm_model = GeminiLLMModel.GEMINI_3_FLASH
     settings.openrouter.llm_model = OpenRouterLLMModel.QWEN_35_FLASH_02_23
-    settings.openrouter.routing_mode = OpenRouterRoutingMode.PARASAIL_FIRST
+    settings.openrouter.routing_mode = OpenRouterRoutingMode.LATENCY
     settings.openrouter.provider_routing = OpenRouterProviderRouting.DEEPSEEK_ONLY
     settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
     settings.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_BYOK

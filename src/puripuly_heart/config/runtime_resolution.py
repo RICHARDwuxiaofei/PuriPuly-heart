@@ -220,11 +220,7 @@ _OPENROUTER_MODELS: Final[tuple[str, ...]] = (
     OPENROUTER_MODEL_GEMINI_3_FLASH,
     OPENROUTER_MODEL_GEMINI_31_FLASH_LITE,
 )
-_OPENROUTER_ROUTING_MODES: Final[tuple[str, ...]] = (
-    "latency",
-    "parasail_first",
-    "novita_first",
-)
+_OPENROUTER_ROUTING_MODES: Final[tuple[str, ...]] = ("latency",)
 _OPENROUTER_PROVIDER_ROUTINGS: Final[tuple[str, ...]] = (
     "default",
     "deepseek_only",

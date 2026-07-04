@@ -830,7 +830,7 @@ def test_openrouter_deepseek_byok_deepseek_only_preserves_routing_and_suppresses
         required=True,
         reference="openrouter:byok",
     )
-    assert config.routing_mode == "parasail_first"
+    assert config.routing_mode == "latency"
     assert config.provider_routing == "deepseek_only"
     assert config.service_endpoint == "https://broker.fixture.test/v1"
     assert config.fallback is None
@@ -1265,7 +1265,7 @@ def test_missing_translation_openrouter_compatibility_values_derive_exact_runtim
         required=True,
         reference="openrouter:byok",
     )
-    assert config.routing_mode == "parasail_first"
+    assert config.routing_mode == "latency"
     assert config.provider_routing == "default"
     assert config.base_url is None
     assert config.service_endpoint == "https://broker.fixture.test/v1"
@@ -1318,7 +1318,7 @@ def test_openrouter_qwen_primary_compatibility_preserves_model_and_source(
         required=True,
         reference=expected_credential_reference,
     )
-    assert config.routing_mode == "parasail_first"
+    assert config.routing_mode == "latency"
     assert config.provider_routing == "default"
     assert config.service_endpoint == "https://broker.fixture.test/v1"
     assert config.fallback is None
@@ -1355,7 +1355,7 @@ def test_openrouter_qwen_primary_deepseek_only_preserves_routing_and_suppresses_
     assert config.provider == "openrouter"
     assert config.model == "qwen/qwen3.5-flash-02-23"
     assert config.provider_routing == "deepseek_only"
-    assert config.routing_mode == "parasail_first"
+    assert config.routing_mode == "latency"
     assert config.fallback is None
 
 
