@@ -90,7 +90,7 @@ def test_qq_managed_auth_dialog_submit_waiting_error_and_cancel_states() -> None
     dialog = _dialog(page, events)
     dialog.open()
     dialog._qq_identity_field.value = "qq-user"
-    dialog._credential_field.value = "credential"
+    dialog._credential_field.value = "0123456789abcdef" * 4
 
     dialog._continue_button.on_click(None)
 

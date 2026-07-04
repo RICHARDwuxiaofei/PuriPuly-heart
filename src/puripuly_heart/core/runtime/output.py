@@ -33,10 +33,13 @@ from puripuly_heart.domain.models import ChannelId, OSCMessage
 
 OutputRuntimeState = Literal["open", "closing", "closed"]
 
+SELF_SPEECH_TYPING_REASON = "self_speech_pending"
+
 
 class ChatboxQueue(Protocol):
     def enqueue(self, message: OSCMessage) -> None: ...
     def send_typing(self, is_typing: bool) -> None: ...
+    def set_typing_reason(self, reason: str, active: bool) -> None: ...
     def process_due(self) -> None: ...
 
 
@@ -211,7 +214,7 @@ class OutputRuntime:
             created_at=self.clock.now(),
         )
         self.chatbox.enqueue(message)
-        self.chatbox.send_typing(False)
+        self.chatbox.set_typing_reason(SELF_SPEECH_TYPING_REASON, False)
         return self._observe_result(
             status=OUTPUT_ROUTING_DECISION_PUBLISHED,
             route=OUTPUT_ROUTE_SELF_CHATBOX,

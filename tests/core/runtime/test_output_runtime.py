@@ -31,6 +31,9 @@ class RecordingChatbox:
     def send_typing(self, is_typing: bool) -> None:
         self.typing.append(is_typing)
 
+    def set_typing_reason(self, reason: str, active: bool) -> None:
+        self.typing.append(active)
+
     def process_due(self) -> None:
         self.process_due_calls += 1
 

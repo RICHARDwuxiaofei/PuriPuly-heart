@@ -141,7 +141,11 @@ def t_for_locale(
 
 
 def localize_user_message_ref(message: UserMessageRef) -> str:
-    return t(message.key, **dict(message.params))
+    params = dict(message.params)
+    category = params.get("category")
+    if isinstance(category, str) and category:
+        params["category"] = t(f"error.category.{category}", default=category)
+    return t(message.key, **params)
 
 
 def language_name(code: str) -> str:

@@ -2920,6 +2920,7 @@ class SettingsView(ft.Column):
         else:
             self._openrouter_key.value = store.get("openrouter_api_key") or ""
             self._deepseek_key.value = store.get("deepseek_api_key") or ""
+            self._cerebras_key.value = store.get("cerebras_api_key") or ""
             self._restore_api_key_icons(settings)
 
         if self.page:
@@ -2942,6 +2943,7 @@ class SettingsView(ft.Column):
         self._google_key.value = store.get("google_api_key") or ""
         self._openrouter_key.value = store.get("openrouter_api_key") or ""
         self._deepseek_key.value = store.get("deepseek_api_key") or ""
+        self._cerebras_key.value = store.get("cerebras_api_key") or ""
         self._deepgram_key.value = store.get("deepgram_api_key") or ""
         self._soniox_key.value = store.get("soniox_api_key") or ""
         self._local_llm_api_key.value = store.get("local_llm_api_key") or ""
@@ -2971,6 +2973,7 @@ class SettingsView(ft.Column):
             (self._google_key, self._google_key.value, verified.google),
             (self._openrouter_key, self._openrouter_key.value, verified.openrouter),
             (self._deepseek_key, self._deepseek_key.value, verified.deepseek),
+            (self._cerebras_key, self._cerebras_key.value, verified.cerebras),
             (self._alibaba_key_beijing, self._alibaba_key_beijing.value, verified.alibaba_beijing),
             (
                 self._alibaba_key_singapore,
@@ -4961,6 +4964,7 @@ class SettingsView(ft.Column):
         self._managed_trial_usage_bar.apply_locale()
         self._openrouter_key.apply_locale()
         self._deepseek_key.apply_locale()
+        self._cerebras_key.apply_locale()
         self._alibaba_key_beijing.apply_locale()
         self._alibaba_key_singapore.apply_locale()
         self._audio_settings.apply_locale()

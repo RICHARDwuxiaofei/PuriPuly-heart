@@ -25,6 +25,9 @@ class FakeOscQueue:
     def send_typing(self, on: bool) -> None:
         _ = on
 
+    def set_typing_reason(self, reason: str, active: bool) -> None:
+        _ = active
+
     def process_due(self) -> None:
         return
 

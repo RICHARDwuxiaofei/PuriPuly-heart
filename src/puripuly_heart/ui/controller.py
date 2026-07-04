@@ -137,6 +137,7 @@ from puripuly_heart.config.settings import (
     normalize_owned_referral_id,
     save_settings,
 )
+from puripuly_heart.config.vad_defaults import DEFAULT_STABLE_VAD_HANGOVER_MS
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
 from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
 from puripuly_heart.core.audio.diagnostics import compute_audio_frame_metrics
@@ -274,6 +275,7 @@ OVERLAY_SHUTDOWN_GRACE_S = 0.05
 DESKTOP_BOUNDS_PERSIST_DEBOUNCE_S = 0.05
 MANUAL_INPUT_TYPING_IDLE_TIMEOUT_S = 3.0
 MANUAL_INPUT_TYPING_REASON = "manual_input"
+MANUAL_SUBMIT_TYPING_TIMEOUT_S = 10.0
 DESKTOP_INTERACTION_MODE_EDIT = "edit"
 DESKTOP_INTERACTION_MODE_PASS_THROUGH = "pass_through"
 DESKTOP_INTERACTION_MODES = frozenset(
@@ -776,6 +778,7 @@ class GuiController:
     _stt_switch_lock: asyncio.Lock | None = None
     _stt_switch_task: asyncio.Task[None] | None = None
     _stt_restart_requested: bool = False
+    _stt_force_immediate: bool = False
     _last_stt_runtime_signature: tuple[object, ...] | None = None
     _last_self_stt_runtime_signature: tuple[object, ...] | None = None
     _last_peer_stt_runtime_signature: tuple[object, ...] | None = None
@@ -977,13 +980,16 @@ class GuiController:
             with contextlib.suppress(Exception):
                 refresh_contract()
 
-    async def _drain_self_stt_for_toggle_off(self) -> None:
+    async def _drain_self_stt_for_toggle_off(self, *, force_immediate: bool = False) -> None:
         if self.hub is None:
             return
-        drain = getattr(self.hub, "drain_self_stt_for_toggle_off", None)
-        if callable(drain):
-            await drain()
-            return
+        if not force_immediate:
+            drain = getattr(self.hub, "drain_self_stt_for_toggle_off", None)
+            if callable(drain):
+                await drain()
+                return
+        else:
+            self.log_detailed("[STT] Force immediate toggle-off requested")
         stt = getattr(self.hub, "stt", None)
         if stt is not None:
             await stt.close()
@@ -4369,13 +4375,14 @@ class GuiController:
                         await result
         return bool(self.hub.translation_enabled)
 
-    async def set_stt_enabled(self, enabled: bool) -> None:
+    async def set_stt_enabled(self, enabled: bool, *, force_immediate: bool = False) -> None:
         self.log_basic(f"[STT] Toggle request: enabled={enabled}")
         self.log_detailed(
             "[STT] Toggle detail: "
             f"desired_before={self._stt_desired} overlay_state={self.overlay_state}"
         )
         self._stt_desired = bool(enabled)
+        self._stt_force_immediate = force_immediate
         if not enabled:
             self._reset_local_stt_pending_enable_after_install()
 
@@ -4856,12 +4863,16 @@ class GuiController:
                 desired = self._stt_desired
                 restart = self._stt_restart_requested
                 self._stt_restart_requested = False
+                force_immediate = self._stt_force_immediate
+                self._stt_force_immediate = False
 
                 if not desired:
                     await self._stop_mic_loop()
                     if self.hub is not None:
                         with contextlib.suppress(Exception):
-                            await self._drain_self_stt_for_toggle_off()
+                            await self._drain_self_stt_for_toggle_off(
+                                force_immediate=force_immediate
+                            )
                 else:
                     if self.hub is None:
                         self.log_detailed(
@@ -4872,7 +4883,9 @@ class GuiController:
                     if restart:
                         await self._stop_mic_loop()
                         with contextlib.suppress(Exception):
-                            await self._drain_self_stt_for_toggle_off()
+                            await self._drain_self_stt_for_toggle_off(
+                                force_immediate=force_immediate
+                            )
                     if not await self._ensure_local_stt_ready():
                         break
                     await self._start_mic_loop()
@@ -4969,7 +4982,8 @@ class GuiController:
             return
         submit_reason = self._begin_manual_submit_typing()
         try:
-            await self.hub.submit_text(text, source="You")
+            utterance_id = await self.hub.submit_text(text, source="You")
+            await self._wait_for_manual_submit_output(utterance_id)
         except Exception as exc:
             self._log_error(f"Submit failed: {exc}")
         finally:
@@ -4996,6 +5010,30 @@ class GuiController:
 
     def _clear_manual_submit_typing(self, reason: str) -> None:
         self._set_typing_reason(reason, False)
+
+    async def _wait_for_manual_submit_output(self, utterance_id: object) -> None:
+        hub = self.hub
+        if hub is None:
+            return
+        runtime = getattr(hub, "self_runtime", None)
+        tasks = getattr(runtime, "translation_tasks", None)
+        task = tasks.get(utterance_id) if isinstance(tasks, dict) else None
+        if task is None:
+            return
+        if isinstance(task, asyncio.Task):
+            awaitable: object = asyncio.gather(task, return_exceptions=True)
+        elif inspect.isawaitable(task):
+            awaitable = task
+        else:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(awaitable), timeout=MANUAL_SUBMIT_TYPING_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            self.log_detailed("[ManualTyping] submit output wait timed out")
+        except Exception as exc:
+            self._log_error(f"Manual submit output wait failed: {exc}")
 
     def _clear_manual_input_typing(self) -> None:
         self._cancel_manual_typing_idle_task()
@@ -5173,7 +5211,7 @@ class GuiController:
             self.hub.hangover_s = (
                 restored_settings.stt.low_latency_vad_hangover_ms / 1000.0
                 if restored_settings.stt.low_latency_mode
-                else 1.1
+                else DEFAULT_STABLE_VAD_HANGOVER_MS / 1000.0
             )
             self.hub.peer_hangover_s = restored_settings.desktop_audio.vad_hangover_ms / 1000.0
             self.hub.chatbox_include_source = restored_settings.osc.chatbox_include_source
@@ -5446,7 +5484,7 @@ class GuiController:
             self.hub.hangover_s = (
                 settings.stt.low_latency_vad_hangover_ms / 1000.0
                 if effective_low_latency_mode
-                else 1.1
+                else DEFAULT_STABLE_VAD_HANGOVER_MS / 1000.0
             )
             self.hub.peer_hangover_s = settings.desktop_audio.vad_hangover_ms / 1000.0
             self.hub.chatbox_include_source = settings.osc.chatbox_include_source
@@ -6494,7 +6532,7 @@ class GuiController:
             self.hub.hangover_s = (
                 next_settings.stt.low_latency_vad_hangover_ms / 1000.0
                 if next_settings.stt.low_latency_mode
-                else 1.1
+                else DEFAULT_STABLE_VAD_HANGOVER_MS / 1000.0
             )
             self.hub.peer_hangover_s = next_settings.desktop_audio.vad_hangover_ms / 1000.0
             self.hub.chatbox_include_source = next_settings.osc.chatbox_include_source
@@ -7006,7 +7044,7 @@ class GuiController:
             hangover_s=(
                 self.settings.stt.low_latency_vad_hangover_ms / 1000.0
                 if self.settings.stt.low_latency_mode
-                else 1.1
+                else DEFAULT_STABLE_VAD_HANGOVER_MS / 1000.0
             ),
             peer_hangover_s=self.settings.desktop_audio.vad_hangover_ms / 1000.0,
         )

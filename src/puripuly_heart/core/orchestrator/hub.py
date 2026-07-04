@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 logger = logging.getLogger(__name__)
 
 from puripuly_heart.config.prompts import render_translation_prompt_template, warm_prompt_cache
+from puripuly_heart.config.vad_defaults import DEFAULT_STABLE_VAD_HANGOVER_MS
 from puripuly_heart.core.clock import Clock, SystemClock
 from puripuly_heart.core.error_messages import (
     format_error_report_for_log,
@@ -52,7 +53,11 @@ from puripuly_heart.core.output.models import (
     PUBLICATION_KIND_SELF_UTTERANCE,
 )
 from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
-from puripuly_heart.core.runtime.output import OutputPublicationResult, OutputRuntime
+from puripuly_heart.core.runtime.output import (
+    SELF_SPEECH_TYPING_REASON,
+    OutputPublicationResult,
+    OutputRuntime,
+)
 from puripuly_heart.core.runtime.provider_handle import ProviderRuntimeHandle
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadEvent
 from puripuly_heart.domain.events import (
@@ -157,7 +162,9 @@ class ClientHub:
     translation_enabled: bool = True
     peer_translation_enabled: bool = False
     integrated_context_enabled: bool = False
-    hangover_s: float = 1.1  # Self VAD hangover in seconds for user-facing E2E latency.
+    hangover_s: float = (
+        DEFAULT_STABLE_VAD_HANGOVER_MS / 1000.0
+    )  # Self VAD hangover in seconds for user-facing E2E latency.
     peer_hangover_s: float = 0.6  # Peer VAD hangover in seconds for user-facing E2E latency.
 
     # Context memory settings
@@ -1105,7 +1112,7 @@ class ClientHub:
         # Record start time for E2E latency tracking (from speech end)
         if isinstance(event, SpeechEnd):
             speech_end_at = self.clock.now()
-            self.osc.send_typing(True)
+            self.osc.set_typing_reason(SELF_SPEECH_TYPING_REASON, True)
             self._utterance_start_times[event.utterance_id] = speech_end_at
             self._speech_ended_ids.add(event.utterance_id)
             self._record_latency_stage(

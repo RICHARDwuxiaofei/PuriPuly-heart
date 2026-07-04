@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Callable
 
 import flet as ft
@@ -14,6 +16,9 @@ from puripuly_heart.ui.components.warm_document_dialog import (
 )
 from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.theme import COLOR_DIVIDER, COLOR_ON_BACKGROUND, COLOR_PRIMARY
+
+_QQ_CREDENTIAL_PATTERN = re.compile(r"\A[0-9a-f]{64}\Z")
+_QQ_IDENTITY_MAX_LENGTH = 128
 
 
 class QqManagedAuthDialog:
@@ -58,7 +63,7 @@ class QqManagedAuthDialog:
 
     @property
     def qq_identity(self) -> str:
-        return self._field_value(self._qq_identity_field)
+        return self._field_value(self._qq_identity_field).strip()
 
     @property
     def credential(self) -> str:
@@ -193,11 +198,23 @@ class QqManagedAuthDialog:
         )
 
     def _submit(self) -> None:
-        if not self.qq_identity.strip() or not self.credential.strip():
+        if not self._validate_inputs():
             self._set_error_key("qq_auth.error.invalid_input")
             self._update_page_if_possible()
             return
         self._on_continue()
+
+    def _validate_inputs(self) -> bool:
+        qq_identity = self.qq_identity.strip()
+        if not qq_identity or not 1 <= len(qq_identity) <= _QQ_IDENTITY_MAX_LENGTH:
+            return False
+        if any(character.isspace() for character in qq_identity):
+            return False
+        if any(unicodedata.category(character).startswith("C") for character in qq_identity):
+            return False
+        if _QQ_CREDENTIAL_PATTERN.fullmatch(self.credential) is None:
+            return False
+        return True
 
     def _cancel_waiting(self) -> None:
         self.close()

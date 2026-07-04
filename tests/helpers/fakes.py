@@ -93,6 +93,9 @@ class RecordingOscQueue:
     def send_typing(self, is_typing: bool) -> None:
         self.typing.append(is_typing)
 
+    def set_typing_reason(self, reason: str, active: bool) -> None:
+        self.typing.append(active)
+
     def send_immediate(self, text: str) -> bool:
         self.immediate_messages.append(text)
         return self.immediate_result
