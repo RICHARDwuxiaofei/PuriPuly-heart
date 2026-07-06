@@ -172,7 +172,7 @@ describe('QQ managed entitlement schema', () => {
       lifecycleDecisionSource: 'qq_managed_entitlements, not qq_auth_assertions',
       rowCardinality: 'zero-or-one-row-per-qq_subject_ref',
       absenceRepresents: 'no production issuance has been reserved or used',
-      storedStatuses: ['issuing', 'active', 'cleanup_required', 'revoked'],
+      storedStatuses: ['issuing', 'delivery_pending', 'active', 'cleanup_required', 'revoked'],
       automaticReissueBlockedStatuses: ['active', 'cleanup_required', 'revoked'],
       columns: QQ_MANAGED_ENTITLEMENT_COLUMNS,
       unique: ['issue_ref'],
@@ -187,6 +187,8 @@ describe('QQ managed entitlement schema', () => {
       stateInvariants: {
         active:
           'requires managed_credential_ref, issued_at, expires_at, and delivered_at',
+        delivery_pending:
+          'requires managed_credential_ref, issued_at, and expires_at; delivered_at remains null until ACK succeeds',
         cleanup_required: 'requires managed_credential_ref',
         issuing:
           'may be stale-reclaimed only when managed_credential_ref is NULL; issuing with a credential ref requires cleanup/remediation',
@@ -208,6 +210,40 @@ describe('QQ managed entitlement schema', () => {
       rawIdentityStorage: false,
       rawCredentialStorage: false,
       rawOpenRouterKeyStorage: false,
+    });
+  });
+
+  it('documents shared managed key delivery ACK persistence', () => {
+    expect(BROKER_PERSISTENCE_MODEL.tables.managedKeyDeliveries).toEqual({
+      name: 'managed_key_deliveries',
+      purpose:
+        'shared pending delivery ACK ledger for Discord and QQ managed key issuance',
+      primaryKey: 'delivery_id',
+      issueSources: ['discord', 'qq'],
+      storedStatuses: ['pending', 'acknowledged', 'expired', 'cleanup_required'],
+      columns: [
+        'delivery_id',
+        'issue_source',
+        'subject_ref',
+        'installation_id',
+        'managed_credential_ref',
+        'ack_token_hash',
+        'status',
+        'created_at',
+        'expires_at',
+        'acknowledged_at',
+        'failed_at',
+        'failure_reason',
+      ],
+      indexed: [
+        'status + expires_at',
+        'managed_credential_ref',
+        'issue_source + created_at',
+      ],
+      rawAckTokenStorage: false,
+      rawOpenRouterKeyStorage: false,
+      stalePendingCleanup:
+        'pending rows remain pending after expired ACK attempts until cleanup owner marks expired or cleanup_required',
     });
   });
 

@@ -1,0 +1,300 @@
+import type { Context } from 'hono';
+
+import { errorResponse as publicErrorResponse } from './broker-error';
+import type { BrokerEnv } from './contract';
+import type { BrokerIssueSuccessSource, ManagedKeyDeliveryRecord } from './persistence';
+
+const DELIVERY_ID_PREFIX = 'ph-delivery-v1_';
+const ACK_TOKEN_HASH_PREFIX = 'ph-delivery-ack-token-v1_';
+const DELIVERY_RANDOM_BYTES = 32;
+const ACK_TOKEN_RANDOM_BYTES = 32;
+
+type ManagedKeyDeliveryIssueSource = BrokerIssueSuccessSource;
+
+interface ManagedKeyDeliveryAckRequestBody {
+  delivery_id?: unknown;
+  managed_credential_ref?: unknown;
+  delivery_ack_token?: unknown;
+}
+
+export interface CreateManagedKeyDeliveryInput {
+  issueSource: ManagedKeyDeliveryIssueSource;
+  subjectRef?: string | null;
+  installationId?: string | null;
+  managedCredentialRef: string;
+  createdAt: Date;
+  expiresAt: Date;
+}
+
+export interface CreateManagedKeyDeliveryResult {
+  deliveryId: string;
+  deliveryAckToken: string;
+  ackTokenHash: string;
+}
+
+export type ManagedKeyDeliveryAckResult =
+  | { ok: true; status: 'acknowledged' | 'already_acknowledged' }
+  | { ok: false; reason: 'invalid' | 'expired' | 'mismatched' | 'failed' };
+
+export async function createManagedKeyDelivery(
+  db: D1Database,
+  input: CreateManagedKeyDeliveryInput,
+): Promise<CreateManagedKeyDeliveryResult> {
+  const deliveryId = `${DELIVERY_ID_PREFIX}${randomBase64Url(DELIVERY_RANDOM_BYTES)}`;
+  const deliveryAckToken = randomBase64Url(ACK_TOKEN_RANDOM_BYTES);
+  const ackTokenHash = await hashDeliveryAckToken(deliveryAckToken);
+
+  await db
+    .prepare(
+      `INSERT INTO managed_key_deliveries (
+          delivery_id,
+          issue_source,
+          subject_ref,
+          installation_id,
+          managed_credential_ref,
+          ack_token_hash,
+          status,
+          created_at,
+          expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    )
+    .bind(
+      deliveryId,
+      input.issueSource,
+      input.subjectRef ?? null,
+      input.installationId ?? null,
+      input.managedCredentialRef,
+      ackTokenHash,
+      input.createdAt.toISOString(),
+      input.expiresAt.toISOString(),
+    )
+    .run();
+
+  return { deliveryId, deliveryAckToken, ackTokenHash };
+}
+
+export async function acknowledgeManagedKeyDelivery(
+  db: D1Database,
+  input: {
+    deliveryId: string;
+    managedCredentialRef: string;
+    deliveryAckToken: string;
+    now: Date;
+  },
+): Promise<ManagedKeyDeliveryAckResult> {
+  const row = await db
+    .prepare(
+      `SELECT delivery_id, managed_credential_ref, ack_token_hash, status, expires_at
+         FROM managed_key_deliveries
+        WHERE delivery_id = ?`,
+    )
+    .bind(input.deliveryId)
+    .first<Pick<ManagedKeyDeliveryRecord, 'delivery_id' | 'managed_credential_ref' | 'ack_token_hash' | 'status' | 'expires_at'>>();
+
+  if (!row) {
+    return { ok: false, reason: 'invalid' };
+  }
+
+  const candidateHash = await hashDeliveryAckToken(input.deliveryAckToken);
+  if (candidateHash !== row.ack_token_hash) {
+    return { ok: false, reason: 'invalid' };
+  }
+
+  if (row.managed_credential_ref !== input.managedCredentialRef) {
+    return { ok: false, reason: 'mismatched' };
+  }
+
+  if (row.status === 'acknowledged') {
+    return { ok: true, status: 'already_acknowledged' };
+  }
+
+  if (row.status === 'expired') {
+    return { ok: false, reason: 'expired' };
+  }
+
+  if (row.status === 'cleanup_required') {
+    return { ok: false, reason: 'failed' };
+  }
+
+  if (input.now.toISOString() > row.expires_at) {
+    return { ok: false, reason: 'expired' };
+  }
+
+  const acknowledgedAt = input.now.toISOString();
+  const result = await db
+    .prepare(
+      `UPDATE managed_key_deliveries
+          SET status = 'acknowledged', acknowledged_at = ?
+        WHERE delivery_id = ?
+          AND status = 'pending'`,
+    )
+    .bind(acknowledgedAt, input.deliveryId)
+    .run();
+
+  if ((result.meta?.changes ?? 0) === 0) {
+    const latest = await getManagedKeyDelivery(db, input.deliveryId);
+    if (latest?.status === 'acknowledged') {
+      return { ok: true, status: 'already_acknowledged' };
+    }
+    return { ok: false, reason: 'failed' };
+  }
+
+  return { ok: true, status: 'acknowledged' };
+}
+
+export async function listStalePendingManagedKeyDeliveries(
+  db: D1Database,
+  input: { now: Date; limit: number },
+): Promise<ManagedKeyDeliveryRecord[]> {
+  const result = await db
+    .prepare(
+      `SELECT delivery_id, issue_source, subject_ref, installation_id, managed_credential_ref,
+              ack_token_hash, status, created_at, expires_at, acknowledged_at, failed_at, failure_reason
+         FROM managed_key_deliveries
+        WHERE status = 'pending'
+          AND expires_at <= ?
+        ORDER BY expires_at ASC
+        LIMIT ?`,
+    )
+    .bind(input.now.toISOString(), input.limit)
+    .all<ManagedKeyDeliveryRecord>();
+
+  return result.results;
+}
+
+export async function markManagedKeyDeliveryCleanupRequired(
+  db: D1Database,
+  input: { deliveryId: string; failedAt: string; failureReason: string },
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE managed_key_deliveries
+          SET status = 'cleanup_required', failed_at = ?, failure_reason = ?
+        WHERE delivery_id = ?
+          AND status IN ('pending', 'expired')`,
+    )
+    .bind(input.failedAt, input.failureReason, input.deliveryId)
+    .run();
+
+  return (result.meta?.changes ?? 0) > 0;
+}
+
+export async function handleManagedKeyDeliveryAck(
+  c: Context<BrokerEnv>,
+): Promise<Response> {
+  const body = await readJsonBody<ManagedKeyDeliveryAckRequestBody>(c);
+  if (!body.ok) {
+    return ackErrorResponse(c, 400, 'malformed', body.reason);
+  }
+
+  const deliveryId = nonEmptyString(body.value.delivery_id);
+  const managedCredentialRef = nonEmptyString(body.value.managed_credential_ref);
+  const deliveryAckToken = nonEmptyString(body.value.delivery_ack_token);
+
+  if (!deliveryId || !managedCredentialRef || !deliveryAckToken) {
+    return ackErrorResponse(
+      c,
+      400,
+      'malformed',
+      'delivery_id, managed_credential_ref, and delivery_ack_token are required',
+    );
+  }
+
+  const result = await acknowledgeManagedKeyDelivery(c.env.BROKER_DB, {
+    deliveryId,
+    managedCredentialRef,
+    deliveryAckToken,
+    now: new Date(),
+  });
+
+  if (result.ok) {
+    return c.json({ ok: true, status: result.status });
+  }
+
+  if (result.reason === 'expired') {
+    return ackErrorResponse(c, 410, 'expired', 'delivery acknowledgement expired');
+  }
+
+  if (result.reason === 'mismatched') {
+    return ackErrorResponse(c, 409, 'mismatched', 'delivery acknowledgement did not match credential');
+  }
+
+  if (result.reason === 'failed') {
+    return ackErrorResponse(c, 409, 'failed', 'delivery acknowledgement cannot be applied');
+  }
+
+  return ackErrorResponse(c, 404, 'invalid', 'delivery acknowledgement is invalid');
+}
+
+export async function hashDeliveryAckToken(deliveryAckToken: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(deliveryAckToken),
+  );
+  return `${ACK_TOKEN_HASH_PREFIX}${toHex(new Uint8Array(digest))}`;
+}
+
+async function getManagedKeyDelivery(
+  db: D1Database,
+  deliveryId: string,
+): Promise<ManagedKeyDeliveryRecord | null> {
+  return db
+    .prepare(
+      `SELECT delivery_id, issue_source, subject_ref, installation_id, managed_credential_ref,
+              ack_token_hash, status, created_at, expires_at, acknowledged_at, failed_at, failure_reason
+         FROM managed_key_deliveries
+        WHERE delivery_id = ?`,
+    )
+    .bind(deliveryId)
+    .first<ManagedKeyDeliveryRecord>();
+}
+
+async function readJsonBody<T>(
+  c: Context<BrokerEnv>,
+): Promise<
+  | { ok: true; value: T }
+  | { ok: false; reason: 'request body must be valid JSON' | 'request body must be a JSON object' }
+> {
+  try {
+    const value = await c.req.json();
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return { ok: false, reason: 'request body must be a JSON object' };
+    }
+
+    return { ok: true, value: value as T };
+  } catch {
+    return { ok: false, reason: 'request body must be valid JSON' };
+  }
+}
+
+function ackErrorResponse(
+  c: Context<BrokerEnv>,
+  status: 400 | 404 | 409 | 410,
+  subcode: 'malformed' | 'invalid' | 'expired' | 'mismatched' | 'failed',
+  message: string,
+): Response {
+  return publicErrorResponse(c, status, {
+    code: 'invalid_request',
+    class: subcode === 'failed' ? 'retryable' : 'terminal',
+    subcode: `delivery_ack_${subcode}`,
+    message,
+  });
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function randomBase64Url(byteLength: number): string {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+}
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
