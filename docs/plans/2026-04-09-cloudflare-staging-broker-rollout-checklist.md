@@ -39,7 +39,7 @@ What it does **not** mean:
   - it also hardcodes `name: "puripuly-heart-broker"`, so direct deploy work targets the canonical worker name unless a deploy-time config overrides it
 - The broker requires these runtime bindings:
   - D1 binding: `BROKER_DB`
-  - Worker secrets: `OPENROUTER_MANAGED_API_KEY` (transitional compatibility only), `OPENROUTER_MANAGEMENT_API_KEY`, `OPENROUTER_MANAGED_GUARDRAIL_ID`, `OPENROUTER_MANAGED_USER_HMAC_SECRET`, `QQ_AUTH_HMAC_PSK`, `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, `DISCORD_REDIRECT_URI_ALLOWLIST`, `DISCORD_USER_REF_SECRET`, `DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL`, `DISCORD_DAILY_REPORT_WEBHOOK_URL`
+  - Worker secrets: `OPENROUTER_MANAGED_API_KEY` (transitional compatibility only), `OPENROUTER_MANAGEMENT_API_KEY`, `OPENROUTER_MANAGED_GUARDRAIL_ID`, `OPENROUTER_MANAGED_USER_HMAC_SECRET`, `QQ_AUTH_HMAC_PSK`, `TELEMETRY_SUBJECT_HMAC_SECRET`, `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, `DISCORD_REDIRECT_URI_ALLOWLIST`, `DISCORD_USER_REF_SECRET`, `DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL`, `DISCORD_DAILY_REPORT_WEBHOOK_URL`
 - Current broker deploy command:
   - `pnpm --filter @puripuly-heart/broker run deploy`
 - Broker `pnpm` / `vitest` / `wrangler` verification should run from a Linux-native workspace.
@@ -84,6 +84,7 @@ What it does **not** mean:
 - [ ] production OpenRouter managed guardrail id prepared (`OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION`)
 - [ ] production OpenRouter managed user-id HMAC secret prepared (`OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION`)
 - [ ] production QQ assertion HMAC PSK prepared (`QQ_AUTH_HMAC_PSK_PRODUCTION`, copied to Worker secret `QQ_AUTH_HMAC_PSK`; never store the value in the repo)
+- [ ] production telemetry subject HMAC secret prepared (`TELEMETRY_SUBJECT_HMAC_SECRET_PRODUCTION`, copied to Worker secret `TELEMETRY_SUBJECT_HMAC_SECRET`; never store the value in the repo)
 - [ ] production Discord OAuth client id prepared (`DISCORD_CLIENT_ID_PRODUCTION`, copied to Worker secret `DISCORD_CLIENT_ID`)
 - [ ] production Discord OAuth client secret prepared (`DISCORD_CLIENT_SECRET_PRODUCTION`, copied to Worker secret `DISCORD_CLIENT_SECRET`; never store the value in the repo)
 - [ ] production Discord redirect allowlist prepared (`DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION`, copied to Worker secret `DISCORD_REDIRECT_URI_ALLOWLIST`)
@@ -98,6 +99,7 @@ What it does **not** mean:
 - [ ] GitHub secret `OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION` registered
 - [ ] GitHub secret `OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION` registered
 - [ ] GitHub secret `QQ_AUTH_HMAC_PSK_PRODUCTION` registered
+- [ ] GitHub secret `TELEMETRY_SUBJECT_HMAC_SECRET_PRODUCTION` registered
 - [ ] GitHub secret `DISCORD_CLIENT_ID_PRODUCTION` registered
 - [ ] GitHub secret `DISCORD_CLIENT_SECRET_PRODUCTION` registered
 - [ ] GitHub secret `DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION` registered
@@ -146,6 +148,7 @@ Minimum automated smoke coverage should include the broker’s real HTTP contrac
 - [x] `GET /v1/trial/status`
 - [x] `POST /v1/providers/openrouter/issue`
 - [x] `POST /v1/auth/qq/assert` with a synthetic non-PII QQ Managed issuance identity and a credential computed from `BROKER_DEPLOY_SMOKE_QQ_AUTH_HMAC_PSK`; when production issuance configuration is present, this returns `issued` plus a one-time `openrouter_api_key`.
+- [x] `POST /v1/telemetry/translation-success-day` runtime secret and migration prerequisites are registered for anonymous active-day telemetry ingest.
 
 Implementation notes for the minimum smoke path:
 
@@ -205,6 +208,7 @@ The remaining rollout work is operational, not repo-side automation:
     - `OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION` and `OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION` are required for child-key issuance
     - `OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION` must be registered so deploy sync can populate runtime `OPENROUTER_MANAGED_USER_HMAC_SECRET` for deterministic managed OpenRouter user ids
     - `QQ_AUTH_HMAC_PSK_PRODUCTION` must be registered so deploy sync can populate runtime `QQ_AUTH_HMAC_PSK` and the smoke test can exercise `POST /v1/auth/qq/assert`
+    - `TELEMETRY_SUBJECT_HMAC_SECRET_PRODUCTION` must be registered so deploy sync can populate runtime `TELEMETRY_SUBJECT_HMAC_SECRET` for `POST /v1/telemetry/translation-success-day`
     - `DISCORD_CLIENT_ID_PRODUCTION`, `DISCORD_CLIENT_SECRET_PRODUCTION`, `DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION`, and `DISCORD_USER_REF_SECRET_PRODUCTION` must be registered so deploy sync can populate runtime `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, `DISCORD_REDIRECT_URI_ALLOWLIST`, and `DISCORD_USER_REF_SECRET` for Discord OAuth onboarding
     - `BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION` must be set to a model blocked by the configured guardrail
 2. create or confirm the production D1 database and capture its `database_id`

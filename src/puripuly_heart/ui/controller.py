@@ -7092,9 +7092,11 @@ class GuiController:
         self, *, secrets
     ) -> ManagedOpenRouterReleaseService | None:
         if self.settings is None:
+            self.telemetry_client = None
             return None
         release_settings = self._managed_openrouter_release_settings()
         if release_settings is None:
+            self.telemetry_client = None
             return None
 
         from puripuly_heart import __version__
@@ -7103,6 +7105,7 @@ class GuiController:
             client = HttpManagedOpenRouterBrokerClient(
                 base_url=self.settings.openrouter.broker_base_url,
             )
+            self.telemetry_client = client
         except ValueError as exc:
             logger.warning(
                 "[Managed OpenRouter] Invalid broker base URL %r; using unavailable fallback: %s",
@@ -7110,6 +7113,7 @@ class GuiController:
                 exc,
             )
             client = UnavailableManagedOpenRouterReleaseClient()
+            self.telemetry_client = None
 
         return ManagedOpenRouterReleaseService(
             openrouter_config=build_openrouter_release_runtime_config(release_settings),
