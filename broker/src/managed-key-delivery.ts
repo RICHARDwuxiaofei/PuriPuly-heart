@@ -2,7 +2,9 @@ import type { Context } from 'hono';
 
 import { errorResponse as publicErrorResponse } from './broker-error';
 import type { BrokerEnv } from './contract';
+import { finalizeDiscordManagedKeyDeliveryAck } from './discord-managed-issue';
 import type { BrokerIssueSuccessSource, ManagedKeyDeliveryRecord } from './persistence';
+import { finalizeQqManagedKeyDeliveryAck } from './qq-managed-issue';
 
 const DELIVERY_ID_PREFIX = 'ph-delivery-v1_';
 const ACK_TOKEN_HASH_PREFIX = 'ph-delivery-ack-token-v1_';
@@ -34,6 +36,10 @@ export interface CreateManagedKeyDeliveryResult {
 
 export type ManagedKeyDeliveryAckResult =
   | { ok: true; status: 'acknowledged' | 'already_acknowledged' }
+  | { ok: false; reason: 'invalid' | 'expired' | 'mismatched' | 'failed' };
+
+type ManagedKeyDeliveryAckValidationResult =
+  | { ok: true; status: 'pending' | 'already_acknowledged'; delivery: ManagedKeyDeliveryRecord }
   | { ok: false; reason: 'invalid' | 'expired' | 'mismatched' | 'failed' };
 
 export async function createManagedKeyDelivery(
@@ -142,6 +148,74 @@ export async function acknowledgeManagedKeyDelivery(
   return { ok: true, status: 'acknowledged' };
 }
 
+export async function validateManagedKeyDeliveryAck(
+  db: D1Database,
+  input: {
+    deliveryId: string;
+    managedCredentialRef: string;
+    deliveryAckToken: string;
+    now: Date;
+  },
+): Promise<ManagedKeyDeliveryAckValidationResult> {
+  const row = await getManagedKeyDelivery(db, input.deliveryId);
+  if (!row) {
+    return { ok: false, reason: 'invalid' };
+  }
+
+  const candidateHash = await hashDeliveryAckToken(input.deliveryAckToken);
+  if (candidateHash !== row.ack_token_hash) {
+    return { ok: false, reason: 'invalid' };
+  }
+
+  if (row.managed_credential_ref !== input.managedCredentialRef) {
+    return { ok: false, reason: 'mismatched' };
+  }
+
+  if (row.status === 'acknowledged') {
+    return { ok: true, status: 'already_acknowledged', delivery: row };
+  }
+
+  if (row.status === 'expired') {
+    return { ok: false, reason: 'expired' };
+  }
+
+  if (row.status === 'cleanup_required') {
+    return { ok: false, reason: 'failed' };
+  }
+
+  if (input.now.toISOString() > row.expires_at) {
+    return { ok: false, reason: 'expired' };
+  }
+
+  return { ok: true, status: 'pending', delivery: row };
+}
+
+export async function markManagedKeyDeliveryAcknowledged(
+  db: D1Database,
+  input: { deliveryId: string; acknowledgedAt: Date },
+): Promise<ManagedKeyDeliveryAckResult> {
+  const result = await db
+    .prepare(
+      `UPDATE managed_key_deliveries
+          SET status = 'acknowledged', acknowledged_at = ?
+        WHERE delivery_id = ?
+          AND status = 'pending'`,
+    )
+    .bind(input.acknowledgedAt.toISOString(), input.deliveryId)
+    .run();
+
+  if ((result.meta?.changes ?? 0) === 1) {
+    return { ok: true, status: 'acknowledged' };
+  }
+
+  const latest = await getManagedKeyDelivery(db, input.deliveryId);
+  if (latest?.status === 'acknowledged') {
+    return { ok: true, status: 'already_acknowledged' };
+  }
+
+  return { ok: false, reason: 'failed' };
+}
+
 export async function listStalePendingManagedKeyDeliveries(
   db: D1Database,
   input: { now: Date; limit: number },
@@ -200,26 +274,54 @@ export async function handleManagedKeyDeliveryAck(
     );
   }
 
-  const result = await acknowledgeManagedKeyDelivery(c.env.BROKER_DB, {
+  const acknowledgedAt = new Date();
+  const validation = await validateManagedKeyDeliveryAck(c.env.BROKER_DB, {
     deliveryId,
     managedCredentialRef,
     deliveryAckToken,
-    now: new Date(),
+    now: acknowledgedAt,
   });
 
-  if (result.ok) {
-    return c.json({ ok: true, status: result.status });
+  if (validation.ok) {
+    let ackDetails: Record<string, unknown> = {};
+    let status: 'acknowledged' | 'already_acknowledged' = 'already_acknowledged';
+    if (validation.status === 'pending') {
+      try {
+        if (validation.delivery.issue_source === 'discord') {
+          ackDetails = await finalizeDiscordManagedKeyDeliveryAck(c, {
+            managedCredentialRef,
+            acknowledgedAt,
+          });
+        } else if (validation.delivery.issue_source === 'qq') {
+          await finalizeQqManagedKeyDeliveryAck(c, {
+            managedCredentialRef,
+            acknowledgedAt,
+          });
+        }
+      } catch {
+        return ackErrorResponse(c, 409, 'failed', 'delivery acknowledgement cannot be applied');
+      }
+      const ackResult = await markManagedKeyDeliveryAcknowledged(c.env.BROKER_DB, {
+        deliveryId,
+        acknowledgedAt,
+      });
+      if (!ackResult.ok) {
+        return ackErrorResponse(c, 409, 'failed', 'delivery acknowledgement cannot be applied');
+      }
+      status = ackResult.status;
+    }
+    return c.json({ ok: true, status, ...ackDetails });
   }
 
-  if (result.reason === 'expired') {
+  if (validation.reason === 'expired') {
     return ackErrorResponse(c, 410, 'expired', 'delivery acknowledgement expired');
   }
 
-  if (result.reason === 'mismatched') {
+  if (validation.reason === 'mismatched') {
     return ackErrorResponse(c, 409, 'mismatched', 'delivery acknowledgement did not match credential');
   }
 
-  if (result.reason === 'failed') {
+  if (validation.reason === 'failed') {
     return ackErrorResponse(c, 409, 'failed', 'delivery acknowledgement cannot be applied');
   }
 

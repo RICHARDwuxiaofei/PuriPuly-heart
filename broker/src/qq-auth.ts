@@ -29,12 +29,14 @@ interface QqAuthAssertRequestBody {
   qq_identity?: unknown;
   credential?: unknown;
   asserted_at?: unknown;
+  delivery_ack_supported?: unknown;
 }
 
 interface QqAuthAssertInput {
   qqIdentity: string;
   credential: string;
   assertedAt: string;
+  deliveryAckSupported: boolean;
 }
 
 export async function handleQqAuthAssert(
@@ -118,6 +120,7 @@ export async function handleQqAuthAssert(
   return issueQqManagedEntitlement(c, {
     qqSubjectRef,
     now,
+    deliveryAckSupported: input.value.deliveryAckSupported,
   });
 }
 
@@ -188,6 +191,7 @@ function validateQqAuthAssertInput(
       qqIdentity,
       credential,
       assertedAt: assertedAtDate.toISOString(),
+      deliveryAckSupported: body.delivery_ack_supported === true,
     },
   };
 }

@@ -28,7 +28,7 @@ interface QqAuthAssertionRow {
 
 interface QqManagedEntitlementRow {
   qq_subject_ref: string;
-  status: 'issuing' | 'active' | 'cleanup_required' | 'revoked';
+  status: 'issuing' | 'delivery_pending' | 'active' | 'cleanup_required' | 'revoked';
   issue_ref: string;
   managed_credential_ref: string | null;
   budget_usd: number;
@@ -821,6 +821,99 @@ describe('QQ auth assertion route', () => {
     expect(retryResponse.status).toBe(200);
   });
 
+  it('cleans up and releases QQ delivery_pending reservation when delivery row creation fails', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const env = createTestBrokerEnv();
+    env.__db
+      .prepare(
+        `CREATE TRIGGER fail_managed_key_delivery_insert
+         BEFORE INSERT ON managed_key_deliveries
+         BEGIN
+           SELECT RAISE(FAIL, 'test delivery insert failure');
+         END`,
+      )
+      .run();
+    const qqIdentity = 'qq-openid-delivery-row-cleanup-success-user';
+    const credential = await signQqCredential(env.QQ_AUTH_HMAC_PSK, qqIdentity);
+    const openRouter = mockOpenRouterManagementApi();
+
+    const response = await postQqAssertion(env, {
+      qq_identity: qqIdentity,
+      credential,
+      asserted_at: '2026-06-05T12:03:00Z',
+      delivery_ack_supported: true,
+    });
+
+    expect(response.status).toBe(500);
+    expect(await response.text()).not.toContain('or-qq-managed-child-key-test-1');
+    expect(openRouter.openRouterCreateCalls).toHaveLength(1);
+    expect(openRouter.openRouterGuardrailCalls).toHaveLength(1);
+    expect(openRouter.openRouterCleanupCalls.map(({ init }) => init?.method)).toEqual([
+      'PATCH',
+      'DELETE',
+    ]);
+    expect(countQqManagedEntitlements(env)).toBe(0);
+    expect(countManagedKeyDeliveries(env)).toBe(0);
+  });
+
+  it('marks QQ delivery_pending reservation cleanup_required when delivery row failure cleanup fails', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const rawOpenRouterChildKey = 'or-qq-managed-child-key-delivery-row-cleanup-redact';
+    const childKeyHash = 'hash_qq_managed_child_delivery_row_cleanup_required';
+    const env = createTestBrokerEnv();
+    env.__db
+      .prepare(
+        `CREATE TRIGGER fail_managed_key_delivery_insert
+         BEFORE INSERT ON managed_key_deliveries
+         BEGIN
+           SELECT RAISE(FAIL, 'test delivery insert failure');
+         END`,
+      )
+      .run();
+    const qqIdentity = 'qq-openid-delivery-row-cleanup-required-user';
+    const credential = await signQqCredential(env.QQ_AUTH_HMAC_PSK, qqIdentity);
+    const qqSubjectRef = await deriveExpectedQqSubjectRef(env.QQ_AUTH_HMAC_PSK, qqIdentity);
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const openRouter = mockOpenRouterManagementApi({
+      mode: 'cleanup_failure',
+      rawChildKey: rawOpenRouterChildKey,
+      childKeyHash,
+      cleanupFailureMessage: `cleanup failed ${qqIdentity} ${credential} ${rawOpenRouterChildKey}`,
+    });
+
+    const response = await postQqAssertion(env, {
+      qq_identity: qqIdentity,
+      credential,
+      asserted_at: '2026-06-05T12:03:00Z',
+      delivery_ack_supported: true,
+    });
+
+    expect(response.status).toBe(500);
+    const responseText = await response.text();
+    for (const sensitiveValue of [qqIdentity, credential, rawOpenRouterChildKey]) {
+      expect(responseText).not.toContain(sensitiveValue);
+      expect(stringifyConsoleCalls(consoleErrorSpy)).not.toContain(sensitiveValue);
+    }
+    expect(openRouter.openRouterCleanupCalls.map(({ init }) => init?.method)).toEqual([
+      'PATCH',
+      'DELETE',
+    ]);
+    expect(readQqManagedEntitlement(env, qqSubjectRef)).toEqual(
+      expect.objectContaining({
+        status: 'cleanup_required',
+        managed_credential_ref: childKeyHash,
+        issued_at: null,
+        expires_at: null,
+        delivered_at: null,
+      }),
+    );
+    expect(countManagedKeyDeliveries(env)).toBe(0);
+  });
+
   it('marks the matching reservation cleanup_required when guardrail cleanup fails without leaking sensitive diagnostics', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW_ISO));
@@ -1467,6 +1560,14 @@ function countOpenRouterEntitlements(env: TestBrokerEnv): number {
   return Number(row.count);
 }
 
+function countManagedKeyDeliveries(env: TestBrokerEnv): number {
+  const row = env.__db
+    .prepare('SELECT COUNT(*) AS count FROM managed_key_deliveries')
+    .get() as { count: number };
+
+  return Number(row.count);
+}
+
 function readQqManagedEntitlement(
   env: TestBrokerEnv,
   qqSubjectRef: string,
@@ -1593,7 +1694,8 @@ function mockOpenRouterManagementApi(options: {
     | 'success'
     | 'create_failure'
     | 'guardrail_failure'
-    | 'guardrail_failure_cleanup_failure';
+    | 'guardrail_failure_cleanup_failure'
+    | 'cleanup_failure';
   rawChildKey?: string;
   childKeyHash?: string;
   createFailureMessage?: string;
@@ -1659,7 +1761,10 @@ function mockOpenRouterManagementApi(options: {
 
     if (url === `${OPENROUTER_KEYS_URL}/${childKeyHash}` && method === 'PATCH') {
       openRouterCleanupCalls.push({ input, init });
-      if (options.mode === 'guardrail_failure_cleanup_failure') {
+      if (
+        options.mode === 'guardrail_failure_cleanup_failure' ||
+        options.mode === 'cleanup_failure'
+      ) {
         return jsonResponse(
           {
             error: {
@@ -1675,7 +1780,10 @@ function mockOpenRouterManagementApi(options: {
 
     if (url === `${OPENROUTER_KEYS_URL}/${childKeyHash}` && method === 'DELETE') {
       openRouterCleanupCalls.push({ input, init });
-      if (options.mode === 'guardrail_failure_cleanup_failure') {
+      if (
+        options.mode === 'guardrail_failure_cleanup_failure' ||
+        options.mode === 'cleanup_failure'
+      ) {
         return jsonResponse(
           {
             error: {

@@ -36,6 +36,7 @@ import {
   normalizeManagedState,
   type TalkTogetherPassStatusResponse,
 } from './managed-state';
+import { createManagedKeyDelivery } from './managed-key-delivery';
 import { nonEmptyString, stringValue, validatePublicInput } from './public-input';
 import type {
   BrokerPendingDiscordOAuthSessionsConfig,
@@ -90,6 +91,7 @@ const textEncoder = new TextEncoder();
 const DISCORD_USER_REF_VERSION = 1;
 const DISCORD_USER_REF_PREFIX = `ph-discord-user-v${DISCORD_USER_REF_VERSION}_`;
 const DISCORD_USER_REF_PAYLOAD_PREFIX = `puripuly-heart:discord-user:v${DISCORD_USER_REF_VERSION}`;
+const MANAGED_KEY_DELIVERY_ACK_TTL_MS = 15 * 60_000;
 
 type DiscordReservationErrorSubcode =
   | 'discord_lifetime_used'
@@ -132,6 +134,7 @@ interface DiscordOpenRouterIssueRequestBody {
   signed_at?: unknown;
   signature_alg?: unknown;
   signature?: unknown;
+  delivery_ack_supported?: unknown;
 }
 
 interface DiscordOpenRouterIssueInput {
@@ -150,6 +153,7 @@ interface DiscordOpenRouterIssueInput {
   signedAt: string;
   signatureAlg: 'ed25519';
   signature: string;
+  deliveryAckSupported: boolean;
 }
 
 interface DiscordEligibilityDecision {
@@ -605,6 +609,42 @@ export async function handleDiscordOpenRouterIssue(
       keyHash: childKey.hash,
     });
 
+    if (input.value.deliveryAckSupported) {
+      const pending = await markDiscordReservationDeliveryPending(c.env.BROKER_DB, {
+        stateHash,
+        installationId: input.value.installationId,
+        devicePublicKey: input.value.devicePublicKey,
+        discordUserRef,
+        managedCredentialRef: childKey.hash,
+        issuedAt,
+        expiresAt,
+        budgetUsd: issueLimitUsd,
+        nowIso,
+      });
+      if (!pending) {
+        throw new Error('Discord managed entitlement delivery-pending transition failed');
+      }
+      const delivery = await createManagedKeyDelivery(c.env.BROKER_DB, {
+        issueSource: 'discord',
+        subjectRef: discordUserRef,
+        installationId: input.value.installationId,
+        managedCredentialRef: childKey.hash,
+        createdAt: now,
+        expiresAt: new Date(now.getTime() + MANAGED_KEY_DELIVERY_ACK_TTL_MS),
+      });
+      return c.json({
+        openrouter_api_key: childKey.rawKey,
+        managed_credential_ref: childKey.hash,
+        expires_at: expiresAt,
+        delivery_ack_required: true,
+        delivery_id: delivery.deliveryId,
+        delivery_ack_token: delivery.deliveryAckToken,
+        delivery_ack_expires_at: new Date(
+          now.getTime() + MANAGED_KEY_DELIVERY_ACK_TTL_MS,
+        ).toISOString(),
+      });
+    }
+
     const activationSucceeded = await activateDiscordReservation(c.env.BROKER_DB, {
       stateHash,
       installationId: input.value.installationId,
@@ -765,6 +805,7 @@ function validateDiscordIssuePublicInput(
   const signedAt = nonEmptyString(body.signed_at);
   const signatureAlg = stringValue(body.signature_alg);
   const signature = nonEmptyString(body.signature);
+  const deliveryAckSupported = body.delivery_ack_supported === true;
 
   if (
     !code ||
@@ -892,6 +933,7 @@ function validateDiscordIssuePublicInput(
       signedAt,
       signatureAlg: 'ed25519',
       signature,
+      deliveryAckSupported,
     },
   };
 }
@@ -1489,7 +1531,7 @@ async function insertOrUpdateIssuingDiscordEntitlement(
             SELECT COUNT(*)
               FROM openrouter_entitlements capped
              WHERE (
-               capped.discord_issue_status = 'issuing'
+                capped.discord_issue_status IN ('issuing', 'delivery_pending')
                AND capped.discord_issue_reserved_at >= ?
                AND capped.discord_issue_reserved_at < ?
              )
@@ -1563,7 +1605,7 @@ async function insertOrUpdateIssuingDiscordEntitlement(
         WHERE openrouter_entitlements.status <> 'active'
           AND (
             openrouter_entitlements.discord_issue_status IS NULL
-            OR openrouter_entitlements.discord_issue_status NOT IN ('issuing', 'cleanup_required')
+             OR openrouter_entitlements.discord_issue_status NOT IN ('issuing', 'delivery_pending', 'cleanup_required')
             OR (
               openrouter_entitlements.discord_issue_status = 'issuing'
               AND (
@@ -1614,7 +1656,7 @@ function deliveredHardwareNotExistsPredicate(): string {
                AND (
                  reserved.status = 'active'
                  OR (
-                  reserved.discord_issue_status IN ('issuing', 'cleanup_required')
+                   reserved.discord_issue_status IN ('issuing', 'delivery_pending', 'cleanup_required')
                   AND NOT (
                     reserved.installation_id = ?
                     AND reserved.discord_user_ref = ?
@@ -1652,7 +1694,7 @@ async function hasDeliveredHardwareDuplicate(
              AND (
                reserved.status = 'active'
                OR (
-                  reserved.discord_issue_status IN ('issuing', 'cleanup_required')
+                   reserved.discord_issue_status IN ('issuing', 'delivery_pending', 'cleanup_required')
                   AND NOT (
                     reserved.installation_id = ?
                     AND reserved.discord_user_ref = ?
@@ -1697,7 +1739,7 @@ async function hasSameInstallationIssuingConflict(
             FROM openrouter_entitlements existing
            WHERE existing.installation_id = ?
              AND existing.status = 'pending_release'
-              AND existing.discord_issue_status IN ('issuing', 'cleanup_required')
+               AND existing.discord_issue_status IN ('issuing', 'delivery_pending', 'cleanup_required')
               AND existing.discord_user_ref IS NOT NULL
               AND existing.discord_user_ref <> ?
         ) AS conflict_found`,
@@ -1834,7 +1876,7 @@ async function releaseDiscordReservationAfterManagedCleanup(
             )
             OR (
               managed_credential_ref = ?
-              AND discord_issue_status IN ('issuing', 'active', 'cleanup_required')
+              AND discord_issue_status IN ('issuing', 'delivery_pending', 'active', 'cleanup_required')
             )
           )`,
     )
@@ -1845,7 +1887,7 @@ async function releaseDiscordReservationAfterManagedCleanup(
       `DELETE FROM discord_identities
         WHERE discord_user_ref = ?
           AND entitlement_installation_id = ?
-          AND status IN ('issuing', 'active', 'cleanup_required')`,
+           AND status IN ('issuing', 'active', 'cleanup_required')`,
     )
     .bind(input.discordUserRef, input.installationId)
     .run();
@@ -1874,7 +1916,7 @@ async function markDiscordCleanupRequired(
               discord_issue_delivered_at = NULL
         WHERE installation_id = ?
           AND discord_user_ref = ?
-          AND discord_issue_status IN ('issuing', 'active')
+          AND discord_issue_status IN ('issuing', 'delivery_pending', 'active')
           AND (managed_credential_ref IS NULL OR managed_credential_ref = ?)`,
     )
     .bind(
@@ -1981,6 +2023,74 @@ async function activateDiscordReservation(
   return Number(sessionResult.meta.changes ?? 0) === 1;
 }
 
+async function markDiscordReservationDeliveryPending(
+  db: D1Database,
+  input: {
+    stateHash: string;
+    installationId: string;
+    devicePublicKey: string;
+    discordUserRef: string;
+    managedCredentialRef: string;
+    issuedAt: string;
+    expiresAt: string;
+    budgetUsd: number;
+    nowIso: string;
+  },
+): Promise<boolean> {
+  const entitlementResult = await db
+    .prepare(
+      `UPDATE openrouter_entitlements
+          SET status = 'pending_release',
+              budget_usd = ?,
+              managed_credential_ref = ?,
+              issued_at = ?,
+              expires_at = ?,
+              release_session_ref = NULL,
+              release_token_hash = NULL,
+              release_token_expires_at = NULL,
+              discord_issue_status = 'delivery_pending',
+              discord_issue_delivered_at = NULL
+        WHERE installation_id = ?
+          AND discord_user_ref = ?
+          AND status = 'pending_release'
+          AND discord_issue_status = 'issuing'
+          AND managed_credential_ref IS NULL
+          AND EXISTS (
+            SELECT 1
+              FROM installations delivery_installation
+             WHERE delivery_installation.installation_id = openrouter_entitlements.installation_id
+               AND delivery_installation.device_public_key = ?
+          )`,
+    )
+    .bind(
+      input.budgetUsd,
+      input.managedCredentialRef,
+      input.issuedAt,
+      input.expiresAt,
+      input.installationId,
+      input.discordUserRef,
+      input.devicePublicKey,
+    )
+    .run();
+  if (Number(entitlementResult.meta.changes ?? 0) !== 1) {
+    return false;
+  }
+
+  const sessionResult = await db
+    .prepare(
+      `UPDATE discord_oauth_sessions
+          SET status = 'consumed',
+              pkce_code_verifier = NULL,
+              consumed_at = ?
+        WHERE state_hash = ?
+          AND status = 'processing'`,
+    )
+    .bind(input.nowIso, input.stateHash)
+    .run();
+
+  return Number(sessionResult.meta.changes ?? 0) === 1;
+}
+
 async function getEntitlement(
   db: D1Database,
   installationId: string,
@@ -1997,6 +2107,92 @@ async function getEntitlement(
     )
     .bind(installationId)
     .first<OpenRouterEntitlementRecord>();
+}
+
+export async function finalizeDiscordManagedKeyDeliveryAck(
+  c: Context<BrokerEnv>,
+  input: { managedCredentialRef: string; acknowledgedAt: Date },
+): Promise<{ referralBonusApplied?: boolean }> {
+  const entitlement = await c.env.BROKER_DB.prepare(
+    `SELECT installation_id, status, budget_usd, managed_credential_ref, issued_at,
+            expires_at, release_session_ref, release_token_hash, release_token_expires_at,
+            verified_hardware_hash, verified_hardware_hash_salt_version,
+            discord_user_ref, discord_issue_status, discord_issue_reserved_at,
+            discord_issue_delivered_at
+       FROM openrouter_entitlements
+      WHERE managed_credential_ref = ?`,
+  )
+    .bind(input.managedCredentialRef)
+    .first<OpenRouterEntitlementRecord>();
+  if (!entitlement) {
+    throw new Error('Discord delivery ACK target is missing');
+  }
+  const alreadyActive =
+    entitlement.status === 'active' && entitlement.discord_issue_status === 'active';
+  if (!alreadyActive && (
+    entitlement.status !== 'pending_release' ||
+    entitlement.discord_issue_status !== 'delivery_pending'
+  )) {
+    throw new Error('Discord delivery ACK target is not pending');
+  }
+  if (!entitlement.discord_user_ref || !entitlement.issued_at || !entitlement.expires_at) {
+    throw new Error('Discord delivery ACK target is missing entitlement metadata');
+  }
+
+  const deliveredAt = entitlement.discord_issue_delivered_at ?? input.acknowledgedAt.toISOString();
+  if (!alreadyActive) {
+    const activated = await c.env.BROKER_DB.prepare(
+      `UPDATE openrouter_entitlements
+          SET status = 'active', discord_issue_status = 'active', discord_issue_delivered_at = ?
+        WHERE installation_id = ?
+          AND managed_credential_ref = ?
+          AND status = 'pending_release'
+          AND discord_issue_status = 'delivery_pending'`,
+    )
+      .bind(deliveredAt, entitlement.installation_id, input.managedCredentialRef)
+      .run();
+    if (Number(activated.meta.changes ?? 0) !== 1) {
+      throw new Error('Discord delivery ACK activation failed');
+    }
+  }
+  await c.env.BROKER_DB.prepare(
+    `UPDATE discord_identities
+        SET status = 'active', updated_at = ?
+      WHERE discord_user_ref = ?
+        AND entitlement_installation_id = ?
+        AND status = 'issuing'`,
+  )
+    .bind(deliveredAt, entitlement.discord_user_ref, entitlement.installation_id)
+    .run();
+
+  if (!(await hasIssueSuccessRecord(c.env.BROKER_DB, input.managedCredentialRef))) {
+    await runDiscordIssueSuccessMonitoring(c, {
+      installationId: entitlement.installation_id,
+      managedCredentialRef: input.managedCredentialRef,
+      issuedAt: deliveredAt,
+      now: input.acknowledgedAt,
+      sensitiveValues: [],
+    });
+  }
+  const referralReservation = await resolveReservedIssueReferralForAck(c.env.BROKER_DB, {
+    referredDiscordUserRef: entitlement.discord_user_ref,
+    referredInstallationId: entitlement.installation_id,
+  });
+  const referralBonusApplied = await creditReservedIssueReferralReward(c.env.BROKER_DB, {
+    referralReservation,
+    referredDiscordUserRef: entitlement.discord_user_ref,
+    referredInstallationId: entitlement.installation_id,
+    referredManagedCredentialRef: input.managedCredentialRef,
+    nowIso: deliveredAt,
+  });
+  await bestEffortApplyReferrerRewardLimitUpdate(c.env.BROKER_DB, {
+    referralReservation,
+    referredDiscordUserRef: entitlement.discord_user_ref,
+    referredInstallationId: entitlement.installation_id,
+    managementApiKey: c.env.OPENROUTER_MANAGEMENT_API_KEY,
+    nowIso: deliveredAt,
+  });
+  return referralBonusApplied ? { referralBonusApplied } : {};
 }
 
 async function getInstallation(
@@ -2220,6 +2416,41 @@ async function creditReservedIssueReferralReward(
   }
 
   return true;
+}
+
+async function resolveReservedIssueReferralForAck(
+  db: D1Database,
+  input: { referredDiscordUserRef: string; referredInstallationId: string },
+): Promise<IssueReferralReservationResult | null> {
+  const row = await db
+    .prepare(
+      `SELECT referral_id
+         FROM referral_rewards
+        WHERE referred_discord_user_ref = ?
+          AND referred_installation_id = ?
+          AND referred_bonus_status = 'reserved'
+        ORDER BY created_at DESC
+        LIMIT 1`,
+    )
+    .bind(input.referredDiscordUserRef, input.referredInstallationId)
+    .first<{ referral_id: string }>();
+  return row?.referral_id ? { outcome: 'reserved', referralId: row.referral_id } : null;
+}
+
+async function hasIssueSuccessRecord(
+  db: D1Database,
+  managedCredentialRef: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 AS found
+         FROM broker_issue_success_events
+        WHERE managed_credential_ref = ?
+        LIMIT 1`,
+    )
+    .bind(managedCredentialRef)
+    .first<{ found: number }>();
+  return Number(row?.found ?? 0) === 1;
 }
 
 async function bestEffortApplyReferrerRewardLimitUpdate(
