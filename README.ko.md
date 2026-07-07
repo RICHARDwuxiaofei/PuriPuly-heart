@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.2.1-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.2.2-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -73,7 +73,7 @@ PuriPuly를 통해 다른 외국인 친구들과 실제로 소통하는 모습�
 → 로컬 Qwen ASR을 사용하는 상황이면 클라우드 STT 서비스로 바꾸는 걸 추천해요. 만약에 인텔 사용자라면 PuriPuly를 Pcore만 고정 할당되게 설정해주세요.
 
 - **음성과 대화 내용은 어떻게 처리되나요?**
-→ 오로지 자신의 전사문과 번역 결과만을 로컬에 저장해요. 또한 타인의 음성, 전사문, 번역 결과는 기록하지 않아요. 다만 STT 서비스와 번역 제공자가 데이터를 처리할 수 있어요.
+→ 음성과 대화 내용은 로컬에 저장되며 Puripuly 서버에 전송되지 않아요. 또한 타인의 음성, 전사문, 번역 결과는 기록하지 않아요. 다만 STT 서비스와 번역 제공자가 데이터를 처리할 수 있어요.
 
 ### [📥 다운로드](https://github.com/kapitalismho/PuriPuly-heart/releases/latest)
 
@@ -90,10 +90,17 @@ PuriPuly를 통해 다른 외국인 친구들과 실제로 소통하는 모습�
 
 ### 1달러 당 사용 가능 횟수
 
+#### 권장 모델
+
 | LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | 14,380회 | 2,920회 | 3,710회 | 1,180회 |
 | **DeepSeek V4 Flash** | 19,410회 | 3,080회 | 3,980회 | 1,210회 |
+
+#### 기타 모델
+
+| LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
+|---|---|---|---|---|
 | **Gemma 4 31B (Cerebras)** | 920회 | 730회 | 770회 | 540회 |
 | **DeepSeek V4 Pro** | 6,400회 | 2,330회 | 2,810회 | 1,070회 |
 | **Gemini 3 Flash** | 1,710회 | 1,170회 | 1,280회 | 740회 |
@@ -103,10 +110,17 @@ PuriPuly를 통해 다른 외국인 친구들과 실제로 소통하는 모습�
 
 ### 발화당 비용
 
+#### 권장 모델
+
 | LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | ~0.1원 | ~0.5원 | ~0.4원 | ~1.3원 |
 | **DeepSeek V4 Flash** | ~0.08원 | ~0.5원 | ~0.4원 | ~1.2원 |
+
+#### 기타 모델
+
+| LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
+|---|---|---|---|---|
 | **Gemma 4 31B (Cerebras)** | ~1.6원 | ~2.0원 | ~1.9원 | ~2.8원 |
 | **DeepSeek V4 Pro** | ~0.2원 | ~0.6원 | ~0.5원 | ~1.4원 |
 | **Gemini 3 Flash** | ~0.9원 | ~1.3원 | ~1.2원 | ~2.0원 |
@@ -142,9 +156,6 @@ PuriPuly를 통해 다른 외국인 친구들과 실제로 소통하는 모습�
 2. PuriPuly 설치
 3. **STT** 버튼 클릭
 4. **TRANS** 버튼 클릭 후 디스코드 인증 
-
-   > 번역 모델이 Gemma 4 혹은 Deepseek이면서 연결 방식이 관리형이어야 디스코드 인증이 가능해요.
-
 5. **Subtitles** 버튼을 눌러 VR 자막 켜기 
 6. (선택) **Peer** 버튼을 눌러 상대 음성 번역 켜기
 
@@ -159,8 +170,6 @@ PuriPuly를 통해 다른 외국인 친구들과 실제로 소통하는 모습�
 2. 알맞은 마이크 선택
 3. 앱 재시작
 
-그래도 해결되지 않는다면 트위터 DM 혹은 [issue #10](https://github.com/kapitalismho/PuriPuly-heart/issues/10)에 보고해주세요.
-
 ---
 
 ### 중국 사용자를 위한 안내
@@ -168,9 +177,9 @@ PuriPuly를 통해 다른 외국인 친구들과 실제로 소통하는 모습�
 Soniox/Gemini/Deepgram이 차단된 지역이라면 아래와 같은 조합으로 사용해주세요.
 
 - STT: **Qwen ASR**
-- LLM: **DeepSeek V4 Flash** 혹은 **DeepSeek V4 Pro**
+- LLM: **DeepSeek V4 Flash**
 
-   > 관리형 연결방식을 사용시 '관리형' 옵션 대신 '관리형 (중국)'을 사용해주세요.
+   > 디스코드 대신 QQ를 통해 인증할 수 있어요.
 
 ---
 

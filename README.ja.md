@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.2.1-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.2.2-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -73,7 +73,7 @@ PuriPulyを通じて他の外国人の友達と実際に交流している様子
 → ローカルのQwen ASRを使っている場合は、クラウドSTTに切り替えるのをおすすめします。Intelユーザーの方は、PuriPulyをPコアのみに固定割り当てされるよう設定してください。
 
 - **音声や会話の内容はどう扱われますか？**
-→ 自分の文字起こしと翻訳結果のみがローカルに保存されます。相手の音声・文字起こし・翻訳結果は記録しません。ただし、STTサービスと翻訳プロバイダーがデータを処理することがあります。
+→ 音声や会話の内容はローカルに保存され、Puripulyのサーバーには送信されません。また、相手の音声・文字起こし・翻訳結果は記録しません。ただし、STTサービスと翻訳プロバイダーがデータを処理することがあります。
 
 ### [📥 ダウンロード](https://github.com/kapitalismho/PuriPuly-heart/releases/latest)
 
@@ -90,10 +90,17 @@ PuriPulyを通じて他の外国人の友達と実際に交流している様子
 
 ### 1ドルあたりの使用可能回数
 
+#### 推奨モデル
+
 | LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | 14,380回 | 2,920回 | 3,710回 | 1,180回 |
 | **DeepSeek V4 Flash** | 19,410回 | 3,080回 | 3,980回 | 1,210回 |
+
+#### その他のモデル
+
+| LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
+|---|---|---|---|---|
 | **Gemma 4 31B (Cerebras)** | 920回 | 730回 | 770回 | 540回 |
 | **DeepSeek V4 Pro** | 6,400回 | 2,330回 | 2,810回 | 1,070回 |
 | **Gemini 3 Flash** | 1,710回 | 1,170回 | 1,280回 | 740回 |
@@ -103,10 +110,17 @@ PuriPulyを通じて他の外国人の友達と実際に交流している様子
 
 ### 発話あたりのコスト
 
+#### 推奨モデル
+
 | LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | ~0.01円 | ~0.05円 | ~0.04円 | ~0.13円 |
 | **DeepSeek V4 Flash** | ~0.008円 | ~0.05円 | ~0.04円 | ~0.12円 |
+
+#### その他のモデル
+
+| LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
+|---|---|---|---|---|
 | **Gemma 4 31B (Cerebras)** | ~0.16円 | ~0.20円 | ~0.19円 | ~0.28円 |
 | **DeepSeek V4 Pro** | ~0.02円 | ~0.06円 | ~0.05円 | ~0.14円 |
 | **Gemini 3 Flash** | ~0.09円 | ~0.13円 | ~0.12円 | ~0.20円 |
@@ -142,9 +156,6 @@ PuriPulyを通じて他の外国人の友達と実際に交流している様子
 2. PuriPulyをインストール
 3. **STT** ボタンをクリック
 4. **TRANS** ボタンをクリックしてDiscord認証
-
-   > 翻訳モデルがGemma 4またはDeepSeekで、接続方式がマネージドの場合のみDiscord認証が可能です。
-
 5. **Subtitles** ボタンを押してVR字幕をオン
 6. （任意）**Peer** ボタンを押して相手の音声翻訳をオン
 
@@ -159,8 +170,6 @@ PuriPulyを通じて他の外国人の友達と実際に交流している様子
 2. 正しいマイクを選択
 3. アプリを再起動
 
-それでも解決しない場合は、Twitter DMまたは [issue #10](https://github.com/kapitalismho/PuriPuly-heart/issues/10) で報告してください。
-
 ---
 
 ### 中国のユーザーへ向けた案内
@@ -168,9 +177,9 @@ PuriPulyを通じて他の外国人の友達と実際に交流している様子
 Soniox / Gemini / Deepgramへのアクセスがブロックされている地域の場合は、以下の組み合わせをお使いください。
 
 - STT: **Qwen ASR**
-- LLM: **DeepSeek V4 Flash** または **DeepSeek V4 Pro**
+- LLM: **DeepSeek V4 Flash**
 
-   > マネージド接続方式を使う場合は、**マネージド** ではなく **マネージド（中国）** を選んでください。
+   > Discordの代わりにQQで認証できます。
 
 ---
 

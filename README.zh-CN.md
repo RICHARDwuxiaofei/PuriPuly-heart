@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.2.1-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.2.2-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -74,7 +74,7 @@
 → 如果您正在使用本地 Qwen ASR，建议改用云端 STT 服务。如果您是 Intel 用户，请将 PuriPuly 设置为仅固定分配到 P-core。
 
 - **语音和对话内容如何处理？**
-→ 仅将自己的转写与翻译结果保存在本地。不会记录他人的语音、转写或翻译结果。但 STT 服务和翻译提供商可能会处理数据。
+→ 语音和对话内容会保存在本地，不会发送到 Puripuly 服务器。此外，不会记录他人的语音、转写或翻译结果。但 STT 服务和翻译提供商可能会处理数据。
 
 ### [📥 下载](https://github.com/kapitalismho/PuriPuly-heart/releases/latest)
 
@@ -91,10 +91,17 @@
 
 ### 每 1 美元可用次数
 
+#### 推荐模型
+
 | LLM \ ASR | Qwen ASR (本地) | Qwen ASR (云端) | Soniox | Deepgram |
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | 14,380 次 | 2,920 次 | 3,710 次 | 1,180 次 |
 | **DeepSeek V4 Flash** | 19,410 次 | 3,080 次 | 3,980 次 | 1,210 次 |
+
+#### 其他模型
+
+| LLM \ ASR | Qwen ASR (本地) | Qwen ASR (云端) | Soniox | Deepgram |
+|---|---|---|---|---|
 | **Gemma 4 31B (Cerebras)** | 920 次 | 730 次 | 770 次 | 540 次 |
 | **DeepSeek V4 Pro** | 6,400 次 | 2,330 次 | 2,810 次 | 1,070 次 |
 | **Gemini 3 Flash** | 1,710 次 | 1,170 次 | 1,280 次 | 740 次 |
@@ -104,10 +111,17 @@
 
 ### 每次发言成本
 
+#### 推荐模型
+
 | LLM \ ASR | Qwen ASR (本地) | Qwen ASR (云端) | Soniox | Deepgram |
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | ~0.0005 元 | ~0.002 元 | ~0.002 元 | ~0.006 元 |
 | **DeepSeek V4 Flash** | ~0.0004 元 | ~0.002 元 | ~0.002 元 | ~0.006 元 |
+
+#### 其他模型
+
+| LLM \ ASR | Qwen ASR (本地) | Qwen ASR (云端) | Soniox | Deepgram |
+|---|---|---|---|---|
 | **Gemma 4 31B (Cerebras)** | ~0.008 元 | ~0.010 元 | ~0.009 元 | ~0.013 元 |
 | **DeepSeek V4 Pro** | ~0.001 元 | ~0.003 元 | ~0.003 元 | ~0.007 元 |
 | **Gemini 3 Flash** | ~0.004 元 | ~0.006 元 | ~0.006 元 | ~0.010 元 |
@@ -143,9 +157,6 @@
 2. 安装 PuriPuly
 3. 点击 **STT** 按钮
 4. 点击 **TRANS** 按钮后通过 Discord 验证
-
-   > 仅当翻译模型为 Gemma 4 或 DeepSeek 且连接方式为托管时，才能进行 Discord 验证。
-
 5. 点击 **Subtitles** 按钮开启 VR 字幕
 6. （可选）点击 **Peer** 按钮开启对方语音翻译
 
@@ -160,8 +171,6 @@
 2. 选择正确的麦克风
 3. 重启应用
 
-如果仍未解决，请通过 Twitter DM 或 [issue #10](https://github.com/kapitalismho/PuriPuly-heart/issues/10) 报告。
-
 ---
 
 ### 中国大陆用户指南
@@ -169,9 +178,9 @@
 如果您所在地区无法访问 Soniox / Gemini / Deepgram，请使用以下组合。
 
 - STT：**Qwen ASR**
-- LLM：**DeepSeek V4 Flash** 或 **DeepSeek V4 Pro**
+- LLM：**DeepSeek V4 Flash**
 
-   > 使用托管连接方式时，请选择 **托管（中国）**，而不是 **托管**。
+   > 可以通过 QQ 认证，而不是 Discord。
 
 ---
 
