@@ -1055,6 +1055,10 @@ class ManagedIdentitySettings:
     founder_letter_seen_credential_ref: str | None = None
     referral_id: str | None = None
     local_managed_claim_sources: tuple[str, ...] = field(default_factory=tuple)
+    pending_delivery_ack_source: str | None = None
+    pending_delivery_ack_delivery_id: str | None = None
+    pending_delivery_ack_managed_credential_ref: str | None = None
+    pending_delivery_ack_expires_at: str | None = None
 
     def validate(self) -> None:
         if not isinstance(self.installation_id, str):
@@ -1090,6 +1094,15 @@ class ManagedIdentitySettings:
         self.local_managed_claim_sources = normalize_managed_claim_sources(
             self.local_managed_claim_sources
         )
+        for key in (
+            "pending_delivery_ack_source",
+            "pending_delivery_ack_delivery_id",
+            "pending_delivery_ack_managed_credential_ref",
+            "pending_delivery_ack_expires_at",
+        ):
+            value = getattr(self, key)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"managed {key} must be a string or None")
 
 
 def _parse_telemetry_consent(value: object) -> str:
@@ -1661,6 +1674,16 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
                 normalize_managed_claim_sources(
                     settings.managed_identity.local_managed_claim_sources
                 )
+            ),
+            "pending_delivery_ack_source": settings.managed_identity.pending_delivery_ack_source,
+            "pending_delivery_ack_delivery_id": (
+                settings.managed_identity.pending_delivery_ack_delivery_id
+            ),
+            "pending_delivery_ack_managed_credential_ref": (
+                settings.managed_identity.pending_delivery_ack_managed_credential_ref
+            ),
+            "pending_delivery_ack_expires_at": (
+                settings.managed_identity.pending_delivery_ack_expires_at
             ),
         },
         "system_prompt": settings.system_prompt,
@@ -4017,6 +4040,18 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             referral_id=normalize_owned_referral_id(managed_identity_data.get("referral_id")),
             local_managed_claim_sources=normalize_managed_claim_sources(
                 managed_identity_data.get("local_managed_claim_sources")
+            ),
+            pending_delivery_ack_source=_parse_optional_str(
+                managed_identity_data.get("pending_delivery_ack_source")
+            ),
+            pending_delivery_ack_delivery_id=_parse_optional_str(
+                managed_identity_data.get("pending_delivery_ack_delivery_id")
+            ),
+            pending_delivery_ack_managed_credential_ref=_parse_optional_str(
+                managed_identity_data.get("pending_delivery_ack_managed_credential_ref")
+            ),
+            pending_delivery_ack_expires_at=_parse_optional_str(
+                managed_identity_data.get("pending_delivery_ack_expires_at")
             ),
         ),
         telemetry=TelemetrySettings(

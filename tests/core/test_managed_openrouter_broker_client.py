@@ -363,7 +363,10 @@ async def test_issue_discord_managed_key_posts_signed_payload_and_parses_success
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
         assert request.url.path == "/v1/providers/openrouter/discord/issue"
-        assert json.loads(request.content) == request_body
+        assert json.loads(request.content) == {
+            **request_body,
+            "delivery_ack_supported": True,
+        }
         return httpx.Response(
             200,
             json={
@@ -463,6 +466,7 @@ async def test_assert_qq_managed_identity_posts_credentials_and_maps_issued_snap
             "qq_identity": "qq-user-123",
             "credential": "a" * 64,
             "asserted_at": "2026-07-03T06:00:00.000Z",
+            "delivery_ack_supported": True,
         }
         return httpx.Response(
             200,

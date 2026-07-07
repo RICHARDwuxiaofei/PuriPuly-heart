@@ -103,11 +103,17 @@ class RecordingBrokerClient:
         *,
         events: list[tuple[str, str]] | None = None,
         raise_on_issue: bool = False,
+        ack_result: broker_client.ManagedKeyDeliveryAckResult | None = None,
     ) -> None:
         self.result = result
         self.events = events if events is not None else []
         self.raise_on_issue = raise_on_issue
+        self.ack_result = ack_result or broker_client.ManagedKeyDeliveryAckResult(
+            succeeded=True,
+            status="acknowledged",
+        )
         self.requests: list[broker_client.BrokerIssueRequest] = []
+        self.ack_requests: list[broker_client.ManagedKeyDeliveryAckRequest] = []
 
     async def issue_managed_connection(
         self,
@@ -121,6 +127,14 @@ class RecordingBrokerClient:
             pytest.fail("RecordingBrokerClient requires a configured result")
         return self.result
 
+    async def acknowledge_managed_key_delivery(
+        self,
+        request: broker_client.ManagedKeyDeliveryAckRequest,
+    ) -> broker_client.ManagedKeyDeliveryAckResult:
+        self.events.append(("delivery_ack", request.delivery_id))
+        self.ack_requests.append(request)
+        return self.ack_result
+
 
 class RecordingSecretStore:
     def __init__(
@@ -129,10 +143,14 @@ class RecordingSecretStore:
         events: list[tuple[str, str]] | None = None,
         write_succeeds: bool = True,
         raise_on_set: bool = False,
+        clear_succeeds: bool = True,
+        fail_set_keys: set[str] | None = None,
     ) -> None:
         self.events = events if events is not None else []
         self.write_succeeds = write_succeeds
         self.raise_on_set = raise_on_set
+        self.clear_succeeds = clear_succeeds
+        self.fail_set_keys = fail_set_keys or set()
         self.values: dict[str, str] = {}
         self.set_calls: list[tuple[str, str]] = []
 
@@ -150,25 +168,27 @@ class RecordingSecretStore:
         self.set_calls.append((key, value))
         if self.raise_on_set:
             raise RuntimeError(RAW_EXCEPTION_TEXT)
-        if self.write_succeeds:
+        succeeded = self.write_succeeds and key not in self.fail_set_keys
+        if succeeded:
             self.values[key] = value
         return secret_store.SecretWriteResult(
-            succeeded=self.write_succeeds,
+            succeeded=succeeded,
             key=key,
-            revision="secret-r2" if self.write_succeeds else None,
+            revision="secret-r2" if succeeded else None,
             message=None,
-            diagnostics=(None if self.write_succeeds else _unsafe_diagnostics("secret_store")),
+            diagnostics=(None if succeeded else _unsafe_diagnostics("secret_store")),
         )
 
     async def clear_secret(self, key: str) -> secret_store.SecretWriteResult:
         self.events.append(("clear_secret", key))
-        self.values.pop(key, None)
+        if self.clear_succeeds:
+            self.values.pop(key, None)
         return secret_store.SecretWriteResult(
-            succeeded=True,
+            succeeded=self.clear_succeeds,
             key=key,
-            revision="secret-cleared",
+            revision="secret-cleared" if self.clear_succeeds else None,
             message=None,
-            diagnostics=None,
+            diagnostics=(None if self.clear_succeeds else _safe_diagnostics("secret_clear_failed")),
         )
 
     async def snapshot_secret(self, key: str) -> secret_store.SecretSnapshot:
@@ -206,8 +226,10 @@ class RecordingSettingsRepository:
         *,
         events: list[tuple[str, str]] | None = None,
         raise_on_save: bool = False,
+        results: list[settings_repository.SettingsCommitResult] | None = None,
     ) -> None:
         self.result = result
+        self.results = list(results or [])
         self.events = events if events is not None else []
         self.raise_on_save = raise_on_save
         self.saved_requests: list[settings_repository.SettingsCommitRequest] = []
@@ -223,6 +245,8 @@ class RecordingSettingsRepository:
         self.saved_requests.append(request)
         if self.raise_on_save:
             raise RuntimeError(RAW_EXCEPTION_TEXT)
+        if self.results:
+            return self.results.pop(0)
         if self.result is None:
             pytest.fail("RecordingSettingsRepository requires a configured result")
         return self.result
@@ -392,6 +416,7 @@ def _discord_failure() -> Any:
 def _broker_success(
     *,
     openrouter_user_id: str | None = None,
+    delivery_ack: broker_client.ManagedKeyDeliveryAckMetadata | None = None,
 ) -> broker_client.BrokerIssueResult:
     return broker_client.BrokerIssueResult(
         succeeded=True,
@@ -401,6 +426,17 @@ def _broker_success(
         message=None,
         diagnostics=None,
         openrouter_user_id=openrouter_user_id,
+        delivery_ack=delivery_ack,
+    )
+
+
+def _delivery_ack_metadata() -> broker_client.ManagedKeyDeliveryAckMetadata:
+    return broker_client.ManagedKeyDeliveryAckMetadata(
+        source="discord",
+        delivery_id="delivery-discord-1",
+        managed_credential_ref="managed-ref-discord-1",
+        expires_at="2026-07-07T00:15:00.000Z",
+        delivery_ack_token="delivery-token-discord-1",
     )
 
 
@@ -751,6 +787,181 @@ async def test_success_preflights_identity_then_discord_auth_then_broker_issue_a
     assert saved_request.expected_revision == "settings-r1"
     assert saved_request.reason == "managed_connection_auth"
     assert saved_request.values["intent"]["translation"]["connection"] == "managed"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_delivery_ack_pending_metadata_persists_before_ack_and_clears_after_success() -> None:
+    events: list[tuple[str, str]] = []
+    metadata = _delivery_ack_metadata()
+    identity = RecordingLocalIdentity(_identity_success(), events=events)
+    discord = RecordingDiscordAuth(_discord_success(), events=events)
+    broker = RecordingBrokerClient(_broker_success(delivery_ack=metadata), events=events)
+    store = RecordingSecretStore(events=events)
+    repository = RecordingSettingsRepository(_commit_success(), events=events)
+
+    result = await _service(
+        identity=identity,
+        discord=discord,
+        broker=broker,
+        store=store,
+        repository=repository,
+    ).authorize(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    assert [event[0] for event in events] == [
+        "identity_preflight",
+        "discord_auth",
+        "broker_issue",
+        "set_secret",
+        "save_settings",
+        "set_secret",
+        "delivery_ack",
+        "clear_secret",
+        "save_settings",
+    ]
+    first_save, second_save = repository.saved_requests
+    pending = first_save.values["state"]["managed_connection"]  # type: ignore[index]
+    assert pending["pending_delivery_ack_source"] == "discord"
+    assert pending["pending_delivery_ack_delivery_id"] == metadata.delivery_id
+    assert pending["pending_delivery_ack_managed_credential_ref"] == metadata.managed_credential_ref
+    assert "delivery_ack_token" not in repr(first_save.values)
+    cleared = second_save.values["state"]["managed_connection"]  # type: ignore[index]
+    assert cleared["pending_delivery_ack_source"] is None
+    assert broker.ack_requests[0].delivery_id == metadata.delivery_id
+    assert "delivery-token-discord-1" not in repr(broker.ack_requests[0])
+    assert "delivery-token-discord-1" not in store.values.values()
+
+
+@pytest.mark.asyncio
+async def test_delivery_ack_token_store_failure_does_not_persist_pending_metadata() -> None:
+    events: list[tuple[str, str]] = []
+    identity = RecordingLocalIdentity(_identity_success(), events=events)
+    discord = RecordingDiscordAuth(_discord_success(), events=events)
+    broker = RecordingBrokerClient(
+        _broker_success(delivery_ack=_delivery_ack_metadata()),
+        events=events,
+    )
+    store = RecordingSecretStore(
+        events=events,
+        fail_set_keys={"openrouter_managed_delivery_ack_token"},
+    )
+    repository = RecordingSettingsRepository(_commit_success(), events=events)
+
+    result = await _service(
+        identity=identity,
+        discord=discord,
+        broker=broker,
+        store=store,
+        repository=repository,
+    ).authorize(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_REMOTE_ACTIVE_LOCAL_MISSING
+    assert repository.saved_requests == []
+    assert broker.ack_requests == []
+    assert result.diagnostics is not None
+    assert result.diagnostics.code == "delivery_ack_token_store_failed_before_local_key_write"
+    assert LOCAL_SECRET_KEY not in store.values
+
+
+@pytest.mark.asyncio
+async def test_delivery_ack_pending_settings_commit_failure_happens_before_local_key_write() -> (
+    None
+):
+    identity = RecordingLocalIdentity(_identity_success())
+    discord = RecordingDiscordAuth(_discord_success())
+    broker = RecordingBrokerClient(_broker_success(delivery_ack=_delivery_ack_metadata()))
+    store = RecordingSecretStore()
+    repository = RecordingSettingsRepository(_commit_failure())
+
+    result = await _service(
+        identity=identity,
+        discord=discord,
+        broker=broker,
+        store=store,
+        repository=repository,
+    ).authorize(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_REMOTE_ACTIVE_LOCAL_MISSING
+    assert LOCAL_SECRET_KEY not in store.values
+    assert broker.ack_requests == []
+    assert len(repository.saved_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_delivery_ack_token_clear_failure_keeps_pending_metadata_for_retry() -> None:
+    metadata = _delivery_ack_metadata()
+    identity = RecordingLocalIdentity(_identity_success())
+    discord = RecordingDiscordAuth(_discord_success())
+    broker = RecordingBrokerClient(_broker_success(delivery_ack=metadata))
+    store = RecordingSecretStore(clear_succeeds=False)
+    repository = RecordingSettingsRepository(_commit_success())
+
+    result = await _service(
+        identity=identity,
+        discord=discord,
+        broker=broker,
+        store=store,
+        repository=repository,
+    ).authorize(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
+    assert len(repository.saved_requests) == 1
+    pending = repository.saved_requests[-1].values["state"]["managed_connection"]  # type: ignore[index]
+    assert pending["pending_delivery_ack_delivery_id"] == metadata.delivery_id
+    assert store.values["openrouter_managed_delivery_ack_token"] == metadata.delivery_ack_token
+
+
+@pytest.mark.asyncio
+async def test_delivery_ack_clear_metadata_commit_failure_keeps_token_for_retry() -> None:
+    metadata = _delivery_ack_metadata()
+    identity = RecordingLocalIdentity(_identity_success())
+    discord = RecordingDiscordAuth(_discord_success())
+    broker = RecordingBrokerClient(_broker_success(delivery_ack=metadata))
+    store = RecordingSecretStore()
+    repository = RecordingSettingsRepository(
+        None,
+        results=[_commit_success(), _commit_failure()],
+    )
+
+    result = await _service(
+        identity=identity,
+        discord=discord,
+        broker=broker,
+        store=store,
+        repository=repository,
+    ).authorize(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
+    assert len(repository.saved_requests) == 2
+    pending = repository.saved_requests[0].values["state"]["managed_connection"]  # type: ignore[index]
+    cleared = repository.saved_requests[1].values["state"]["managed_connection"]  # type: ignore[index]
+    assert pending["pending_delivery_ack_delivery_id"] == metadata.delivery_id
+    assert cleared["pending_delivery_ack_delivery_id"] is None
+    assert store.values["openrouter_managed_delivery_ack_token"] == metadata.delivery_ack_token
+
+
+@pytest.mark.asyncio
+async def test_delivery_ack_token_clear_and_metadata_restore_failure_is_not_ignored() -> None:
+    metadata = _delivery_ack_metadata()
+    identity = RecordingLocalIdentity(_identity_success())
+    discord = RecordingDiscordAuth(_discord_success())
+    broker = RecordingBrokerClient(_broker_success(delivery_ack=metadata))
+    store = RecordingSecretStore(clear_succeeds=False)
+    repository = RecordingSettingsRepository(
+        None,
+        results=[_commit_success(), _commit_success(), _commit_failure()],
+    )
+
+    result = await _service(
+        identity=identity,
+        discord=discord,
+        broker=broker,
+        store=store,
+        repository=repository,
+    ).authorize(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
+    assert len(repository.saved_requests) == 1
 
 
 @pytest.mark.asyncio

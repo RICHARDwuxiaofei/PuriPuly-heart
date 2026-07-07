@@ -26,6 +26,7 @@ MANAGED_AUTH_CLAIM_SOURCES: Final = (
     MANAGED_AUTH_CLAIM_SOURCE_DISCORD,
     MANAGED_AUTH_CLAIM_SOURCE_QQ,
 )
+MANAGED_KEY_DELIVERY_ACK_SOURCES: Final = ("discord", "qq")
 
 RUNTIME_ONLY_LEGACY_SETTINGS_PATHS: Final = frozenset(
     {"ui.overlay_enabled", "ui.peer_translation_enabled"}
@@ -286,6 +287,13 @@ def _normalize_telemetry_sent_dates(value: object) -> tuple[str, ...]:
 
 
 def _normalize_telemetry_identifier(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _normalize_optional_state_text(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     normalized = value.strip()
@@ -615,13 +623,38 @@ class ManagedConnectionState:
     founder_letter_seen_credential_ref: str | None = None
     referral_id: str | None = None
     local_managed_claim_sources: tuple[str, ...] = ()
+    pending_delivery_ack_source: str | None = None
+    pending_delivery_ack_delivery_id: str | None = None
+    pending_delivery_ack_managed_credential_ref: str | None = None
+    pending_delivery_ack_expires_at: str | None = None
 
     def __post_init__(self) -> None:
+        source = _normalize_optional_state_text(self.pending_delivery_ack_source)
+        if source not in MANAGED_KEY_DELIVERY_ACK_SOURCES:
+            source = None
+        delivery_id = _normalize_optional_state_text(self.pending_delivery_ack_delivery_id)
+        managed_credential_ref = _normalize_optional_state_text(
+            self.pending_delivery_ack_managed_credential_ref
+        )
+        expires_at = _normalize_optional_state_text(self.pending_delivery_ack_expires_at)
+        if source is None or delivery_id is None or managed_credential_ref is None:
+            source = None
+            delivery_id = None
+            managed_credential_ref = None
+            expires_at = None
         object.__setattr__(
             self,
             "local_managed_claim_sources",
             normalize_managed_claim_sources(self.local_managed_claim_sources),
         )
+        object.__setattr__(self, "pending_delivery_ack_source", source)
+        object.__setattr__(self, "pending_delivery_ack_delivery_id", delivery_id)
+        object.__setattr__(
+            self,
+            "pending_delivery_ack_managed_credential_ref",
+            managed_credential_ref,
+        )
+        object.__setattr__(self, "pending_delivery_ack_expires_at", expires_at)
 
 
 @dataclass(frozen=True, slots=True)
@@ -726,6 +759,7 @@ __all__ = [
     "MANAGED_AUTH_CLAIM_SOURCE_DISCORD",
     "MANAGED_AUTH_CLAIM_SOURCE_QQ",
     "MANAGED_AUTH_CLAIM_SOURCES",
+    "MANAGED_KEY_DELIVERY_ACK_SOURCES",
     "OscIntent",
     "OverlayIntent",
     "PeerSTTIntent",

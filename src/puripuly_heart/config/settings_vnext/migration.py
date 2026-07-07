@@ -417,6 +417,18 @@ def from_legacy_app_settings(
                 local_managed_claim_sources=normalize_managed_claim_sources(
                     data["managed_identity"].get("local_managed_claim_sources")
                 ),
+                pending_delivery_ack_source=data["managed_identity"].get(
+                    "pending_delivery_ack_source"
+                ),
+                pending_delivery_ack_delivery_id=data["managed_identity"].get(
+                    "pending_delivery_ack_delivery_id"
+                ),
+                pending_delivery_ack_managed_credential_ref=data["managed_identity"].get(
+                    "pending_delivery_ack_managed_credential_ref"
+                ),
+                pending_delivery_ack_expires_at=data["managed_identity"].get(
+                    "pending_delivery_ack_expires_at"
+                ),
             ),
             github_star_prompt=GithubStarPromptState(
                 clicked=bool(data["ui"]["github_star_prompt_clicked"]),
@@ -659,6 +671,16 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
         "referral_id": state.managed_connection.referral_id,
         "local_managed_claim_sources": list(
             normalize_managed_claim_sources(state.managed_connection.local_managed_claim_sources)
+        ),
+        "pending_delivery_ack_source": state.managed_connection.pending_delivery_ack_source,
+        "pending_delivery_ack_delivery_id": (
+            state.managed_connection.pending_delivery_ack_delivery_id
+        ),
+        "pending_delivery_ack_managed_credential_ref": (
+            state.managed_connection.pending_delivery_ack_managed_credential_ref
+        ),
+        "pending_delivery_ack_expires_at": (
+            state.managed_connection.pending_delivery_ack_expires_at
         ),
     }
     data["system_prompt"] = intent.prompts.system_prompt

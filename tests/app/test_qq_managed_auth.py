@@ -10,6 +10,7 @@ from puripuly_heart.app.services.managed_auth_claims import (
     OPENROUTER_MANAGED_API_KEY_SECRET,
     ManagedAuthClaimGuard,
 )
+from puripuly_heart.app.services.managed_key_delivery_ack import ManagedKeyDeliveryAckService
 from puripuly_heart.app.services.qq_managed_auth import (
     OPENROUTER_MANAGED_QQ_API_KEY_SECRET,
     QqManagedAuthRequest,
@@ -23,9 +24,19 @@ RAW_MANAGED_KEY = "sk-or-v1-raw-qq-managed-key"
 
 
 class RecordingBrokerClient:
-    def __init__(self, result: broker_client.QqManagedAssertionResult | Exception) -> None:
+    def __init__(
+        self,
+        result: broker_client.QqManagedAssertionResult | Exception,
+        *,
+        ack_result: broker_client.ManagedKeyDeliveryAckResult | None = None,
+    ) -> None:
         self.result = result
+        self.ack_result = ack_result or broker_client.ManagedKeyDeliveryAckResult(
+            succeeded=True,
+            status="acknowledged",
+        )
         self.requests: list[broker_client.QqManagedAssertionRequest] = []
+        self.ack_requests: list[broker_client.ManagedKeyDeliveryAckRequest] = []
 
     async def issue_managed_connection(
         self,
@@ -42,6 +53,13 @@ class RecordingBrokerClient:
             raise self.result
         return self.result
 
+    async def acknowledge_managed_key_delivery(
+        self,
+        request: broker_client.ManagedKeyDeliveryAckRequest,
+    ) -> broker_client.ManagedKeyDeliveryAckResult:
+        self.ack_requests.append(request)
+        return self.ack_result
+
 
 class RecordingSecretStore:
     def __init__(self) -> None:
@@ -50,6 +68,10 @@ class RecordingSecretStore:
         self.set_fail = False
         self.set_raise = False
         self.restore_fail = False
+        self.clear_fail = False
+        self.fail_repeated_set_keys: set[str] = set()
+        self.fail_set_keys: set[str] = set()
+        self.set_counts: dict[str, int] = {}
         self.snapshots: list[str] = []
         self.set_calls: list[tuple[str, str]] = []
         self.restore_calls: list[secret_store.SecretSnapshot] = []
@@ -66,9 +88,14 @@ class RecordingSecretStore:
 
     async def set_secret(self, key: str, value: str) -> secret_store.SecretWriteResult:
         self.set_calls.append((key, value))
+        self.set_counts[key] = self.set_counts.get(key, 0) + 1
         if self.set_raise:
             raise RuntimeError("raw provider failure must not leak")
-        if self.set_fail:
+        if (
+            self.set_fail
+            or key in self.fail_set_keys
+            or (key in self.fail_repeated_set_keys and self.set_counts[key] > 1)
+        ):
             return secret_store.SecretWriteResult(
                 succeeded=False,
                 key=key,
@@ -86,6 +113,14 @@ class RecordingSecretStore:
         )
 
     async def clear_secret(self, key: str) -> secret_store.SecretWriteResult:
+        if self.clear_fail:
+            return secret_store.SecretWriteResult(
+                succeeded=False,
+                key=key,
+                revision=None,
+                message=None,
+                diagnostics=None,
+            )
         self.values.pop(key, None)
         return secret_store.SecretWriteResult(
             succeeded=True,
@@ -145,6 +180,10 @@ class RecordingManagedState:
     founder_letter_seen_credential_ref: str | None = "previous-ref"
     referral_id: str | None = None
     local_managed_claim_sources: tuple[str, ...] = ()
+    pending_delivery_ack_source: str | None = None
+    pending_delivery_ack_delivery_id: str | None = None
+    pending_delivery_ack_managed_credential_ref: str | None = None
+    pending_delivery_ack_expires_at: str | None = None
     fail_persist_calls: int = 0
     persist_calls: int = 0
     restore_calls: int = 0
@@ -167,6 +206,12 @@ class RecordingManagedState:
             founder_letter_seen_credential_ref=self.founder_letter_seen_credential_ref,
             referral_id=self.referral_id,
             local_managed_claim_sources=self.local_managed_claim_sources,
+            pending_delivery_ack_source=self.pending_delivery_ack_source,
+            pending_delivery_ack_delivery_id=self.pending_delivery_ack_delivery_id,
+            pending_delivery_ack_managed_credential_ref=(
+                self.pending_delivery_ack_managed_credential_ref
+            ),
+            pending_delivery_ack_expires_at=self.pending_delivery_ack_expires_at,
         )
 
     def restore(self, snapshot: managed_identity_state.ManagedIdentitySnapshot) -> None:
@@ -181,12 +226,19 @@ class RecordingManagedState:
         self.founder_letter_seen_credential_ref = snapshot.founder_letter_seen_credential_ref
         self.referral_id = snapshot.referral_id
         self.local_managed_claim_sources = snapshot.local_managed_claim_sources
+        self.pending_delivery_ack_source = snapshot.pending_delivery_ack_source
+        self.pending_delivery_ack_delivery_id = snapshot.pending_delivery_ack_delivery_id
+        self.pending_delivery_ack_managed_credential_ref = (
+            snapshot.pending_delivery_ack_managed_credential_ref
+        )
+        self.pending_delivery_ack_expires_at = snapshot.pending_delivery_ack_expires_at
 
 
 def _success_result(
     *,
     managed_credential_ref: str | None = "managed-ref-qq",
     expires_at: str | None = "2026-08-03T06:00:00.000Z",
+    delivery_ack: broker_client.ManagedKeyDeliveryAckMetadata | None = None,
 ) -> broker_client.QqManagedAssertionResult:
     return broker_client.QqManagedAssertionResult(
         succeeded=True,
@@ -201,6 +253,17 @@ def _success_result(
         retry_after_ms=None,
         message=None,
         diagnostics=None,
+        delivery_ack=delivery_ack,
+    )
+
+
+def _delivery_ack_metadata() -> broker_client.ManagedKeyDeliveryAckMetadata:
+    return broker_client.ManagedKeyDeliveryAckMetadata(
+        source="qq",
+        delivery_id="delivery-qq-1",
+        managed_credential_ref="managed-ref-qq",
+        expires_at="2026-07-07T00:15:00.000Z",
+        delivery_ack_token="delivery-token-qq-1",
     )
 
 
@@ -235,10 +298,11 @@ def _service(
     *,
     store: RecordingSecretStore | None = None,
     state: RecordingManagedState | None = None,
+    ack_result: broker_client.ManagedKeyDeliveryAckResult | None = None,
 ) -> tuple[
     QqManagedAuthService, RecordingBrokerClient, RecordingSecretStore, RecordingManagedState
 ]:
-    broker = RecordingBrokerClient(broker_result)
+    broker = RecordingBrokerClient(broker_result, ack_result=ack_result)
     secret = store or RecordingSecretStore()
     managed_state = state or RecordingManagedState()
     return QqManagedAuthService(broker, secret, managed_state), broker, secret, managed_state
@@ -271,6 +335,118 @@ async def test_qq_managed_auth_success_stores_qq_key_and_persists_entitlement_st
     assert broker.requests[0].qq_identity == RAW_QQ_IDENTITY
     assert broker.requests[0].credential == RAW_QQ_CREDENTIAL
     _assert_no_raw_values(result)
+
+
+@pytest.mark.asyncio
+async def test_qq_managed_auth_ack_success_stores_pending_then_clears_token_and_metadata() -> None:
+    metadata = _delivery_ack_metadata()
+    service, broker, store, state = _service(_success_result(delivery_ack=metadata))
+
+    result = await service.authenticate(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    assert broker.ack_requests[0].delivery_id == metadata.delivery_id
+    assert "delivery-token-qq-1" not in repr(broker.ack_requests[0])
+    assert (
+        "openrouter_managed_qq_delivery_ack_token",
+        metadata.delivery_ack_token,
+    ) in store.set_calls
+    assert "openrouter_managed_qq_delivery_ack_token" not in store.values
+    assert state.pending_delivery_ack_source is None
+    assert state.pending_delivery_ack_delivery_id is None
+    assert state.persist_calls == 2
+    _assert_no_raw_values(result)
+
+
+@pytest.mark.asyncio
+async def test_qq_managed_auth_ack_failure_leaves_pending_metadata_and_token() -> None:
+    metadata = _delivery_ack_metadata()
+    service, broker, store, state = _service(
+        _success_result(delivery_ack=metadata),
+        ack_result=broker_client.ManagedKeyDeliveryAckResult(
+            succeeded=False,
+            status="retryable",
+        ),
+    )
+
+    result = await service.authenticate(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
+    assert broker.ack_requests[0].delivery_id == metadata.delivery_id
+    assert state.pending_delivery_ack_source == "qq"
+    assert state.pending_delivery_ack_delivery_id == metadata.delivery_id
+    assert state.pending_delivery_ack_managed_credential_ref == metadata.managed_credential_ref
+    assert store.values["openrouter_managed_qq_delivery_ack_token"] == metadata.delivery_ack_token
+    assert state.persist_calls == 1
+    _assert_no_raw_values(result)
+
+
+@pytest.mark.asyncio
+async def test_qq_managed_auth_ack_token_store_failure_happens_before_local_key_write() -> None:
+    metadata = _delivery_ack_metadata()
+    store = RecordingSecretStore()
+    store.fail_set_keys.add("openrouter_managed_qq_delivery_ack_token")
+    service, broker, store, state = _service(
+        _success_result(delivery_ack=metadata),
+        store=store,
+    )
+
+    result = await service.authenticate(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_REMOTE_ACTIVE_LOCAL_MISSING
+    assert result.diagnostics is not None
+    assert result.diagnostics.code == "qq_delivery_ack_token_store_failed_before_local_key_write"
+    assert OPENROUTER_MANAGED_QQ_API_KEY_SECRET not in store.values
+    assert broker.ack_requests == []
+    assert state.active_managed_credential_ref == "previous-ref"
+    _assert_no_raw_values(result)
+
+
+@pytest.mark.asyncio
+async def test_qq_managed_auth_pending_ack_persist_failure_happens_before_local_key_write() -> None:
+    metadata = _delivery_ack_metadata()
+    state = RecordingManagedState(fail_persist_calls=1)
+    service, broker, store, state = _service(
+        _success_result(delivery_ack=metadata),
+        state=state,
+    )
+
+    result = await service.authenticate(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_REMOTE_ACTIVE_LOCAL_MISSING
+    assert result.diagnostics is not None
+    assert (
+        result.diagnostics.code == "qq_pending_delivery_ack_persist_failed_before_local_key_write"
+    )
+    assert OPENROUTER_MANAGED_QQ_API_KEY_SECRET not in store.values
+    assert broker.ack_requests == []
+
+
+@pytest.mark.asyncio
+async def test_shared_ack_service_checks_token_restore_result_after_clear_persist_failure() -> None:
+    metadata = _delivery_ack_metadata()
+    state = RecordingManagedState(
+        pending_delivery_ack_source="qq",
+        pending_delivery_ack_delivery_id=metadata.delivery_id,
+        pending_delivery_ack_managed_credential_ref=metadata.managed_credential_ref,
+        pending_delivery_ack_expires_at=metadata.expires_at,
+        fail_persist_calls=1,
+    )
+    store = RecordingSecretStore()
+    store.values["openrouter_managed_qq_delivery_ack_token"] = metadata.delivery_ack_token
+    store.set_counts["openrouter_managed_qq_delivery_ack_token"] = 1
+    store.fail_repeated_set_keys.add("openrouter_managed_qq_delivery_ack_token")
+    broker = RecordingBrokerClient(_success_result())
+    service = ManagedKeyDeliveryAckService(broker, store, state)
+
+    result = await service.retry_pending()
+
+    assert result.succeeded is False
+    assert result.status == "token_restore_failed"
+    assert state.pending_delivery_ack_source == "qq"
+    assert "openrouter_managed_qq_delivery_ack_token" not in store.values
+    assert result.diagnostics is not None
+    assert result.diagnostics.code == "delivery_ack_token_restore_failed"
 
 
 @pytest.mark.asyncio
