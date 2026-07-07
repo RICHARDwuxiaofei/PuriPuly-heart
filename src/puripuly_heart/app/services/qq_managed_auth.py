@@ -20,6 +20,10 @@ from puripuly_heart.app.services.managed_auth_claims import (
     MANAGED_AUTH_CLAIM_SOURCE_QQ,
     ManagedAuthClaimGuard,
 )
+from puripuly_heart.app.services.managed_key_delivery_ack import (
+    ManagedKeyDeliveryAckService,
+    ManagedKeyDeliveryAckTokenStoreError,
+)
 from puripuly_heart.core.messages import (
     CONTENT_POLICY_METADATA_ONLY,
     DIAGNOSTIC_CATEGORY_AUTH,
@@ -33,6 +37,7 @@ from puripuly_heart.core.messages import (
     SEVERITY_WARNING,
     TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED,
     TRANSACTION_STATUS_REMOTE_ACTIVE_LOCAL_MISSING,
+    TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING,
     TRANSACTION_STATUS_SECRET_WRITE_FAILED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORE_FAILED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORED,
@@ -80,6 +85,7 @@ class QqManagedAuthService:
     secret_store: SecretStorePort
     managed_state: ManagedIdentityStatePort
     claim_guard: ManagedAuthClaimGuard | None = None
+    delivery_ack_service: ManagedKeyDeliveryAckService | None = None
 
     async def authenticate(self, request: QqManagedAuthRequest) -> TransactionResult:
         claim_result = await self._preflight_claim_source()
@@ -107,6 +113,69 @@ class QqManagedAuthService:
         if isinstance(secret_snapshot, TransactionResult):
             return secret_snapshot
         state_snapshot = self.managed_state.snapshot()
+
+        if broker_result.delivery_ack is not None:
+            try:
+                await self._delivery_ack_service().store_pending(broker_result.delivery_ack)
+            except ManagedKeyDeliveryAckTokenStoreError:
+                return _remote_active_local_missing_result(
+                    operation="store_qq_delivery_ack_token",
+                    code="qq_delivery_ack_token_store_failed_before_local_key_write",
+                    phase="delivery_ack_token_store",
+                    failure_subcode="key_unavailable",
+                    secret_write_succeeded=False,
+                    settings_commit_succeeded=False,
+                    rollback_succeeded=None,
+                    compensation_succeeded=None,
+                    retry_after_ms=None,
+                )
+            self._apply_entitlement_snapshot(broker_result.entitlement)
+            if self.claim_guard is not None:
+                self.claim_guard.record_success(MANAGED_AUTH_CLAIM_SOURCE_QQ)
+            try:
+                self.managed_state.persist()
+            except Exception:
+                return _remote_active_local_missing_result(
+                    operation="persist_qq_pending_delivery_ack",
+                    code="qq_pending_delivery_ack_persist_failed_before_local_key_write",
+                    phase="delivery_ack_pending_persist",
+                    failure_subcode="key_unavailable",
+                    secret_write_succeeded=False,
+                    settings_commit_succeeded=False,
+                    rollback_succeeded=None,
+                    compensation_succeeded=None,
+                    retry_after_ms=None,
+                )
+            secret_write = await self._write_managed_secret(broker_result.managed_secret_key)
+            if isinstance(secret_write, TransactionResult):
+                return secret_write
+            ack_result = await self._delivery_ack_service().retry_pending()
+            if not ack_result.succeeded:
+                return _delivery_ack_pending_result(
+                    ack_status=ack_result.status,
+                    diagnostics_present=ack_result.diagnostics is not None,
+                )
+            return TransactionResult(
+                status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
+                message=_message("qq_managed_auth.success", severity=SEVERITY_INFO),
+                diagnostics=_diagnostics(
+                    operation="persist_qq_managed_auth",
+                    code="qq_managed_auth_succeeded",
+                    category=DIAGNOSTIC_CATEGORY_TRANSACTION,
+                    fields={
+                        "phase": "settings_commit",
+                        "secret_key": OPENROUTER_MANAGED_QQ_API_KEY_SECRET,
+                        "secret_write_succeeded": True,
+                        "settings_commit_succeeded": True,
+                        "entitlement_ref_present": bool(
+                            broker_result.entitlement.managed_credential_ref
+                        ),
+                        "entitlement_expires_at_present": bool(
+                            broker_result.entitlement.expires_at
+                        ),
+                    },
+                ),
+            )
 
         secret_write = await self._write_managed_secret(broker_result.managed_secret_key)
         if isinstance(secret_write, TransactionResult):
@@ -147,6 +216,15 @@ class QqManagedAuthService:
         if self.claim_guard is None:
             return None
         return await self.claim_guard.preflight(MANAGED_AUTH_CLAIM_SOURCE_QQ)
+
+    def _delivery_ack_service(self) -> ManagedKeyDeliveryAckService:
+        if self.delivery_ack_service is not None:
+            return self.delivery_ack_service
+        return ManagedKeyDeliveryAckService(
+            broker_client=self.broker_client,
+            secret_store=self.secret_store,
+            managed_state=self.managed_state,
+        )
 
     async def _assert_qq_identity(
         self,
@@ -266,6 +344,48 @@ class QqManagedAuthService:
             ),
         )
 
+    async def _rollback_after_delivery_ack_token_store_failure(
+        self,
+        *,
+        secret_snapshot: SecretSnapshot,
+        state_snapshot: ManagedIdentitySnapshot,
+        metadata: object,
+    ) -> TransactionResult:
+        state_rollback_succeeded = self._restore_state_snapshot(state_snapshot)
+        secret_rollback_succeeded = await self._restore_secret_snapshot(secret_snapshot)
+        if not secret_rollback_succeeded:
+            self.managed_state.pending_delivery_ack_source = getattr(metadata, "source", None)
+            self.managed_state.pending_delivery_ack_delivery_id = getattr(
+                metadata, "delivery_id", None
+            )
+            self.managed_state.pending_delivery_ack_managed_credential_ref = getattr(
+                metadata,
+                "managed_credential_ref",
+                None,
+            )
+            self.managed_state.pending_delivery_ack_expires_at = getattr(
+                metadata, "expires_at", None
+            )
+            try:
+                self.managed_state.persist()
+            except Exception:
+                pass
+        return _remote_active_local_missing_result(
+            operation="store_qq_delivery_ack_token",
+            code=(
+                "qq_delivery_ack_token_store_failed_local_key_rolled_back"
+                if state_rollback_succeeded and secret_rollback_succeeded
+                else "qq_delivery_ack_token_store_failed_local_key_rollback_failed"
+            ),
+            phase="delivery_ack_token_store",
+            failure_subcode="key_unavailable",
+            secret_write_succeeded=not secret_rollback_succeeded,
+            settings_commit_succeeded=False,
+            rollback_succeeded=state_rollback_succeeded,
+            compensation_succeeded=state_rollback_succeeded and secret_rollback_succeeded,
+            retry_after_ms=None,
+        )
+
     def _restore_state_snapshot(self, snapshot: ManagedIdentitySnapshot) -> bool:
         try:
             self.managed_state.restore(snapshot)
@@ -373,6 +493,30 @@ def _remote_active_local_missing_result(
             category=DIAGNOSTIC_CATEGORY_SERVICE_UNAVAILABLE,
             retry_after_ms=retry_after_ms,
             fields=fields,
+        ),
+    )
+
+
+def _delivery_ack_pending_result(
+    *,
+    ack_status: str,
+    diagnostics_present: bool,
+) -> TransactionResult:
+    return TransactionResult(
+        status=TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING,
+        message=_message("qq_managed_auth.key_unavailable", severity=SEVERITY_WARNING),
+        diagnostics=_diagnostics(
+            operation="acknowledge_qq_managed_key_delivery",
+            code="qq_delivery_ack_pending",
+            category=DIAGNOSTIC_CATEGORY_TRANSACTION,
+            fields={
+                "phase": "remote_delivery_ack",
+                "secret_key": OPENROUTER_MANAGED_QQ_API_KEY_SECRET,
+                "secret_write_succeeded": True,
+                "settings_commit_succeeded": True,
+                "delivery_ack_status": ack_status,
+                "diagnostics_present": diagnostics_present,
+            },
         ),
     )
 

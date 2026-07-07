@@ -24,6 +24,12 @@ describe('Discord OAuth managed OpenRouter schema contract', () => {
     );
   });
 
+  it('requires the telemetry subject HMAC worker secret at the broker boundary', () => {
+    expect(REQUIRED_BINDINGS.secrets).toEqual(
+      expect.arrayContaining(['TELEMETRY_SUBJECT_HMAC_SECRET']),
+    );
+  });
+
   it('caps new Discord-gated OpenRouter entitlements to 500 per UTC day by default', () => {
     expect(DEFAULT_BROKER_ABUSE_CONTROLS.newActiveEntitlementsPerDay).toEqual({
       endpoint: 'POST /v1/providers/openrouter/discord/issue',
@@ -38,6 +44,15 @@ describe('Discord OAuth managed OpenRouter schema contract', () => {
       endpoint: 'POST /v1/auth/qq/assert',
       scope: 'ip',
       maxRequests: 20,
+      windowMinutes: 15,
+    });
+  });
+
+  it('rate limits telemetry translation success-day attempts by IP by default', () => {
+    expect(DEFAULT_BROKER_ABUSE_CONTROLS.telemetryTranslationSuccessDayIp).toEqual({
+      endpoint: 'POST /v1/telemetry/translation-success-day',
+      scope: 'ip',
+      maxRequests: 60,
       windowMinutes: 15,
     });
   });

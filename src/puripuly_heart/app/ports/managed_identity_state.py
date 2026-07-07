@@ -26,6 +26,10 @@ class ManagedIdentitySnapshot:
     founder_letter_seen_credential_ref: str | None
     referral_id: str | None
     local_managed_claim_sources: tuple[str, ...]
+    pending_delivery_ack_source: str | None = None
+    pending_delivery_ack_delivery_id: str | None = None
+    pending_delivery_ack_managed_credential_ref: str | None = None
+    pending_delivery_ack_expires_at: str | None = None
 
 
 class ManagedIdentityStatePort(Protocol):
@@ -47,6 +51,10 @@ class ManagedIdentityStatePort(Protocol):
     founder_letter_seen_credential_ref: str | None
     referral_id: str | None
     local_managed_claim_sources: tuple[str, ...]
+    pending_delivery_ack_source: str | None
+    pending_delivery_ack_delivery_id: str | None
+    pending_delivery_ack_managed_credential_ref: str | None
+    pending_delivery_ack_expires_at: str | None
 
     def persist(self) -> None: ...
 

@@ -7,7 +7,10 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from puripuly_heart.app.ports.broker_client import QqManagedAssertionRequest
+from puripuly_heart.app.ports.broker_client import (
+    ManagedKeyDeliveryAckRequest,
+    QqManagedAssertionRequest,
+)
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterChallengeSuccess,
     ManagedOpenRouterDiscordStartSuccess,
@@ -363,7 +366,10 @@ async def test_issue_discord_managed_key_posts_signed_payload_and_parses_success
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
         assert request.url.path == "/v1/providers/openrouter/discord/issue"
-        assert json.loads(request.content) == request_body
+        assert json.loads(request.content) == {
+            **request_body,
+            "delivery_ack_supported": True,
+        }
         return httpx.Response(
             200,
             json={
@@ -390,6 +396,37 @@ async def test_issue_discord_managed_key_posts_signed_payload_and_parses_success
         expires_at="2026-07-30T06:00:00.000Z",
         openrouter_user_id="user-123",
     )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_issue_discord_managed_key_parses_delivery_ack_metadata() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/providers/openrouter/discord/issue"
+        assert json.loads(request.content)["delivery_ack_supported"] is True
+        return httpx.Response(
+            200,
+            json={
+                "openrouter_api_key": "managed-openrouter-api-key",
+                "managed_credential_ref": "managed-credential-ref-123",
+                "expires_at": "2026-07-30T06:00:00.000Z",
+                "delivery_ack_required": True,
+                "delivery_id": "delivery-discord-123",
+                "delivery_ack_token": "delivery-ack-token-123",
+                "delivery_ack_expires_at": "2026-07-30T06:05:00.000Z",
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.issue_discord_managed_key({"code": "discord-oauth-code-123"})
+
+    assert result.delivery_ack_required is True
+    assert result.delivery_id == "delivery-discord-123"
+    assert result.delivery_ack_token == "delivery-ack-token-123"
+    assert result.delivery_ack_expires_at == "2026-07-30T06:05:00.000Z"
+    assert "delivery-ack-token-123" not in repr(result)
     await client.close()
 
 
@@ -463,6 +500,7 @@ async def test_assert_qq_managed_identity_posts_credentials_and_maps_issued_snap
             "qq_identity": "qq-user-123",
             "credential": "a" * 64,
             "asserted_at": "2026-07-03T06:00:00.000Z",
+            "delivery_ack_supported": True,
         }
         return httpx.Response(
             200,
@@ -496,6 +534,158 @@ async def test_assert_qq_managed_identity_posts_credentials_and_maps_issued_snap
     assert result.entitlement.expires_at == "2026-08-03T06:00:00.000Z"
     assert result.entitlement.openrouter_user_id == "user-qq"
     assert "qq-managed-openrouter-api-key" not in repr(result)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_assert_qq_managed_identity_parses_delivery_ack_metadata() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/auth/qq/assert"
+        assert json.loads(request.content)["delivery_ack_supported"] is True
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "status": "delivery_pending",
+                "qq_subject_ref": "ph-qq-subject-v1_subject",
+                "openrouter_api_key": "qq-managed-openrouter-api-key",
+                "managed_credential_ref": "managed-ref-qq",
+                "expires_at": "2026-08-03T06:00:00.000Z",
+                "delivery_ack_required": True,
+                "delivery_id": "delivery-qq-123",
+                "delivery_ack_token": "delivery-ack-token-qq",
+                "delivery_ack_expires_at": "2026-08-03T06:05:00.000Z",
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.assert_qq_managed_identity(
+        QqManagedAssertionRequest(
+            qq_identity="qq-user-123",
+            credential="a" * 64,
+            asserted_at="2026-07-03T06:00:00.000Z",
+            metadata={"flow": "qq_managed"},
+        )
+    )
+
+    assert result.succeeded is True
+    assert result.delivery_ack is not None
+    assert result.delivery_ack.source == "qq"
+    assert result.delivery_ack.delivery_id == "delivery-qq-123"
+    assert result.delivery_ack.managed_credential_ref == "managed-ref-qq"
+    assert result.delivery_ack.delivery_ack_token == "delivery-ack-token-qq"
+    assert result.delivery_ack.expires_at == "2026-08-03T06:05:00.000Z"
+    assert "delivery-ack-token-qq" not in repr(result.delivery_ack)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_managed_key_delivery_posts_token_and_maps_success() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/providers/openrouter/managed-key-delivery/ack"
+        assert json.loads(request.content) == {
+            "delivery_id": "delivery-123",
+            "managed_credential_ref": "managed-credential-ref-123",
+            "delivery_ack_token": "delivery-ack-token-123",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "status": "acknowledged",
+                "referral_bonus_applied": True,
+                "referral_id": " 7kq9m2 ",
+                "talk_together_pass": {
+                    "pass_id": "7KQ9M2",
+                    "invite_count": 2,
+                    "invite_limit": 5,
+                    "bonus_translations_per_friend": 200,
+                },
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.acknowledge_managed_key_delivery(
+        ManagedKeyDeliveryAckRequest(
+            delivery_id="delivery-123",
+            managed_credential_ref="managed-credential-ref-123",
+            delivery_ack_token="delivery-ack-token-123",
+        )
+    )
+
+    assert result.succeeded is True
+    assert result.status == "acknowledged"
+    assert result.diagnostics is None
+    assert result.referral_bonus_applied is True
+    assert result.referral_id == "7KQ9M2"
+    assert result.pass_status == TalkTogetherPassStatus(
+        pass_id="7KQ9M2",
+        invite_count=2,
+        invite_limit=5,
+        bonus_translations_per_friend=200,
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_managed_key_delivery_maps_broker_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/providers/openrouter/managed-key-delivery/ack"
+        return httpx.Response(
+            409,
+            json={
+                "error": {
+                    "code": "invalid_request",
+                    "class": "terminal",
+                    "subcode": "delivery_ack_invalid",
+                    "message": "delivery ACK failed",
+                }
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.acknowledge_managed_key_delivery(
+        ManagedKeyDeliveryAckRequest(
+            delivery_id="delivery-123",
+            managed_credential_ref="managed-credential-ref-123",
+            delivery_ack_token="delivery-ack-token-123",
+        )
+    )
+
+    assert result.succeeded is False
+    assert result.status == "delivery_ack_invalid"
+    assert result.diagnostics is not None
+    assert result.diagnostics.code == "managed_key_delivery_ack_error"
+    assert result.diagnostics.fields["broker_subcode"] == "delivery_ack_invalid"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_record_translation_success_day_posts_telemetry_payload() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/telemetry/translation-success-day"
+        assert json.loads(request.content) == {
+            "signal": "translation_success_day",
+            "telemetry_identifier": "anon-telemetry-id-123456",
+            "active_date_utc": "2026-07-03",
+        }
+        return httpx.Response(200, json={"ok": True})
+
+    client, _transport = _build_client(handler)
+
+    result = await client.record_translation_success_day(
+        "anon-telemetry-id-123456",
+        "2026-07-03",
+    )
+
+    assert result is True
     await client.close()
 
 

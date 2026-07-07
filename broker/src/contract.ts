@@ -12,6 +12,7 @@ export {
   DEFAULT_BROKER_ABUSE_CONTROLS,
   DEFAULT_BROKER_ABUSE_RUNTIME_STATE,
   FINGERPRINT_SALT_POLICY,
+  MANAGED_KEY_DELIVERY_STATUS_VALUES,
   OPENROUTER_ENTITLEMENT_STATUS_VALUES,
   QQ_MANAGED_ENTITLEMENT_AUTOMATIC_REISSUE_BLOCKING_STATUS_VALUES,
   QQ_MANAGED_ENTITLEMENT_STALE_ISSUING_POLICY,
@@ -65,6 +66,8 @@ export type {
   InstallationRecord,
   OpenRouterEntitlementRecord,
   OpenRouterEntitlementStatus,
+  ManagedKeyDeliveryRecord,
+  ManagedKeyDeliveryStatus,
   QqManagedEntitlementRecord,
   QqManagedEntitlementStatus,
   ReferralCodeRecord,
@@ -113,6 +116,7 @@ export const REQUIRED_BINDINGS = {
     'DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL',
     'DISCORD_DAILY_REPORT_WEBHOOK_URL',
     'QQ_AUTH_HMAC_PSK',
+    'TELEMETRY_SUBJECT_HMAC_SECRET',
   ],
 } as const;
 
@@ -129,6 +133,7 @@ export interface BrokerBindings {
   DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL: string;
   DISCORD_DAILY_REPORT_WEBHOOK_URL: string;
   QQ_AUTH_HMAC_PSK: string;
+  TELEMETRY_SUBJECT_HMAC_SECRET: string;
 }
 
 export type BrokerEnv = {

@@ -6,7 +6,12 @@ import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from puripuly_heart.app.ports.broker_client import BrokerIssueRequest, BrokerIssueResult
+from puripuly_heart.app.ports.broker_client import (
+    BrokerIssueRequest,
+    BrokerIssueResult,
+    ManagedKeyDeliveryAckMetadata,
+    ManagedKeyDeliveryAckRequest,
+)
 from puripuly_heart.app.ports.discord_auth import DiscordAuthRequest, DiscordAuthResult
 from puripuly_heart.app.ports.managed_identity import (
     ManagedIdentityPreflightRequest,
@@ -155,6 +160,42 @@ class ManagedIdentityStateAdapter:
     def local_managed_claim_sources(self, value: tuple[str, ...]) -> None:
         self._settings.managed_identity.local_managed_claim_sources = value
 
+    @property
+    def pending_delivery_ack_source(self) -> str | None:
+        return getattr(self._settings.managed_identity, "pending_delivery_ack_source", None)
+
+    @pending_delivery_ack_source.setter
+    def pending_delivery_ack_source(self, value: str | None) -> None:
+        self._settings.managed_identity.pending_delivery_ack_source = value
+
+    @property
+    def pending_delivery_ack_delivery_id(self) -> str | None:
+        return getattr(self._settings.managed_identity, "pending_delivery_ack_delivery_id", None)
+
+    @pending_delivery_ack_delivery_id.setter
+    def pending_delivery_ack_delivery_id(self, value: str | None) -> None:
+        self._settings.managed_identity.pending_delivery_ack_delivery_id = value
+
+    @property
+    def pending_delivery_ack_managed_credential_ref(self) -> str | None:
+        return getattr(
+            self._settings.managed_identity,
+            "pending_delivery_ack_managed_credential_ref",
+            None,
+        )
+
+    @pending_delivery_ack_managed_credential_ref.setter
+    def pending_delivery_ack_managed_credential_ref(self, value: str | None) -> None:
+        self._settings.managed_identity.pending_delivery_ack_managed_credential_ref = value
+
+    @property
+    def pending_delivery_ack_expires_at(self) -> str | None:
+        return getattr(self._settings.managed_identity, "pending_delivery_ack_expires_at", None)
+
+    @pending_delivery_ack_expires_at.setter
+    def pending_delivery_ack_expires_at(self, value: str | None) -> None:
+        self._settings.managed_identity.pending_delivery_ack_expires_at = value
+
     def persist(self) -> None:
         self._persist(self._settings)
 
@@ -171,6 +212,20 @@ class ManagedIdentityStateAdapter:
             founder_letter_seen_credential_ref=managed.founder_letter_seen_credential_ref,
             referral_id=managed.referral_id,
             local_managed_claim_sources=managed.local_managed_claim_sources,
+            pending_delivery_ack_source=getattr(managed, "pending_delivery_ack_source", None),
+            pending_delivery_ack_delivery_id=getattr(
+                managed, "pending_delivery_ack_delivery_id", None
+            ),
+            pending_delivery_ack_managed_credential_ref=getattr(
+                managed,
+                "pending_delivery_ack_managed_credential_ref",
+                None,
+            ),
+            pending_delivery_ack_expires_at=getattr(
+                managed,
+                "pending_delivery_ack_expires_at",
+                None,
+            ),
         )
 
     def restore(self, snapshot: ManagedIdentitySnapshot) -> None:
@@ -185,6 +240,12 @@ class ManagedIdentityStateAdapter:
         managed.founder_letter_seen_credential_ref = snapshot.founder_letter_seen_credential_ref
         managed.referral_id = snapshot.referral_id
         managed.local_managed_claim_sources = snapshot.local_managed_claim_sources
+        managed.pending_delivery_ack_source = snapshot.pending_delivery_ack_source
+        managed.pending_delivery_ack_delivery_id = snapshot.pending_delivery_ack_delivery_id
+        managed.pending_delivery_ack_managed_credential_ref = (
+            snapshot.pending_delivery_ack_managed_credential_ref
+        )
+        managed.pending_delivery_ack_expires_at = snapshot.pending_delivery_ack_expires_at
 
 
 def build_managed_identity_state_port(
@@ -363,6 +424,7 @@ class DiscordManagedBrokerClientAdapter:
                 issue_nonce=request.issue_nonce or "",
                 signed_at=self.signed_at_provider(),
             )
+            issue_request["delivery_ack_supported"] = True
             issue = await getattr(self.client, "issue_discord_managed_key")(issue_request)
         except ManagedOpenRouterReleaseError as exc:
             return _broker_issue_failure_from_release_error(exc)
@@ -383,11 +445,19 @@ class DiscordManagedBrokerClientAdapter:
             referral_id=issue.referral_id,
             referral_bonus_applied=issue.referral_bonus_applied,
             pass_status=issue.pass_status,
+            delivery_ack=_delivery_ack_metadata_from_issue(issue, source="discord"),
         )
 
     async def assert_qq_managed_identity(self, request: object) -> object:
         assert_qq = getattr(self.client, "assert_qq_managed_identity")
         return await assert_qq(request)
+
+    async def acknowledge_managed_key_delivery(
+        self,
+        request: ManagedKeyDeliveryAckRequest,
+    ) -> object:
+        ack = getattr(self.client, "acknowledge_managed_key_delivery")
+        return await ack(request)
 
 
 def apply_discord_issue_result_to_managed_state(
@@ -413,6 +483,24 @@ def apply_discord_issue_result_to_managed_state(
     managed_state.release_token_expires_at = None
     managed_state.verified_hardware_hash = None
     managed_state.verified_hardware_hash_salt_version = None
+
+
+def _delivery_ack_metadata_from_issue(
+    issue: ManagedOpenRouterIssueSuccess,
+    *,
+    source: str,
+) -> ManagedKeyDeliveryAckMetadata | None:
+    if not issue.delivery_ack_required:
+        return None
+    if not (issue.delivery_id and issue.managed_credential_ref and issue.delivery_ack_token):
+        return None
+    return ManagedKeyDeliveryAckMetadata(
+        source=source,
+        delivery_id=issue.delivery_id,
+        managed_credential_ref=issue.managed_credential_ref,
+        expires_at=issue.delivery_ack_expires_at,
+        delivery_ack_token=issue.delivery_ack_token,
+    )
 
 
 async def _resolve_provider_without_blocking_event_loop(

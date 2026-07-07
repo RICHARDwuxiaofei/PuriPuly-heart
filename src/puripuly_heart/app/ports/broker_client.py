@@ -49,6 +49,34 @@ class BrokerIssueResult:
     referral_id: str | None = None
     referral_bonus_applied: bool = False
     pass_status: object | None = field(default=None, repr=False)
+    delivery_ack: ManagedKeyDeliveryAckMetadata | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedKeyDeliveryAckMetadata:
+    source: str
+    delivery_id: str
+    managed_credential_ref: str
+    expires_at: str | None
+    delivery_ack_token: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedKeyDeliveryAckRequest:
+    delivery_id: str
+    managed_credential_ref: str
+    delivery_ack_token: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedKeyDeliveryAckResult:
+    succeeded: bool
+    status: str
+    message: UserMessageRef | None = None
+    diagnostics: ErrorDiagnostics | None = None
+    referral_bonus_applied: bool = False
+    referral_id: str | None = None
+    pass_status: object | None = field(default=None, repr=False)
 
 
 QqManagedAssertionFailureSubcode = Literal[
@@ -89,6 +117,7 @@ class QqManagedAssertionResult:
     retry_after_ms: int | None
     message: UserMessageRef | None
     diagnostics: ErrorDiagnostics | None
+    delivery_ack: ManagedKeyDeliveryAckMetadata | None = field(default=None, repr=False)
 
 
 class BrokerClientPort(Protocol):
@@ -102,11 +131,19 @@ class BrokerClientPort(Protocol):
         request: QqManagedAssertionRequest,
     ) -> QqManagedAssertionResult: ...
 
+    async def acknowledge_managed_key_delivery(
+        self,
+        request: ManagedKeyDeliveryAckRequest,
+    ) -> ManagedKeyDeliveryAckResult: ...
+
 
 __all__ = [
     "BrokerClientPort",
     "BrokerIssueRequest",
     "BrokerIssueResult",
+    "ManagedKeyDeliveryAckMetadata",
+    "ManagedKeyDeliveryAckRequest",
+    "ManagedKeyDeliveryAckResult",
     "QqManagedAssertionFailureSubcode",
     "QqManagedAssertionRequest",
     "QqManagedAssertionResult",

@@ -12,17 +12,27 @@ import {
 } from './abuse-monitoring';
 import type { BrokerBindings } from './contract';
 import {
+  listStalePendingManagedKeyDeliveries,
+  markManagedKeyDeliveryCleanupRequired,
+} from './managed-key-delivery';
+import { cleanupManagedChildKey } from './openrouter-management';
+import {
   sendDailyReport,
   type DailyReportPayload,
 } from './discord-alerts';
 import type {
   BrokerAbuseControlsConfigValue,
   BrokerAbuseRuntimeStateValue,
+  ManagedKeyDeliveryRecord,
 } from './persistence';
 import {
   applyReferralRewardRetention,
   reconcileStaleReferralRewards,
 } from './referral';
+import {
+  applyTelemetryActiveDayRetention,
+  getTelemetryUsageDailyMetrics,
+} from './telemetry';
 
 type AlertLevel = 'warn1' | 'warn2' | 'warn3' | 'critical';
 
@@ -66,12 +76,13 @@ interface ExecutionContextLike {
 
 export async function handleScheduled(
   controller: ScheduledControllerLike,
-  env: Pick<BrokerBindings, 'BROKER_DB' | 'DISCORD_DAILY_REPORT_WEBHOOK_URL'>,
+  env: Pick<BrokerBindings, 'BROKER_DB' | 'DISCORD_DAILY_REPORT_WEBHOOK_URL' | 'OPENROUTER_MANAGEMENT_API_KEY'>,
   _ctx: ExecutionContextLike,
 ): Promise<void> {
   const now = new Date(controller.scheduledTime);
 
   await applyAbuseMonitoringRetention(env.BROKER_DB, now);
+  await reconcileStaleManagedKeyDeliveries(env, now);
   await reconcileStaleReferralRewards(env.BROKER_DB, { nowIso: now.toISOString() });
   await applyReferralRewardRetention(env.BROKER_DB, now);
 
@@ -79,10 +90,141 @@ export async function handleScheduled(
   const runtimeState = await getBrokerAbuseRuntimeState(env.BROKER_DB);
 
   if (!shouldSendDailyReport(runtimeState, controls.dailyReport, now)) {
+    await applyTelemetryActiveDayRetention(env.BROKER_DB, now);
     return;
   }
 
   await runDailyReport(env, now, controls);
+  await applyTelemetryActiveDayRetention(env.BROKER_DB, now);
+}
+
+export async function reconcileStaleManagedKeyDeliveries(
+  env: Pick<BrokerBindings, 'BROKER_DB' | 'OPENROUTER_MANAGEMENT_API_KEY'>,
+  now: Date,
+): Promise<{ expired: number; cleanupRequired: number }> {
+  let expired = 0;
+  let cleanupRequired = 0;
+  const staleDeliveries = await listStalePendingManagedKeyDeliveries(env.BROKER_DB, {
+    now,
+    limit: 50,
+  });
+  const nowIso = now.toISOString();
+  for (const delivery of staleDeliveries) {
+    const cleanup = await cleanupManagedChildKey({
+      managementApiKey: env.OPENROUTER_MANAGEMENT_API_KEY,
+      keyHash: delivery.managed_credential_ref,
+    });
+    if (!cleanup.ok) {
+      await markManagedKeyDeliveryCleanupRequired(env.BROKER_DB, {
+        deliveryId: delivery.delivery_id,
+        failedAt: nowIso,
+        failureReason: 'managed_child_key_cleanup_failed',
+      });
+      await markDeliveryOwnerCleanupRequired(env.BROKER_DB, delivery, nowIso);
+      cleanupRequired += 1;
+      continue;
+    }
+    await markDeliveryOwnerExpired(env.BROKER_DB, delivery, nowIso);
+    await env.BROKER_DB.prepare(
+      `UPDATE managed_key_deliveries
+          SET status = 'expired', failed_at = ?, failure_reason = 'ack_expired_child_key_cleaned'
+        WHERE delivery_id = ?
+          AND status = 'pending'`,
+    )
+      .bind(nowIso, delivery.delivery_id)
+      .run();
+    expired += 1;
+  }
+  return { expired, cleanupRequired };
+}
+
+async function markDeliveryOwnerExpired(
+  db: D1Database,
+  delivery: ManagedKeyDeliveryRecord,
+  nowIso: string,
+): Promise<void> {
+  if (delivery.issue_source === 'discord') {
+    await db
+      .prepare(
+        `DELETE FROM openrouter_entitlements
+          WHERE managed_credential_ref = ?
+            AND status = 'pending_release'
+            AND discord_issue_status = 'delivery_pending'`,
+      )
+      .bind(delivery.managed_credential_ref)
+      .run();
+    await db
+      .prepare(
+        `DELETE FROM discord_identities
+          WHERE discord_user_ref = ?
+            AND entitlement_installation_id = ?
+            AND status = 'issuing'`,
+      )
+      .bind(delivery.subject_ref ?? '', delivery.installation_id ?? '')
+      .run();
+    await db
+      .prepare(
+        `UPDATE referral_rewards
+            SET referred_bonus_status = 'failed', referrer_bonus_status = 'failed', failure_reason = 'issue_delivery_failed', updated_at = ?
+          WHERE referred_managed_credential_ref IS NULL
+            AND referred_bonus_status = 'reserved'
+            AND referred_installation_id = ?`,
+      )
+      .bind(nowIso, delivery.installation_id ?? '')
+      .run();
+    return;
+  }
+  if (delivery.issue_source === 'qq') {
+    await db
+      .prepare(
+        `DELETE FROM qq_managed_entitlements
+          WHERE managed_credential_ref = ?
+            AND status = 'delivery_pending'`,
+      )
+      .bind(delivery.managed_credential_ref)
+      .run();
+  }
+}
+
+async function markDeliveryOwnerCleanupRequired(
+  db: D1Database,
+  delivery: ManagedKeyDeliveryRecord,
+  nowIso: string,
+): Promise<void> {
+  if (delivery.issue_source === 'discord') {
+    await db
+      .prepare(
+        `UPDATE openrouter_entitlements
+            SET discord_issue_status = 'cleanup_required', discord_issue_delivered_at = NULL
+          WHERE managed_credential_ref = ?
+            AND status = 'pending_release'
+            AND discord_issue_status = 'delivery_pending'`,
+      )
+      .bind(delivery.managed_credential_ref)
+      .run();
+    await db
+      .prepare(
+        `UPDATE discord_identities
+            SET status = 'cleanup_required', updated_at = ?
+          WHERE discord_user_ref = ?
+            AND entitlement_installation_id = ?
+            AND status = 'issuing'`,
+      )
+      .bind(nowIso, delivery.subject_ref ?? '', delivery.installation_id ?? '')
+      .run();
+    return;
+  }
+  if (delivery.issue_source === 'qq') {
+    await db
+      .prepare(
+        `UPDATE qq_managed_entitlements
+            SET status = 'cleanup_required', delivered_at = NULL, updated_at = ?
+          WHERE managed_credential_ref = ?
+            AND status = 'delivery_pending'`,
+      )
+      .bind(nowIso, delivery.managed_credential_ref)
+      .run();
+  }
 }
 
 export function shouldSendDailyReport(
@@ -145,6 +287,7 @@ export async function buildDailyHeartbeatPacket(
     issueSeverityResult,
     auditResult,
     manualRevocationCountRow,
+    translationUsage,
   ] =
     await Promise.all([
       db
@@ -211,6 +354,7 @@ export async function buildDailyHeartbeatPacket(
         )
         .bind(windowStart24h, nowIso)
         .first<CountRow>(),
+      getTelemetryUsageDailyMetrics(db, now),
     ]);
 
   const issueSuccess24h = Number(issueCountRow?.count ?? 0);
@@ -266,6 +410,7 @@ export async function buildDailyHeartbeatPacket(
       cloud_asn_share_24h:
         issueSuccess24h === 0 ? 0 : Math.round((cloudAsnIssueCount / issueSuccess24h) * 100),
       manual_revocations_24h: Number(manualRevocationCountRow?.count ?? 0),
+      translation_usage: translationUsage,
     },
   };
 }

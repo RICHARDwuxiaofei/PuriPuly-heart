@@ -181,6 +181,7 @@ from puripuly_heart.core.managed_openrouter_release import (
 )
 from puripuly_heart.core.messages import (
     RUNTIME_APPLY_STATUS_APPLIED,
+    TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
     TransactionResult,
@@ -545,12 +546,13 @@ class _ControllerSettingsPatchRepository:
         return SettingsSnapshot(values=_settings_snapshot_values(settings), revision=None)
 
     async def save(self, request: SettingsCommitRequest) -> SettingsCommitResult:
-        _ = request
+        next_settings = copy.deepcopy(self.committed_settings)
+        _apply_managed_pending_delivery_ack_patch(next_settings, request.values)
         try:
             await asyncio.to_thread(
                 _validate_and_save_settings,
                 self.controller.config_path,
-                self.committed_settings,
+                next_settings,
             )
         except Exception:
             self.controller._log_error("Failed to save settings mutation")
@@ -565,6 +567,7 @@ class _ControllerSettingsPatchRepository:
                     surface=self.surface,
                 ),
             )
+        _apply_managed_pending_delivery_ack_patch(self.committed_settings, request.values)
         return SettingsCommitResult(
             succeeded=True,
             snapshot=SettingsSnapshot(
@@ -574,6 +577,29 @@ class _ControllerSettingsPatchRepository:
             message=None,
             diagnostics=None,
         )
+
+
+def _apply_managed_pending_delivery_ack_patch(
+    settings: AppSettings,
+    values: Mapping[str, object],
+) -> None:
+    state = values.get("state")
+    if not isinstance(state, Mapping):
+        return
+    managed = state.get("managed_connection")
+    if not isinstance(managed, Mapping):
+        return
+    field_map = {
+        "pending_delivery_ack_source": "pending_delivery_ack_source",
+        "pending_delivery_ack_delivery_id": "pending_delivery_ack_delivery_id",
+        "pending_delivery_ack_managed_credential_ref": "pending_delivery_ack_managed_credential_ref",
+        "pending_delivery_ack_expires_at": "pending_delivery_ack_expires_at",
+    }
+    if not any(key in managed for key in field_map):
+        return
+    for source_key, attr_name in field_map.items():
+        value = managed.get(source_key)
+        setattr(settings.managed_identity, attr_name, value if isinstance(value, str) else None)
 
 
 @dataclass(slots=True)
@@ -1597,6 +1623,8 @@ class GuiController:
                 )
             )
             self.last_settings_mutation_result = result
+            if result.status == TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING:
+                self.settings = updated
             if _settings_mutation_committed(result):
                 issue = broker.last_issue_response
                 self.settings = updated
@@ -7092,9 +7120,11 @@ class GuiController:
         self, *, secrets
     ) -> ManagedOpenRouterReleaseService | None:
         if self.settings is None:
+            self.telemetry_client = None
             return None
         release_settings = self._managed_openrouter_release_settings()
         if release_settings is None:
+            self.telemetry_client = None
             return None
 
         from puripuly_heart import __version__
@@ -7103,6 +7133,7 @@ class GuiController:
             client = HttpManagedOpenRouterBrokerClient(
                 base_url=self.settings.openrouter.broker_base_url,
             )
+            self.telemetry_client = client
         except ValueError as exc:
             logger.warning(
                 "[Managed OpenRouter] Invalid broker base URL %r; using unavailable fallback: %s",
@@ -7110,6 +7141,7 @@ class GuiController:
                 exc,
             )
             client = UnavailableManagedOpenRouterReleaseClient()
+            self.telemetry_client = None
 
         return ManagedOpenRouterReleaseService(
             openrouter_config=build_openrouter_release_runtime_config(release_settings),

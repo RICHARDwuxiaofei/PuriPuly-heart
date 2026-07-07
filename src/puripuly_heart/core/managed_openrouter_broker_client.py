@@ -8,6 +8,9 @@ from urllib.parse import urlsplit
 import httpx
 
 from puripuly_heart.app.ports.broker_client import (
+    ManagedKeyDeliveryAckMetadata,
+    ManagedKeyDeliveryAckRequest,
+    ManagedKeyDeliveryAckResult,
     QqManagedAssertionFailureSubcode,
     QqManagedAssertionRequest,
     QqManagedAssertionResult,
@@ -161,7 +164,7 @@ class HttpManagedOpenRouterBrokerClient:
     ) -> ManagedOpenRouterIssueSuccess:
         payload = await self._post_json(
             path="/v1/providers/openrouter/discord/issue",
-            request_body=request,
+            request_body={**dict(request), "delivery_ack_supported": True},
             operation="discord_issue",
         )
         try:
@@ -175,6 +178,10 @@ class HttpManagedOpenRouterBrokerClient:
                 referral_bonus_applied=_parse_referral_bonus_applied(payload),
                 referral_id=_parse_owned_referral_id(payload),
                 pass_status=_parse_talk_together_pass_status(payload),
+                delivery_ack_required=_delivery_ack_required(payload),
+                delivery_id=_delivery_ack_text(payload, "delivery_id"),
+                delivery_ack_token=_delivery_ack_text(payload, "delivery_ack_token"),
+                delivery_ack_expires_at=_require_optional_text(payload, "delivery_ack_expires_at"),
             )
         except ValueError as exc:
             raise _retryable_error(
@@ -192,6 +199,7 @@ class HttpManagedOpenRouterBrokerClient:
                     "qq_identity": request.qq_identity,
                     "credential": request.credential,
                     "asserted_at": request.asserted_at,
+                    "delivery_ack_supported": True,
                 },
                 operation="qq_assert",
             )
@@ -199,7 +207,7 @@ class HttpManagedOpenRouterBrokerClient:
             return _qq_assertion_failure_from_error(exc)
 
         status = payload.get("status")
-        if status != "issued":
+        if status not in {"issued", "delivery_pending"}:
             return _qq_assertion_failure(
                 failure_subcode="key_unavailable",
                 code="qq_key_unavailable",
@@ -228,6 +236,7 @@ class HttpManagedOpenRouterBrokerClient:
                 retry_after_ms=None,
                 message=None,
                 diagnostics=None,
+                delivery_ack=_parse_delivery_ack_metadata(payload, source="qq"),
             )
         except ValueError as exc:
             return _qq_assertion_failure(
@@ -238,6 +247,63 @@ class HttpManagedOpenRouterBrokerClient:
                 retry_after_ms=None,
                 fields={"payload_valid": False, "reason": _safe_field_label(str(exc))},
             )
+
+    async def record_translation_success_day(
+        self,
+        identifier: str,
+        active_date_utc: str,
+    ) -> bool:
+        payload = await self._post_json(
+            path="/v1/telemetry/translation-success-day",
+            request_body={
+                "signal": "translation_success_day",
+                "telemetry_identifier": identifier,
+                "active_date_utc": active_date_utc,
+            },
+            operation="telemetry_translation_success_day",
+        )
+        return payload.get("ok") is True
+
+    async def acknowledge_managed_key_delivery(
+        self,
+        request: ManagedKeyDeliveryAckRequest,
+    ) -> ManagedKeyDeliveryAckResult:
+        try:
+            payload = await self._post_json(
+                path="/v1/providers/openrouter/managed-key-delivery/ack",
+                request_body={
+                    "delivery_id": request.delivery_id,
+                    "managed_credential_ref": request.managed_credential_ref,
+                    "delivery_ack_token": request.delivery_ack_token,
+                },
+                operation="managed_key_delivery_ack",
+            )
+        except ManagedOpenRouterReleaseError as exc:
+            return _ack_failure_from_error(exc)
+
+        status = payload.get("status")
+        succeeded = payload.get("ok") is True and status in {
+            "acknowledged",
+            "already_acknowledged",
+        }
+        if not isinstance(status, str):
+            status = "malformed"
+        return ManagedKeyDeliveryAckResult(
+            succeeded=succeeded,
+            status=status,
+            diagnostics=(
+                None
+                if succeeded
+                else _ack_diagnostics(
+                    code="managed_key_delivery_ack_failed",
+                    status=status,
+                    fields={"broker_ok": payload.get("ok") is True},
+                )
+            ),
+            referral_bonus_applied=_parse_referral_bonus_applied(payload),
+            referral_id=_parse_owned_referral_id(payload),
+            pass_status=_parse_talk_together_pass_status(payload),
+        )
 
     async def get_trial_status(
         self,
@@ -377,6 +443,82 @@ def _parse_talk_together_pass_status(
         invite_count=invite_count,
         invite_limit=invite_limit,
         bonus_translations_per_friend=bonus,
+    )
+
+
+def _parse_delivery_ack_metadata(
+    payload: Mapping[str, object],
+    *,
+    source: str,
+) -> ManagedKeyDeliveryAckMetadata | None:
+    if payload.get("delivery_ack_required") is not True:
+        return None
+    try:
+        delivery_id = _require_text(payload, "delivery_id")
+        managed_credential_ref = _require_text(payload, "managed_credential_ref")
+        delivery_ack_token = _require_text(payload, "delivery_ack_token")
+        expires_at = _require_optional_text(payload, "delivery_ack_expires_at")
+    except ValueError as exc:
+        raise ValueError(
+            f"broker returned malformed delivery ACK metadata: {_safe_field_label(str(exc))}"
+        ) from exc
+    return ManagedKeyDeliveryAckMetadata(
+        source=source,
+        delivery_id=delivery_id,
+        managed_credential_ref=managed_credential_ref,
+        expires_at=expires_at,
+        delivery_ack_token=delivery_ack_token,
+    )
+
+
+def _delivery_ack_required(payload: Mapping[str, object]) -> bool:
+    return payload.get("delivery_ack_required") is True
+
+
+def _delivery_ack_text(payload: Mapping[str, object], key: str) -> str | None:
+    if _delivery_ack_required(payload):
+        return _require_text(payload, key)
+    return _require_optional_text(payload, key)
+
+
+def _ack_failure_from_error(error: ManagedOpenRouterReleaseError) -> ManagedKeyDeliveryAckResult:
+    retryable = error.error_class == RETRYABLE_ERROR_CLASS or error.code == RETRYABLE_ERROR_CODE
+    subcode = error.subcode or error.code
+    status = "retryable" if retryable else subcode
+    return ManagedKeyDeliveryAckResult(
+        succeeded=False,
+        status=status,
+        message=None,
+        diagnostics=_ack_diagnostics(
+            code="managed_key_delivery_ack_error",
+            status=status,
+            retry_after_ms=error.retry_after_ms,
+            fields={
+                "broker_code": error.code,
+                "broker_class": error.error_class,
+                "broker_subcode": error.subcode,
+            },
+        ),
+    )
+
+
+def _ack_diagnostics(
+    *,
+    code: str,
+    status: str,
+    fields: Mapping[str, messages.DiagnosticFieldValue],
+    retry_after_ms: int | None = None,
+) -> messages.ErrorDiagnostics:
+    return messages.ErrorDiagnostics(
+        component="managed_openrouter_broker_client",
+        operation="managed_key_delivery_ack",
+        code=code,
+        category=messages.DIAGNOSTIC_CATEGORY_SERVICE_UNAVAILABLE,
+        visibility=messages.DIAGNOSTIC_VISIBILITY_DIAGNOSTIC_ONLY,
+        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
+        status_code=None,
+        retry_after_ms=retry_after_ms,
+        fields={"ack_status": status, **{k: v for k, v in fields.items() if v is not None}},
     )
 
 

@@ -20,6 +20,7 @@ import {
   buildManagedCleanupRequiredAuditPayload,
   getManagedIssuanceSourcePolicy,
 } from './managed-issuance';
+import { createManagedKeyDelivery } from './managed-key-delivery';
 import {
   assignManagedGuardrail,
   cleanupManagedChildKey,
@@ -37,10 +38,12 @@ import { MANAGED_TRIAL_POLICY } from './trial-policy';
 
 const QQ_ISSUE_REF_PREFIX = 'qq-issue-v1_';
 const ISSUE_SOURCE = 'qq' as const;
+const MANAGED_KEY_DELIVERY_ACK_TTL_MS = 15 * 60_000;
 
 interface QqManagedIssueInput {
   qqSubjectRef: string;
   now: Date;
+  deliveryAckSupported?: boolean;
 }
 
 type QqReservationResult =
@@ -144,6 +147,48 @@ export async function issueQqManagedEntitlement(
       guardrailId: c.env.OPENROUTER_MANAGED_GUARDRAIL_ID,
       keyHash: childKey.hash,
     });
+
+    if (input.deliveryAckSupported === true) {
+      const pending = await markQqReservationDeliveryPending(c.env.BROKER_DB, {
+        qqSubjectRef: input.qqSubjectRef,
+        issueRef: issueMetadata.issueRef,
+        managedCredentialRef: childKey.hash,
+        budgetUsd: sourcePolicy.budget_usd,
+        issuedAt,
+        expiresAt,
+        nowIso,
+      });
+      if (!pending) {
+        throw new Error('QQ managed entitlement delivery-pending transition failed');
+      }
+      const deliveryAckExpiresAt = new Date(
+        input.now.getTime() + MANAGED_KEY_DELIVERY_ACK_TTL_MS,
+      );
+      const delivery = await createManagedKeyDelivery(c.env.BROKER_DB, {
+        issueSource: ISSUE_SOURCE,
+        subjectRef: input.qqSubjectRef,
+        managedCredentialRef: childKey.hash,
+        createdAt: input.now,
+        expiresAt: deliveryAckExpiresAt,
+      });
+      const openRouterUserId = await deriveOptionalOpenRouterUserId({
+        subjectRef: input.qqSubjectRef,
+        secret: c.env.OPENROUTER_MANAGED_USER_HMAC_SECRET,
+      });
+      return c.json({
+        ok: true,
+        status: 'delivery_pending',
+        qq_subject_ref: input.qqSubjectRef,
+        openrouter_api_key: childKey.rawKey,
+        managed_credential_ref: childKey.hash,
+        expires_at: expiresAt,
+        delivery_ack_required: true,
+        delivery_id: delivery.deliveryId,
+        delivery_ack_token: delivery.deliveryAckToken,
+        delivery_ack_expires_at: deliveryAckExpiresAt.toISOString(),
+        ...(openRouterUserId ? { openrouter_user_id: openRouterUserId } : {}),
+      });
+    }
 
     const activated = await activateQqReservation(c.env.BROKER_DB, {
       qqSubjectRef: input.qqSubjectRef,
@@ -330,6 +375,7 @@ function isLifetimeBlockingQqEntitlement(
 ): boolean {
   return (
     entitlement?.status === 'active' ||
+    entitlement?.status === 'delivery_pending' ||
     entitlement?.status === 'cleanup_required' ||
     entitlement?.status === 'revoked'
   );
@@ -417,7 +463,7 @@ async function activateQqReservation(
               updated_at = ?
         WHERE qq_subject_ref = ?
           AND issue_ref = ?
-          AND status = 'issuing'
+          AND status IN ('issuing', 'delivery_pending')
           AND managed_credential_ref = ?`,
     )
     .bind(
@@ -434,6 +480,109 @@ async function activateQqReservation(
     .run();
 
   return Number(result.meta.changes ?? 0) === 1;
+}
+
+async function markQqReservationDeliveryPending(
+  db: D1Database,
+  input: {
+    qqSubjectRef: string;
+    issueRef: string;
+    managedCredentialRef: string;
+    budgetUsd: number;
+    issuedAt: string;
+    expiresAt: string;
+    nowIso: string;
+  },
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE qq_managed_entitlements
+          SET status = 'delivery_pending',
+              managed_credential_ref = ?,
+              budget_usd = ?,
+              issued_at = ?,
+              expires_at = ?,
+              delivered_at = NULL,
+              updated_at = ?
+        WHERE qq_subject_ref = ?
+          AND issue_ref = ?
+          AND status = 'issuing'
+          AND managed_credential_ref = ?`,
+    )
+    .bind(
+      input.managedCredentialRef,
+      input.budgetUsd,
+      input.issuedAt,
+      input.expiresAt,
+      input.nowIso,
+      input.qqSubjectRef,
+      input.issueRef,
+      input.managedCredentialRef,
+    )
+    .run();
+
+  return Number(result.meta.changes ?? 0) === 1;
+}
+
+export async function finalizeQqManagedKeyDeliveryAck(
+  c: Context<BrokerEnv>,
+  input: { managedCredentialRef: string; acknowledgedAt: Date },
+): Promise<void> {
+  const entitlement = await c.env.BROKER_DB.prepare(
+    `SELECT qq_subject_ref, status, issue_ref, managed_credential_ref,
+            budget_usd, reserved_at, issued_at, expires_at, delivered_at,
+            created_at, updated_at
+       FROM qq_managed_entitlements
+      WHERE managed_credential_ref = ?`,
+  )
+    .bind(input.managedCredentialRef)
+    .first<QqManagedEntitlementRecord>();
+  if (!entitlement) {
+    throw new Error('QQ delivery ACK target is missing');
+  }
+  const alreadyActive = entitlement.status === 'active';
+  if (!alreadyActive && entitlement.status !== 'delivery_pending') {
+    throw new Error('QQ delivery ACK target is not pending');
+  }
+  const deliveredAt = entitlement.delivered_at ?? input.acknowledgedAt.toISOString();
+  if (!alreadyActive) {
+    const activated = await activateQqReservation(c.env.BROKER_DB, {
+      qqSubjectRef: entitlement.qq_subject_ref,
+      issueRef: entitlement.issue_ref,
+      managedCredentialRef: input.managedCredentialRef,
+      budgetUsd: entitlement.budget_usd,
+      issuedAt: entitlement.issued_at ?? deliveredAt,
+      expiresAt: entitlement.expires_at!,
+      deliveredAt,
+    });
+    if (!activated) {
+      throw new Error('QQ delivery ACK activation failed');
+    }
+  }
+  if (!(await hasQqIssueSuccessRecord(c.env.BROKER_DB, input.managedCredentialRef))) {
+    await runQqIssueSuccessMonitoring(c, {
+      qqSubjectRef: entitlement.qq_subject_ref,
+      managedCredentialRef: input.managedCredentialRef,
+      observedAt: deliveredAt,
+      now: input.acknowledgedAt,
+    });
+  }
+}
+
+async function hasQqIssueSuccessRecord(
+  db: D1Database,
+  managedCredentialRef: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 AS found
+         FROM broker_issue_success_events
+        WHERE managed_credential_ref = ?
+        LIMIT 1`,
+    )
+    .bind(managedCredentialRef)
+    .first<{ found: number }>();
+  return Number(row?.found ?? 0) === 1;
 }
 
 async function releaseQqReservationBeforeChildKey(
@@ -482,7 +631,7 @@ async function releaseQqReservationAfterManagedCleanup(
       `DELETE FROM qq_managed_entitlements
         WHERE qq_subject_ref = ?
           AND issue_ref = ?
-          AND status IN ('issuing', 'active')
+          AND status IN ('issuing', 'delivery_pending', 'active')
           AND managed_credential_ref = ?`,
     )
     .bind(input.qqSubjectRef, input.issueRef, input.managedCredentialRef)
@@ -509,7 +658,7 @@ async function markQqCleanupRequired(
               updated_at = ?
         WHERE qq_subject_ref = ?
           AND issue_ref = ?
-          AND status IN ('issuing', 'active')
+          AND status IN ('issuing', 'delivery_pending', 'active')
           AND managed_credential_ref = ?`,
     )
     .bind(

@@ -2951,6 +2951,66 @@ async def test_discord_managed_auth_transaction_rebuilds_existing_provider(
 
 
 @pytest.mark.asyncio
+async def test_discord_managed_auth_pending_ack_installs_runtime_settings_without_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = SimpleNamespace(
+        app_version="test",
+        client=object(),
+        raw_hardware_fingerprint_provider=None,
+        _legacy_hardware_hash_provider=None,
+        oauth_runtime=object(),
+        discord_oauth_listener_factory=object(),
+        discord_oauth_callback_runner=object(),
+        openrouter_config=controller_module.build_openrouter_release_runtime_config(
+            controller.settings
+        ),
+        signed_at_provider=lambda: "2026-01-01T00:00:00Z",
+    )
+    rebuild_calls: list[str] = []
+
+    async def fake_authorize(service, _request):
+        service.settings_repository.committed_settings.managed_identity.pending_delivery_ack_source = (
+            "discord"
+        )
+        service.settings_repository.committed_settings.managed_identity.pending_delivery_ack_delivery_id = (
+            "delivery-discord"
+        )
+        service.settings_repository.committed_settings.managed_identity.pending_delivery_ack_managed_credential_ref = (
+            "managed-ref-discord"
+        )
+        return messages.TransactionResult(
+            status=messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING,
+            message=None,
+            diagnostics=None,
+        )
+
+    async def fake_rebuild_llm_provider(self: GuiController) -> None:
+        rebuild_calls.append("rebuild")
+
+    monkeypatch.setattr(
+        controller_module, "create_secret_store", lambda *_args, **_kwargs: DummySecrets({})
+    )
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(controller_module.ManagedConnectionAuthService, "authorize", fake_authorize)
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is False
+    assert rebuild_calls == []
+    assert controller.settings.managed_identity.pending_delivery_ack_source == "discord"
+    assert (
+        controller.settings.managed_identity.pending_delivery_ack_delivery_id == "delivery-discord"
+    )
+
+
+@pytest.mark.asyncio
 async def test_start_discord_managed_auth_from_dialog_success_rebuilds_missing_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -15530,6 +15590,48 @@ async def test_order21_snapshot_full_repository_save_offloads_persistence_thread
         "model": TranslationModel.DEEPSEEK_V4_FLASH.value,
         "connection": TranslationConnection.OPENROUTER.value,
     }
+
+
+@pytest.mark.asyncio
+async def test_managed_auth_repository_persists_pending_delivery_ack_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    committed = AppSettings()
+    saved: list[AppSettings] = []
+
+    def record_saved(_path: Path, settings: AppSettings) -> None:
+        saved.append(copy.deepcopy(settings))
+
+    monkeypatch.setattr(controller_module, "save_settings", record_saved)
+    repository = controller_module._ControllerSettingsPatchRepository(
+        controller=controller,
+        committed_settings=committed,
+        surface="managed_connection_auth",
+    )
+
+    result = await repository.save(
+        controller_module.SettingsCommitRequest(
+            values={
+                "state": {
+                    "managed_connection": {
+                        "pending_delivery_ack_source": "discord",
+                        "pending_delivery_ack_delivery_id": "delivery-1",
+                        "pending_delivery_ack_managed_credential_ref": "managed-ref-1",
+                        "pending_delivery_ack_expires_at": "2026-07-07T00:15:00.000Z",
+                    }
+                }
+            },
+            expected_revision=None,
+            reason="managed_connection_auth",
+        )
+    )
+
+    assert result.succeeded is True
+    assert saved[0].managed_identity.pending_delivery_ack_source == "discord"
+    assert saved[0].managed_identity.pending_delivery_ack_delivery_id == "delivery-1"
+    assert saved[0].managed_identity.pending_delivery_ack_managed_credential_ref == "managed-ref-1"
+    assert "delivery_ack_token" not in repr(result.snapshot.values if result.snapshot else {})
 
 
 @pytest.mark.asyncio

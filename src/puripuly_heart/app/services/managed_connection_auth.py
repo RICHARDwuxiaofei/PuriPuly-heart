@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -9,6 +10,7 @@ from puripuly_heart.app.ports.broker_client import (
     BrokerClientPort,
     BrokerIssueRequest,
     BrokerIssueResult,
+    ManagedKeyDeliveryAckRequest,
 )
 from puripuly_heart.app.ports.discord_auth import (
     DiscordAuthPort,
@@ -32,12 +34,19 @@ from puripuly_heart.app.services.managed_auth_claims import (
     OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
     ManagedAuthClaimGuard,
 )
+from puripuly_heart.app.services.managed_key_delivery_ack import (
+    ManagedKeyDeliveryAckTokenStoreError,
+    clear_pending_ack_in_settings_values,
+    secret_key_for_ack_source,
+    store_pending_ack_in_settings_values,
+)
 from puripuly_heart.core.messages import (
     CONTENT_POLICY_METADATA_ONLY,
     DIAGNOSTIC_CATEGORY_TRANSACTION,
     DIAGNOSTIC_VISIBILITY_BASIC,
     TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED,
     TRANSACTION_STATUS_REMOTE_ACTIVE_LOCAL_MISSING,
+    TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
     DiagnosticFieldValue,
     ErrorDiagnostics,
@@ -139,11 +148,47 @@ class ManagedConnectionAuthService:
                 message=broker_result.message,
             )
 
+        settings_values = request.settings_values
+        commit_result: TransactionResult | None = None
+        if broker_result.delivery_ack is not None:
+            try:
+                settings_values = await store_pending_ack_in_settings_values(
+                    settings_values=request.settings_values,
+                    secret_store=self.secret_store,
+                    metadata=broker_result.delivery_ack,
+                )
+            except ManagedKeyDeliveryAckTokenStoreError:
+                return _remote_active_local_missing_result(
+                    request=request,
+                    broker_result=broker_result,
+                    operation="store_delivery_ack_token",
+                    code="delivery_ack_token_store_failed_before_local_key_write",
+                    phase="delivery_ack_token_store",
+                    secret_write_succeeded=False,
+                    settings_commit_succeeded=False,
+                    diagnostics_present=broker_result.diagnostics is not None,
+                    message=broker_result.message,
+                )
+            commit_result = await self._commit_settings(
+                request=request,
+                broker_result=broker_result,
+                settings_values=settings_values,
+                secret_message=None,
+                secret_diagnostics_present=False,
+            )
+            if commit_result.status != TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+                return commit_result
+
         secret_write_result = await self._write_local_managed_secret(
             request=request,
             broker_result=broker_result,
         )
         if isinstance(secret_write_result, TransactionResult):
+            if broker_result.delivery_ack is not None:
+                with contextlib.suppress(Exception):
+                    await self.secret_store.clear_secret(
+                        secret_key_for_ack_source(broker_result.delivery_ack.source)
+                    )
             return secret_write_result
 
         await self._store_managed_user_identifier(
@@ -151,14 +196,81 @@ class ManagedConnectionAuthService:
             broker_result=broker_result,
         )
 
-        commit_result = await self._commit_settings(
-            request=request,
-            broker_result=broker_result,
-            secret_message=secret_write_result.message,
-            secret_diagnostics_present=secret_write_result.diagnostics is not None,
-        )
-        if commit_result.status != TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
-            return commit_result
+        if broker_result.delivery_ack is None:
+            commit_result = await self._commit_settings(
+                request=request,
+                broker_result=broker_result,
+                settings_values=settings_values,
+                secret_message=secret_write_result.message,
+                secret_diagnostics_present=secret_write_result.diagnostics is not None,
+            )
+            if commit_result.status != TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+                return commit_result
+        assert commit_result is not None
+
+        if broker_result.delivery_ack is not None:
+            ack_result = await self.broker_client.acknowledge_managed_key_delivery(
+                ManagedKeyDeliveryAckRequest(
+                    delivery_id=broker_result.delivery_ack.delivery_id,
+                    managed_credential_ref=broker_result.delivery_ack.managed_credential_ref,
+                    delivery_ack_token=broker_result.delivery_ack.delivery_ack_token,
+                )
+            )
+            if not ack_result.succeeded:
+                return _delivery_ack_pending_result(
+                    request=request,
+                    broker_result=broker_result,
+                    ack_status=ack_result.status,
+                    diagnostics_present=ack_result.diagnostics is not None,
+                    message=ack_result.message or commit_result.message,
+                )
+            try:
+                clear_result = await self.secret_store.clear_secret(
+                    secret_key_for_ack_source(broker_result.delivery_ack.source)
+                )
+            except Exception:
+                return _delivery_ack_pending_result(
+                    request=request,
+                    broker_result=broker_result,
+                    ack_status="token_clear_failed",
+                    diagnostics_present=False,
+                    message=commit_result.message,
+                )
+            if not clear_result.succeeded:
+                return _delivery_ack_pending_result(
+                    request=request,
+                    broker_result=broker_result,
+                    ack_status="token_clear_failed",
+                    diagnostics_present=clear_result.diagnostics is not None,
+                    message=clear_result.message or commit_result.message,
+                )
+            cleared_values = clear_pending_ack_in_settings_values(settings_values)
+            clear_commit = await self._commit_settings(
+                request=request,
+                broker_result=broker_result,
+                settings_values=cleared_values,
+                secret_message=commit_result.message,
+                secret_diagnostics_present=commit_result.diagnostics is not None,
+            )
+            if clear_commit.status != TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+                try:
+                    restore_result = await self.secret_store.set_secret(
+                        secret_key_for_ack_source(broker_result.delivery_ack.source),
+                        broker_result.delivery_ack.delivery_ack_token,
+                    )
+                    token_restored = restore_result.succeeded
+                except Exception:
+                    token_restored = False
+                return _delivery_ack_pending_result(
+                    request=request,
+                    broker_result=broker_result,
+                    ack_status=(
+                        "metadata_clear_failed" if token_restored else "token_restore_failed"
+                    ),
+                    diagnostics_present=clear_commit.diagnostics is not None,
+                    message=clear_commit.message or commit_result.message,
+                )
+            commit_result = clear_commit
 
         claim_persist_result = self._record_successful_claim_after_commit(
             request=request,
@@ -332,13 +444,14 @@ class ManagedConnectionAuthService:
         *,
         request: ManagedConnectionAuthRequest,
         broker_result: BrokerIssueResult,
+        settings_values: Mapping[str, object],
         secret_message: UserMessageRef | None,
         secret_diagnostics_present: bool,
     ) -> TransactionResult:
         try:
             settings_commit_result = await self.settings_repository.save(
                 SettingsCommitRequest(
-                    values=request.settings_values,
+                    values=settings_values,
                     expected_revision=request.expected_settings_revision,
                     reason=request.reason,
                 )
@@ -634,6 +747,37 @@ def _remote_active_local_missing_result(
         diagnostics=_metadata_diagnostics(
             operation=operation,
             code=code,
+            fields=fields,
+        ),
+    )
+
+
+def _delivery_ack_pending_result(
+    *,
+    request: ManagedConnectionAuthRequest,
+    broker_result: BrokerIssueResult,
+    ack_status: str,
+    diagnostics_present: bool,
+    message: UserMessageRef | None,
+) -> TransactionResult:
+    fields: dict[str, DiagnosticFieldValue] = {
+        "phase": "remote_delivery_ack",
+        "local_secret_key": request.local_secret_key,
+        "remote_active": False,
+        "broker_issue_succeeded": True,
+        "secret_write_succeeded": True,
+        "settings_commit_succeeded": True,
+        "delivery_ack_status": ack_status,
+        "diagnostics_present": diagnostics_present,
+    }
+    if broker_result.managed_credential_ref is not None:
+        fields["managed_credential_ref"] = broker_result.managed_credential_ref
+    return TransactionResult(
+        status=TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING,
+        message=message,
+        diagnostics=_metadata_diagnostics(
+            operation="acknowledge_managed_key_delivery",
+            code="remote_delivery_ack_pending",
             fields=fields,
         ),
     )
