@@ -99,6 +99,12 @@
       "name": "Ephedrine",
       "avatar_url": "https://ui-avatars.com/api/?name=EPH&size=160&background=F4F0FF&color=4C3B7A&rounded=true&bold=true",
       "contributions": ["thanks"]
+    },
+    {
+      "login": "eri",
+      "name": "~ eri ~",
+      "avatar_url": "https://ui-avatars.com/api/?name=ERI&size=160&background=FFF0F0&color=7A3030&rounded=true&bold=true",
+      "contributions": ["thanks"]
     }
   ]
 }

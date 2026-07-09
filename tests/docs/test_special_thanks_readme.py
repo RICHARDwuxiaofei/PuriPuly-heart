@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 README_FILES = ["README.md", "README.ko.md", "README.ja.md", "README.zh-CN.md"]
 SPECIAL_THANKS_TEXT = (
     "SUI\\_32C, Nagikokoro, motoka96, \\_Ykol魚, kascr\\_, "
-    "Just Monika V, FLUVIA, Han โชเล่ย์, EA\\_PE, Ephedrine"
+    "Just Monika V, FLUVIA, Han โชเล่ย์, EA\\_PE, Ephedrine, ~ eri ~"
 )
 
 
@@ -48,5 +48,21 @@ def test_all_contributors_contains_ephedrine_special_thanks_entry() -> None:
         "login": "ephedrine",
         "name": "Ephedrine",
         "avatar_url": "https://ui-avatars.com/api/?name=EPH&size=160&background=F4F0FF&color=4C3B7A&rounded=true&bold=true",
+        "contributions": ["thanks"],
+    }
+
+
+def test_all_contributors_contains_eri_special_thanks_entry() -> None:
+    config = json.loads((ROOT / ".all-contributorsrc").read_text(encoding="utf-8"))
+
+    contributor = next(
+        (entry for entry in config["contributors"] if entry["login"] == "eri"),
+        None,
+    )
+
+    assert contributor == {
+        "login": "eri",
+        "name": "~ eri ~",
+        "avatar_url": "https://ui-avatars.com/api/?name=ERI&size=160&background=FFF0F0&color=7A3030&rounded=true&bold=true",
         "contributions": ["thanks"],
     }
