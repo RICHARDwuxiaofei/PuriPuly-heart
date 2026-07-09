@@ -1176,7 +1176,21 @@ class RecordingWebSocket:
 
 
 class FakeFletWindow:
+    _PROTECTED_PROPERTIES = {
+        "visible",
+        "always_on_top",
+        "frameless",
+        "shadow",
+        "skip_task_bar",
+        "resizable",
+        "maximizable",
+        "title_bar_hidden",
+        "title_bar_buttons_hidden",
+        "bgcolor",
+    }
+
     def __init__(self, app: FakeFletApp) -> None:
+        self._record_writes = False
         self._app = app
         self.visible: bool = False
         self.frameless: bool | None = None
@@ -1198,6 +1212,13 @@ class FakeFletWindow:
         self.close_calls = 0
         self.destroy_calls = 0
         self.start_resizing_calls = 0
+        self.protected_writes: list[str] = []
+        self._record_writes = True
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_record_writes", False) and name in self._PROTECTED_PROPERTIES:
+            self.protected_writes.append(name)
+        super().__setattr__(name, value)
 
     def close(self) -> None:
         self.close_calls += 1
@@ -1223,15 +1244,19 @@ class FakeFletPage:
         self.horizontal_alignment: object | None = None
         self.vertical_alignment: object | None = None
         self.update_calls = 0
+        self.add_calls = 0
+        self.clean_calls = 0
         self.render_snapshots: list[dict[str, object]] = []
         self.visibility_updates: list[bool] = []
         self.run_task_calls = 0
         self.tasks: list[asyncio.Task[object]] = []
 
     def add(self, *controls: object) -> None:
+        self.add_calls += 1
         self.controls.extend(controls)
 
     def clean(self) -> None:
+        self.clean_calls += 1
         self.controls.clear()
 
     def update(self) -> None:
@@ -1330,10 +1355,10 @@ def _page_text_values(page: FakeFletPage) -> set[str]:
     for control in page.controls:
         for item in _walk_control_tree(control):
             value = getattr(item, "value", None)
-            if isinstance(value, str):
+            if isinstance(value, str) and value:
                 values.add(value)
             text = getattr(item, "text", None)
-            if isinstance(text, str):
+            if isinstance(text, str) and text:
                 values.add(text)
     return values
 
@@ -1947,6 +1972,87 @@ async def test_desktop_overlay_preview_controls_apply_size_preset_without_outlin
         await window.close()
 
 
+@pytest.mark.asyncio
+async def test_desktop_overlay_preview_post_start_updates_retain_caption_surface_and_window_state() -> (
+    None
+):
+    app = FakeFletApp()
+    catalog = desktop_overlay.build_desktop_overlay_preview_catalog(locale="en")
+    window = desktop_overlay.FletDesktopRendererWindow(
+        app_runner=app.run,
+        event_sink=RecordingLifecycleSink().emit,
+        locale="en",
+        preview_catalog=catalog,
+    )
+
+    try:
+        await window.start(catalog.fixtures[0].snapshot)
+        model = window._retained_caption_surface
+        assert model is not None
+        identities = (
+            app.page.controls[0],
+            model.caption_surface,
+            *model.slot_containers,
+            *model.primary_texts,
+            *model.secondary_texts,
+        )
+        protected_writes = len(app.page.window.protected_writes)
+        initial_bounds = (
+            app.page.window.left,
+            app.page.window.top,
+            app.page.window.width,
+            app.page.window.height,
+        )
+
+        for label in (
+            catalog.fixtures[1].label,
+            "50%",
+            catalog.background_surfaces[1].label,
+        ):
+            handler = getattr(_find_control_with_text(app.page, label), "on_click", None)
+            assert callable(handler)
+            handler(None)
+            assert identities == (
+                app.page.controls[0],
+                model.caption_surface,
+                *model.slot_containers,
+                *model.primary_texts,
+                *model.secondary_texts,
+            )
+            assert (
+                app.page.window.left,
+                app.page.window.top,
+                app.page.window.width,
+                app.page.window.height,
+            ) == initial_bounds
+
+        size_handler = getattr(_find_control_with_text(app.page, "Large"), "on_click", None)
+        assert callable(size_handler)
+        size_handler(None)
+        assert (app.page.window.left, app.page.window.top) == initial_bounds[:2]
+        assert (app.page.window.width, app.page.window.height) == (1600, 400)
+
+        await window.dispatch_runtime_control(
+            {"command": "set_interaction_mode", "mode": "pass_through"}
+        )
+        window._on_preview_keyboard_event(type("PreviewKeyEvent", (), {"key": "e"})())
+        await asyncio.gather(*app.page.tasks)
+
+        assert app.page.window.ignore_mouse_events is False
+        assert identities == (
+            app.page.controls[0],
+            model.caption_surface,
+            *model.slot_containers,
+            *model.primary_texts,
+            *model.secondary_texts,
+        )
+        assert app.page.add_calls == 1
+        assert app.page.clean_calls == 0
+        assert len(app.page.window.protected_writes) == protected_writes
+    finally:
+        await window.close()
+
+
 def test_desktop_overlay_preview_i18n_labels_resolve_for_all_controls() -> None:
     catalog = desktop_overlay.build_desktop_overlay_preview_catalog(locale="ja")
 
@@ -2438,7 +2544,8 @@ async def test_desktop_overlay_empty_lock_action_hides_when_captions_arrive() ->
 
         assert "고정하기" not in _page_text_values(app.page)
         assert {"좋아요", "Sounds good"} <= _page_text_values(app.page)
-        assert _text_buttons(app.page) == []
+        assert len(_text_buttons(app.page)) == 1
+        assert _text_buttons(app.page)[0].visible is False
         assert _page_contains_control_type(app.page, ft.WindowDragArea)
     finally:
         await window.close()
@@ -2502,7 +2609,7 @@ async def test_desktop_overlay_display_matrix_moving_and_locked_with_captions() 
             app.page.window.title_bar_buttons_hidden,
         ) == chrome_before_lock
         assert {"좋아요", "Sounds good"} <= _page_text_values(app.page)
-        assert not _page_contains_control_type(app.page, ft.WindowDragArea)
+        assert _page_contains_control_type(app.page, ft.WindowDragArea)
         assert len(_caption_card_controls(app.page)) == 1
         _assert_no_overlay_local_renderer_text(app.page)
         assert sink.events[-1] == {
@@ -2690,7 +2797,7 @@ async def test_desktop_overlay_empty_lock_action_switches_to_pass_through() -> N
         assert app.page.window.ignore_mouse_events is True
         assert _page_text_values(app.page) == set()
         assert _caption_card_controls(app.page) == []
-        assert not _page_contains_control_type(app.page, ft.WindowDragArea)
+        assert _page_contains_control_type(app.page, ft.WindowDragArea)
         assert sink.events[-1] == {
             "type": "overlay_event",
             "payload": {"event": "interaction_mode_changed", "mode": "pass_through"},
@@ -2736,7 +2843,7 @@ async def test_desktop_overlay_display_matrix_locked_no_captions_is_fully_transp
         assert app.page.window.ignore_mouse_events is True
         assert _page_text_values(app.page) == set()
         assert _caption_card_controls(app.page) == []
-        assert not _page_contains_control_type(app.page, ft.WindowDragArea)
+        assert _page_contains_control_type(app.page, ft.WindowDragArea)
 
         await window.dispatch_runtime_control({"command": "set_interaction_mode", "mode": "edit"})
 
@@ -2921,6 +3028,107 @@ async def test_desktop_overlay_interaction_mode_bounds_and_visual_runtime_contro
             "type": "overlay_event",
             "payload": {"event": "interaction_mode_changed", "mode": "pass_through"},
         }
+    finally:
+        await window.close()
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_post_start_paths_update_retained_controls_in_place() -> None:
+    app = FakeFletApp()
+    window = desktop_overlay.FletDesktopRendererWindow(
+        app_runner=app.run,
+        event_sink=RecordingLifecycleSink().emit,
+        locale="en",
+    )
+    initial_snapshot = OverlayPresentationSnapshot(
+        revision=1,
+        blocks=[
+            _block(
+                "self-active",
+                channel="self",
+                block_variant="active_self",
+                appearance_seq=1,
+                primary_text="self transcript",
+            )
+        ],
+    )
+    peer_translation = OverlayPresentationSnapshot(
+        revision=2,
+        blocks=[
+            _block(
+                "self-finalized",
+                channel="self",
+                block_variant="finalized",
+                appearance_seq=1,
+                primary_text="self transcript",
+                secondary_text="self translation",
+                secondary_enabled=True,
+            ),
+            _block(
+                "peer-finalized",
+                channel="peer",
+                block_variant="finalized",
+                appearance_seq=2,
+                primary_text="peer translation",
+                secondary_text="peer original",
+                secondary_enabled=True,
+            ),
+        ],
+    )
+
+    try:
+        await window.start(initial_snapshot)
+        model = window._retained_caption_surface
+        assert model is not None
+        identities = (
+            app.page.controls[0],
+            model.caption_surface,
+            *model.slot_containers,
+            *model.primary_texts,
+            *model.secondary_texts,
+        )
+        protected_writes = len(app.page.window.protected_writes)
+
+        await window.dispatch_snapshot(peer_translation)
+        await window.dispatch_runtime_control(
+            {
+                "command": "apply_visual_config",
+                "text_scale": 1.25,
+                "background_alpha": 0.5,
+                "outline_width": None,
+            }
+        )
+        await window.dispatch_runtime_control(
+            {
+                "command": "apply_window_bounds",
+                "x": 320,
+                "y": 720,
+                "width": 1152,
+                "height": 288,
+            }
+        )
+        assert (app.page.window.left, app.page.window.top) == (320, 720)
+        assert (app.page.window.width, app.page.window.height) == (1152, 288)
+
+        await window.dispatch_snapshot(OverlayPresentationSnapshot(revision=3, blocks=[]))
+        action = _find_text_button(app.page, "Lock")
+        action.on_click(None)
+        await asyncio.gather(*app.page.tasks)
+
+        assert app.page.window.ignore_mouse_events is True
+        assert model.caption_surface.visible is False
+        await window.dispatch_runtime_control({"command": "set_interaction_mode", "mode": "edit"})
+        assert app.page.window.ignore_mouse_events is False
+        assert identities == (
+            app.page.controls[0],
+            model.caption_surface,
+            *model.slot_containers,
+            *model.primary_texts,
+            *model.secondary_texts,
+        )
+        assert app.page.add_calls == 1
+        assert app.page.clean_calls == 0
+        assert len(app.page.window.protected_writes) == protected_writes
     finally:
         await window.close()
 

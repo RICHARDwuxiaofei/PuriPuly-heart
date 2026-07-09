@@ -1735,6 +1735,311 @@ class _DesktopRenderTrace:
     background_alpha: float
 
 
+@dataclass(slots=True)
+class _RetainedDesktopCaptionSurface:
+    root: Any
+    surface_host: Any
+    caption_surface: Any
+    caption_stack: Any
+    full_background: Any
+    slot_column: Any
+    slot_containers: tuple[Any, ...]
+    cards: tuple[Any, ...]
+    text_layers: tuple[Any, ...]
+    primary_regions: tuple[Any, ...]
+    secondary_regions: tuple[Any, ...]
+    primary_texts: tuple[Any, ...]
+    secondary_texts: tuple[Any, ...]
+    empty_lock_action: Any
+
+
+def _retained_placeholder_line(slot: str) -> DesktopCaptionLine:
+    return DesktopCaptionLine(
+        text="",
+        role="retained_placeholder",
+        slot=slot,
+        color=_DESKTOP_CAPTION_WHITE,
+        priority=0,
+        block_id="",
+        channel="self",
+        block_variant="finalized",
+        appearance_seq=0,
+        max_lines=(
+            _DESKTOP_CAPTION_PRIMARY_MAX_LINES
+            if slot == "primary"
+            else _DESKTOP_CAPTION_SECONDARY_MAX_LINES
+        ),
+        font_size=1,
+        font_family=_DESKTOP_CAPTION_LATIN_FONT_FAMILY,
+    )
+
+
+def _build_retained_desktop_caption_surface(
+    ft: Any,
+    plan: DesktopCaptionPlan,
+    *,
+    empty_lock_label: str,
+    on_empty_lock: Callable[[object], object] | None,
+    include_drag_area: bool,
+) -> _RetainedDesktopCaptionSurface:
+    full_background = ft.Container(
+        left=0,
+        top=0,
+        right=0,
+        bottom=0,
+        alignment=ft.alignment.center,
+    )
+    slot_containers: list[Any] = []
+    cards: list[Any] = []
+    text_layers: list[Any] = []
+    primary_regions: list[Any] = []
+    secondary_regions: list[Any] = []
+    primary_texts: list[Any] = []
+    secondary_texts: list[Any] = []
+    for _index in range(_DESKTOP_CAPTION_MAX_VISIBLE_SLOTS):
+        primary_text = _build_flet_text(ft, _retained_placeholder_line("primary"), 1)
+        secondary_text = _build_flet_text(ft, _retained_placeholder_line("secondary"), 1)
+        primary_region = ft.Container(content=primary_text, bgcolor=ft.Colors.TRANSPARENT)
+        secondary_region = ft.Container(content=secondary_text, bgcolor=ft.Colors.TRANSPARENT)
+        column = ft.Column(
+            controls=[primary_region, secondary_region],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=0,
+            tight=True,
+            scroll=None,
+        )
+        text_layer = ft.Container(content=column, bgcolor=ft.Colors.TRANSPARENT)
+        card = ft.Container(content=text_layer, alignment=ft.alignment.center)
+        slot_container = ft.Container(
+            content=card,
+            bgcolor=ft.Colors.TRANSPARENT,
+            alignment=ft.alignment.center,
+        )
+        slot_containers.append(slot_container)
+        cards.append(card)
+        text_layers.append(text_layer)
+        primary_regions.append(primary_region)
+        secondary_regions.append(secondary_region)
+        primary_texts.append(primary_text)
+        secondary_texts.append(secondary_text)
+    slot_column = ft.Column(
+        controls=slot_containers,
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        alignment=ft.MainAxisAlignment.CENTER,
+        tight=True,
+    )
+    caption_stack = ft.Stack(
+        controls=[full_background, slot_column],
+        alignment=ft.alignment.center,
+    )
+    caption_surface = ft.Container(
+        content=caption_stack,
+        bgcolor=ft.Colors.TRANSPARENT,
+        alignment=ft.alignment.center,
+    )
+    empty_lock_action = build_desktop_empty_lock_action(
+        plan,
+        label=empty_lock_label,
+        on_click=on_empty_lock,
+    )
+    caption_content: Any = caption_surface
+    if include_drag_area:
+        caption_content = ft.WindowDragArea(content=caption_surface, maximizable=False)
+    surface_host = ft.Stack(
+        controls=[caption_content, empty_lock_action],
+        alignment=ft.alignment.center,
+    )
+    root = ft.Container(
+        content=surface_host,
+        padding=0,
+        bgcolor=ft.Colors.TRANSPARENT,
+        alignment=ft.alignment.center,
+    )
+    model = _RetainedDesktopCaptionSurface(
+        root=root,
+        surface_host=surface_host,
+        caption_surface=caption_surface,
+        caption_stack=caption_stack,
+        full_background=full_background,
+        slot_column=slot_column,
+        slot_containers=tuple(slot_containers),
+        cards=tuple(cards),
+        text_layers=tuple(text_layers),
+        primary_regions=tuple(primary_regions),
+        secondary_regions=tuple(secondary_regions),
+        primary_texts=tuple(primary_texts),
+        secondary_texts=tuple(secondary_texts),
+        empty_lock_action=empty_lock_action,
+    )
+    _apply_retained_desktop_caption_plan(ft, model, plan, empty_lock_label=empty_lock_label)
+    return model
+
+
+def _apply_retained_desktop_caption_plan(
+    ft: Any,
+    model: _RetainedDesktopCaptionSurface,
+    plan: DesktopCaptionPlan,
+    *,
+    empty_lock_label: str,
+) -> None:
+    model.root.width = plan.window_width
+    model.root.height = plan.window_height
+    model.surface_host.width = plan.window_width
+    model.surface_host.height = plan.window_height
+    model.caption_surface.width = plan.window_width
+    model.caption_surface.height = plan.window_height
+    model.caption_surface.border_radius = plan.border_radius
+    model.caption_surface.visible = plan.surface_visible
+    model.caption_stack.width = plan.window_width
+    model.caption_stack.height = plan.window_height
+    model.full_background.visible = plan.full_window_background_visible
+    model.full_background.bgcolor = (
+        plan.background_color if plan.full_window_background_visible else ft.Colors.TRANSPARENT
+    )
+    model.full_background.border_radius = plan.border_radius
+    visible_slot_count = len(plan.slots)
+    model.slot_column.visible = bool(visible_slot_count)
+    model.slot_column.width = plan.window_width
+    model.slot_column.height = (plan.slot_height * visible_slot_count) + (
+        plan.slot_gap * max(0, visible_slot_count - 1)
+    )
+    model.slot_column.spacing = plan.slot_gap
+    for index, slot_container in enumerate(model.slot_containers):
+        slot = plan.slots[index] if index < visible_slot_count else None
+        slot_container.visible = slot is not None
+        slot_container.width = plan.window_width
+        slot_container.height = plan.slot_height
+        if slot is None:
+            continue
+        if plan.full_window_background_visible:
+            card_width = plan.window_width
+            card_text_width = plan.text_width
+        else:
+            card_width = slot.card_width or plan.window_width
+            card_text_width = slot.card_text_width or plan.text_width
+        card = model.cards[index]
+        text_layer = model.text_layers[index]
+        card.width = card_width
+        card.height = plan.slot_height
+        card.bgcolor = (
+            ft.Colors.TRANSPARENT if plan.full_window_background_visible else plan.background_color
+        )
+        card.border_radius = plan.border_radius
+        card.padding = ft.padding.symmetric(
+            horizontal=plan.padding_horizontal,
+            vertical=plan.padding_vertical,
+        )
+        text_layer.width = card_text_width
+        primary_line = next((line for line in slot.lines if line.slot == "primary"), None)
+        secondary_line = next((line for line in slot.lines if line.slot == "secondary"), None)
+        reserve_secondary = (
+            secondary_line is not None
+            or _slot_should_reserve_empty_secondary_region(
+                slot,
+                (primary_line,) if primary_line is not None else (),
+            )
+        )
+        text_layer.alignment = (
+            ft.Alignment(0, _DESKTOP_CAPTION_TEXT_STACK_ALIGNMENT_Y)
+            if reserve_secondary
+            else ft.alignment.center
+        )
+        _apply_retained_caption_line(
+            ft,
+            model.primary_regions[index],
+            model.primary_texts[index],
+            primary_line,
+            width=card_text_width,
+            height=plan.primary_region_height,
+            center=not reserve_secondary,
+        )
+        _apply_retained_caption_line(
+            ft,
+            model.secondary_regions[index],
+            model.secondary_texts[index],
+            secondary_line,
+            width=card_text_width,
+            height=plan.secondary_region_height,
+            center=True,
+            visible=reserve_secondary,
+            fallback_font_family=(
+                primary_line.font_family
+                if primary_line is not None
+                else _DESKTOP_CAPTION_LATIN_FONT_FAMILY
+            ),
+            fallback_font_size=plan.secondary_font_size,
+        )
+    show_empty_lock = plan.full_window_background_visible and not plan.slots
+    model.empty_lock_action.visible = show_empty_lock
+    model.empty_lock_action.text = empty_lock_label if show_empty_lock else ""
+    model.empty_lock_action.tooltip = empty_lock_label if show_empty_lock else None
+    model.empty_lock_action.width = _desktop_empty_lock_action_width(
+        empty_lock_label,
+        _desktop_empty_lock_action_font_size(plan),
+    )
+    model.empty_lock_action.height = max(
+        _DESKTOP_EMPTY_LOCK_ACTION_MIN_HIT_TARGET,
+        _desktop_empty_lock_action_font_size(plan)
+        + (_DESKTOP_EMPTY_LOCK_ACTION_VERTICAL_PADDING * 2),
+    )
+
+
+def _apply_retained_caption_line(
+    ft: Any,
+    region: Any,
+    text: Any,
+    line: DesktopCaptionLine | None,
+    *,
+    width: float,
+    height: float,
+    center: bool,
+    visible: bool = True,
+    fallback_font_family: str | None = None,
+    fallback_font_size: int | None = None,
+) -> None:
+    displayed_line = line or DesktopCaptionLine(
+        text="",
+        role="retained_placeholder",
+        slot="secondary" if fallback_font_size is not None else "primary",
+        color=_DESKTOP_CAPTION_WHITE,
+        priority=0,
+        block_id="",
+        channel="self",
+        block_variant="finalized",
+        appearance_seq=0,
+        max_lines=(
+            _DESKTOP_CAPTION_SECONDARY_MAX_LINES
+            if fallback_font_size is not None
+            else _DESKTOP_CAPTION_PRIMARY_MAX_LINES
+        ),
+        font_size=fallback_font_size or 1,
+        font_family=fallback_font_family or _DESKTOP_CAPTION_LATIN_FONT_FAMILY,
+    )
+    region.visible = visible
+    region.width = width
+    region.height = height
+    region.alignment = _caption_line_region_alignment(
+        ft,
+        displayed_line,
+        center_primary_region=center,
+    )
+    text.value = displayed_line.text
+    text.width = width
+    text.font_family = displayed_line.font_family
+    text.size = displayed_line.font_size
+    text.weight = _flet_font_weight(ft, displayed_line.weight)
+    text.max_lines = displayed_line.max_lines
+    text.color = displayed_line.color
+    text.style = ft.TextStyle(
+        size=displayed_line.font_size,
+        height=displayed_line.line_height,
+        weight=_flet_font_weight(ft, displayed_line.weight),
+        font_family=displayed_line.font_family,
+        shadow=_caption_text_shadow(ft),
+        foreground=None,
+    )
+
+
 class StdoutLifecycleSink:
     async def emit(self, event: dict[str, object]) -> None:
         safe_event = _redact_event(event)
@@ -1857,6 +2162,11 @@ class FletDesktopRendererWindow:
         self._last_reported_bounds: tuple[float, float, float, float] | None = None
         self._caption_card_width_floor_by_block: dict[tuple[str, str, int], float] = {}
         self._last_render_trace: _DesktopRenderTrace | None = None
+        self._retained_caption_surface: _RetainedDesktopCaptionSurface | None = None
+        self._preview_stage: Any | None = None
+        self._preview_backdrop: Any | None = None
+        self._preview_busy_background: Any | None = None
+        self._preview_option_buttons: dict[tuple[str, str], Any] = {}
 
     def prime_startup_runtime_controls(
         self,
@@ -1907,6 +2217,11 @@ class FletDesktopRendererWindow:
         self._page_ready.clear()
         self._closed.clear()
         self._page_start_error = None
+        self._retained_caption_surface = None
+        self._preview_stage = None
+        self._preview_backdrop = None
+        self._preview_busy_background = None
+        self._preview_option_buttons.clear()
         self._interaction_mode = _DESKTOP_INTERACTION_MODE_EDIT
         if self._app_task is None or self._app_task.done():
             self._app_task = asyncio.create_task(self._app_runner(self._handle_page))
@@ -2111,14 +2426,14 @@ class FletDesktopRendererWindow:
         import flet as ft
 
         if self._preview_catalog is not None:
-            root = self._build_preview_root(ft)
-            if hasattr(page, "clean"):
-                page.clean()
+            plan = self._current_preview_caption_plan()
+            if self._retained_caption_surface is None:
+                root = self._build_preview_root(ft, plan)
+                page.add(root)
+                self._apply_interaction_window_chrome()
+                self._reveal_window_if_supported()
             else:
-                page.controls.clear()
-            page.add(root)
-            self._apply_interaction_window_chrome()
-            self._reveal_window_if_supported()
+                self._apply_preview_surface(ft, plan)
             page.update()
             return
 
@@ -2133,37 +2448,14 @@ class FletDesktopRendererWindow:
         previous_width_floors = dict(self._caption_card_width_floor_by_block)
         plan = self._plan_with_grow_only_caption_card_widths(raw_plan)
         self._emit_caption_width_diagnostics(raw_plan, plan, previous_width_floors)
-        caption_surface = build_desktop_caption_surface(plan)
         if self._interaction_mode == _DESKTOP_INTERACTION_MODE_EDIT:
-            drag_area = ft.WindowDragArea(
-                content=caption_surface,
-                maximizable=False,
+            content_kind = (
+                "drag_area_with_empty_lock_action"
+                if plan.full_window_background_visible and not plan.slots
+                else "drag_area"
             )
-            if plan.full_window_background_visible and not plan.slots:
-                content_kind = "drag_area_with_empty_lock_action"
-                content = ft.Stack(
-                    controls=[
-                        drag_area,
-                        build_desktop_empty_lock_action(
-                            plan,
-                            label=desktop_empty_lock_action_label(self._locale),
-                            on_click=self._on_empty_lock_action_click,
-                        ),
-                    ],
-                    width=plan.window_width,
-                    height=plan.window_height,
-                    alignment=ft.alignment.center,
-                )
-            else:
-                content_kind = "drag_area"
-                content = drag_area
         else:
-            if plan.surface_visible:
-                content_kind = "caption_surface"
-                content = caption_surface
-            else:
-                content_kind = "transparent_host"
-                content = build_desktop_transparent_sizing_host(plan)
+            content_kind = "caption_surface" if plan.surface_visible else "transparent_host"
         self._emit_detailed_log(
             "render "
             f"revision={self._snapshot.revision} "
@@ -2186,20 +2478,24 @@ class FletDesktopRendererWindow:
                 background_alpha=plan.background_alpha,
             )
         )
-        root = ft.Container(
-            content=content,
-            padding=0,
-            bgcolor=ft.Colors.TRANSPARENT,
-            alignment=ft.alignment.center,
-        )
-
-        if hasattr(page, "clean"):
-            page.clean()
+        if self._retained_caption_surface is None:
+            self._retained_caption_surface = _build_retained_desktop_caption_surface(
+                ft,
+                plan,
+                empty_lock_label=desktop_empty_lock_action_label(self._locale),
+                on_empty_lock=self._on_empty_lock_action_click,
+                include_drag_area=True,
+            )
+            page.add(self._retained_caption_surface.root)
+            self._apply_interaction_window_chrome()
+            self._reveal_window_if_supported()
         else:
-            page.controls.clear()
-        page.add(root)
-        self._apply_interaction_window_chrome()
-        self._reveal_window_if_supported()
+            _apply_retained_desktop_caption_plan(
+                ft,
+                self._retained_caption_surface,
+                plan,
+                empty_lock_label=desktop_empty_lock_action_label(self._locale),
+            )
         page.update()
 
     def _apply_interaction_window_chrome(self) -> None:
@@ -2218,28 +2514,33 @@ class FletDesktopRendererWindow:
         if hasattr(window, "visible"):
             window.visible = True
 
-    def _build_preview_root(self, ft: Any) -> Any:
-        preview_plan = self._current_preview_caption_plan()
-        caption_surface = build_desktop_caption_surface(preview_plan)
-        if preview_plan.full_window_background_visible and not preview_plan.slots:
-            caption_surface = ft.Stack(
-                controls=[
-                    caption_surface,
-                    build_desktop_empty_lock_action(
-                        preview_plan,
-                        label=desktop_empty_lock_action_label(self._locale),
-                        on_click=self._on_empty_lock_action_click,
-                    ),
-                ],
-                width=preview_plan.window_width,
-                height=preview_plan.window_height,
-                alignment=ft.alignment.center,
-            )
-        return ft.Container(
+    def _build_preview_root(self, ft: Any, plan: DesktopCaptionPlan) -> Any:
+        self._retained_caption_surface = _build_retained_desktop_caption_surface(
+            ft,
+            plan,
+            empty_lock_label=desktop_empty_lock_action_label(self._locale),
+            on_empty_lock=self._on_empty_lock_action_click,
+            include_drag_area=False,
+        )
+        self._preview_busy_background = self._build_preview_busy_background(
+            ft,
+            self._preview_selected_size_preset(),
+        )
+        self._preview_stage = ft.Stack(
+            controls=[self._preview_busy_background, self._retained_caption_surface.surface_host],
+            alignment=ft.alignment.center,
+        )
+        self._preview_backdrop = ft.Container(
+            content=self._preview_stage,
+            padding=24,
+            border_radius=20,
+            alignment=ft.alignment.center,
+        )
+        root = ft.Container(
             content=ft.Column(
                 controls=[
                     self._build_preview_controls(ft),
-                    self._build_preview_surface_backdrop(ft, caption_surface),
+                    self._preview_backdrop,
                 ],
                 spacing=12,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -2249,6 +2550,43 @@ class FletDesktopRendererWindow:
             bgcolor="#101827",
             alignment=ft.alignment.center,
         )
+        self._apply_preview_surface(ft, plan)
+        return root
+
+    def _apply_preview_surface(self, ft: Any, plan: DesktopCaptionPlan) -> None:
+        model = self._retained_caption_surface
+        stage = self._preview_stage
+        backdrop = self._preview_backdrop
+        busy_background = self._preview_busy_background
+        if model is None or stage is None or backdrop is None or busy_background is None:
+            return
+        _apply_retained_desktop_caption_plan(
+            ft,
+            model,
+            plan,
+            empty_lock_label=desktop_empty_lock_action_label(self._locale),
+        )
+        size_preset = self._preview_selected_size_preset()
+        background_surface = self._preview_selected_background_surface()
+        stage.width = size_preset.window_width
+        stage.height = size_preset.window_height
+        backdrop.width = size_preset.window_width
+        backdrop.height = size_preset.window_height
+        backdrop.bgcolor = background_surface.bgcolor
+        busy_background.visible = background_surface.id == "busy"
+        busy_background.width = size_preset.window_width
+        busy_background.height = size_preset.window_height
+        self._refresh_preview_option_buttons()
+
+    def _refresh_preview_option_buttons(self) -> None:
+        selected_by_group = {
+            "fixture": self._preview_fixture_id,
+            "size_preset": self._preview_size_preset_id,
+            "background_alpha": str(self._preview_background_alpha),
+            "background_surface": self._preview_background_surface_id,
+        }
+        for (group, value), button in self._preview_option_buttons.items():
+            button.disabled = selected_by_group.get(group) == value
 
     def _build_preview_controls(self, ft: Any) -> Any:
         catalog = self._preview_catalog
@@ -2260,6 +2598,7 @@ class FletDesktopRendererWindow:
                 self._build_preview_button_group(
                     ft,
                     labels.fixture,
+                    "fixture",
                     [
                         (fixture.id, fixture.label, fixture.id == self._preview_fixture_id)
                         for fixture in catalog.fixtures
@@ -2269,6 +2608,7 @@ class FletDesktopRendererWindow:
                 self._build_preview_button_group(
                     ft,
                     labels.size_preset,
+                    "size_preset",
                     [
                         (preset.id, preset.label, preset.id == self._preview_size_preset_id)
                         for preset in catalog.size_presets
@@ -2278,6 +2618,7 @@ class FletDesktopRendererWindow:
                 self._build_preview_button_group(
                     ft,
                     labels.background_alpha,
+                    "background_alpha",
                     [
                         (
                             str(value),
@@ -2291,6 +2632,7 @@ class FletDesktopRendererWindow:
                 self._build_preview_button_group(
                     ft,
                     labels.background_surface,
+                    "background_surface",
                     [
                         (
                             surface.id,
@@ -2311,24 +2653,27 @@ class FletDesktopRendererWindow:
         self,
         ft: Any,
         label: str,
+        group: str,
         items: list[tuple[str, str, bool]],
         on_select: Callable[[str], None],
     ) -> Any:
+        buttons = []
+        for value, text, selected in items:
+            button = ft.ElevatedButton(
+                text=text,
+                on_click=lambda _event, selected_value=value: self._select_preview(
+                    selected_value,
+                    on_select,
+                ),
+                disabled=selected,
+            )
+            self._preview_option_buttons[(group, value)] = button
+            buttons.append(button)
         return ft.Column(
             controls=[
                 ft.Text(label, size=12, weight=ft.FontWeight.BOLD, color="#FFE7D6"),
                 ft.Row(
-                    controls=[
-                        ft.ElevatedButton(
-                            text=text,
-                            on_click=lambda _event, selected=value: self._select_preview(
-                                selected,
-                                on_select,
-                            ),
-                            disabled=selected,
-                        )
-                        for value, text, selected in items
-                    ],
+                    controls=buttons,
                     spacing=6,
                     alignment=ft.MainAxisAlignment.CENTER,
                     wrap=True,
@@ -2589,6 +2934,7 @@ class FletDesktopRendererWindow:
         previous_mode = self._interaction_mode
         self._interaction_mode = mode
         self._emit_detailed_log(f"interaction_mode {previous_mode}->{mode}")
+        self._apply_interaction_window_chrome()
         self._render_page()
         if emit_event:
             await self._emit_overlay_event({"event": "interaction_mode_changed", "mode": mode})
