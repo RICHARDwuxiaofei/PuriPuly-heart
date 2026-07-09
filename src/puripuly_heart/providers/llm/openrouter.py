@@ -150,7 +150,7 @@ def _build_provider_preferences(
     if model == "google/gemma-4-26b-a4b-it":
         return {
             "sort": "latency",
-            "only": ["cloudflare", "parasail", "wafer"],
+            "only": ["cloudflare", "wafer"],
             "allow_fallbacks": True,
         }
     if model == "deepseek/deepseek-v4-flash":

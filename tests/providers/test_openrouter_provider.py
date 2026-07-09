@@ -253,7 +253,7 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_la
     assert body["user"] == "managed-user-123"
     assert body["provider"] == {
         "sort": "latency",
-        "only": ["cloudflare", "parasail", "wafer"],
+        "only": ["cloudflare", "wafer"],
         "allow_fallbacks": True,
     }
     assert body["messages"][0] == {"role": "system", "content": "SYSTEM"}
@@ -286,7 +286,7 @@ async def test_httpx_openrouter_client_gemma_uses_cloudflare_first_routing(
     body = fake_client.last_request["json"]
     assert body["provider"] == {
         "sort": "latency",
-        "only": ["cloudflare", "parasail", "wafer"],
+        "only": ["cloudflare", "wafer"],
         "allow_fallbacks": True,
     }
 
@@ -400,7 +400,7 @@ async def test_httpx_openrouter_client_builds_latency_request_with_explicit_rout
     body = fake_client.last_request["json"]
     assert body["provider"] == {
         "sort": "latency",
-        "only": ["cloudflare", "parasail", "wafer"],
+        "only": ["cloudflare", "wafer"],
         "allow_fallbacks": True,
     }
 
