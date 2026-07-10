@@ -905,6 +905,7 @@ async fn runtime_applies_new_snapshot_calibration_to_state() {
             text_scale: 1.1,
             background_alpha: 0.4,
         },
+        native_fresh_render_generations: None,
         blocks: vec![],
     });
 
@@ -954,6 +955,7 @@ async fn runtime_correlates_allowlisted_presentation_stages_without_payload_data
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 934,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![unsafe_block],
     });
     let mut submitter = RecordingSubmitter::default();
@@ -1071,6 +1073,7 @@ async fn bridge_client_close_sends_close_frame() {
 #[tokio::test]
 async fn runtime_caption_blocks_keep_channel_metadata_for_color_only_rendering() {
     let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 3,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
@@ -1112,6 +1115,7 @@ async fn runtime_caption_blocks_carry_primary_and_secondary_languages_from_slots
     let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 4,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![localized],
     });
 
@@ -1137,6 +1141,7 @@ fn runtime_language_only_snapshot_redraws_without_slot_identity_reset() {
     let mut updated = initial.clone();
     updated.primary_language = Some("ja".into());
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![initial],
@@ -1150,6 +1155,7 @@ fn runtime_language_only_snapshot_redraws_without_slot_identity_reset() {
     let outcome = runtime.apply_snapshot(OverlayPresentationSnapshot {
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![updated],
     });
 
@@ -1181,6 +1187,7 @@ fn runtime_seeds_initial_snapshot_with_static_block_visual_state() {
     let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![slot_block("self:1", "self:1", 1, "self", "hello", "", true)],
     });
 
@@ -1193,12 +1200,14 @@ fn runtime_seeds_initial_snapshot_with_static_block_visual_state() {
 #[test]
 fn runtime_new_snapshot_keeps_blocks_static_after_seeded_start() {
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![slot_block("self:1", "self:1", 1, "self", "hello", "", true)],
     });
 
     runtime.apply_snapshot(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
@@ -1219,6 +1228,7 @@ fn runtime_new_snapshot_keeps_blocks_static_after_seeded_start() {
 #[test]
 fn runtime_keeps_slot_two_top_fixed_when_slot_one_secondary_changes() {
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
@@ -1229,6 +1239,7 @@ fn runtime_keeps_slot_two_top_fixed_when_slot_one_secondary_changes() {
     let first = runtime.caption_blocks();
 
     runtime.apply_snapshot(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
@@ -1244,12 +1255,14 @@ fn runtime_keeps_slot_two_top_fixed_when_slot_one_secondary_changes() {
 #[test]
 fn runtime_clears_missing_snapshot_blocks_immediately() {
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![slot_block("self:1", "self:1", 1, "self", "hello", "", true)],
     });
 
     runtime.apply_snapshot(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![],
@@ -1261,6 +1274,7 @@ fn runtime_clears_missing_snapshot_blocks_immediately() {
 #[test]
 fn runtime_keeps_active_self_and_finalized_rows_visible_within_two_slot_cap() {
     let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
@@ -1296,6 +1310,7 @@ fn runtime_keeps_active_self_and_finalized_rows_visible_within_two_slot_cap() {
 #[test]
 fn runtime_keeps_fixed_slot_visual_state_when_secondary_slot_changes() {
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
@@ -1305,6 +1320,7 @@ fn runtime_keeps_fixed_slot_visual_state_when_secondary_slot_changes() {
     });
 
     runtime.apply_snapshot(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
@@ -1332,6 +1348,7 @@ fn runtime_keeps_fixed_slot_visual_state_when_secondary_slot_changes() {
 fn runtime_renderer_uses_fixed_slot_bounds_when_secondary_slot_changes() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
@@ -1342,6 +1359,7 @@ fn runtime_renderer_uses_fixed_slot_bounds_when_secondary_slot_changes() {
     let initial = renderer.render_blocks(runtime.caption_blocks()).unwrap();
 
     runtime.apply_snapshot(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
@@ -1384,6 +1402,7 @@ fn runtime_active_self_frames_do_not_hit_finalized_block_cache() {
     let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![active_self_block("self:active", "speaking now")],
     });
 
@@ -1399,15 +1418,18 @@ fn runtime_does_not_render_duplicate_row_when_same_id_reappears_during_exit() {
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![block("self:1", "self", "hello", "", true)],
     });
 
     runtime.apply_snapshot(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![],
     });
     runtime.apply_snapshot(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 3,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![block("self:1", "self", "hello again", "", true)],
@@ -1464,6 +1486,7 @@ async fn runtime_records_failed_show_visibility_without_false_observation() {
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![block("self:show", "self", "visible", "", true)],
     });
     let mut submitter = RecordingSubmitter {
@@ -1496,6 +1519,7 @@ async fn runtime_records_failed_hide_visibility_without_false_observation() {
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![block("self:hide", "self", "visible", "", true)],
     });
     let mut submitter = RecordingSubmitter::default();
@@ -1504,6 +1528,7 @@ async fn runtime_records_failed_hide_visibility_without_false_observation() {
         .await
         .unwrap();
     runtime.apply_snapshot(OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![],
@@ -1575,6 +1600,7 @@ async fn runtime_submits_same_peer_refresh_target_when_session_scope_nonce_chang
     let first_outcome = runtime.apply_snapshot(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![peer_refresh_1],
     });
     assert!(matches!(
@@ -1593,6 +1619,7 @@ async fn runtime_submits_same_peer_refresh_target_when_session_scope_nonce_chang
     let second_outcome = runtime.apply_snapshot(OverlayPresentationSnapshot {
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![peer_refresh_2],
     });
     assert!(matches!(
@@ -1668,6 +1695,7 @@ async fn runtime_self_refresh_keeps_logical_identity_and_fresh_render_cadence() 
 
     for (revision, block) in [(1, self_refresh_1), (2, self_refresh_2)] {
         let outcome = runtime.apply_snapshot(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![block],
@@ -1711,6 +1739,7 @@ async fn native_owner_retries_unchanged_caption_with_new_generation() {
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![block("self:retry", "self", "stable", "", true)],
     });
     let mut submitter = RecordingSubmitter::default();
@@ -1751,6 +1780,7 @@ fn native_owner_coalesces_to_latest_snapshot_and_rejects_stale_overwrite() {
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
     for revision in 1..=32 {
         let outcome = runtime.apply_snapshot(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![block(
@@ -1766,6 +1796,7 @@ fn native_owner_coalesces_to_latest_snapshot_and_rejects_stale_overwrite() {
     let stale = runtime.apply_snapshot(OverlayPresentationSnapshot {
         revision: 12,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![block("self:rapid", "self", "stale", "", true)],
     });
 

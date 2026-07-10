@@ -74,6 +74,14 @@ pub struct OverlayPresentationBlock {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct NativeFreshRenderGenerations {
+    #[serde(default, rename = "self", skip_serializing_if = "Option::is_none")]
+    pub self_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct OverlayPresentationSnapshot {
     #[serde(default)]
     pub revision: u64,
@@ -81,6 +89,8 @@ pub struct OverlayPresentationSnapshot {
     pub calibration: OverlayPresentationCalibration,
     #[serde(default)]
     pub blocks: Vec<OverlayPresentationBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_fresh_render_generations: Option<NativeFreshRenderGenerations>,
 }
 
 pub type OverlayCalibration = OverlayPresentationCalibration;
@@ -306,6 +316,10 @@ impl OverlayState {
         &self.snapshot.blocks
     }
 
+    pub fn native_fresh_render_generations(&self) -> Option<&NativeFreshRenderGenerations> {
+        self.snapshot.native_fresh_render_generations.as_ref()
+    }
+
     pub fn scene(&self) -> &OverlayScene {
         &self.scene
     }
@@ -334,9 +348,63 @@ fn default_secondary_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
-        OverlayPresentationSnapshot, OverlayState,
+        NativeFreshRenderGenerations, OverlayPresentationBlock, OverlayPresentationBlockVariant,
+        OverlayPresentationCalibration, OverlayPresentationSnapshot, OverlayState,
     };
+    use serde_json::json;
+
+    #[test]
+    fn native_fresh_render_generations_are_legacy_safe_and_round_trip() {
+        let legacy: OverlayPresentationSnapshot = serde_json::from_value(json!({})).unwrap();
+        assert!(legacy.native_fresh_render_generations.is_none());
+
+        let snapshot: OverlayPresentationSnapshot = serde_json::from_value(json!({
+            "native_fresh_render_generations": {"self": 2, "peer": 7}
+        }))
+        .unwrap();
+        assert_eq!(
+            snapshot.native_fresh_render_generations,
+            Some(NativeFreshRenderGenerations {
+                self_generation: Some(2),
+                peer: Some(7),
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap()["native_fresh_render_generations"],
+            json!({"self": 2, "peer": 7})
+        );
+    }
+
+    #[test]
+    fn native_fresh_render_generations_reject_negative_values_and_are_non_visual() {
+        assert!(
+            serde_json::from_value::<OverlayPresentationSnapshot>(json!({
+                "native_fresh_render_generations": {"self": -1}
+            }))
+            .is_err()
+        );
+        assert!(serde_json::from_str::<OverlayPresentationSnapshot>(
+            r#"{"native_fresh_render_generations":{"peer":18446744073709551616}}"#
+        )
+        .is_err());
+        let mut state = OverlayState::default();
+        let first: OverlayPresentationSnapshot = serde_json::from_value(json!({
+            "revision": 1,
+            "native_fresh_render_generations": {"self": 1}
+        }))
+        .unwrap();
+        let second: OverlayPresentationSnapshot = serde_json::from_value(json!({
+            "revision": 2,
+            "native_fresh_render_generations": {"self": 2, "peer": 1}
+        }))
+        .unwrap();
+        assert!(!state.apply_snapshot(&first));
+        assert!(!state.apply_snapshot(&second));
+        assert_eq!(
+            state.native_fresh_render_generations(),
+            second.native_fresh_render_generations.as_ref()
+        );
+    }
 
     fn block(id: &str) -> OverlayPresentationBlock {
         OverlayPresentationBlock {
@@ -363,6 +431,7 @@ mod tests {
         assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
             revision: 1,
             calibration: OverlayPresentationCalibration::default(),
+            native_fresh_render_generations: None,
             blocks: vec![block("self:1")],
         }));
 
@@ -376,6 +445,7 @@ mod tests {
         let snapshot = OverlayPresentationSnapshot {
             revision: 2,
             calibration: OverlayPresentationCalibration::default(),
+            native_fresh_render_generations: None,
             blocks: vec![],
         };
         let mut state = OverlayState::default();

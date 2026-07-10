@@ -2354,6 +2354,7 @@ mod tests {
     #[test]
     fn caption_blocks_follow_snapshot_order_exactly() {
         let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 3,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![
@@ -2376,6 +2377,7 @@ mod tests {
     #[test]
     fn caption_blocks_for_render_prefixes_peer_lines_when_visual_debug_is_enabled() {
         let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 3,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![
@@ -2432,12 +2434,14 @@ mod tests {
     #[test]
     fn apply_snapshot_replaces_snapshot_blocks_and_calibration_without_retaining_removed_rows() {
         let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 1,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![block("self:1", "self", "self one", "", true)],
         });
 
         runtime.apply_snapshot(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 2,
             calibration: OverlayPresentationCalibration {
                 distance: 1.5,
@@ -2472,6 +2476,7 @@ mod tests {
     #[test]
     fn runtime_orders_snapshot_blocks_by_appearance_seq() {
         let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 4,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![
@@ -2498,6 +2503,7 @@ mod tests {
         active_peer.secondary_text = "Can you hear me?".into();
         active_peer.secondary_enabled = true;
         let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 5,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![active_peer],
@@ -2516,6 +2522,7 @@ mod tests {
     #[test]
     fn runtime_detects_peer_overlay_first_emit_blocks_from_snapshot() {
         let snapshot = OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 4,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![
@@ -2537,6 +2544,7 @@ mod tests {
         active_peer.secondary_text = "source".into();
         active_peer.secondary_enabled = true;
         let snapshot = OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 6,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![active_peer],
@@ -2612,6 +2620,7 @@ mod tests {
     #[test]
     fn runtime_starts_empty_when_snapshot_has_no_blocks() {
         let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 0,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![],
@@ -2831,6 +2840,7 @@ mod tests {
     #[test]
     fn snapshot_summary_omits_block_details_for_log_noise_reduction() {
         let summary = format_snapshot_received_log(&OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 7,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![
@@ -2878,6 +2888,7 @@ mod tests {
     #[test]
     fn state_snapshot_summary_excludes_raw_slot_identifiers() {
         let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 7,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![OverlayPresentationBlock {
@@ -2915,6 +2926,7 @@ mod tests {
     #[test]
     fn snapshot_slot_correlation_summary_reports_safe_bounded_counts() {
         let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 7,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![
@@ -2963,6 +2975,7 @@ mod tests {
     #[test]
     fn apply_snapshot_marks_visible_updates_for_existing_slot_order() {
         let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 1,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![OverlayPresentationBlock {
@@ -2988,6 +3001,7 @@ mod tests {
             .insert(slot_order, diagnostic_row_signature(&rows[0]));
 
         let outcome = runtime.apply_snapshot(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 2,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![OverlayPresentationBlock {
@@ -3021,6 +3035,7 @@ mod tests {
     #[test]
     fn overlay_visible_update_rendered_summary_reports_bounds_and_slot_mapping() {
         let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 8,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![OverlayPresentationBlock {
@@ -3389,6 +3404,7 @@ mod tests {
     #[test]
     fn runtime_apply_snapshot_reports_ignored_revisions_without_redraw() {
         let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 3,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![block("self:1", "self", "hello", "", true)],
@@ -3396,6 +3412,7 @@ mod tests {
         runtime.clear_redraw_flag();
 
         let outcome = runtime.apply_snapshot(OverlayPresentationSnapshot {
+            native_fresh_render_generations: None,
             revision: 2,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![block("peer:2", "peer", "ignored", "", true)],

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 ChannelId = Literal["self", "peer"]
+U64_MAX = (1 << 64) - 1
 # `active_peer` remains a reserved compatibility/fallback variant. Normal
 # product peer rows are primary-visible only after translation arrival.
 BlockVariant = Literal["active_self", "active_peer", "finalized"]
@@ -127,19 +128,57 @@ class OverlayPresentationBlock:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeFreshRenderGenerations:
+    self: int | None = None
+    peer: int | None = None
+
+    def __post_init__(self) -> None:
+        _validate_optional_generation(self.self, "self")
+        _validate_optional_generation(self.peer, "peer")
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {}
+        if self.self is not None:
+            payload["self"] = self.self
+        if self.peer is not None:
+            payload["peer"] = self.peer
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> "NativeFreshRenderGenerations":
+        if not isinstance(data, dict):
+            raise ValueError("native fresh render generations must be an object")
+        return cls(
+            self=_optional_non_negative_int_field(data, "self"),
+            peer=_optional_non_negative_int_field(data, "peer"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class OverlayPresentationSnapshot:
     revision: int = 0
     calibration: OverlayPresentationCalibration = field(
         default_factory=OverlayPresentationCalibration
     )
     blocks: list[OverlayPresentationBlock] = field(default_factory=list)
+    native_fresh_render_generations: NativeFreshRenderGenerations | None = None
+
+    def __post_init__(self) -> None:
+        generations = self.native_fresh_render_generations
+        if generations is not None and generations.self is None and generations.peer is None:
+            object.__setattr__(self, "native_fresh_render_generations", None)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "revision": self.revision,
             "calibration": self.calibration.to_dict(),
             "blocks": [block.to_dict() for block in self.blocks],
         }
+        if self.native_fresh_render_generations is not None:
+            payload["native_fresh_render_generations"] = (
+                self.native_fresh_render_generations.to_dict()
+            )
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "OverlayPresentationSnapshot":
@@ -159,10 +198,18 @@ class OverlayPresentationSnapshot:
                 )
             blocks.append(OverlayPresentationBlock.from_dict(block))
 
+        raw_generations = data.get("native_fresh_render_generations")
+        if raw_generations is not None and not isinstance(raw_generations, dict):
+            raise ValueError("native fresh render generations must be an object")
         return cls(
             revision=int(data.get("revision", 0)),
             calibration=OverlayPresentationCalibration.from_dict(calibration),
             blocks=blocks,
+            native_fresh_render_generations=(
+                NativeFreshRenderGenerations.from_dict(raw_generations)
+                if raw_generations is not None
+                else None
+            ),
         )
 
 
@@ -205,3 +252,18 @@ def _optional_int_field(data: dict[str, object], key: str) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool):
         raise ValueError(f"{key} must be an int")
     return value
+
+
+def _optional_non_negative_int_field(data: dict[str, object], key: str) -> int | None:
+    value = _optional_int_field(data, key)
+    _validate_optional_generation(value, key)
+    return value
+
+
+def _validate_optional_generation(value: int | None, key: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{key} must be an int")
+    if value < 0 or value > U64_MAX:
+        raise ValueError(f"{key} must be between 0 and {U64_MAX}")

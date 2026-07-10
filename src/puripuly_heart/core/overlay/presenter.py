@@ -14,6 +14,8 @@ from puripuly_heart.core.clock import Clock, SystemClock
 
 from .diagnostics import OverlayDiagnosticsRecorder
 from .protocol import (
+    U64_MAX,
+    NativeFreshRenderGenerations,
     OverlayPresentationBlock,
     OverlayPresentationCalibration,
     OverlayPresentationSnapshot,
@@ -98,6 +100,9 @@ class OverlayPresenter(OverlaySink):
     )
     _revision: int = field(init=False, default=0)
     _appearance_seq: int = field(init=False, default=0)
+    _native_fresh_render_generations: NativeFreshRenderGenerations = field(
+        init=False, default_factory=NativeFreshRenderGenerations
+    )
     _presentation_state: OverlayPresentationState = field(init=False)
     _last_visible_window_signature: tuple[object, ...] | None = field(init=False, default=None)
     _peer_presentation_refresh_burst_task: asyncio.Task[None] | None = field(
@@ -398,6 +403,7 @@ class OverlayPresenter(OverlaySink):
         self._live_peer_turn_key = None
         self._revision = 0
         self._appearance_seq = 0
+        self._native_fresh_render_generations = NativeFreshRenderGenerations()
         self._last_visible_window_signature = None
         peer_refresh_key = self._presentation_state.peer_presentation_refresh_target_key
         if peer_refresh_key is not None:
@@ -423,6 +429,7 @@ class OverlayPresenter(OverlaySink):
         self._live_self_turn_key = None
         self._live_peer_turn_key = None
         self._revision += 1
+        self._native_fresh_render_generations = NativeFreshRenderGenerations()
         self._last_visible_window_signature = None
         peer_refresh_key = self._presentation_state.peer_presentation_refresh_target_key
         if peer_refresh_key is not None:
@@ -441,9 +448,18 @@ class OverlayPresenter(OverlaySink):
     async def emit(self, event: OverlayEventUnion) -> None:
         previous_snapshot = self.snapshot()
         changed = self._apply_event(event)
-        if changed:
-            await self._publish_if_changed()
-        if changed or self._peer_presentation_refresh_event_is_current(event):
+        peer_event_is_current = self._peer_presentation_refresh_event_is_current(event)
+        peer_event_is_visible = (
+            peer_event_is_current
+            and event.utterance_id is not None
+            and self._snapshot_has_refreshable_peer_key(("peer", event.utterance_id))
+        )
+        if changed or peer_event_is_visible:
+            await self._publish_if_changed(
+                fresh_render_event=event,
+                event_changed=changed,
+            )
+        if changed or peer_event_is_current:
             await self._start_peer_presentation_refresh_burst_for_event(event)
         if changed:
             await self._start_self_presentation_refresh_burst_for_event(
@@ -735,7 +751,12 @@ class OverlayPresenter(OverlaySink):
     def _live_peer_entry(self) -> tuple[tuple[str, UUID], _LogicalTurnEntry] | None:
         return self._live_entry_for_channel("peer")
 
-    async def _publish_if_changed(self) -> None:
+    async def _publish_if_changed(
+        self,
+        *,
+        fresh_render_event: OverlayEventUnion | None = None,
+        event_changed: bool = False,
+    ) -> None:
         now = self.clock.now()
         self._expire_closed_entries(now=now)
         previous_snapshot = self.snapshot()
@@ -770,6 +791,11 @@ class OverlayPresenter(OverlaySink):
         rendered_entries = selection.rendered_entries
         next_blocks = [block for _, block in rendered_entries]
         next_calibration = _calibration_from_overlay(self.calibration)
+        fresh_render_channel = self._eligible_fresh_render_channel(
+            fresh_render_event,
+            event_changed=event_changed,
+            rendered_entries=rendered_entries,
+        )
         previous_rendered_signature = self._presentation_state.rendered_blocks_signature(
             previous_snapshot.blocks
         )
@@ -786,6 +812,7 @@ class OverlayPresenter(OverlaySink):
         if (
             next_rendered_signature == previous_rendered_signature
             and next_calibration == previous_snapshot.calibration
+            and fresh_render_channel is None
         ):
             self._emit_turn_decision(
                 "overlay_turn_no_visible_change",
@@ -817,11 +844,14 @@ class OverlayPresenter(OverlaySink):
                 )
                 self._emit_pair_state(key, entry, block, publish_kind="visible_update")
 
+        if fresh_render_channel is not None:
+            self._increment_native_fresh_render_generation(fresh_render_channel)
         self._revision += 1
         snapshot = self._presentation_state.generate_snapshot(
             revision=self._revision,
             calibration=next_calibration,
             rendered_entries=rendered_entries,
+            native_fresh_render_generations=self._native_fresh_render_generations,
         )
         blocks_summary = [
             {
@@ -1123,6 +1153,59 @@ class OverlayPresenter(OverlaySink):
         if self.task_factory is not None:
             return self.task_factory(coroutine, task_name=task_name)
         return asyncio.create_task(coroutine, name=f"OverlayPresenter:{task_name}")
+
+    def _eligible_fresh_render_channel(
+        self,
+        event: OverlayEventUnion | None,
+        *,
+        event_changed: bool,
+        rendered_entries: list[tuple[tuple[str, UUID], OverlayPresentationBlock]],
+    ) -> str | None:
+        if event is None or event.utterance_id is None:
+            return None
+        key = (event.channel, event.utterance_id)
+        if event.channel == "self":
+            if not event_changed or not isinstance(event, (SelfTranscriptFinal, TranslationFinal)):
+                return None
+        elif event.channel == "peer":
+            if not isinstance(
+                event,
+                (
+                    PeerActiveUpdate,
+                    PeerTranscriptFinal,
+                    TranslationStreamUpdate,
+                    TranslationFinal,
+                ),
+            ):
+                return None
+        else:
+            return None
+        for rendered_key, block in rendered_entries:
+            if rendered_key != key:
+                continue
+            if block.block_variant == "finalized" and block.primary_text.strip():
+                return event.channel
+        return None
+
+    def _increment_native_fresh_render_generation(self, channel: str) -> None:
+        generations = self._native_fresh_render_generations
+        if channel == "self":
+            self._native_fresh_render_generations = NativeFreshRenderGenerations(
+                self=self._next_native_fresh_render_generation(generations.self),
+                peer=generations.peer,
+            )
+            return
+        self._native_fresh_render_generations = NativeFreshRenderGenerations(
+            self=generations.self,
+            peer=self._next_native_fresh_render_generation(generations.peer),
+        )
+
+    def _next_native_fresh_render_generation(self, current: int | None) -> int:
+        if current is None:
+            return 1
+        if current == U64_MAX:
+            return 0
+        return current + 1
 
     def _self_presentation_refresh_key_for_event(
         self,

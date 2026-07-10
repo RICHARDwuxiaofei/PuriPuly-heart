@@ -5,10 +5,48 @@ from uuid import uuid4
 import pytest
 
 from puripuly_heart.core.overlay.protocol import (
+    U64_MAX,
+    NativeFreshRenderGenerations,
     OverlayPresentationBlock,
     OverlayPresentationCalibration,
     OverlayPresentationSnapshot,
 )
+
+
+def test_native_fresh_render_generations_are_optional_and_round_trip_independently() -> None:
+    legacy = OverlayPresentationSnapshot.from_dict({"revision": 1, "blocks": []})
+    assert legacy.native_fresh_render_generations is None
+    assert "native_fresh_render_generations" not in legacy.to_dict()
+
+    snapshot = OverlayPresentationSnapshot(
+        native_fresh_render_generations=NativeFreshRenderGenerations(self=3, peer=8)
+    )
+    assert OverlayPresentationSnapshot.from_dict(snapshot.to_dict()) == snapshot
+    assert (
+        "native_fresh_render_generations"
+        not in OverlayPresentationSnapshot(
+            native_fresh_render_generations=NativeFreshRenderGenerations()
+        ).to_dict()
+    )
+    maximum = NativeFreshRenderGenerations(self=U64_MAX, peer=0)
+    assert NativeFreshRenderGenerations.from_dict(maximum.to_dict()) == maximum
+
+
+@pytest.mark.parametrize(
+    "value",
+    [-1, U64_MAX + 1, True, 1.5, "1"],
+)
+def test_native_fresh_render_generations_reject_invalid_values(value: object) -> None:
+    with pytest.raises(ValueError):
+        OverlayPresentationSnapshot.from_dict({"native_fresh_render_generations": {"self": value}})
+
+
+@pytest.mark.parametrize("value", [-1, U64_MAX + 1, True, 1.5, "1"])
+def test_native_fresh_render_generations_reject_invalid_direct_values(value: object) -> None:
+    with pytest.raises(ValueError):
+        NativeFreshRenderGenerations(peer=value)  # type: ignore[arg-type]
+
+
 from puripuly_heart.core.overlay.sink import (
     OverlayEventAdapter,
     PeerActiveUpdate,

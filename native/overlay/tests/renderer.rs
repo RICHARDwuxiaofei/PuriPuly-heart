@@ -726,6 +726,7 @@ fn renderer_active_peer_with_state_generated_slots_does_not_overlap_next_row() {
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![
             OverlayPresentationBlock {
                 id: "peer:active".into(),
@@ -819,6 +820,7 @@ fn renderer_source_only_peer_finalized_with_state_generated_slots_does_not_overl
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![
             OverlayPresentationBlock {
                 id: "peer:source-only".into(),

@@ -37,7 +37,7 @@ pub use runtime::{
     StartupError,
 };
 pub use state::{
-    OverlayCalibration, OverlayPresentationBlock, OverlayPresentationBlockVariant,
-    OverlayPresentationCalibration, OverlayPresentationSnapshot, OverlayScene, OverlaySlot,
-    OverlayState, OverlayStateSnapshot,
+    NativeFreshRenderGenerations, OverlayCalibration, OverlayPresentationBlock,
+    OverlayPresentationBlockVariant, OverlayPresentationCalibration, OverlayPresentationSnapshot,
+    OverlayScene, OverlaySlot, OverlayState, OverlayStateSnapshot,
 };
