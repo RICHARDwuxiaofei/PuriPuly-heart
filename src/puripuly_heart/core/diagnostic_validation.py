@@ -8,7 +8,9 @@ from types import MappingProxyType
 from typing import Final, Literal, TypeAlias
 
 from puripuly_heart.core.messages import (
+    CONTENT_POLICY_METADATA_ONLY,
     CONTENT_POLICY_REDACTED,
+    DIAGNOSTIC_CATEGORY_LIFECYCLE,
     DIAGNOSTIC_CATEGORY_UNKNOWN,
     DIAGNOSTIC_FIELD_KEY_MAX_LENGTH,
     DIAGNOSTIC_FIELD_MAX_ITEMS,
@@ -120,6 +122,34 @@ DIAGNOSTIC_REDACTION_MARKER: Final = "[redacted]"
 BROKER_RAW_MESSAGE_REDACTION_MARKER: Final = "[broker-raw-message-redacted]"
 PROVIDER_RESPONSE_BODY_REDACTION_MARKER: Final = "[provider-response-body-redacted]"
 LOCAL_LLM_EXTRA_BODY_REDACTION_MARKER: Final = "[local-llm-extra-body-redacted]"
+DESKTOP_RENDERER_EVENT_SCHEMA_VERSION: Final = 1
+_DESKTOP_RENDERER_EVENT_FIELDS: Final = frozenset(
+    {
+        "schema_version",
+        "record_type",
+        "event_type",
+        "renderer_revision",
+        "actual_disposition",
+        "render_commit_acknowledged",
+        "slot_count",
+        "line_count",
+        "surface_visible",
+        "interaction_mode",
+        "window_width",
+        "window_height",
+    }
+)
+_DESKTOP_RENDERER_EVENT_DISPOSITIONS: Final = MappingProxyType(
+    {
+        "receipt": frozenset({"committed", "superseded", "stale", "failed"}),
+        "supersession": frozenset({"superseded"}),
+        "stale": frozenset({"stale"}),
+        "failed": frozenset({"failed"}),
+        "render_start": frozenset({"committed"}),
+        "render_commit": frozenset({"committed"}),
+        "render_commit_acknowledgement": frozenset({"committed"}),
+    }
+)
 
 _SAFE_REDACTION_MARKERS: Final = frozenset(
     {
@@ -306,6 +336,80 @@ def validate_diagnostics_for_sink(
         redacted=False,
         reasons=(),
     )
+
+
+def validate_desktop_renderer_event(
+    record: Mapping[str, object],
+) -> Mapping[str, object] | None:
+    candidate = dict(record)
+    if set(candidate) != _DESKTOP_RENDERER_EVENT_FIELDS:
+        return None
+    schema_version = candidate.get("schema_version")
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version != DESKTOP_RENDERER_EVENT_SCHEMA_VERSION
+    ):
+        return None
+    if candidate.get("record_type") != "renderer_event":
+        return None
+    event_type = candidate.get("event_type")
+    disposition = candidate.get("actual_disposition")
+    if (
+        not isinstance(event_type, str)
+        or not isinstance(disposition, str)
+        or disposition not in _DESKTOP_RENDERER_EVENT_DISPOSITIONS.get(event_type, frozenset())
+    ):
+        return None
+    if not _is_nonnegative_int(candidate.get("renderer_revision")):
+        return None
+    if not _is_bounded_int(candidate.get("slot_count"), minimum=0, maximum=2):
+        return None
+    if not _is_bounded_int(candidate.get("line_count"), minimum=0, maximum=6):
+        return None
+    if not isinstance(candidate.get("surface_visible"), bool):
+        return None
+    if candidate.get("interaction_mode") not in {"edit", "locked"}:
+        return None
+    if not _is_bounded_int(candidate.get("window_width"), minimum=1):
+        return None
+    if not _is_bounded_int(candidate.get("window_height"), minimum=1):
+        return None
+    acknowledged = candidate.get("render_commit_acknowledged")
+    if not isinstance(acknowledged, bool):
+        return None
+    if event_type == "render_commit_acknowledgement":
+        if not acknowledged:
+            return None
+    elif acknowledged:
+        return None
+    validation = validate_diagnostics_for_sink(
+        ErrorDiagnostics(
+            component="desktop_overlay_renderer",
+            operation="snapshot_scheduling",
+            code=event_type,
+            category=DIAGNOSTIC_CATEGORY_LIFECYCLE,
+            visibility=DIAGNOSTIC_VISIBILITY_DIAGNOSTIC_ONLY,
+            content_policy=CONTENT_POLICY_METADATA_ONLY,
+            status_code=None,
+            retry_after_ms=None,
+            fields=candidate,
+        ),
+        DIAGNOSTIC_SINK_PERSISTED_LOGS,
+    )
+    if validation.status != DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED:
+        return None
+    return MappingProxyType(candidate)
+
+
+def _is_nonnegative_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_bounded_int(value: object, *, minimum: int, maximum: int | None = None) -> bool:
+    if not _is_nonnegative_int(value) or value < minimum:
+        return False
+    return maximum is None or value <= maximum
 
 
 def redact_diagnostics_for_sink(
@@ -844,6 +948,7 @@ __all__ = [
     "BROKER_RAW_MESSAGE_KEYS",
     "BROKER_RAW_MESSAGE_REDACTION_MARKER",
     "DEFAULT_DIAGNOSTIC_REDACTION_POLICY",
+    "DESKTOP_RENDERER_EVENT_SCHEMA_VERSION",
     "DIAGNOSTIC_FIELD_MAX_DEPTH",
     "DIAGNOSTIC_REDACTION_MARKER",
     "DIAGNOSTIC_SINK_BASIC_LOGS",
@@ -882,4 +987,5 @@ __all__ = [
     "redact_text_for_sink",
     "redact_user_message_ref_for_sink",
     "validate_diagnostics_for_sink",
+    "validate_desktop_renderer_event",
 ]

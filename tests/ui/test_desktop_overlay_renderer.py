@@ -2376,21 +2376,17 @@ async def test_desktop_overlay_detail_logs_layout_diagnostics_only_when_detailed
         await window.dispatch_snapshot(OverlayPresentationSnapshot(revision=2, blocks=[short_peer]))
 
         first_output = capsys.readouterr().out
-        assert "snapshot_update revision=2 blocks=1 rows=[" in first_output
-        assert "idx=0" in first_output
-        assert "id=peer-translated" in first_output
-        assert "occupant_key=peer:peer-translated" in first_output
-        assert "channel=peer" in first_output
-        assert "variant=finalized" in first_output
-        assert "primary_len=1" in first_output
-        assert "secondary_len=11" in first_output
+        assert "snapshot_update revision=2 blocks=1" in first_output
+        assert "peer-translated" not in first_output
+        assert "peer:peer-translated" not in first_output
+        assert "Sounds good" not in first_output
         assert "render_transition revision=2" in first_output
         assert "content_kind transparent_host->caption_surface" in first_output
         assert "surface_visible False->True" in first_output
         assert "slot_count 0->1" in first_output
         assert "line_count 0->2" in first_output
         assert "render_width revision=2 slot=0" in first_output
-        assert "key=peer-translated/peer:peer-translated/1" in first_output
+        assert "key=" not in first_output
         assert "previous_floor=0.0" in first_output
 
         await window.dispatch_snapshot(OverlayPresentationSnapshot(revision=3, blocks=[long_peer]))
@@ -3397,6 +3393,550 @@ class FakeRendererWindow:
 
     async def dispatch_runtime_control(self, payload: dict[str, object]) -> None:
         self.runtime_controls.append(dict(payload))
+
+    async def advance_snapshot_history(self, snapshot: OverlayPresentationSnapshot) -> None:
+        _ = snapshot
+
+    def renderer_visual_state(self) -> dict[str, object]:
+        return {
+            "slot_count": 0,
+            "line_count": 0,
+            "surface_visible": False,
+            "interaction_mode": "edit",
+            "window_width": 1344,
+            "window_height": 336,
+        }
+
+    def renderer_visual_state_for_snapshot(
+        self,
+        snapshot: OverlayPresentationSnapshot,
+    ) -> dict[str, object]:
+        _ = snapshot
+        return self.renderer_visual_state()
+
+
+class BatchingRendererWindow(FakeRendererWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.history_snapshots: list[OverlayPresentationSnapshot] = []
+        self.rendered_snapshot = asyncio.Event()
+        self.execution: list[str] = []
+
+    async def dispatch_snapshot(self, snapshot: OverlayPresentationSnapshot) -> None:
+        await super().dispatch_snapshot(snapshot)
+        self.execution.append(f"snapshot:{snapshot.revision}")
+        self.rendered_snapshot.set()
+
+    async def dispatch_runtime_control(self, payload: dict[str, object]) -> None:
+        await super().dispatch_runtime_control(payload)
+        self.execution.append(f"control:{payload['command']}")
+
+    async def advance_snapshot_history(self, snapshot: OverlayPresentationSnapshot) -> None:
+        self.history_snapshots.append(snapshot)
+
+    def renderer_visual_state(self) -> dict[str, object]:
+        return {
+            "slot_count": 1,
+            "line_count": 1,
+            "surface_visible": True,
+            "interaction_mode": "locked",
+            "window_width": 1344,
+            "window_height": 336,
+        }
+
+
+class FailingBatchingRendererWindow(BatchingRendererWindow):
+    async def dispatch_snapshot(self, snapshot: OverlayPresentationSnapshot) -> None:
+        raise RuntimeError("must not enter persisted diagnostics")
+
+
+class RecordingRendererDiagnosticPort:
+    def __init__(self) -> None:
+        self.records: list[dict[str, object]] = []
+        self.closed = False
+        self.requires_commit_acknowledgement = False
+
+    async def emit(self, envelope: desktop_overlay.RendererDiagnosticEnvelope) -> None:
+        self.records.append(dict(envelope.record))
+
+    async def wait_for_commit_ack(
+        self,
+        acknowledgement: desktop_overlay.RendererCommitAcknowledgement,
+    ) -> None:
+        _ = acknowledgement
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _scheduled_snapshot(revision: int, text: str) -> OverlayPresentationSnapshot:
+    return OverlayPresentationSnapshot(
+        revision=revision,
+        blocks=[
+            _block(
+                "scheduled-peer",
+                channel="peer",
+                block_variant="finalized",
+                appearance_seq=1,
+                primary_text=text,
+            )
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_snapshot_batching_is_fifo_latest_only_and_reports_acknowledged_commit() -> (
+    None
+):
+    token = "scheduled-batching-token"
+    bridge = OverlayBridge(
+        session_token=token,
+        initial_snapshot=OverlayPresentationSnapshot(revision=1),
+        heartbeat_interval_ms=20,
+        desktop_runtime_controls_enabled=True,
+    )
+    await bridge.start()
+    window = BatchingRendererWindow()
+    port = RecordingRendererDiagnosticPort()
+    renderer = desktop_overlay.DesktopOverlayRenderer(
+        _manifest(bridge_url=bridge.url, session_token=token),
+        window=window,
+        lifecycle_sink=RecordingLifecycleSink(),
+        parent_monitor=FakeParentMonitor(),
+        diagnostic_port=port,
+    )
+    revision_ten = _scheduled_snapshot(10, "first valid")
+    revision_nine = _scheduled_snapshot(9, "stale")
+    revision_eleven = _scheduled_snapshot(11, "latest valid")
+    try:
+        await renderer.enqueue_snapshot(revision_ten)
+        await renderer.enqueue_snapshot(revision_nine)
+        await renderer.enqueue_snapshot(revision_eleven)
+        await renderer.enqueue_snapshot(_scheduled_snapshot(11, "equal"))
+        run_task = asyncio.create_task(renderer.run())
+        await _next_bridge_event(bridge, expected_type="overlay_ready")
+        await asyncio.wait_for(window.rendered_snapshot.wait(), timeout=1.0)
+
+        assert [snapshot.revision for snapshot in window.history_snapshots] == [10]
+        assert [snapshot.revision for snapshot in window.snapshots] == [1, 11]
+        assert [
+            (record["event_type"], record["renderer_revision"], record["actual_disposition"])
+            for record in port.records
+        ] == [
+            ("receipt", 10, "superseded"),
+            ("supersession", 10, "superseded"),
+            ("receipt", 9, "stale"),
+            ("stale", 9, "stale"),
+            ("receipt", 11, "committed"),
+            ("receipt", 11, "stale"),
+            ("stale", 11, "stale"),
+            ("render_start", 11, "committed"),
+            ("render_commit", 11, "committed"),
+        ]
+        assert port.records[-1]["render_commit_acknowledged"] is False
+        assert all(set(record) == set(port.records[0]) for record in port.records)
+
+        await bridge.broadcast_shutdown()
+        assert await asyncio.wait_for(run_task, timeout=1.0) == 0
+        assert port.closed is True
+    finally:
+        await renderer.shutdown()
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_snapshot_batching_matches_sequential_width_reference() -> None:
+    short = _scheduled_snapshot(2, "응")
+    long = _scheduled_snapshot(3, "This caption is long enough to grow the retained width floor.")
+    final_short = _scheduled_snapshot(4, "응")
+    sequential_app = FakeFletApp()
+    sequential_window = desktop_overlay.FletDesktopRendererWindow(
+        app_runner=sequential_app.run,
+        event_sink=RecordingLifecycleSink().emit,
+        locale="en",
+    )
+    await sequential_window.start(OverlayPresentationSnapshot(revision=1, blocks=[]))
+    await sequential_window.dispatch_runtime_control(
+        {"command": "set_interaction_mode", "mode": "pass_through"}
+    )
+    await sequential_window.dispatch_snapshot(short)
+    await sequential_window.dispatch_snapshot(long)
+    await sequential_window.dispatch_snapshot(final_short)
+    sequential_width = _caption_card_controls(sequential_app.page)[0].width
+    await sequential_window.close()
+
+    token = "scheduled-width-token"
+    bridge = OverlayBridge(
+        session_token=token,
+        initial_snapshot=OverlayPresentationSnapshot(revision=1, blocks=[]),
+        heartbeat_interval_ms=20,
+        desktop_runtime_controls_enabled=True,
+    )
+    await bridge.start()
+    app = FakeFletApp()
+    window = desktop_overlay.FletDesktopRendererWindow(
+        app_runner=app.run,
+        event_sink=RecordingLifecycleSink().emit,
+        locale="en",
+    )
+    renderer = desktop_overlay.DesktopOverlayRenderer(
+        _manifest(bridge_url=bridge.url, session_token=token),
+        window=window,
+        lifecycle_sink=RecordingLifecycleSink(),
+        parent_monitor=FakeParentMonitor(),
+    )
+    try:
+        await renderer.enqueue_runtime_control(
+            {"command": "set_interaction_mode", "mode": "pass_through"}
+        )
+        await renderer.enqueue_snapshot(short)
+        await renderer.enqueue_snapshot(long)
+        await renderer.enqueue_snapshot(final_short)
+        run_task = asyncio.create_task(renderer.run())
+        await _next_bridge_event(bridge, expected_type="overlay_ready")
+        for _ in range(20):
+            if _page_text_values(app.page) == {"응"}:
+                break
+            await asyncio.sleep(0.01)
+        assert _page_text_values(app.page) == {"응"}
+        assert _caption_card_controls(app.page)[0].width == pytest.approx(sequential_width)
+        await bridge.broadcast_shutdown()
+        assert await asyncio.wait_for(run_task, timeout=1.0) == 0
+    finally:
+        await renderer.shutdown()
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_runtime_control_barrier_continues_through_real_queue_loop() -> None:
+    token = "runtime-control-barrier-token"
+    bridge = OverlayBridge(
+        session_token=token,
+        initial_snapshot=OverlayPresentationSnapshot(revision=1),
+        heartbeat_interval_ms=20,
+        desktop_runtime_controls_enabled=True,
+    )
+    await bridge.start()
+    window = BatchingRendererWindow()
+    renderer = desktop_overlay.DesktopOverlayRenderer(
+        _manifest(bridge_url=bridge.url, session_token=token),
+        window=window,
+        lifecycle_sink=RecordingLifecycleSink(),
+        parent_monitor=FakeParentMonitor(),
+    )
+    try:
+        run_task = asyncio.create_task(renderer.run())
+        await _next_bridge_event(bridge, expected_type="overlay_ready")
+        await renderer.enqueue_snapshot(_scheduled_snapshot(2, "before control"))
+        await renderer.enqueue_runtime_control({"command": "set_interaction_mode", "mode": "edit"})
+        await renderer.enqueue_snapshot(_scheduled_snapshot(3, "after control"))
+        await asyncio.wait_for(window.rendered_snapshot.wait(), timeout=1.0)
+        for _ in range(20):
+            if window.execution == ["snapshot:2", "control:set_interaction_mode", "snapshot:3"]:
+                break
+            await asyncio.sleep(0.01)
+        assert window.execution == ["snapshot:2", "control:set_interaction_mode", "snapshot:3"]
+        await bridge.broadcast_shutdown()
+        assert await asyncio.wait_for(run_task, timeout=1.0) == 0
+    finally:
+        await renderer.shutdown()
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_renderer_records_safe_failed_disposition_through_owned_port() -> (
+    None
+):
+    token = "scheduled-failure-token"
+    bridge = OverlayBridge(
+        session_token=token,
+        initial_snapshot=OverlayPresentationSnapshot(revision=1),
+        heartbeat_interval_ms=20,
+        desktop_runtime_controls_enabled=True,
+    )
+    await bridge.start()
+    port = RecordingRendererDiagnosticPort()
+    renderer = desktop_overlay.DesktopOverlayRenderer(
+        _manifest(bridge_url=bridge.url, session_token=token),
+        window=FailingBatchingRendererWindow(),
+        lifecycle_sink=RecordingLifecycleSink(),
+        parent_monitor=FakeParentMonitor(),
+        diagnostic_port=port,
+    )
+    try:
+        run_task = asyncio.create_task(renderer.run())
+        await _next_bridge_event(bridge, expected_type="overlay_ready")
+        await renderer.enqueue_snapshot(_scheduled_snapshot(2, "visible text"))
+        assert await asyncio.wait_for(run_task, timeout=1.0) == 1
+        assert port.records[-1]["event_type"] == "failed"
+        assert port.records[-1]["actual_disposition"] == "failed"
+        assert port.closed is True
+    finally:
+        await renderer.shutdown()
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_renderer_diagnostic_local_port_waits_for_delayed_acknowledgement() -> (
+    None
+):
+    token = "delayed-acknowledgement-token"
+    bridge = OverlayBridge(
+        session_token=token,
+        initial_snapshot=OverlayPresentationSnapshot(revision=1),
+        heartbeat_interval_ms=20,
+        desktop_runtime_controls_enabled=True,
+    )
+    await bridge.start()
+    port = desktop_overlay.DiagnosticLocalRendererPort(acknowledgement_timeout_s=1.0)
+    renderer = desktop_overlay.DesktopOverlayRenderer(
+        _manifest(bridge_url=bridge.url, session_token=token),
+        window=BatchingRendererWindow(),
+        lifecycle_sink=RecordingLifecycleSink(),
+        parent_monitor=FakeParentMonitor(),
+        diagnostic_port=port,
+    )
+    try:
+        run_task = asyncio.create_task(renderer.run())
+        await _next_bridge_event(bridge, expected_type="overlay_ready")
+        await renderer.enqueue_snapshot(_scheduled_snapshot(2, "delayed acknowledgement"))
+        envelope = None
+        for _ in range(8):
+            candidate = await asyncio.wait_for(port.next_event(), timeout=1.0)
+            if candidate.acknowledgement is not None:
+                envelope = candidate
+                break
+        assert envelope is not None
+        assert envelope.record["event_type"] == "render_commit"
+        assert run_task.done() is False
+        await asyncio.sleep(0.02)
+        assert run_task.done() is False
+        assert port.acknowledge_render_commit(2) is True
+        acknowledgement = await asyncio.wait_for(port.next_event(), timeout=1.0)
+        assert acknowledgement.record["event_type"] == "render_commit_acknowledgement"
+        assert acknowledgement.record["render_commit_acknowledged"] is True
+        await bridge.broadcast_shutdown()
+        assert await asyncio.wait_for(run_task, timeout=1.0) == 0
+    finally:
+        await renderer.shutdown()
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_renderer_diagnostic_local_acknowledgement_timeout_fails_runtime() -> (
+    None
+):
+    token = "acknowledgement-timeout-token"
+    bridge = OverlayBridge(
+        session_token=token,
+        initial_snapshot=OverlayPresentationSnapshot(revision=1),
+        heartbeat_interval_ms=20,
+        desktop_runtime_controls_enabled=True,
+    )
+    await bridge.start()
+    port = desktop_overlay.DiagnosticLocalRendererPort(acknowledgement_timeout_s=0.01)
+    renderer = desktop_overlay.DesktopOverlayRenderer(
+        _manifest(bridge_url=bridge.url, session_token=token),
+        window=BatchingRendererWindow(),
+        lifecycle_sink=RecordingLifecycleSink(),
+        parent_monitor=FakeParentMonitor(),
+        diagnostic_port=port,
+    )
+    try:
+        run_task = asyncio.create_task(renderer.run())
+        await _next_bridge_event(bridge, expected_type="overlay_ready")
+        await renderer.enqueue_snapshot(_scheduled_snapshot(2, "timeout"))
+        assert await asyncio.wait_for(run_task, timeout=1.0) == 1
+        with pytest.raises(desktop_overlay.RendererDiagnosticPortClosed):
+            await port.next_event()
+    finally:
+        await renderer.shutdown()
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_renderer_diagnostic_local_acknowledgement_failure_fails_runtime() -> (
+    None
+):
+    token = "acknowledgement-failure-token"
+    bridge = OverlayBridge(
+        session_token=token,
+        initial_snapshot=OverlayPresentationSnapshot(revision=1),
+        heartbeat_interval_ms=20,
+        desktop_runtime_controls_enabled=True,
+    )
+    await bridge.start()
+    port = desktop_overlay.DiagnosticLocalRendererPort(acknowledgement_timeout_s=1.0)
+    renderer = desktop_overlay.DesktopOverlayRenderer(
+        _manifest(bridge_url=bridge.url, session_token=token),
+        window=BatchingRendererWindow(),
+        lifecycle_sink=RecordingLifecycleSink(),
+        parent_monitor=FakeParentMonitor(),
+        diagnostic_port=port,
+    )
+    try:
+        run_task = asyncio.create_task(renderer.run())
+        await _next_bridge_event(bridge, expected_type="overlay_ready")
+        await renderer.enqueue_snapshot(_scheduled_snapshot(2, "failure"))
+        for _ in range(8):
+            envelope = await asyncio.wait_for(port.next_event(), timeout=1.0)
+            if envelope.acknowledgement is not None:
+                break
+        assert port.fail_render_commit(2, "local_route_failed") is True
+        assert await asyncio.wait_for(run_task, timeout=1.0) == 1
+    finally:
+        await renderer.shutdown()
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_renderer_diagnostic_local_port_close_and_cancellation_end_ack_wait() -> (
+    None
+):
+    token = "acknowledgement-close-token"
+    bridge = OverlayBridge(
+        session_token=token,
+        initial_snapshot=OverlayPresentationSnapshot(revision=1),
+        heartbeat_interval_ms=20,
+        desktop_runtime_controls_enabled=True,
+    )
+    await bridge.start()
+    port = desktop_overlay.DiagnosticLocalRendererPort(acknowledgement_timeout_s=1.0)
+    renderer = desktop_overlay.DesktopOverlayRenderer(
+        _manifest(bridge_url=bridge.url, session_token=token),
+        window=BatchingRendererWindow(),
+        lifecycle_sink=RecordingLifecycleSink(),
+        parent_monitor=FakeParentMonitor(),
+        diagnostic_port=port,
+    )
+    try:
+        run_task = asyncio.create_task(renderer.run())
+        await _next_bridge_event(bridge, expected_type="overlay_ready")
+        await renderer.enqueue_snapshot(_scheduled_snapshot(2, "close"))
+        for _ in range(8):
+            envelope = await asyncio.wait_for(port.next_event(), timeout=1.0)
+            if envelope.acknowledgement is not None:
+                break
+        await port.close()
+        assert await asyncio.wait_for(run_task, timeout=1.0) == 1
+    finally:
+        await renderer.shutdown()
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_renderer_cancellation_ends_diagnostic_acknowledgement_wait() -> None:
+    token = "acknowledgement-cancellation-token"
+    bridge = OverlayBridge(
+        session_token=token,
+        initial_snapshot=OverlayPresentationSnapshot(revision=1),
+        heartbeat_interval_ms=20,
+        desktop_runtime_controls_enabled=True,
+    )
+    await bridge.start()
+    port = desktop_overlay.DiagnosticLocalRendererPort(acknowledgement_timeout_s=1.0)
+    renderer = desktop_overlay.DesktopOverlayRenderer(
+        _manifest(bridge_url=bridge.url, session_token=token),
+        window=BatchingRendererWindow(),
+        lifecycle_sink=RecordingLifecycleSink(),
+        parent_monitor=FakeParentMonitor(),
+        diagnostic_port=port,
+    )
+    try:
+        run_task = asyncio.create_task(renderer.run())
+        await _next_bridge_event(bridge, expected_type="overlay_ready")
+        await renderer.enqueue_snapshot(_scheduled_snapshot(2, "cancel"))
+        for _ in range(8):
+            envelope = await asyncio.wait_for(port.next_event(), timeout=1.0)
+            if envelope.acknowledgement is not None:
+                break
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+        with pytest.raises(desktop_overlay.RendererDiagnosticPortClosed):
+            await port.next_event()
+    finally:
+        await renderer.shutdown()
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_renderer_default_diagnostic_port_outputs_only_safe_records(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    token = "scheduled-default-port-token"
+    bridge = OverlayBridge(
+        session_token=token,
+        initial_snapshot=OverlayPresentationSnapshot(revision=1),
+        heartbeat_interval_ms=20,
+        desktop_runtime_controls_enabled=True,
+    )
+    await bridge.start()
+    window = BatchingRendererWindow()
+    renderer = desktop_overlay.DesktopOverlayRenderer(
+        _manifest(bridge_url=bridge.url, session_token=token, logging_mode="detailed"),
+        window=window,
+        lifecycle_sink=RecordingLifecycleSink(),
+        parent_monitor=FakeParentMonitor(),
+    )
+    try:
+        run_task = asyncio.create_task(renderer.run())
+        await _next_bridge_event(bridge, expected_type="overlay_ready")
+        await renderer.enqueue_snapshot(_scheduled_snapshot(2, "caption must not appear"))
+        await asyncio.wait_for(window.rendered_snapshot.wait(), timeout=1.0)
+        output = capsys.readouterr().out
+        assert '"record_type": "renderer_event"' in output
+        assert '"renderer_revision": 2' in output
+        assert "caption must not appear" not in output
+        assert "scheduled-peer" not in output
+        await bridge.broadcast_shutdown()
+        assert await asyncio.wait_for(run_task, timeout=1.0) == 0
+    finally:
+        await renderer.shutdown()
+        await bridge.stop()
+
+
+def test_desktop_overlay_renderer_diagnostic_policy_requires_exact_safe_flat_schema() -> None:
+    committed = {
+        "schema_version": 1,
+        "record_type": "renderer_event",
+        "event_type": "render_commit",
+        "renderer_revision": 11,
+        "actual_disposition": "committed",
+        "render_commit_acknowledged": False,
+        "slot_count": 1,
+        "line_count": 2,
+        "surface_visible": True,
+        "interaction_mode": "locked",
+        "window_width": 1344,
+        "window_height": 336,
+    }
+
+    assert desktop_overlay.validate_desktop_renderer_event(committed) == committed
+    for unsafe_record in (
+        {**committed, "record_type": "revision_outcome"},
+        {**committed, "schema_version": True},
+        {**committed, "schema_version": 1.0},
+        {**committed, "caption_text": "must never persist"},
+        {**committed, "occupant_key": "user-derived"},
+        {**committed, "session_token": "credential"},
+        {**committed, "file_path": "C:/secret.txt"},
+        {**committed, "raw_exception": "Traceback (most recent call last):"},
+        {**committed, "provider_payload": "payload"},
+        {**committed, "window_width": {"nested": 1344}},
+        {**committed, "line_count": [2]},
+        {**committed, "renderer_revision": True},
+        {**committed, "slot_count": True},
+        {**committed, "line_count": True},
+        {**committed, "window_width": True},
+    ):
+        assert desktop_overlay.validate_desktop_renderer_event(unsafe_record) is None
+    assert (
+        desktop_overlay.validate_desktop_renderer_event(
+            {**committed, "render_commit_acknowledged": True}
+        )
+        is None
+    )
 
 
 class FailingStartWindow(FakeRendererWindow):

@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 import traceback
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future as ConcurrentFuture
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -41,6 +41,10 @@ from puripuly_heart.config.settings import (
     DESKTOP_FLET_SIZE_PRESET_ORDER,
     DESKTOP_FLET_SIZE_PRESETS,
     DesktopFletOverlayVisualSettings,
+)
+from puripuly_heart.core.diagnostic_validation import (
+    DESKTOP_RENDERER_EVENT_SCHEMA_VERSION,
+    validate_desktop_renderer_event,
 )
 from puripuly_heart.core.overlay.manifest import (
     OVERLAY_CONTRACT_VERSION,
@@ -1316,43 +1320,6 @@ def _caption_card_width_memory_key(slot: DesktopCaptionSlot) -> tuple[str, str, 
     return (slot.block_id, slot.occupant_key, slot.appearance_seq)
 
 
-def _caption_width_key_label(key: tuple[str, str, int]) -> str:
-    return f"{key[0]}/{key[1]}/{key[2]}"
-
-
-def _desktop_snapshot_rows_summary(snapshot: OverlayPresentationSnapshot) -> str:
-    return "; ".join(
-        _desktop_snapshot_block_summary(index, block) for index, block in enumerate(snapshot.blocks)
-    )
-
-
-def _desktop_snapshot_block_summary(
-    index: int,
-    block: OverlayPresentationBlock,
-) -> str:
-    secondary_len = len(block.secondary_text) if block.secondary_enabled else 0
-    return (
-        f"idx={index} "
-        f"id={block.id} "
-        f"occupant_key={block.occupant_key} "
-        f"appearance_seq={block.appearance_seq} "
-        f"channel={block.channel} "
-        f"variant={block.block_variant} "
-        f"primary_len={len(block.primary_text)} "
-        f"secondary_len={secondary_len} "
-        f"secondary_enabled={block.secondary_enabled} "
-        f"update_id={_optional_log_value(block.update_id)} "
-        f"origin_wall_clock_ms={_optional_log_value(block.origin_wall_clock_ms)} "
-        f"session_scope={_optional_log_value(block.session_scope)}"
-    )
-
-
-def _optional_log_value(value: object | None) -> str:
-    if value is None:
-        return "none"
-    return str(value)
-
-
 def _estimated_caption_line_width(text: str, font_size: int) -> float:
     return sum(_estimated_caption_char_width(char, font_size) for char in text)
 
@@ -1701,12 +1668,150 @@ class LifecycleSink(Protocol):
     async def emit(self, event: dict[str, object]) -> None: ...
 
 
+@dataclass(slots=True)
+class RendererCommitAcknowledgement:
+    renderer_revision: int
+    _completed: asyncio.Event = field(default_factory=asyncio.Event)
+    _failure: str | None = None
+
+    def acknowledge(self) -> None:
+        self._completed.set()
+
+    def fail(self, reason: str) -> None:
+        self._failure = reason
+        self._completed.set()
+
+    @property
+    def acknowledged(self) -> bool:
+        return self._completed.is_set() and self._failure is None
+
+    async def wait(self, timeout_s: float) -> None:
+        try:
+            await asyncio.wait_for(self._completed.wait(), timeout=timeout_s)
+        except TimeoutError as exc:
+            raise RendererDiagnosticAcknowledgementTimeout from exc
+        if self._failure is not None:
+            raise RendererDiagnosticAcknowledgementFailure(self._failure)
+
+
+class RendererDiagnosticAcknowledgementTimeout(Exception):
+    pass
+
+
+class RendererDiagnosticAcknowledgementFailure(Exception):
+    pass
+
+
+class RendererDiagnosticPortClosed(Exception):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class RendererDiagnosticEnvelope:
+    record: Mapping[str, object]
+    acknowledgement: RendererCommitAcknowledgement | None = None
+
+
+class RendererDiagnosticPort(Protocol):
+    requires_commit_acknowledgement: bool
+
+    async def emit(self, envelope: RendererDiagnosticEnvelope) -> None: ...
+    async def wait_for_commit_ack(self, acknowledgement: RendererCommitAcknowledgement) -> None: ...
+    async def close(self) -> None: ...
+
+
+@dataclass(slots=True)
+class DetailedRendererDiagnosticPort:
+    logging_mode: str
+    closed: bool = False
+    requires_commit_acknowledgement: bool = False
+
+    async def emit(self, envelope: RendererDiagnosticEnvelope) -> None:
+        if self.closed or self.logging_mode != "detailed":
+            return
+        print(
+            f"[DesktopOverlay][Detail] {json.dumps(dict(envelope.record), sort_keys=True)}",
+            flush=True,
+        )
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def wait_for_commit_ack(self, acknowledgement: RendererCommitAcknowledgement) -> None:
+        _ = acknowledgement
+
+
+@dataclass(slots=True)
+class DiagnosticLocalRendererPort:
+    acknowledgement_timeout_s: float = 1.0
+    requires_commit_acknowledgement: bool = True
+    _events: asyncio.Queue[RendererDiagnosticEnvelope] = field(default_factory=asyncio.Queue)
+    _closed: asyncio.Event = field(default_factory=asyncio.Event)
+    _acknowledgements: dict[int, RendererCommitAcknowledgement] = field(default_factory=dict)
+
+    async def emit(self, envelope: RendererDiagnosticEnvelope) -> None:
+        if self._closed.is_set():
+            raise RendererDiagnosticPortClosed
+        acknowledgement = envelope.acknowledgement
+        if acknowledgement is not None:
+            self._acknowledgements[acknowledgement.renderer_revision] = acknowledgement
+        await self._events.put(envelope)
+
+    async def next_event(self) -> RendererDiagnosticEnvelope:
+        event_task = asyncio.create_task(self._events.get())
+        close_task = asyncio.create_task(self._closed.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {event_task, close_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if close_task in done:
+                raise RendererDiagnosticPortClosed
+            return event_task.result()
+        finally:
+            for task in (event_task, close_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(event_task, close_task, return_exceptions=True)
+
+    def acknowledge_render_commit(self, renderer_revision: int) -> bool:
+        acknowledgement = self._acknowledgements.pop(renderer_revision, None)
+        if acknowledgement is None:
+            return False
+        acknowledgement.acknowledge()
+        return True
+
+    def fail_render_commit(self, renderer_revision: int, reason: str) -> bool:
+        acknowledgement = self._acknowledgements.pop(renderer_revision, None)
+        if acknowledgement is None:
+            return False
+        acknowledgement.fail(reason)
+        return True
+
+    async def wait_for_commit_ack(self, acknowledgement: RendererCommitAcknowledgement) -> None:
+        await acknowledgement.wait(self.acknowledgement_timeout_s)
+
+    async def close(self) -> None:
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        for acknowledgement in self._acknowledgements.values():
+            acknowledgement.fail("port_closed")
+        self._acknowledgements.clear()
+
+
 class RendererWindow(Protocol):
     async def start(self, initial_snapshot: OverlayPresentationSnapshot) -> None: ...
     async def run_until_closed(self) -> None: ...
     async def close(self) -> None: ...
     async def dispatch_snapshot(self, snapshot: OverlayPresentationSnapshot) -> None: ...
     async def dispatch_runtime_control(self, payload: dict[str, object]) -> None: ...
+    async def advance_snapshot_history(self, snapshot: OverlayPresentationSnapshot) -> None: ...
+    def renderer_visual_state(self) -> dict[str, object]: ...
+    def renderer_visual_state_for_snapshot(
+        self,
+        snapshot: OverlayPresentationSnapshot,
+    ) -> dict[str, object]: ...
 
 
 class ParentMonitor(Protocol):
@@ -2147,6 +2252,7 @@ class FletDesktopRendererWindow:
         self._preview_background_alpha = _DESKTOP_PREVIEW_DEFAULT_BACKGROUND_ALPHA
         self._preview_size_preset_id = DESKTOP_FLET_DEFAULT_SIZE_PRESET
         self._snapshot = OverlayPresentationSnapshot()
+        self._last_snapshot_revision = -1
         self._visual_state = DesktopCaptionVisualState()
         self._interaction_mode = _DESKTOP_INTERACTION_MODE_EDIT
         self._startup_visual_state: DesktopCaptionVisualState | None = None
@@ -2214,6 +2320,7 @@ class FletDesktopRendererWindow:
         else:
             self._snapshot = initial_snapshot
             self._visual_state = self._startup_visual_state or DesktopCaptionVisualState()
+        self._last_snapshot_revision = self._snapshot.revision
         self._page_ready.clear()
         self._closed.clear()
         self._page_start_error = None
@@ -2295,12 +2402,76 @@ class FletDesktopRendererWindow:
                 pass
 
     async def dispatch_snapshot(self, snapshot: OverlayPresentationSnapshot) -> None:
+        if snapshot.revision <= self._last_snapshot_revision:
+            return
         self._emit_detailed_log(
-            f"snapshot_update revision={snapshot.revision} blocks={len(snapshot.blocks)} "
-            f"rows=[{_desktop_snapshot_rows_summary(snapshot)}]"
+            f"snapshot_update revision={snapshot.revision} blocks={len(snapshot.blocks)}"
         )
         self._snapshot = snapshot
+        self._last_snapshot_revision = snapshot.revision
         self._render_page()
+
+    async def advance_snapshot_history(self, snapshot: OverlayPresentationSnapshot) -> None:
+        page = self._page
+        if page is None or self._preview_catalog is not None:
+            return
+        plan = build_desktop_caption_plan(
+            snapshot,
+            window_width=_page_window_number(page, "width", DESKTOP_FLET_DEFAULT_WIDTH),
+            window_height=_page_window_number(page, "height", DESKTOP_FLET_DEFAULT_HEIGHT),
+            visual_state=self._visual_state,
+            interaction_mode=self._interaction_mode,
+            locale=self._locale,
+        )
+        self._plan_with_grow_only_caption_card_widths(plan)
+
+    def renderer_visual_state(self) -> dict[str, object]:
+        trace = self._last_render_trace
+        if trace is None:
+            return {
+                "slot_count": 0,
+                "line_count": 0,
+                "surface_visible": False,
+                "interaction_mode": "locked",
+                "window_width": DESKTOP_FLET_DEFAULT_WIDTH,
+                "window_height": DESKTOP_FLET_DEFAULT_HEIGHT,
+            }
+        return {
+            "slot_count": trace.slot_count,
+            "line_count": trace.line_count,
+            "surface_visible": trace.surface_visible,
+            "interaction_mode": (
+                "edit" if self._interaction_mode == _DESKTOP_INTERACTION_MODE_EDIT else "locked"
+            ),
+            "window_width": trace.window_width,
+            "window_height": trace.window_height,
+        }
+
+    def renderer_visual_state_for_snapshot(
+        self,
+        snapshot: OverlayPresentationSnapshot,
+    ) -> dict[str, object]:
+        page = self._page
+        if page is None:
+            return self.renderer_visual_state()
+        plan = build_desktop_caption_plan(
+            snapshot,
+            window_width=_page_window_number(page, "width", DESKTOP_FLET_DEFAULT_WIDTH),
+            window_height=_page_window_number(page, "height", DESKTOP_FLET_DEFAULT_HEIGHT),
+            visual_state=self._visual_state,
+            interaction_mode=self._interaction_mode,
+            locale=self._locale,
+        )
+        return {
+            "slot_count": len(plan.slots),
+            "line_count": len(plan.lines),
+            "surface_visible": plan.surface_visible,
+            "interaction_mode": (
+                "edit" if self._interaction_mode == _DESKTOP_INTERACTION_MODE_EDIT else "locked"
+            ),
+            "window_width": plan.window_width,
+            "window_height": plan.window_height,
+        }
 
     async def dispatch_runtime_control(self, payload: dict[str, object]) -> None:
         if "logging_mode" in payload and payload.get("command") is None:
@@ -2883,16 +3054,13 @@ class FletDesktopRendererWindow:
                 "render_width "
                 f"revision={self._snapshot.revision} "
                 f"slot={slot_index} "
-                f"key={_caption_width_key_label(key)} "
                 f"raw_card_width={raw_slot.card_width:.1f} "
                 f"applied_card_width={slot.card_width:.1f} "
                 f"raw_text_width={raw_slot.card_text_width:.1f} "
                 f"applied_text_width={slot.card_text_width:.1f} "
                 f"previous_floor={previous_floor:.1f} "
                 f"floor_hit={floor_hit} "
-                f"line_count={len(slot.lines)} "
-                f"primary_len={sum(len(line.text) for line in slot.lines if line.slot == 'primary')} "
-                f"secondary_len={sum(len(line.text) for line in slot.lines if line.slot == 'secondary')}"
+                f"line_count={len(slot.lines)}"
             )
 
     def _emit_render_transition(self, trace: _DesktopRenderTrace) -> None:
@@ -3431,6 +3599,7 @@ class DesktopOverlayRenderer:
         window: RendererWindow | None = None,
         lifecycle_sink: LifecycleSink | None = None,
         parent_monitor: ParentMonitor | None = None,
+        diagnostic_port: RendererDiagnosticPort | None = None,
     ) -> None:
         self.manifest = manifest
         self.lifecycle_sink = lifecycle_sink or StdoutLifecycleSink()
@@ -3440,6 +3609,9 @@ class DesktopOverlayRenderer:
             logging_mode=manifest.logging_mode,
         )
         self.parent_monitor = parent_monitor or create_parent_monitor(manifest.parent_pid)
+        self.diagnostic_port = diagnostic_port or DetailedRendererDiagnosticPort(
+            logging_mode=manifest.logging_mode
+        )
         self._shutdown_event = asyncio.Event()
         self._shutdown_lock = asyncio.Lock()
         self._shutdown_complete = False
@@ -3447,6 +3619,7 @@ class DesktopOverlayRenderer:
         self._tasks: set[asyncio.Task[_RuntimeOutcome | None]] = set()
         self._ui_queue: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
         self._startup_pending_messages: asyncio.Queue[object] = asyncio.Queue()
+        self._last_accepted_snapshot_revision = -1
 
     @property
     def is_shutdown(self) -> bool:
@@ -3478,6 +3651,7 @@ class DesktopOverlayRenderer:
                     initial_runtime_controls
                 )
             await self.window.start(initial_snapshot)
+            self._last_accepted_snapshot_revision = initial_snapshot.revision
             for payload in startup_runtime_controls_to_dispatch:
                 await self.window.dispatch_runtime_control(payload)
             unexpected_startup_failure_reason = "renderer_init_failed"
@@ -3539,6 +3713,8 @@ class DesktopOverlayRenderer:
             if self._tasks:
                 await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
+            with contextlib.suppress(Exception):
+                await self.diagnostic_port.close()
             await _close_parent_monitor(self.parent_monitor)
             self._shutdown_complete = True
 
@@ -3701,19 +3877,25 @@ class DesktopOverlayRenderer:
             except Exception:
                 logger.warning("[DesktopOverlay] Ignoring malformed snapshot update")
                 return None
-            await self._ui_queue.put(("snapshot", snapshot))
+            await self.enqueue_snapshot(snapshot)
             return None
         if message_type == "runtime_control":
             payload = _parse_runtime_control_payload(message)
             if payload is None:
                 await self._emit_runtime_error("runtime_control_invalid")
                 return _RuntimeOutcome(_RUNTIME_FAILURE_EXIT_CODE)
-            await self._ui_queue.put(("runtime_control", payload))
+            await self.enqueue_runtime_control(payload)
             return None
         logger.warning(
             "[DesktopOverlay] Ignoring unsupported bridge message type: %r", message_type
         )
         return None
+
+    async def enqueue_snapshot(self, snapshot: OverlayPresentationSnapshot) -> None:
+        await self._ui_queue.put(("snapshot", snapshot))
+
+    async def enqueue_runtime_control(self, payload: dict[str, object]) -> None:
+        await self._ui_queue.put(("runtime_control", dict(payload)))
 
     async def _ui_update_loop(self) -> _RuntimeOutcome | None:
         while not self._shutdown_event.is_set():
@@ -3735,13 +3917,154 @@ class DesktopOverlayRenderer:
 
             try:
                 if kind == "snapshot" and isinstance(payload, OverlayPresentationSnapshot):
-                    await self.window.dispatch_snapshot(payload)
+                    barrier = await self._dispatch_pending_snapshot_batch(payload)
+                    if barrier is not None:
+                        barrier_kind, barrier_payload = barrier
+                        if barrier_kind == "runtime_control" and isinstance(barrier_payload, dict):
+                            await self.window.dispatch_runtime_control(barrier_payload)
                 elif kind == "runtime_control" and isinstance(payload, dict):
                     await self.window.dispatch_runtime_control(payload)
             except Exception:
                 await self._emit_runtime_error("window_configuration_failed")
                 return _RuntimeOutcome(_RUNTIME_FAILURE_EXIT_CODE)
         return None
+
+    async def _dispatch_pending_snapshot_batch(
+        self,
+        first_snapshot: OverlayPresentationSnapshot,
+    ) -> tuple[str, object] | None:
+        snapshots = [first_snapshot]
+        barrier: tuple[str, object] | None = None
+        while True:
+            try:
+                kind, payload = self._ui_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if kind == "snapshot" and isinstance(payload, OverlayPresentationSnapshot):
+                snapshots.append(payload)
+                continue
+            barrier = (kind, payload)
+            break
+
+        accepted: list[OverlayPresentationSnapshot] = []
+        dispositions: list[tuple[OverlayPresentationSnapshot, str]] = []
+        for snapshot in snapshots:
+            if snapshot.revision <= self._last_accepted_snapshot_revision:
+                dispositions.append((snapshot, "stale"))
+                continue
+            self._last_accepted_snapshot_revision = snapshot.revision
+            accepted.append(snapshot)
+            dispositions.append((snapshot, "accepted"))
+
+        committed_snapshot = accepted[-1] if accepted else None
+        for snapshot, disposition in dispositions:
+            outcome = (
+                "committed"
+                if snapshot is committed_snapshot
+                else "superseded" if disposition == "accepted" else disposition
+            )
+            await self._emit_renderer_diagnostic(
+                event_type="receipt",
+                snapshot=snapshot,
+                disposition=outcome,
+            )
+            if disposition == "stale":
+                await self._emit_renderer_diagnostic(
+                    event_type="stale",
+                    snapshot=snapshot,
+                    disposition="stale",
+                )
+                continue
+            if snapshot is not committed_snapshot:
+                await self._advance_snapshot_history(snapshot)
+                await self._emit_renderer_diagnostic(
+                    event_type="supersession",
+                    snapshot=snapshot,
+                    disposition="superseded",
+                )
+
+        if committed_snapshot is not None:
+            await self._emit_renderer_diagnostic(
+                event_type="render_start",
+                snapshot=committed_snapshot,
+                disposition="committed",
+                visual_state=self._renderer_visual_state_for_snapshot(committed_snapshot),
+            )
+            try:
+                await self.window.dispatch_snapshot(committed_snapshot)
+            except Exception:
+                await self._emit_renderer_diagnostic(
+                    event_type="failed",
+                    snapshot=committed_snapshot,
+                    disposition="failed",
+                )
+                raise
+            acknowledgement = RendererCommitAcknowledgement(committed_snapshot.revision)
+            await self._emit_renderer_diagnostic(
+                event_type="render_commit",
+                snapshot=committed_snapshot,
+                disposition="committed",
+                visual_state=self._renderer_visual_state(),
+                acknowledgement=acknowledgement,
+            )
+            if self.diagnostic_port.requires_commit_acknowledgement:
+                try:
+                    await self.diagnostic_port.wait_for_commit_ack(acknowledgement)
+                except Exception:
+                    await self._emit_renderer_diagnostic(
+                        event_type="failed",
+                        snapshot=committed_snapshot,
+                        disposition="failed",
+                    )
+                    raise
+                await self._emit_renderer_diagnostic(
+                    event_type="render_commit_acknowledgement",
+                    snapshot=committed_snapshot,
+                    disposition="committed",
+                    visual_state=self._renderer_visual_state(),
+                    render_commit_acknowledged=True,
+                )
+        return barrier
+
+    async def _advance_snapshot_history(self, snapshot: OverlayPresentationSnapshot) -> None:
+        await self.window.advance_snapshot_history(snapshot)
+
+    def _renderer_visual_state(self) -> dict[str, object]:
+        return dict(self.window.renderer_visual_state())
+
+    def _renderer_visual_state_for_snapshot(
+        self,
+        snapshot: OverlayPresentationSnapshot,
+    ) -> dict[str, object]:
+        return dict(self.window.renderer_visual_state_for_snapshot(snapshot))
+
+    async def _emit_renderer_diagnostic(
+        self,
+        *,
+        event_type: str,
+        snapshot: OverlayPresentationSnapshot,
+        disposition: str,
+        visual_state: Mapping[str, object] | None = None,
+        acknowledgement: RendererCommitAcknowledgement | None = None,
+        render_commit_acknowledged: bool = False,
+    ) -> None:
+        safe_visual_state = dict(visual_state or self._renderer_visual_state_for_snapshot(snapshot))
+        record = validate_desktop_renderer_event(
+            {
+                "schema_version": DESKTOP_RENDERER_EVENT_SCHEMA_VERSION,
+                "record_type": "renderer_event",
+                "event_type": event_type,
+                "renderer_revision": snapshot.revision,
+                "actual_disposition": disposition,
+                "render_commit_acknowledged": render_commit_acknowledged,
+                **safe_visual_state,
+            }
+        )
+        if record is None:
+            return
+        await self.diagnostic_port.emit(
+            RendererDiagnosticEnvelope(record=record, acknowledgement=acknowledgement)
+        )
 
     async def _parent_monitor_loop(self) -> _RuntimeOutcome | None:
         try:
