@@ -358,6 +358,15 @@ class LifecycleScope:
         )
 
 
+def start_lifecycle_task(
+    scope: LifecycleScope,
+    coroutine: Coroutine[Any, Any, _TaskResultT],
+    *,
+    name: str,
+) -> asyncio.Task[_TaskResultT]:
+    return scope.create_task(coroutine, name=name)
+
+
 def _shutdown_diagnostic_event(
     *,
     callback: LifecycleShutdownCallback,
@@ -414,4 +423,5 @@ __all__ = [
     "SHUTDOWN_PHASE_OWNER_DRAIN_CANCEL",
     "SHUTDOWN_PHASE_STOP_EXTERNAL_PRODUCERS",
     "ShutdownCallback",
+    "start_lifecycle_task",
 ]

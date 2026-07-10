@@ -442,10 +442,7 @@ async def test_replaced_llm_provider_late_final_cleans_peer_runtime_without_outp
     assert utterance_id not in hub.peer_runtime.utterances
     assert hub.ui_events.empty()
     assert osc.messages == []
-    assert [getattr(event, "type", None) for event in overlay_sink.events] == [
-        "peer_transcript_final",
-        "utterance_closed",
-    ]
+    assert overlay_sink.events == []
     assert not any(
         getattr(event, "type", None) == "translation_final" for event in overlay_sink.events
     )

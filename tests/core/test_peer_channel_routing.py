@@ -157,7 +157,8 @@ async def test_peer_desktop_transcripts_are_routed_to_peer_runtime_and_never_sen
     assert event.channel == "peer"
 
 
-def test_peer_logical_turn_projection_preserves_final_language_runs() -> None:
+@pytest.mark.asyncio
+async def test_peer_final_runs_owner_creates_ordered_children_for_language_runs() -> None:
     hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), clock=FakeClock(_now=10.0))
     parent_utterance_id = uuid4()
     runs = (
@@ -165,19 +166,25 @@ def test_peer_logical_turn_projection_preserves_final_language_runs() -> None:
         FinalLanguageRun(text="中文", language="zh"),
     )
 
-    parent_id, projected = hub._peer_logical_turn_transcript(
+    child_ids = await hub.peer_final_runs.submit_parent(
         Transcript(
             utterance_id=parent_utterance_id,
             text="日本語中文",
             is_final=True,
             channel="peer",
             final_language_runs=runs,
-        )
+        ),
+        source="Peer",
     )
 
-    assert parent_id == parent_utterance_id
-    assert projected.utterance_id != parent_utterance_id
-    assert projected.final_language_runs == runs
+    assert len(child_ids) == 2
+    assert parent_utterance_id not in child_ids
+    assert [
+        hub.peer_runtime.utterances[child_id].final.final_language_runs for child_id in child_ids
+    ] == [
+        (runs[0],),
+        (runs[1],),
+    ]
 
 
 @pytest.mark.asyncio
