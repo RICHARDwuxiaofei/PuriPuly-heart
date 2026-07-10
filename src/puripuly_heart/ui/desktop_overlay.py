@@ -1890,6 +1890,7 @@ class _DesktopRenderTrace:
 class _RetainedDesktopCaptionSurface:
     root: Any
     surface_host: Any
+    drag_content_host: Any | None
     caption_surface: Any
     caption_stack: Any
     full_background: Any
@@ -1993,9 +1994,16 @@ def _build_retained_desktop_caption_surface(
         label=empty_lock_label,
         on_click=on_empty_lock,
     )
+    drag_content_host: Any | None = None
     caption_content: Any = caption_surface
     if include_drag_area:
-        caption_content = ft.WindowDragArea(content=caption_surface, maximizable=False)
+        drag_content_host = ft.Container(
+            content=caption_surface,
+            bgcolor=ft.Colors.TRANSPARENT,
+            alignment=ft.alignment.center,
+            visible=True,
+        )
+        caption_content = ft.WindowDragArea(content=drag_content_host, maximizable=False)
     surface_host = ft.Stack(
         controls=[caption_content, empty_lock_action],
         alignment=ft.alignment.center,
@@ -2009,6 +2017,7 @@ def _build_retained_desktop_caption_surface(
     model = _RetainedDesktopCaptionSurface(
         root=root,
         surface_host=surface_host,
+        drag_content_host=drag_content_host,
         caption_surface=caption_surface,
         caption_stack=caption_stack,
         full_background=full_background,
@@ -2037,6 +2046,10 @@ def _apply_retained_desktop_caption_plan(
     model.root.height = plan.window_height
     model.surface_host.width = plan.window_width
     model.surface_host.height = plan.window_height
+    if model.drag_content_host is not None:
+        model.drag_content_host.width = plan.window_width
+        model.drag_content_host.height = plan.window_height
+        model.drag_content_host.visible = True
     model.caption_surface.width = plan.window_width
     model.caption_surface.height = plan.window_height
     model.caption_surface.border_radius = plan.border_radius

@@ -1261,6 +1261,10 @@ class FakeFletPage:
 
     def update(self) -> None:
         self.update_calls += 1
+        for control in self.controls:
+            for item in _walk_control_tree(control):
+                if isinstance(item, ft.WindowDragArea):
+                    item.before_update()
         self.visibility_updates.append(self.window.visible)
         self.render_snapshots.append(
             {
@@ -2447,6 +2451,44 @@ async def test_desktop_overlay_flet_window_starts_frameless_transparent_moving_e
         cards = _caption_card_controls(page)
         assert len(cards) == 1
         assert cards[0].bgcolor == "#99000000"
+    finally:
+        await window.close()
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_empty_pass_through_keeps_window_drag_area_content_visible() -> None:
+    app = FakeFletApp()
+    window = desktop_overlay.FletDesktopRendererWindow(
+        app_runner=app.run,
+        event_sink=RecordingLifecycleSink().emit,
+        locale="en",
+        bounds_debounce_s=0.01,
+    )
+
+    try:
+        await window.start(OverlayPresentationSnapshot(revision=1, blocks=[]))
+        await window.dispatch_runtime_control(
+            {"command": "set_interaction_mode", "mode": "pass_through"}
+        )
+        if app.page.tasks:
+            await asyncio.gather(*app.page.tasks)
+
+        model = window._retained_caption_surface
+        assert model is not None
+        assert model.drag_content_host is not None
+        assert model.drag_content_host.visible is True
+        assert model.caption_surface.visible is False
+        drag_area = next(
+            item
+            for control in app.page.controls
+            for item in _walk_control_tree(control)
+            if isinstance(item, ft.WindowDragArea)
+        )
+        assert drag_area.content is model.drag_content_host
+        drag_area.before_update()
+        assert app.page.window.ignore_mouse_events is True
+        assert app.page.add_calls == 1
+        assert app.page.clean_calls == 0
     finally:
         await window.close()
 

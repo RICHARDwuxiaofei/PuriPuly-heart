@@ -274,6 +274,16 @@ class DesktopOverlayReproOwner:
                 {"command": "set_interaction_mode", "mode": "pass_through"}
             )
             await _wait_for_locked_interaction_mode(renderer.window)
+            await ingress.send_runtime_control(
+                {
+                    "command": "apply_window_bounds",
+                    "x": 0,
+                    "y": 0,
+                    "width": 1344,
+                    "height": 336,
+                }
+            )
+            await asyncio.sleep(0)
             for cycle in range(1, self.arguments.cycles + 1):
                 for batch in normative_repro_schedule(cycle):
                     _raise_owned_task_failure(self._consumer_task)
