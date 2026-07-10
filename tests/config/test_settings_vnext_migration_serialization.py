@@ -124,6 +124,23 @@ def test_v24_maximal_fixture_migrates_to_canonical_vnext_serialization() -> None
     assert "api_key_verified" not in serialized
 
 
+def test_peer_auto_detection_intent_roundtrips_through_legacy_compatibility_projection() -> None:
+    migration = _migration()
+    serialization = _serialization()
+    legacy = AppSettings()
+    legacy.languages.peer_source_mode = "soniox_auto"
+    legacy.languages.peer_expected_languages = ["ja", "zh-TW", "ja"]
+
+    vnext = migration.from_legacy_app_settings(legacy)
+    serialized = serialization.to_dict(vnext)
+    projected = migration.to_legacy_dict(vnext)
+
+    assert serialized["intent"]["languages"]["peer_source_mode"] == "soniox_auto"
+    assert serialized["intent"]["languages"]["peer_expected_languages"] == ["ja", "zh-TW"]
+    assert projected["languages"]["peer_source_mode"] == "soniox_auto"
+    assert projected["languages"]["peer_expected_languages"] == ["ja", "zh-TW"]
+
+
 def test_high_version_legacy_shape_migrates_by_shape_not_settings_version() -> None:
     migration = _migration()
     serialization = _serialization()
@@ -436,7 +453,11 @@ def test_existing_settings_default_to_unknown_telemetry_without_identifier() -> 
     migration = _migration()
     serialization = _serialization()
 
-    serialized = serialization.to_dict(migration.from_dict(maximal_v24_settings_fixture()))
+    existing = maximal_v24_settings_fixture()
+    existing["telemetry"] = {}
+    existing["telemetry_state"] = {}
+
+    serialized = serialization.to_dict(migration.from_dict(existing))
 
     assert serialized["intent"]["telemetry"] == {"consent": "unknown"}
     assert serialized["state"]["telemetry"] == {

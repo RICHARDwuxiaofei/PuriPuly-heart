@@ -98,7 +98,7 @@ TASK_CREATION_ALLOWLIST_RATIONALES = {
     (
         "src/puripuly_heart/ui/app.py",
         RUN_TASK,
-    ): "Flet UI callbacks must use page.run_task for async controller/service calls; each call remains UI-bound, not a background owner bypass",
+    ): "Flet UI callbacks, including peer-auto activation, must use page.run_task for async controller/service calls; each call remains UI-bound, not a background owner bypass",
     (
         "src/puripuly_heart/ui/components/settings/api_key_field.py",
         RUN_TASK,

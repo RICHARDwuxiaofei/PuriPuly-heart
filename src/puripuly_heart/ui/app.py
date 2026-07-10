@@ -1040,6 +1040,7 @@ class TranslatorApp:
         target_code: str,
         peer_source_code: str = "",
         peer_target_code: str = "",
+        peer_source_mode: str = "manual",
     ) -> None:
         if self.controller.settings is None:
             return
@@ -1077,12 +1078,26 @@ class TranslatorApp:
             self.page.open(snackbar)
 
         async def _task():
-            await self.controller.on_dashboard_language_change(
-                source_code=source_code,
-                target_code=target_code,
-                peer_source_code=peer_source_code,
-                peer_target_code=peer_target_code,
-            )
+            if _callable_accepts_keyword(
+                self.controller.on_dashboard_language_change,
+                "peer_source_mode",
+            ):
+                await self.controller.on_dashboard_language_change(
+                    source_code=source_code,
+                    target_code=target_code,
+                    peer_source_code=peer_source_code,
+                    peer_target_code=peer_target_code,
+                    peer_source_mode=peer_source_mode,
+                )
+            else:
+                if peer_source_mode == "soniox_auto":
+                    raise TypeError("peer automatic source mode requires a mode-aware controller")
+                await self.controller.on_dashboard_language_change(
+                    source_code=source_code,
+                    target_code=target_code,
+                    peer_source_code=peer_source_code,
+                    peer_target_code=peer_target_code,
+                )
 
         self._queue_settings_mutation_task(_task)
 

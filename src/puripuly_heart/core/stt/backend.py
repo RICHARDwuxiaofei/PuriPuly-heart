@@ -5,11 +5,14 @@ from typing import AsyncIterator, Protocol, runtime_checkable
 
 import numpy as np
 
+from puripuly_heart.domain.models import FinalLanguageRun
+
 
 @dataclass(frozen=True, slots=True)
 class STTBackendTranscriptEvent:
     text: str
     is_final: bool
+    final_language_runs: tuple[FinalLanguageRun, ...] = ()
 
 
 class STTBackendSession(Protocol):

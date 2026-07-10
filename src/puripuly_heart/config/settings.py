@@ -516,6 +516,8 @@ class LanguageSettings:
     target_language: str = "en"
     peer_source_language: str = "en"
     peer_target_language: str = "ko"
+    peer_source_mode: str = "manual"
+    peer_expected_languages: list[str] = field(default_factory=list)
     recent_source_languages: list[str] = field(default_factory=lambda: ["en", "zh-CN", "ja"])
     recent_target_languages: list[str] = field(default_factory=lambda: ["en", "zh-CN", "ja"])
 
@@ -524,6 +526,8 @@ class LanguageSettings:
             raise ValueError("source_language must be non-empty")
         if not self.target_language:
             raise ValueError("target_language must be non-empty")
+        if self.peer_source_mode not in {"manual", "soniox_auto"}:
+            raise ValueError("peer_source_mode must be manual or soniox_auto")
 
     @property
     def effective_peer_source(self) -> str:
@@ -1528,6 +1532,8 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "target_language": settings.languages.target_language,
             "peer_source_language": settings.languages.peer_source_language,
             "peer_target_language": settings.languages.peer_target_language,
+            "peer_source_mode": settings.languages.peer_source_mode,
+            "peer_expected_languages": settings.languages.peer_expected_languages,
             "recent_source_languages": settings.languages.recent_source_languages,
             "recent_target_languages": settings.languages.recent_target_languages,
         },
@@ -3783,6 +3789,23 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             target_language=data.get("languages", {}).get("target_language", "en"),
             peer_source_language=str(data.get("languages", {}).get("peer_source_language", "")),
             peer_target_language=str(data.get("languages", {}).get("peer_target_language", "")),
+            peer_source_mode=(
+                str(data.get("languages", {}).get("peer_source_mode", "manual"))
+                if str(data.get("languages", {}).get("peer_source_mode", "manual"))
+                in {"manual", "soniox_auto"}
+                else "manual"
+            ),
+            peer_expected_languages=(
+                list(
+                    dict.fromkeys(
+                        str(language).strip()
+                        for language in data.get("languages", {}).get("peer_expected_languages", [])
+                        if str(language).strip()
+                    )
+                )
+                if isinstance(data.get("languages", {}).get("peer_expected_languages"), list)
+                else []
+            ),
             recent_source_languages=list(
                 dict.fromkeys(
                     list(data.get("languages", {}).get("recent_source_languages") or [])

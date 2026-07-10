@@ -29,15 +29,24 @@ def _hash_source_text(source_text: str) -> str | None:
 
 
 @dataclass(frozen=True, slots=True)
+class FinalLanguageRun:
+    text: str
+    language: str
+
+
+@dataclass(frozen=True, slots=True)
 class Transcript:
     utterance_id: UUID
     text: str
     is_final: bool
     created_at: float | None = None  # monotonic seconds (Clock)
     channel: ChannelId = "self"
+    final_language_runs: tuple[FinalLanguageRun, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_channel(self.channel)
+        if not self.is_final and self.final_language_runs:
+            raise ValueError("partial transcripts cannot have final language runs")
 
 
 @dataclass(frozen=True, slots=True, init=False)

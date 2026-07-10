@@ -3522,6 +3522,34 @@ async def test_on_language_change_updates_settings_and_shows_warning(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_on_language_change_auto_mode_does_not_call_legacy_controller_callback(
+    monkeypatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = SimpleNamespace(
+        languages=SimpleNamespace(source_language="ko", target_language="en"),
+        provider=SimpleNamespace(stt=SimpleNamespace(value="deepgram")),
+    )
+    seen: list[tuple[str, str, str, str]] = []
+
+    async def legacy_callback(
+        *, source_code: str, target_code: str, peer_source_code: str, peer_target_code: str
+    ) -> None:
+        seen.append((source_code, target_code, peer_source_code, peer_target_code))
+
+    monkeypatch.setattr(app_module, "get_stt_compatibility_warning", lambda *_args: None)
+    app.controller = SimpleNamespace(
+        settings=settings, on_dashboard_language_change=legacy_callback
+    )
+
+    app._on_language_change("ko", "en", "ja", "fr", "soniox_auto")
+    await app.page.tasks[0]()
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
 async def test_on_verify_api_key_persists_and_updates_dashboard_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

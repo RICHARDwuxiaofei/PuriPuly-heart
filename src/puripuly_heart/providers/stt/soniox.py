@@ -18,6 +18,7 @@ from puripuly_heart.core.stt.backend import (
     STTBackendSession,
     STTBackendTranscriptEvent,
 )
+from puripuly_heart.domain.models import FinalLanguageRun
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ class _FinalizeRequest:
 class _FinalToken:
     text: str
     end_ms: int | None
+    language: str = ""
 
 
 @dataclass(slots=True)
@@ -47,6 +49,7 @@ class SonioxRealtimeSTTBackend(STTBackend):
     sample_rate_hz: int = 16000
     keepalive_interval_s: float = 10.0
     trailing_silence_ms: int = 100
+    enable_language_identification: bool = False
     connect_timeout_s: float = 5.0
 
     async def open_session(self) -> STTBackendSession:
@@ -72,6 +75,7 @@ class SonioxRealtimeSTTBackend(STTBackend):
             context_terms=list(self.context_terms),
             keepalive_interval_s=self.keepalive_interval_s,
             trailing_silence_ms=self.trailing_silence_ms,
+            enable_language_identification=self.enable_language_identification,
             connect_timeout_s=self.connect_timeout_s,
         )
         await session.start()
@@ -127,6 +131,7 @@ class _SonioxSession(STTBackendSession):
     keepalive_interval_s: float
     trailing_silence_ms: int
     connect_timeout_s: float
+    enable_language_identification: bool = False
 
     _events: asyncio.Queue[STTBackendTranscriptEvent | BaseException | None] = field(
         init=False, repr=False
@@ -157,6 +162,7 @@ class _SonioxSession(STTBackendSession):
             "sample_rate": self.sample_rate_hz,
             "num_channels": 1,
             "enable_endpoint_detection": False,
+            "enable_language_identification": self.enable_language_identification,
         }
         if self.language_hints:
             config["language_hints"] = self.language_hints
@@ -254,8 +260,7 @@ class _SonioxSession(STTBackendSession):
             return
 
         if "error" in data or "error_code" in data:
-            error_msg = data.get("error") or data.get("error_code") or "Unknown error"
-            self._put_event(RuntimeError(f"Soniox error: {error_msg}"))
+            self._put_event(RuntimeError("Soniox request failed"))
             return
 
         tokens = data.get("tokens") or []
@@ -295,7 +300,12 @@ class _SonioxSession(STTBackendSession):
                 end_ms,
                 len(self._pending_tokens) + 1,
             )
-            self._pending_tokens.append(_FinalToken(text=text, end_ms=end_ms))
+            language = ""
+            if self.enable_language_identification:
+                raw_language = token.get("language")
+                if isinstance(raw_language, str):
+                    language = raw_language.strip().lower()
+            self._pending_tokens.append(_FinalToken(text=text, end_ms=end_ms, language=language))
 
     def _flush_final(self) -> None:
         if not self._pending_tokens:
@@ -373,12 +383,8 @@ class _SonioxSession(STTBackendSession):
     def _emit_final_text(self) -> bool:
         if not self._final_tokens:
             return False
-        text = "".join(token.text for token in self._final_tokens).strip()
-        if not text:
-            return False
-        # 문두 문장부호+공백 패턴 제거 (이전 발화의 잔여 문장부호 방어)
-        # 예: ". 안녕" -> "안녕", "? 다음" -> "다음"
-        text = re.sub(r"^[.,:;!?。，；：！？]+\s+", "", text)
+        self._final_tokens = self._normalized_final_tokens()
+        text = "".join(token.text for token in self._final_tokens)
         if not text:
             return False
         logger.info("[STT] Transcript final text_len=%s", len(text))
@@ -387,8 +393,57 @@ class _SonioxSession(STTBackendSession):
             len(self._final_tokens),
             len(text),
         )
-        self._put_event(STTBackendTranscriptEvent(text=text, is_final=True))
+        self._put_event(
+            STTBackendTranscriptEvent(
+                text=text,
+                is_final=True,
+                final_language_runs=self._final_language_runs(),
+            )
+        )
         return True
+
+    def _normalized_final_tokens(self) -> list[_FinalToken]:
+        source = "".join(token.text for token in self._final_tokens)
+        start = len(source) - len(source.lstrip())
+        end = len(source.rstrip())
+        terminal_text = source[start:end]
+        leading_punctuation = re.match(r"^[.,:;!?。，；：！？]+\s+", terminal_text)
+        if leading_punctuation is not None:
+            start += leading_punctuation.end()
+        if start >= end:
+            return []
+
+        normalized: list[_FinalToken] = []
+        offset = 0
+        for token in self._final_tokens:
+            token_end = offset + len(token.text)
+            overlap_start = max(start, offset)
+            overlap_end = min(end, token_end)
+            if overlap_start < overlap_end:
+                normalized.append(
+                    _FinalToken(
+                        text=token.text[overlap_start - offset : overlap_end - offset],
+                        end_ms=token.end_ms,
+                        language=token.language,
+                    )
+                )
+            offset = token_end
+        return normalized
+
+    def _final_language_runs(self) -> tuple[FinalLanguageRun, ...]:
+        if not self.enable_language_identification:
+            return ()
+        runs: list[FinalLanguageRun] = []
+        for token in self._final_tokens:
+            if runs and runs[-1].language == token.language:
+                previous = runs[-1]
+                runs[-1] = FinalLanguageRun(
+                    text=previous.text + token.text,
+                    language=previous.language,
+                )
+            else:
+                runs.append(FinalLanguageRun(text=token.text, language=token.language))
+        return tuple(runs)
 
     def _emit_empty_final_ack(self) -> None:
         logger.debug("[STT] Soniox empty finalize ack")

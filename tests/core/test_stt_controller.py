@@ -24,6 +24,7 @@ from puripuly_heart.domain.events import (
     STTSessionState,
     STTSessionStateEvent,
 )
+from puripuly_heart.domain.models import FinalLanguageRun
 from tests.helpers.fakes import samples
 
 
@@ -1703,6 +1704,36 @@ async def test_managed_stt_provider_peer_channel_produces_final_event():
     assert isinstance(event, STTFinalEvent)
     assert event.transcript.channel == "peer"
     assert event.transcript.text == "peer line"
+
+
+async def test_managed_stt_provider_preserves_provider_neutral_final_language_runs():
+    provider = ManagedSTTProvider(
+        backend=FakeBackend(),
+        sample_rate_hz=16000,
+        channel="peer",
+    )
+    utterance_id = uuid4()
+    provider._pending_final_utterance_ids.append(utterance_id)
+    runs = (
+        FinalLanguageRun(text="日本語", language="ja"),
+        FinalLanguageRun(text="中文", language="zh"),
+    )
+
+    await provider._consume_session_events(
+        EventOnlySession(
+            items=[
+                STTBackendTranscriptEvent(
+                    text="日本語中文",
+                    is_final=True,
+                    final_language_runs=runs,
+                )
+            ]
+        )
+    )
+
+    event = await _next_event(provider.events())
+    assert isinstance(event, STTFinalEvent)
+    assert event.transcript.final_language_runs == runs
 
 
 @pytest.mark.parametrize(

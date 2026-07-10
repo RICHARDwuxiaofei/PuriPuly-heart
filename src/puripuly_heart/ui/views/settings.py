@@ -889,6 +889,35 @@ class SettingsView(ft.Column):
                 self.show_snackbar(msg, bg) if self.show_snackbar else None
             ),
         )
+        self._peer_auto_languages_title = ft.Text(
+            t("settings.peer_auto_languages.title"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._peer_auto_languages_description = ft.Text(
+            t("settings.peer_auto_languages.description"),
+            size=16,
+            color=COLOR_NEUTRAL,
+        )
+        self._peer_auto_languages_editor = CustomVocabularyTagEditor(
+            on_add_terms=self._on_peer_auto_languages_add,
+            on_remove_term=self._on_peer_auto_languages_remove,
+        )
+        self._peer_auto_languages_card = self._wrap_card(
+            ft.Column(
+                [
+                    self._peer_auto_languages_title,
+                    ft.Container(height=6),
+                    self._peer_auto_languages_description,
+                    ft.Container(height=12),
+                    self._peer_auto_languages_editor,
+                ],
+                spacing=0,
+            ),
+            height=None,
+        )
+        self._peer_auto_languages_card.visible = False
         self._google_key = ApiKeyField(
             "settings.google_api_key",
             "google_api_key",
@@ -1045,6 +1074,7 @@ class SettingsView(ft.Column):
                 # self._qwen_region_row removed
                 self._deepgram_key,
                 self._soniox_key,
+                self._peer_auto_languages_card,
                 self._google_key,
                 self._deepseek_key,
                 self._cerebras_key,
@@ -2277,10 +2307,22 @@ class SettingsView(ft.Column):
         self._prompt_for_text.value = self._prompt_provider_copy()
         self._custom_vocab_description_text.value = self._custom_vocabulary_description_copy()
         self._apply_custom_vocabulary_tag_editor_locale()
+        peer_auto_languages_title = getattr(self, "_peer_auto_languages_title", None)
+        peer_auto_languages_description = getattr(self, "_peer_auto_languages_description", None)
+        if peer_auto_languages_title is not None:
+            peer_auto_languages_title.value = t("settings.peer_auto_languages.title")
+        if peer_auto_languages_description is not None:
+            peer_auto_languages_description.value = t("settings.peer_auto_languages.description")
         if self.page:
-            for control in (self._prompt_for_text, self._custom_vocab_description_text):
-                with contextlib.suppress(Exception):
-                    control.update()
+            for control in (
+                self._prompt_for_text,
+                self._custom_vocab_description_text,
+                peer_auto_languages_title,
+                peer_auto_languages_description,
+            ):
+                if control is not None:
+                    with contextlib.suppress(Exception):
+                        control.update()
 
     def _sync_custom_vocabulary_editor_from_settings(self) -> None:
         if not self._settings:
@@ -2293,6 +2335,44 @@ class SettingsView(ft.Column):
             list(self._settings.stt.custom_terms.get(source_language, []))
         )
         self._custom_vocab_tag_editor.clear_input()
+
+    def _sync_peer_auto_languages_editor(self, settings: AppSettings | None = None) -> None:
+        if not hasattr(self, "_peer_auto_languages_editor"):
+            return
+        settings = settings or self._settings
+        languages = [] if settings is None else settings.languages.peer_expected_languages
+        self._peer_auto_languages_editor.set_terms(list(languages))
+        self._peer_auto_languages_editor.clear_input()
+
+    def _set_peer_auto_languages(self, languages: list[str]) -> None:
+        if self._settings is None:
+            return
+        normalized = list(
+            dict.fromkeys(language.strip() for language in languages if language.strip())
+        )
+        if self._settings.languages.peer_expected_languages == normalized:
+            return
+        self._settings.languages.peer_expected_languages = normalized
+        self._sync_peer_auto_languages_editor()
+        self._emit_settings_changed()
+
+    def _on_peer_auto_languages_add(self, languages: list[str]) -> None:
+        if self._settings is None:
+            return
+        self._set_peer_auto_languages(
+            [*self._settings.languages.peer_expected_languages, *languages]
+        )
+
+    def _on_peer_auto_languages_remove(self, language: str) -> None:
+        if self._settings is None:
+            return
+        self._set_peer_auto_languages(
+            [
+                current
+                for current in self._settings.languages.peer_expected_languages
+                if current != language
+            ]
+        )
 
     def _normalize_custom_vocabulary_submitted_terms(self, raw_terms: list[str]) -> list[str]:
         terms: list[str] = []
@@ -3046,6 +3126,10 @@ class SettingsView(ft.Column):
         active_stt_providers = {stt, peer_stt}
         self._deepgram_key.visible = STTProviderName.DEEPGRAM in active_stt_providers
         self._soniox_key.visible = STTProviderName.SONIOX in active_stt_providers
+        peer_auto_languages_card = getattr(self, "_peer_auto_languages_card", None)
+        if peer_auto_languages_card is not None:
+            peer_auto_languages_card.visible = peer_stt == STTProviderName.SONIOX
+            self._sync_peer_auto_languages_editor(settings)
 
         self._google_key.visible = llm == LLMProviderName.GEMINI
         self._sync_managed_key_card(settings)

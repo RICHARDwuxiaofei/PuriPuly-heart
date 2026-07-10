@@ -337,6 +337,10 @@ def from_legacy_app_settings(
                 target_language=data["languages"]["target_language"],
                 peer_source_language=data["languages"]["peer_source_language"],
                 peer_target_language=data["languages"]["peer_target_language"],
+                peer_source_mode=data["languages"].get("peer_source_mode", "manual"),
+                peer_expected_languages=list(
+                    data["languages"].get("peer_expected_languages") or []
+                ),
                 recent_source_languages=list(data["languages"]["recent_source_languages"]),
                 recent_target_languages=list(data["languages"]["recent_target_languages"]),
             ),
@@ -509,6 +513,8 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
         "target_language": intent.languages.target_language,
         "peer_source_language": intent.languages.peer_source_language,
         "peer_target_language": intent.languages.peer_target_language,
+        "peer_source_mode": intent.languages.peer_source_mode,
+        "peer_expected_languages": list(intent.languages.peer_expected_languages),
         "recent_source_languages": list(intent.languages.recent_source_languages),
         "recent_target_languages": list(intent.languages.recent_target_languages),
     }

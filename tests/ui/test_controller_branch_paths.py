@@ -6,6 +6,7 @@ import copy
 import logging
 import re
 import threading
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Literal
@@ -17,6 +18,9 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.app.adapters import (
+    settings_vnext_canonical_persistence as canonical_persistence_adapter_module,
+)
 from puripuly_heart.app.services import provider_runtime_apply as provider_runtime_apply_module
 from puripuly_heart.app.services import settings_mutation
 from puripuly_heart.config.audio_host_api import (
@@ -49,6 +53,7 @@ from puripuly_heart.config.settings import (
     TranslationSettings,
     to_dict,
 )
+from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core import messages
 from puripuly_heart.core.audio.format import AudioFrameF32
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
@@ -3834,6 +3839,526 @@ def test_peer_stt_runtime_signature_includes_peer_source_language() -> None:
     changed = controller._build_peer_stt_runtime_signature(settings)
 
     assert baseline != changed
+
+
+def test_peer_runtime_uses_canonical_vnext_intent_over_legacy_projection() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.DEEPGRAM
+    controller.settings.languages.peer_source_mode = "manual"
+    vnext_settings = AppSettingsVNext()
+    controller.vnext_settings = replace(
+        vnext_settings,
+        intent=replace(
+            vnext_settings.intent,
+            peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
+            languages=replace(
+                vnext_settings.intent.languages,
+                peer_source_mode="soniox_auto",
+                peer_expected_languages=["ja"],
+            ),
+        ),
+    )
+    controller._vnext_settings_authoritative = True
+
+    config = controller._build_peer_runtime_config(controller.settings)
+
+    assert config.backend.provider == "soniox"
+    assert config.backend.provider_options["enable_language_identification"] is True
+    assert config.backend.provider_options["language_hints"] == ("ja",)
+
+
+def test_direct_peer_settings_mutation_refreshes_canonical_runtime_intent() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    controller.settings = settings
+    vnext_settings = AppSettingsVNext()
+    controller.vnext_settings = replace(
+        vnext_settings,
+        intent=replace(
+            vnext_settings.intent,
+            peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
+        ),
+    )
+    controller._vnext_settings_authoritative = True
+
+    pending = copy.deepcopy(settings)
+    pending.languages.peer_source_mode = "soniox_auto"
+    pending.languages.peer_expected_languages = ["ja"]
+    pending.desktop_audio.output_device = "Headphones (Loopback)"
+    pending.desktop_audio.vad_speech_threshold = 0.72
+
+    controller._update_canonical_settings_from_compatibility_mutation(pending)
+    config = controller._build_peer_runtime_config(pending)
+
+    assert controller.vnext_settings.intent.languages.peer_source_mode == "soniox_auto"
+    assert controller.vnext_settings.intent.languages.peer_expected_languages == ["ja"]
+    assert config.backend.provider_options["enable_language_identification"] is True
+    assert config.output_device == "Headphones (Loopback)"
+    assert config.vad_threshold == 0.72
+
+
+def test_unrelated_legacy_apply_preserves_canonical_peer_auto_intent_after_save_reload(
+    tmp_path: Path,
+) -> None:
+    from puripuly_heart.config.settings_vnext.facade import load_vnext_settings
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.config_path = tmp_path / "settings.json"
+    legacy = AppSettings()
+    legacy.provider.peer_stt = STTProviderName.DEEPGRAM
+    controller.settings = legacy
+    vnext_settings = AppSettingsVNext()
+    controller.vnext_settings = replace(
+        vnext_settings,
+        intent=replace(
+            vnext_settings.intent,
+            peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
+            languages=replace(
+                vnext_settings.intent.languages,
+                peer_source_mode="soniox_auto",
+                peer_expected_languages=["ja"],
+            ),
+        ),
+    )
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    expected_signature = controller._build_peer_stt_provider_signature(legacy)
+
+    pending = copy.deepcopy(legacy)
+    pending.ui.locale = "ja"
+    controller._begin_canonical_mutation()
+    controller._update_canonical_settings_from_compatibility_mutation(pending)
+    controller.settings = pending
+    controller.persist_settings()
+
+    loaded = load_vnext_settings(controller.config_path)
+    runtime = controller._build_peer_runtime_config(pending)
+
+    assert loaded.settings is not None
+    assert loaded.settings.intent.languages.peer_source_mode == "soniox_auto"
+    assert loaded.settings.intent.languages.peer_expected_languages == ["ja"]
+    assert runtime.backend.provider == "soniox"
+    assert runtime.backend.provider_options["enable_language_identification"] is True
+    assert controller._build_peer_stt_provider_signature(pending) == expected_signature
+
+
+def test_failed_canonical_persistence_rolls_back_peer_auto_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    legacy = AppSettings()
+    legacy_before_mutation = copy.deepcopy(legacy)
+    controller.settings = legacy
+    vnext_settings = AppSettingsVNext()
+    canonical = replace(
+        vnext_settings,
+        intent=replace(
+            vnext_settings.intent,
+            peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
+            languages=replace(
+                vnext_settings.intent.languages,
+                peer_source_mode="soniox_auto",
+                peer_expected_languages=["ja"],
+            ),
+        ),
+    )
+    controller.vnext_settings = canonical
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    pending = copy.deepcopy(legacy)
+    pending.ui.locale = "ja"
+    controller._begin_canonical_mutation()
+    controller._update_canonical_settings_from_compatibility_mutation(pending)
+    controller.settings = pending
+    monkeypatch.setattr(
+        canonical_persistence_adapter_module,
+        "save_vnext_settings",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("save failed")),
+    )
+
+    controller._save_settings()
+    runtime = controller._build_peer_runtime_config(pending)
+
+    assert controller.vnext_settings == canonical
+    assert controller.settings == legacy_before_mutation
+    assert runtime.backend.provider == "soniox"
+    assert runtime.backend.provider_options["language_hints"] == ("ja",)
+
+
+def test_active_controller_persistence_preserves_canonical_peer_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    legacy = AppSettings()
+    controller.settings = legacy
+    vnext_settings = AppSettingsVNext()
+    canonical = replace(
+        vnext_settings,
+        intent=replace(
+            vnext_settings.intent,
+            peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
+            languages=replace(
+                vnext_settings.intent.languages,
+                peer_source_mode="soniox_auto",
+                peer_expected_languages=["ja"],
+            ),
+        ),
+    )
+    controller.vnext_settings = canonical
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    controller._remember_canonical_legacy_projection(legacy)
+    saved: list[AppSettingsVNext] = []
+    monkeypatch.setattr(
+        canonical_persistence_adapter_module,
+        "save_vnext_settings",
+        lambda _path, settings: saved.append(settings) or SimpleNamespace(ok=True),
+    )
+
+    updated = copy.deepcopy(legacy)
+    updated.managed_identity.referral_id = "234567"
+    controller._persist_active_controller_settings(updated)
+
+    assert len(saved) == 1
+    assert saved[0].intent.peer_stt.provider == "soniox"
+    assert saved[0].intent.languages.peer_source_mode == "soniox_auto"
+    assert saved[0].intent.languages.peer_expected_languages == ["ja"]
+    assert saved[0].state.managed_connection.referral_id == "234567"
+
+
+def test_failed_active_in_place_managed_persistence_restores_legacy_and_canonical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    legacy = AppSettings()
+    legacy_before_mutation = copy.deepcopy(legacy)
+    controller.settings = legacy
+    vnext_settings = AppSettingsVNext()
+    canonical = replace(
+        vnext_settings,
+        intent=replace(
+            vnext_settings.intent,
+            peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
+            languages=replace(
+                vnext_settings.intent.languages,
+                peer_source_mode="soniox_auto",
+                peer_expected_languages=["ja"],
+            ),
+        ),
+    )
+    controller.vnext_settings = canonical
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    controller._remember_canonical_legacy_projection(legacy)
+    monkeypatch.setattr(
+        canonical_persistence_adapter_module,
+        "save_vnext_settings",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("save failed")),
+    )
+
+    controller.settings.managed_identity.referral_id = "234567"
+    with pytest.raises(OSError, match="save failed"):
+        controller._persist_active_controller_settings(controller.settings)
+
+    assert controller.settings == legacy_before_mutation
+    assert controller.settings.managed_identity.referral_id is None
+    assert controller.vnext_settings == canonical
+    assert controller.vnext_settings.state.managed_connection.referral_id is None
+
+
+def test_stale_managed_adapter_persists_only_managed_delta_on_current_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    stale_settings = AppSettings()
+    state = controller_module.build_managed_identity_state_port(
+        stale_settings,
+        controller._managed_identity_persistence_callback(stale_settings),
+    )
+    active_settings = copy.deepcopy(stale_settings)
+    active_settings.ui.locale = "ja"
+    controller.settings = active_settings
+    vnext_settings = AppSettingsVNext()
+    controller.vnext_settings = replace(
+        vnext_settings,
+        intent=replace(
+            vnext_settings.intent,
+            ui=replace(vnext_settings.intent.ui, locale="ja"),
+            peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
+            languages=replace(
+                vnext_settings.intent.languages,
+                peer_source_mode="soniox_auto",
+                peer_expected_languages=["ja"],
+            ),
+        ),
+    )
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    controller._remember_canonical_legacy_projection(active_settings)
+    saved: list[AppSettingsVNext] = []
+    monkeypatch.setattr(
+        canonical_persistence_adapter_module,
+        "save_vnext_settings",
+        lambda _path, settings: saved.append(settings) or SimpleNamespace(ok=True),
+    )
+
+    state.referral_id = "234567"
+    state.persist()
+
+    assert controller.settings.ui.locale == "ja"
+    assert controller.settings.managed_identity.referral_id == "234567"
+    assert len(saved) == 1
+    assert saved[0].intent.ui.locale == "ja"
+    assert saved[0].state.managed_connection.referral_id == "234567"
+    assert saved[0].intent.peer_stt.provider == "soniox"
+    assert saved[0].intent.languages.peer_source_mode == "soniox_auto"
+    assert saved[0].intent.languages.peer_expected_languages == ["ja"]
+
+
+def test_failed_stale_managed_adapter_persistence_restores_active_and_bound_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    stale_settings = AppSettings()
+    state = controller_module.build_managed_identity_state_port(
+        stale_settings,
+        controller._managed_identity_persistence_callback(stale_settings),
+    )
+    active_settings = copy.deepcopy(stale_settings)
+    active_settings.ui.locale = "ja"
+    active_before_mutation = copy.deepcopy(active_settings)
+    stale_before_mutation = copy.deepcopy(stale_settings)
+    controller.settings = active_settings
+    vnext_settings = AppSettingsVNext()
+    canonical = replace(
+        vnext_settings,
+        intent=replace(
+            vnext_settings.intent,
+            ui=replace(vnext_settings.intent.ui, locale="ja"),
+            peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
+            languages=replace(
+                vnext_settings.intent.languages,
+                peer_source_mode="soniox_auto",
+                peer_expected_languages=["ja"],
+            ),
+        ),
+    )
+    controller.vnext_settings = canonical
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    controller._remember_canonical_legacy_projection(active_settings)
+    monkeypatch.setattr(
+        canonical_persistence_adapter_module,
+        "save_vnext_settings",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("save failed")),
+    )
+
+    state.referral_id = "234567"
+    with pytest.raises(OSError, match="save failed"):
+        state.persist()
+
+    assert controller.settings == active_before_mutation
+    assert stale_settings == stale_before_mutation
+    assert controller.vnext_settings == canonical
+
+
+def test_direct_save_stages_legacy_delta_without_overwriting_canonical_peer_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    legacy = AppSettings()
+    controller.settings = legacy
+    vnext_settings = AppSettingsVNext()
+    controller.vnext_settings = replace(
+        vnext_settings,
+        intent=replace(
+            vnext_settings.intent,
+            peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
+            languages=replace(
+                vnext_settings.intent.languages,
+                peer_source_mode="soniox_auto",
+                peer_expected_languages=["ja"],
+            ),
+        ),
+    )
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    controller._remember_canonical_legacy_projection(legacy)
+    saved: list[AppSettingsVNext] = []
+    monkeypatch.setattr(
+        canonical_persistence_adapter_module,
+        "save_vnext_settings",
+        lambda _path, settings: saved.append(settings) or SimpleNamespace(ok=True),
+    )
+
+    controller.settings.ui.locale = "ja"
+    controller.settings.managed_identity.referral_id = "234567"
+    assert controller._save_settings() is True
+
+    assert len(saved) == 1
+    assert saved[0].intent.ui.locale == "ja"
+    assert saved[0].state.managed_connection.referral_id == "234567"
+    assert saved[0].intent.peer_stt.provider == "soniox"
+    assert saved[0].intent.languages.peer_source_mode == "soniox_auto"
+    assert saved[0].intent.languages.peer_expected_languages == ["ja"]
+
+    controller.settings.ui.locale = "ko"
+    controller.persist_settings()
+
+    assert len(saved) == 2
+    assert saved[1].intent.ui.locale == "ko"
+    assert saved[1].intent.peer_stt.provider == "soniox"
+    assert saved[1].intent.languages.peer_source_mode == "soniox_auto"
+    assert saved[1].intent.languages.peer_expected_languages == ["ja"]
+
+
+def test_nested_canonical_completion_keeps_outer_rollback_snapshot() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    legacy = AppSettings()
+    legacy_before_mutation = copy.deepcopy(legacy)
+    controller.settings = legacy
+    vnext_settings = AppSettingsVNext()
+    canonical = replace(
+        vnext_settings,
+        intent=replace(
+            vnext_settings.intent,
+            peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
+        ),
+    )
+    controller.vnext_settings = canonical
+    controller._vnext_settings_authoritative = True
+
+    controller._begin_canonical_mutation()
+    controller.settings.ui.locale = "ja"
+    controller._begin_canonical_mutation()
+    controller._complete_canonical_mutation()
+
+    assert controller._canonical_mutation_rollback_pending is True
+    assert controller._canonical_mutation_depth == 1
+    controller._rollback_canonical_mutation()
+
+    assert controller.settings == legacy_before_mutation
+    assert controller.vnext_settings == canonical
+    assert controller._canonical_mutation_depth == 0
+
+
+@pytest.mark.asyncio
+async def test_settings_repository_commits_only_scoped_delta_to_canonical_vnext(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    legacy = AppSettings()
+    controller.settings = legacy
+    vnext_settings = AppSettingsVNext()
+    controller.vnext_settings = replace(
+        vnext_settings,
+        intent=replace(
+            vnext_settings.intent,
+            peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
+            languages=replace(
+                vnext_settings.intent.languages,
+                peer_source_mode="soniox_auto",
+                peer_expected_languages=["ja"],
+            ),
+        ),
+    )
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    stale_full_draft = copy.deepcopy(legacy)
+    stale_full_draft.provider.peer_stt = STTProviderName.DEEPGRAM
+    saved: list[AppSettingsVNext] = []
+    monkeypatch.setattr(
+        canonical_persistence_adapter_module,
+        "save_vnext_settings",
+        lambda _path, settings: saved.append(settings) or SimpleNamespace(ok=True),
+    )
+    repository = controller_module._ControllerSettingsPatchRepository(
+        controller=controller,
+        base_settings=legacy,
+        committed_settings=stale_full_draft,
+        surface="ui_prompt_clipboard_state",
+    )
+
+    result = await repository.save(
+        controller_module.SettingsCommitRequest(
+            values={"ui.locale": "ja"},
+            expected_revision=None,
+            reason="settings.ui_prompt_clipboard_state",
+        )
+    )
+
+    assert result.succeeded is True
+    assert len(saved) == 1
+    assert saved[0].intent.languages.peer_source_mode == "soniox_auto"
+    assert saved[0].intent.languages.peer_expected_languages == ["ja"]
+    assert saved[0].intent.peer_stt.provider == "soniox"
+    assert saved[0].intent.ui.locale == "ja"
+
+
+@pytest.mark.asyncio
+async def test_failed_scoped_persistence_restores_canonical_and_legacy_before_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    legacy = AppSettings()
+    controller.settings = legacy
+    vnext_settings = AppSettingsVNext()
+    canonical = replace(
+        vnext_settings,
+        intent=replace(
+            vnext_settings.intent,
+            peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
+            languages=replace(
+                vnext_settings.intent.languages,
+                peer_source_mode="soniox_auto",
+                peer_expected_languages=["ja"],
+            ),
+        ),
+    )
+    controller.vnext_settings = canonical
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    controller._remember_canonical_legacy_projection(legacy)
+    runtime_calls: list[str] = []
+    monkeypatch.setattr(
+        canonical_persistence_adapter_module,
+        "save_vnext_settings",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("save failed")),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_refresh_peer_stt_runtime",
+        lambda self: runtime_calls.append("peer") or asyncio.sleep(0),
+    )
+
+    updated = copy.deepcopy(legacy)
+    updated.languages.peer_source_mode = "manual"
+    updated.languages.peer_source_language = "ko"
+    await controller.apply_settings(updated)
+
+    assert controller.settings == legacy
+    assert controller.vnext_settings == canonical
+    assert runtime_calls == []
+
+
+def test_dashboard_sync_does_not_swallow_supported_setter_type_error() -> None:
+    calls: list[tuple[object, ...]] = []
+
+    class FailingDashboard:
+        def set_languages_from_codes(self, *values: object) -> None:
+            calls.append(values)
+            raise TypeError("dashboard failure")
+
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=FailingDashboard()))
+    controller.settings = AppSettings()
+
+    with pytest.raises(TypeError, match="dashboard failure"):
+        controller._sync_ui_from_settings()
+
+    assert len(calls) == 1
+    assert len(calls[0]) == 5
 
 
 def test_build_peer_runtime_config_includes_provider_signature_and_desktop_settings() -> None:
@@ -17852,6 +18377,34 @@ async def test_on_dashboard_language_change_preserves_explicit_peer_override_whe
     assert captured[0].languages.target_language == "en"
     assert captured[0].languages.peer_source_language == "ja"
     assert captured[0].languages.peer_target_language == "fr"
+
+
+@pytest.mark.asyncio
+async def test_on_dashboard_language_change_persists_explicit_automatic_peer_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.languages.peer_source_language = "ja"
+    captured: list[AppSettings] = []
+
+    async def fake_apply_settings(self, settings: AppSettings) -> None:
+        captured.append(settings)
+
+    monkeypatch.setattr(GuiController, "apply_settings", fake_apply_settings)
+
+    await controller.on_dashboard_language_change(
+        source_code="ko",
+        target_code="en",
+        peer_source_code="ja",
+        peer_target_code="fr",
+        peer_source_mode="soniox_auto",
+    )
+
+    assert captured[0].languages.peer_source_language == "ja"
+    assert captured[0].languages.peer_source_mode == "soniox_auto"
+    assert controller.vnext_settings is not None
+    assert controller.vnext_settings.intent.languages.peer_source_mode == "soniox_auto"
 
 
 @pytest.mark.asyncio

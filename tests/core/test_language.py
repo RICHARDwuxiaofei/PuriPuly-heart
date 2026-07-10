@@ -15,6 +15,7 @@ from puripuly_heart.core.language import (
     is_qwen_asr_supported,
     is_soniox_supported,
     is_supported_language,
+    map_detected_language_for_llm,
 )
 
 
@@ -30,6 +31,17 @@ def test_language_helpers_fallback_for_unknown() -> None:
     assert get_llm_language_name("xx") == "English"
     assert get_qwen_asr_language("xx") == "en"
     assert get_soniox_language_hints("xx") == ["en"]
+
+
+def test_detected_language_mapper_preserves_generic_chinese() -> None:
+    chinese = map_detected_language_for_llm("zh")
+    japanese = map_detected_language_for_llm("ja")
+
+    assert chinese is not None
+    assert (chinese.code, chinese.name) == ("zh", "Chinese")
+    assert japanese is not None
+    assert (japanese.code, japanese.name) == ("ja", "Japanese")
+    assert map_detected_language_for_llm("xx") is None
 
 
 def test_qwen_asr_language_normalization() -> None:

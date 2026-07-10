@@ -28,6 +28,7 @@ from puripuly_heart.config.settings import (
     QwenRegion,
     STTProviderName,
 )
+from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core.storage.secrets import SecretStore
 from puripuly_heart.core.stt.backend import STTBackend
 from puripuly_heart.core.stt.custom_vocab import (
@@ -60,6 +61,8 @@ class ResolvedPeerSTTConfig:
     soniox_endpoint: str | None = None
     soniox_keepalive_interval_s: float | None = None
     soniox_trailing_silence_ms: int | None = None
+    soniox_enable_language_identification: bool = False
+    soniox_language_hints: tuple[str, ...] | None = None
 
     @property
     def model(self) -> str | None:
@@ -89,6 +92,8 @@ class ResolvedPeerSTTConfig:
             return {
                 "keepalive_interval_s": self.soniox_keepalive_interval_s,
                 "trailing_silence_ms": self.soniox_trailing_silence_ms,
+                "enable_language_identification": self.soniox_enable_language_identification,
+                "language_hints": self.soniox_language_hints,
             }
         return {}
 
@@ -160,36 +165,6 @@ def _self_stt_runtime_intent_from_compatibility_settings(settings: AppSettings) 
     )
 
 
-def _peer_stt_runtime_intent_from_compatibility_settings(settings: AppSettings) -> STTRuntimeIntent:
-    return STTRuntimeIntent(
-        channel="peer",
-        provider=_stt_provider_value_or_raise(settings.provider.peer_stt, peer=True),
-        source_language=settings.languages.effective_peer_source,
-        input_host_api=None,
-        input_device=None,
-        output_device=settings.desktop_audio.output_device,
-        sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
-        channels=settings.audio.internal_channels,
-        ring_buffer_ms=settings.audio.ring_buffer_ms,
-        drain_timeout_s=settings.stt.drain_timeout_s,
-        vad_speech_threshold=settings.desktop_audio.vad_speech_threshold,
-        vad_hangover_ms=settings.desktop_audio.vad_hangover_ms,
-        vad_pre_roll_ms=settings.desktop_audio.vad_pre_roll_ms,
-        low_latency_enabled=settings.stt.low_latency_mode,
-        low_latency_merge_gap_ms=settings.stt.low_latency_merge_gap_ms,
-        low_latency_spec_retry_max=settings.stt.low_latency_spec_retry_max,
-        custom_vocabulary_enabled=False,
-        custom_terms={},
-        deepgram_model=settings.deepgram_stt.model,
-        qwen_asr_model=settings.qwen_asr_stt.model,
-        qwen_region=settings.qwen.region.value,
-        soniox_model=settings.soniox_stt.model,
-        soniox_endpoint=settings.soniox_stt.endpoint,
-        soniox_keepalive_interval_s=settings.soniox_stt.keepalive_interval_s,
-        soniox_trailing_silence_ms=settings.soniox_stt.trailing_silence_ms,
-    )
-
-
 def _effective_custom_terms_for_resolved_config(
     settings: AppSettings,
     source_language: str,
@@ -236,32 +211,57 @@ def _self_stt_runtime_intent_from_compatibility_settings(settings: AppSettings) 
 
 
 def _peer_stt_runtime_intent_from_compatibility_settings(settings: AppSettings) -> STTRuntimeIntent:
+    from puripuly_heart.config.settings_vnext.migration import from_legacy_app_settings
+
+    _stt_provider_value_or_raise(settings.provider.peer_stt, peer=True)
+    return peer_stt_runtime_intent_from_vnext(from_legacy_app_settings(settings))
+
+
+def peer_stt_runtime_intent_from_vnext(settings: AppSettingsVNext) -> STTRuntimeIntent:
+    intent = settings.intent
+    provider = intent.peer_stt.provider
+    automatic_soniox = (
+        provider == STT_PROVIDER_SONIOX and intent.languages.peer_source_mode == "soniox_auto"
+    )
+    language_hints = None
+    if automatic_soniox:
+        from puripuly_heart.core.language import get_soniox_language_hints
+
+        language_hints = tuple(
+            dict.fromkeys(
+                hint
+                for language in intent.languages.peer_expected_languages
+                for hint in get_soniox_language_hints(language)
+            )
+        )
     return STTRuntimeIntent(
         channel="peer",
-        provider=_stt_provider_value_or_raise(settings.provider.peer_stt, peer=True),
-        source_language=settings.languages.effective_peer_source,
+        provider=provider,
+        source_language=intent.languages.peer_source_language or intent.languages.source_language,
         input_host_api=None,
         input_device=None,
-        output_device=settings.desktop_audio.output_device,
+        output_device=intent.desktop_audio.output_device,
         sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
-        channels=settings.audio.internal_channels,
-        ring_buffer_ms=settings.audio.ring_buffer_ms,
-        drain_timeout_s=settings.stt.drain_timeout_s,
-        vad_speech_threshold=settings.desktop_audio.vad_speech_threshold,
-        vad_hangover_ms=settings.desktop_audio.vad_hangover_ms,
-        vad_pre_roll_ms=settings.desktop_audio.vad_pre_roll_ms,
-        low_latency_enabled=settings.stt.low_latency_mode,
-        low_latency_merge_gap_ms=settings.stt.low_latency_merge_gap_ms,
-        low_latency_spec_retry_max=settings.stt.low_latency_spec_retry_max,
+        channels=1,
+        ring_buffer_ms=intent.audio.ring_buffer_ms,
+        drain_timeout_s=intent.stt.drain_timeout_s,
+        vad_speech_threshold=intent.desktop_audio.vad_speech_threshold,
+        vad_hangover_ms=intent.desktop_audio.vad_hangover_ms,
+        vad_pre_roll_ms=intent.desktop_audio.vad_pre_roll_ms,
+        low_latency_enabled=intent.stt.low_latency_mode,
+        low_latency_merge_gap_ms=intent.stt.low_latency_merge_gap_ms,
+        low_latency_spec_retry_max=intent.stt.low_latency_spec_retry_max,
         custom_vocabulary_enabled=False,
         custom_terms={},
-        deepgram_model=settings.deepgram_stt.model,
-        qwen_asr_model=settings.qwen_asr_stt.model,
-        qwen_region=settings.qwen.region.value,
-        soniox_model=settings.soniox_stt.model,
-        soniox_endpoint=settings.soniox_stt.endpoint,
-        soniox_keepalive_interval_s=settings.soniox_stt.keepalive_interval_s,
-        soniox_trailing_silence_ms=settings.soniox_stt.trailing_silence_ms,
+        deepgram_model=intent.stt.deepgram.model,
+        qwen_asr_model=intent.stt.qwen_asr.model,
+        qwen_region=intent.translation.qwen.region,
+        soniox_model=intent.stt.soniox.model,
+        soniox_endpoint=intent.stt.soniox.endpoint,
+        soniox_keepalive_interval_s=intent.stt.soniox.keepalive_interval_s,
+        soniox_trailing_silence_ms=intent.stt.soniox.trailing_silence_ms,
+        soniox_enable_language_identification=automatic_soniox,
+        soniox_language_hints=language_hints,
     )
 
 
@@ -313,6 +313,23 @@ def _resolved_int_option(
     if isinstance(value, int) and not isinstance(value, bool):
         return value
     return default
+
+
+def _resolved_bool_option(
+    options: Mapping[str, object],
+    key: str,
+    *,
+    default: bool,
+) -> bool:
+    value = options.get(key)
+    return value if isinstance(value, bool) else default
+
+
+def _resolved_soniox_language_hints(config: ResolvedSTTConfig) -> list[str]:
+    value = config.provider_options.get("language_hints")
+    if isinstance(value, tuple) and all(isinstance(language, str) for language in value):
+        return list(value)
+    return []
 
 
 def _deepgram_api_key_for_resolved_credential(
@@ -395,7 +412,6 @@ def create_stt_backend_from_resolved_config(
         )
 
     if config.provider == STT_PROVIDER_SONIOX:
-        from puripuly_heart.core.language import get_soniox_language_hints
         from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 
         api_key = _soniox_api_key_for_resolved_credential(config.credential, secrets=secrets)
@@ -403,7 +419,7 @@ def create_stt_backend_from_resolved_config(
             api_key=api_key,
             model=config.model or SONIOX_STT_MODEL_RT_V5,
             endpoint=config.endpoint or "wss://stt-rt.soniox.com/transcribe-websocket",
-            language_hints=get_soniox_language_hints(config.source_language),
+            language_hints=_resolved_soniox_language_hints(config),
             sample_rate_hz=config.sample_rate_hz,
             keepalive_interval_s=_resolved_float_option(
                 config.provider_options,
@@ -414,6 +430,11 @@ def create_stt_backend_from_resolved_config(
                 config.provider_options,
                 "trailing_silence_ms",
                 default=SONIOX_STT_DEFAULT_TRAILING_SILENCE_MS,
+            ),
+            enable_language_identification=_resolved_bool_option(
+                config.provider_options,
+                "enable_language_identification",
+                default=False,
             ),
             context_terms=keyterms,
         )
@@ -446,6 +467,18 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
         )
 
     if provider == STTProviderName.SONIOX:
+        automatic_soniox = settings.languages.peer_source_mode == "soniox_auto"
+        language_hints = None
+        if automatic_soniox:
+            from puripuly_heart.core.language import get_soniox_language_hints
+
+            language_hints = tuple(
+                dict.fromkeys(
+                    hint
+                    for language in settings.languages.peer_expected_languages
+                    for hint in get_soniox_language_hints(language)
+                )
+            )
         return ResolvedPeerSTTConfig(
             provider=provider,
             source_language=peer_source_language,
@@ -455,6 +488,8 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
             soniox_endpoint=settings.soniox_stt.endpoint,
             soniox_keepalive_interval_s=settings.soniox_stt.keepalive_interval_s,
             soniox_trailing_silence_ms=settings.soniox_stt.trailing_silence_ms,
+            soniox_enable_language_identification=automatic_soniox,
+            soniox_language_hints=language_hints,
         )
 
     if provider == STTProviderName.LOCAL_QWEN:
@@ -480,20 +515,29 @@ def resolve_peer_stt_runtime_config(settings: AppSettings) -> ResolvedSTTConfig:
     return _resolved_peer_stt_config_from_compatibility_settings(settings)
 
 
+def resolve_peer_stt_runtime_config_from_vnext(settings: AppSettingsVNext) -> ResolvedSTTConfig:
+    return resolve_stt_runtime_config(peer_stt_runtime_intent_from_vnext(settings))
+
+
 def build_peer_stt_provider_signature(settings: AppSettings) -> tuple[object, ...]:
-    resolved = resolve_peer_stt_config(settings)
+    from puripuly_heart.config.settings_vnext.migration import from_legacy_app_settings
+
+    return build_peer_stt_provider_signature_from_vnext(from_legacy_app_settings(settings))
+
+
+def build_peer_stt_provider_signature_from_vnext(settings: AppSettingsVNext) -> tuple[object, ...]:
+    resolved = resolve_peer_stt_runtime_config_from_vnext(settings)
     return (
         resolved.provider,
         resolved.source_language,
         resolved.sample_rate_hz,
-        resolved.deepgram_model,
-        resolved.qwen_model,
-        resolved.qwen_region,
-        resolved.soniox_model,
-        resolved.soniox_endpoint,
-        resolved.soniox_keepalive_interval_s,
-        resolved.soniox_trailing_silence_ms,
-        resolved.keyterms,
+        resolved.model,
+        resolved.endpoint,
+        resolved.region,
+        resolved.provider_options.get("keepalive_interval_s"),
+        resolved.provider_options.get("trailing_silence_ms"),
+        resolved.provider_options.get("enable_language_identification", False),
+        resolved.provider_options.get("language_hints"),
     )
 
 
