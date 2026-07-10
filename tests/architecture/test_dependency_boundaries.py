@@ -18,8 +18,10 @@ RUNTIME_OWNERS = "runtime owners"
 ORCHESTRATOR = "orchestrator"
 OVERLAY_CORE = "overlay core"
 APP_SERVICES = "app services"
+APP_COMPOSITION = "app composition"
 SERVICE_PORTS = "service ports"
 ADAPTERS = "adapters"
+SETTINGS_PERSISTENCE_ADAPTERS = "settings persistence adapters"
 OUTPUT_MESSAGE_OBSERVABILITY_PORTS = "output/message/observability ports"
 PROVIDERS = "providers"
 UI_ADAPTERS_RENDERERS = "UI adapters/renderers"
@@ -34,8 +36,10 @@ REQUIRED_LAYER_VOCABULARY = (
     ORCHESTRATOR,
     OVERLAY_CORE,
     APP_SERVICES,
+    APP_COMPOSITION,
     SERVICE_PORTS,
     ADAPTERS,
+    SETTINGS_PERSISTENCE_ADAPTERS,
     OUTPUT_MESSAGE_OBSERVABILITY_PORTS,
     PROVIDERS,
     UI_ADAPTERS_RENDERERS,
@@ -213,6 +217,19 @@ LAYER_RULES = (
         reason="app services own transactions through ports and DTOs, not UI controls, localized text, concrete providers, adapters, or migration internals",
     ),
     LayerRule(
+        layer=APP_COMPOSITION,
+        prefixes=("puripuly_heart.app.services.canonical_settings_persistence",),
+        forbidden_layers=frozenset(
+            {
+                UI_ADAPTERS_RENDERERS,
+                ADAPTERS,
+                PROVIDERS,
+            }
+        ),
+        rule_id="app-composition-owns-settings-persistence-assembly",
+        reason="app composition may assemble the explicit settings persistence port and reference its public settings types, but must not absorb UI or unrelated adapter behavior",
+    ),
+    LayerRule(
         layer=SERVICE_PORTS,
         prefixes=("puripuly_heart.app.ports",),
         forbidden_layers=frozenset(
@@ -244,6 +261,21 @@ LAYER_RULES = (
         ),
         rule_id="adapters-avoid-ui-and-migration-internals",
         reason="adapters may wrap concrete resources but must not depend on settings migration internals or UI controls unless explicitly UI-owned",
+    ),
+    LayerRule(
+        layer=SETTINGS_PERSISTENCE_ADAPTERS,
+        prefixes=("puripuly_heart.app.adapters.settings_vnext_canonical_persistence",),
+        forbidden_layers=frozenset(
+            {
+                UI_ADAPTERS_RENDERERS,
+                APP_SERVICES,
+                APP_COMPOSITION,
+                ADAPTERS,
+                PROVIDERS,
+            }
+        ),
+        rule_id="settings-persistence-adapter-owns-canonical-settings-internals",
+        reason="the settings persistence adapter is the sole concrete boundary permitted to use facade, migration, and serialization internals",
     ),
     LayerRule(
         layer=OUTPUT_MESSAGE_OBSERVABILITY_PORTS,
@@ -285,6 +317,7 @@ LAYER_RULES = (
             {
                 MIGRATION_SERIALIZATION,
                 ADAPTERS,
+                SETTINGS_PERSISTENCE_ADAPTERS,
                 PROVIDERS,
             }
         ),
@@ -474,6 +507,7 @@ SETTINGS_COMPATIBILITY_SOURCE_PATHS = frozenset(
     {
         "src/puripuly_heart/config/settings.py",
         "src/puripuly_heart/config/settings_vnext/compat.py",
+        "src/puripuly_heart/config/settings_vnext/canonical_persistence.py",
         "src/puripuly_heart/config/settings_vnext/facade.py",
         "src/puripuly_heart/config/settings_vnext/migration.py",
         "src/puripuly_heart/config/settings_vnext/serialization.py",
@@ -483,6 +517,12 @@ SETTINGS_COMPATIBILITY_SOURCE_PATHS = frozenset(
 SETTINGS_PUBLIC_COMPATIBILITY_FACADE_PATHS = frozenset(
     {
         "src/puripuly_heart/app/wiring.py",
+    }
+)
+
+SETTINGS_PERSISTENCE_COMPOSITION_PATHS = frozenset(
+    {
+        "src/puripuly_heart/app/services/canonical_settings_persistence.py",
     }
 )
 
@@ -578,6 +618,12 @@ KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementVio
             "src/puripuly_heart/ui/views/settings.py",
             "AppSettings",
             "SettingsView remains a UI editor for the public AppSettings compatibility model while controller/app services own persistence; replacing the view draft model is deferred UI-rendering work, not active runtime resolution.",
+        ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/core/telemetry.py",
+            "AppSettings",
+            "Translation-success telemetry service mutates and persists consent/anonymous identity through the public AppSettings compatibility model until a dedicated telemetry state port is extracted.",
         ),
     }
 )
@@ -826,6 +872,8 @@ def _legacy_settings_api_import_violations(
     if relative_path in SETTINGS_COMPATIBILITY_SOURCE_PATHS:
         return set()
     if relative_path in SETTINGS_PUBLIC_COMPATIBILITY_FACADE_PATHS:
+        return set()
+    if relative_path in SETTINGS_PERSISTENCE_COMPOSITION_PATHS:
         return set()
     if relative_path in SETTINGS_LEGACY_COMPATIBILITY_ADAPTER_PATHS:
         return set()
@@ -1161,6 +1209,64 @@ def test_settings_public_facade_delegates_persistence_helpers_to_vnext_facade() 
 
     assert definitions.isdisjoint(helper_definitions)
     assert delegated_names <= facade_imports
+
+
+def test_controller_consumes_only_canonical_settings_port_and_composition_entrypoint() -> None:
+    controller_path = SOURCE_PACKAGE_ROOT / "ui" / "controller.py"
+    tree = ast.parse(controller_path.read_text(encoding="utf-8"))
+    imports = {
+        node.module: {alias.name for alias in node.names}
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+
+    assert imports["puripuly_heart.app.ports.canonical_settings_persistence"] == {
+        "CanonicalSettingsPersistencePort"
+    }
+    assert imports["puripuly_heart.app.services.canonical_settings_persistence"] == {
+        "compose_canonical_settings_persistence"
+    }
+    forbidden_modules = {
+        "puripuly_heart.app.adapters.settings_vnext_canonical_persistence",
+        "puripuly_heart.config.settings_vnext.facade",
+        "puripuly_heart.config.settings_vnext.migration",
+        "puripuly_heart.config.settings_vnext.serialization",
+    }
+    assert forbidden_modules.isdisjoint(imports)
+    assert "save_vnext_settings" not in {
+        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    }
+
+
+def test_canonical_settings_persistence_layers_are_explicit() -> None:
+    assert (
+        _layer_for_module("puripuly_heart.app.adapters.settings_vnext_canonical_persistence")
+        == SETTINGS_PERSISTENCE_ADAPTERS
+    )
+    assert (
+        _layer_for_module("puripuly_heart.app.services.canonical_settings_persistence")
+        == APP_COMPOSITION
+    )
+
+
+def test_canonical_settings_persistence_composition_uses_only_public_settings_types() -> None:
+    composition_path = (
+        SOURCE_PACKAGE_ROOT / "app" / "services" / "canonical_settings_persistence.py"
+    )
+    tree = ast.parse(composition_path.read_text(encoding="utf-8"))
+    imports = {
+        node.module: {alias.name for alias in node.names}
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+
+    assert imports["puripuly_heart.config.settings"] == {"AppSettings"}
+    assert imports["puripuly_heart.config.settings_vnext.schema"] == {"AppSettingsVNext"}
+    assert {
+        "puripuly_heart.config.settings_vnext.facade",
+        "puripuly_heart.config.settings_vnext.migration",
+        "puripuly_heart.config.settings_vnext.serialization",
+    }.isdisjoint(imports)
 
 
 def test_internal_source_imports_canonical_overlay_calibration_not_ui_facade() -> None:

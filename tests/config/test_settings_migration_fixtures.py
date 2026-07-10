@@ -34,6 +34,7 @@ from tests.config.settings_migration_fixtures import (
 SCHEMA_OR_SINGLETON_SAME_AS_DEFAULT_PATHS = frozenset(
     {
         "cerebras.llm_model",
+        "openrouter.routing_mode",
         "overlay.calibration.anchor",
         "settings_version",
     }
@@ -153,6 +154,7 @@ def test_vnext_native_provider_verification_evidence_leaves_are_explicitly_exclu
     ) | frozenset(
         {
             "intent.desktop_audio.capture_target.kind",
+            "intent.desktop_audio.capture_target.device_name",
             "intent.desktop_audio.capture_target.process",
         }
     )
@@ -271,6 +273,8 @@ def test_maximal_v24_fixture_round_trip_retains_explicit_stable_fields() -> None
         "desktop_audio.output_device",
         "local_llm.base_url",
         "managed_identity.installation_id",
+        "languages.peer_expected_languages",
+        "languages.peer_source_mode",
         "openrouter.broker_base_url",
         "provider.peer_stt",
         "provider.stt",

@@ -127,6 +127,23 @@ def test_v24_maximal_fixture_migrates_to_canonical_vnext_serialization() -> None
     assert "api_key_verified" not in serialized
 
 
+def test_peer_auto_detection_intent_roundtrips_through_legacy_compatibility_projection() -> None:
+    migration = _migration()
+    serialization = _serialization()
+    legacy = AppSettings()
+    legacy.languages.peer_source_mode = "soniox_auto"
+    legacy.languages.peer_expected_languages = ["ja", "zh-TW", "ja"]
+
+    vnext = migration.from_legacy_app_settings(legacy)
+    serialized = serialization.to_dict(vnext)
+    projected = migration.to_legacy_dict(vnext)
+
+    assert serialized["intent"]["languages"]["peer_source_mode"] == "soniox_auto"
+    assert serialized["intent"]["languages"]["peer_expected_languages"] == ["ja", "zh-TW"]
+    assert projected["languages"]["peer_source_mode"] == "soniox_auto"
+    assert projected["languages"]["peer_expected_languages"] == ["ja", "zh-TW"]
+
+
 def test_high_version_legacy_shape_migrates_by_shape_not_settings_version() -> None:
     migration = _migration()
     serialization = _serialization()
@@ -435,11 +452,28 @@ def test_current_vnext_missing_fallback_alias_still_infers_compatibility_fields(
     )
 
 
-def test_existing_settings_default_to_unknown_telemetry_without_identifier() -> None:
+def test_maximal_v24_fixture_preserves_telemetry_consent_and_identifier() -> None:
     migration = _migration()
     serialization = _serialization()
 
     serialized = serialization.to_dict(migration.from_dict(maximal_v24_settings_fixture()))
+
+    assert serialized["intent"]["telemetry"] == {"consent": "allow"}
+    assert serialized["state"]["telemetry"] == {
+        "anonymous_id": "fixture-telemetry-anonymous-id",
+        "sent_translation_success_dates_utc": ("2026-07-01", "2026-07-02"),
+    }
+
+
+def test_existing_settings_default_to_unknown_telemetry_without_identifier() -> None:
+    migration = _migration()
+    serialization = _serialization()
+
+    existing = maximal_v24_settings_fixture()
+    existing["telemetry"] = {}
+    existing["telemetry_state"] = {}
+
+    serialized = serialization.to_dict(migration.from_dict(existing))
 
     assert serialized["intent"]["telemetry"] == {"consent": "unknown"}
     assert serialized["state"]["telemetry"] == {
@@ -634,7 +668,7 @@ def test_legacy_output_device_migrates_to_canonical_capture_target(
         "device_name": device_name,
         "process": None,
     }
-    assert "output_device" not in serialized["intent"]["desktop_audio"]
+    assert serialized["intent"]["desktop_audio"]["output_device"] == legacy_output_device
     assert (
         migration.to_legacy_dict(settings)["desktop_audio"]["output_device"] == legacy_output_device
     )
@@ -675,7 +709,7 @@ def test_pre_v27_canonical_vnext_output_device_migration_backs_up_before_rewrite
         "device_name": device_name,
         "process": None,
     }
-    assert "output_device" not in persisted["intent"]["desktop_audio"]
+    assert persisted["intent"]["desktop_audio"]["output_device"] == legacy_output_device
 
 
 @pytest.mark.parametrize(
@@ -732,12 +766,7 @@ def test_generic_process_identity_is_normalized_without_relocation() -> None:
     target = CaptureTargetIntent.process_target(
         ProcessCaptureTargetIntent.generic_executable(original_identity)
     )
-    settings = AppSettingsVNext(
-        intent=replace(
-            AppSettingsVNext().intent,
-            desktop_audio=replace(AppSettingsVNext().intent.desktop_audio, capture_target=target),
-        )
-    )
+    settings = with_capture_target(AppSettingsVNext(), target)
 
     restored = migration.from_dict(serialization.to_dict(settings))
 
@@ -1081,12 +1110,7 @@ def test_capture_target_legacy_facade_projection(
     legacy_output_device: str,
 ) -> None:
     migration = _migration()
-    settings = AppSettingsVNext(
-        intent=replace(
-            AppSettingsVNext().intent,
-            desktop_audio=replace(AppSettingsVNext().intent.desktop_audio, capture_target=target),
-        )
-    )
+    settings = with_capture_target(AppSettingsVNext(), target)
 
     legacy = migration.to_legacy_dict(settings)
 
@@ -1113,12 +1137,7 @@ def test_legacy_facade_save_preserves_existing_canonical_process_target(
 ) -> None:
     facade = _facade()
     path = tmp_path / "settings.json"
-    settings = AppSettingsVNext(
-        intent=replace(
-            AppSettingsVNext().intent,
-            desktop_audio=replace(AppSettingsVNext().intent.desktop_audio, capture_target=target),
-        )
-    )
+    settings = with_capture_target(AppSettingsVNext(), target)
     facade.save_vnext_settings(path, settings)
 
     legacy = facade.load_settings(path)
@@ -1138,19 +1157,39 @@ def test_legacy_facade_device_change_replaces_process_projection_with_named_devi
     process_target = CaptureTargetIntent.process_target(
         ProcessCaptureTargetIntent.generic_executable(r"C:\Apps\Game\Game.exe")
     )
-    settings = AppSettingsVNext(
-        intent=replace(
-            AppSettingsVNext().intent,
-            desktop_audio=replace(
-                AppSettingsVNext().intent.desktop_audio,
-                capture_target=process_target,
-            ),
-        )
-    )
+    settings = with_capture_target(AppSettingsVNext(), process_target)
     facade.save_vnext_settings(path, settings)
 
     legacy = facade.load_settings(path)
     legacy.desktop_audio.output_device = "Replacement Speakers"
+    from puripuly_heart.config.resolved import ResolvedDesktopAudioCaptureTarget
+
+    legacy.desktop_audio.runtime_capture_target = ResolvedDesktopAudioCaptureTarget(
+        kind="named_output_device",
+        device_name="Replacement Speakers",
+    )
+    facade.save_settings(path, legacy)
+    reloaded = facade.load_vnext_settings(path)
+
+    assert reloaded.settings is not None
+    assert reloaded.settings.intent.desktop_audio.capture_target == (
+        CaptureTargetIntent.named_output_device("Replacement Speakers")
+    )
+
+
+def test_legacy_facade_device_change_without_runtime_projection_replaces_process_target(
+    tmp_path: Path,
+) -> None:
+    facade = _facade()
+    path = tmp_path / "settings.json"
+    process_target = CaptureTargetIntent.process_target(
+        ProcessCaptureTargetIntent.generic_executable(r"C:\Apps\Game\Game.exe")
+    )
+    facade.save_vnext_settings(path, with_capture_target(AppSettingsVNext(), process_target))
+
+    legacy = facade.load_settings(path)
+    legacy.desktop_audio.output_device = "Replacement Speakers"
+    legacy.desktop_audio.runtime_capture_target = None
     facade.save_settings(path, legacy)
     reloaded = facade.load_vnext_settings(path)
 

@@ -16,7 +16,11 @@ from puripuly_heart.providers.stt.soniox import (
 )
 
 
-def _make_session(*, context_terms: list[str] | None = None) -> _SonioxSession:
+def _make_session(
+    *,
+    context_terms: list[str] | None = None,
+    enable_language_identification: bool = False,
+) -> _SonioxSession:
     return _SonioxSession(
         api_key="k",
         model="m",
@@ -27,6 +31,7 @@ def _make_session(*, context_terms: list[str] | None = None) -> _SonioxSession:
         keepalive_interval_s=10.0,
         trailing_silence_ms=100,
         connect_timeout_s=5.0,
+        enable_language_identification=enable_language_identification,
     )
 
 
@@ -84,6 +89,215 @@ async def test_soniox_session_collects_final_tokens() -> None:
 
     assert isinstance(event, STTBackendTranscriptEvent)
     assert event.text == "Hello world"
+    assert event.final_language_runs == ()
+
+
+@pytest.mark.asyncio
+async def test_soniox_session_emits_ordered_adjacent_final_language_runs() -> None:
+    session = _make_session(enable_language_identification=True)
+
+    session._handle_message(
+        json.dumps(
+            {
+                "tokens": [
+                    {"text": "안", "language": "ko", "is_final": True, "end_ms": 100},
+                    {"text": "녕", "language": "ko", "is_final": True, "end_ms": 110},
+                    {"text": "こんにちは", "language": "ja", "is_final": True, "end_ms": 120},
+                    {"text": "你", "language": "zh", "is_final": True, "end_ms": 130},
+                    {"text": "好", "language": "zh", "is_final": True, "end_ms": 140},
+                    {"text": "世界", "language": "ja", "is_final": True, "end_ms": 150},
+                    {"text": "<fin>", "is_final": True},
+                ]
+            }
+        )
+    )
+
+    event = session._events.get_nowait()
+    assert event.text == "안녕こんにちは你好世界"
+    assert [(run.text, run.language) for run in event.final_language_runs] == [
+        ("안녕", "ko"),
+        ("こんにちは", "ja"),
+        ("你好", "zh"),
+        ("世界", "ja"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_soniox_terminal_cleanup_keeps_final_runs_equal_to_emitted_text() -> None:
+    session = _make_session(enable_language_identification=True)
+
+    session._handle_message(
+        json.dumps(
+            {
+                "tokens": [
+                    {"text": ". ", "language": "ja", "is_final": True, "end_ms": 100},
+                    {"text": "あ", "language": "ja", "is_final": True, "end_ms": 110},
+                    {"text": "你", "language": "zh", "is_final": True, "end_ms": 120},
+                    {"text": "<fin>", "is_final": True},
+                ]
+            }
+        )
+    )
+
+    event = session._events.get_nowait()
+    assert event.text == "あ你"
+    assert [(token.text, token.language) for token in session._final_tokens] == [
+        ("あ", "ja"),
+        ("你", "zh"),
+    ]
+    assert [(run.text, run.language) for run in event.final_language_runs] == [
+        ("あ", "ja"),
+        ("你", "zh"),
+    ]
+    assert "".join(run.text for run in event.final_language_runs) == event.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fixture_name", "tokens", "expected_runs"),
+    [
+        (
+            "korean-only",
+            [("가", "ko", 100), ("나", "ko", 110)],
+            [("가나", "ko")],
+        ),
+        (
+            "japanese-only",
+            [("あ", "ja", 100), ("い", "ja", 110)],
+            [("あい", "ja")],
+        ),
+        (
+            "generic-chinese",
+            [("你", "zh", 100), ("好", "zh", 110)],
+            [("你好", "zh")],
+        ),
+        (
+            "japanese-to-chinese",
+            [("あ", "ja", 100), ("你", "zh", 110), ("好", "zh", 120)],
+            [("あ", "ja"), ("你好", "zh")],
+        ),
+        (
+            "chinese-to-japanese-to-korean",
+            [("你", "zh", 100), ("あ", "ja", 110), ("가", "ko", 120)],
+            [("你", "zh"), ("あ", "ja"), ("가", "ko")],
+        ),
+    ],
+)
+async def test_soniox_controlled_final_token_fixtures_preserve_each_token_and_adjacent_runs(
+    fixture_name: str,
+    tokens: list[tuple[str, str, int]],
+    expected_runs: list[tuple[str, str]],
+) -> None:
+    session = _make_session(enable_language_identification=True)
+    fixture_tokens = [
+        {"text": text, "language": language, "is_final": True, "end_ms": end_ms}
+        for text, language, end_ms in tokens
+    ]
+    fixture_tokens.append({"text": "<fin>", "is_final": True})
+
+    session._handle_message(json.dumps({"tokens": fixture_tokens}))
+
+    event = session._events.get_nowait()
+    assert fixture_name
+    assert [(token.text, token.language, token.end_ms) for token in session._final_tokens] == tokens
+    assert event.text == "".join(text for text, _, _ in tokens)
+    assert [(run.text, run.language) for run in event.final_language_runs] == expected_runs
+
+
+@pytest.mark.asyncio
+async def test_soniox_controlled_final_batches_merge_and_replace_without_token_loss_or_duplicates() -> (
+    None
+):
+    merged = _make_session(enable_language_identification=True)
+    merged._handle_message(
+        json.dumps(
+            {
+                "tokens": [
+                    {"text": "あ", "language": "ja", "is_final": True, "end_ms": 100},
+                    {"text": "<fin>", "is_final": True},
+                ]
+            }
+        )
+    )
+    merged._events.get_nowait()
+    merged._handle_message(
+        json.dumps(
+            {
+                "tokens": [
+                    {"text": "你", "language": "zh", "is_final": True, "end_ms": 200},
+                    {"text": "<fin>", "is_final": True},
+                ]
+            }
+        )
+    )
+    merged_event = merged._events.get_nowait()
+
+    assert [(token.text, token.language, token.end_ms) for token in merged._final_tokens] == [
+        ("あ", "ja", 100),
+        ("你", "zh", 200),
+    ]
+    assert [(run.text, run.language) for run in merged_event.final_language_runs] == [
+        ("あ", "ja"),
+        ("你", "zh"),
+    ]
+
+    replaced = _make_session(enable_language_identification=True)
+    replaced._handle_message(
+        json.dumps(
+            {
+                "tokens": [
+                    {"text": "你", "language": "zh", "is_final": True, "end_ms": 100},
+                    {"text": "旧", "language": "ja", "is_final": True, "end_ms": 200},
+                    {"text": "旧", "language": "ko", "is_final": True, "end_ms": 300},
+                    {"text": "<fin>", "is_final": True},
+                ]
+            }
+        )
+    )
+    replaced._events.get_nowait()
+    replaced._handle_message(
+        json.dumps(
+            {
+                "tokens": [
+                    {"text": "あ", "language": "ja", "is_final": True, "end_ms": 200},
+                    {"text": "가", "language": "ko", "is_final": True, "end_ms": 300},
+                    {"text": "<fin>", "is_final": True},
+                ]
+            }
+        )
+    )
+    replaced_event = replaced._events.get_nowait()
+
+    assert [(token.text, token.language, token.end_ms) for token in replaced._final_tokens] == [
+        ("你", "zh", 100),
+        ("あ", "ja", 200),
+        ("가", "ko", 300),
+    ]
+    assert replaced_event.text == "你あ가"
+    assert [(run.text, run.language) for run in replaced_event.final_language_runs] == [
+        ("你", "zh"),
+        ("あ", "ja"),
+        ("가", "ko"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_soniox_session_retains_unknown_detected_language_for_safe_fallback() -> None:
+    session = _make_session(enable_language_identification=True)
+
+    session._handle_message(
+        json.dumps(
+            {
+                "tokens": [
+                    {"text": "bonjour", "language": "xx", "is_final": True, "end_ms": 100},
+                    {"text": "<fin>", "is_final": True},
+                ]
+            }
+        )
+    )
+
+    event = session._events.get_nowait()
+    assert [(run.text, run.language) for run in event.final_language_runs] == [("bonjour", "xx")]
 
 
 @pytest.mark.asyncio

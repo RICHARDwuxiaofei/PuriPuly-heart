@@ -409,8 +409,33 @@ class LanguageIntent:
     target_language: str = "en"
     peer_source_language: str = "en"
     peer_target_language: str = "ko"
+    peer_source_mode: str = "manual"
+    peer_expected_languages: list[str] = field(default_factory=list)
     recent_source_languages: list[str] = field(default_factory=lambda: ["en", "zh-CN", "ja"])
     recent_target_languages: list[str] = field(default_factory=lambda: ["en", "zh-CN", "ja"])
+
+    def __post_init__(self) -> None:
+        mode = self.peer_source_mode if isinstance(self.peer_source_mode, str) else "manual"
+        mode = mode.strip()
+        object.__setattr__(
+            self,
+            "peer_source_mode",
+            mode if mode in {"manual", "soniox_auto"} else "manual",
+        )
+        languages = self.peer_expected_languages
+        if not isinstance(languages, list):
+            languages = []
+        object.__setattr__(
+            self,
+            "peer_expected_languages",
+            list(
+                dict.fromkeys(
+                    language.strip()
+                    for language in languages
+                    if isinstance(language, str) and language.strip()
+                )
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -558,6 +583,7 @@ class CaptureTargetIntent:
 
 @dataclass(frozen=True, slots=True)
 class DesktopAudioIntent:
+    output_device: str = ""
     capture_target: CaptureTargetIntent = field(default_factory=CaptureTargetIntent)
     vad_speech_threshold: float = 0.6
     vad_hangover_ms: int = 500
@@ -852,11 +878,21 @@ def with_capture_target(
 ) -> AppSettingsVNext:
     if not isinstance(capture_target, CaptureTargetIntent):
         raise TypeError("capture target mutation requires CaptureTargetIntent")
+    desktop_audio = settings.intent.desktop_audio
+    output_device = desktop_audio.output_device
+    if capture_target.kind == "default_output_device":
+        output_device = ""
+    elif capture_target.kind == "named_output_device":
+        output_device = capture_target.device_name or ""
     return replace(
         settings,
         intent=replace(
             settings.intent,
-            desktop_audio=replace(settings.intent.desktop_audio, capture_target=capture_target),
+            desktop_audio=replace(
+                desktop_audio,
+                output_device=output_device,
+                capture_target=capture_target,
+            ),
         ),
     )
 

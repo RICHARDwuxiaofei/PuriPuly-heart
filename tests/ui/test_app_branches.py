@@ -165,8 +165,8 @@ def test_telemetry_consent_dialog_shown_only_for_unknown_and_localized() -> None
     assert len(app.page.opened) == 1
     texts = _dialog_text_values(app.page.opened[0])
     assert app_module.t("telemetry.consent.title") in texts
-    assert app_module.t("telemetry.consent.body") in texts
-    assert app_module.t("telemetry.consent.privacy") in texts
+    assert any(app_module.t("telemetry.consent.body") in text for text in texts)
+    assert any(app_module.t("telemetry.consent.excludes") in text for text in texts)
 
     app.controller.settings.telemetry.consent = "decline"
     assert app.maybe_show_telemetry_consent_dialog() is False
@@ -3519,6 +3519,34 @@ async def test_on_language_change_updates_settings_and_shows_warning(monkeypatch
     assert len(app.page.tasks) == 1
     await app.page.tasks[0]()
     assert seen == [("ja", "fr", "", "it")]
+
+
+@pytest.mark.asyncio
+async def test_on_language_change_auto_mode_does_not_call_legacy_controller_callback(
+    monkeypatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = SimpleNamespace(
+        languages=SimpleNamespace(source_language="ko", target_language="en"),
+        provider=SimpleNamespace(stt=SimpleNamespace(value="deepgram")),
+    )
+    seen: list[tuple[str, str, str, str]] = []
+
+    async def legacy_callback(
+        *, source_code: str, target_code: str, peer_source_code: str, peer_target_code: str
+    ) -> None:
+        seen.append((source_code, target_code, peer_source_code, peer_target_code))
+
+    monkeypatch.setattr(app_module, "get_stt_compatibility_warning", lambda *_args: None)
+    app.controller = SimpleNamespace(
+        settings=settings, on_dashboard_language_change=legacy_callback
+    )
+
+    app._on_language_change("ko", "en", "ja", "fr", "soniox_auto")
+    await app.page.tasks[0]()
+
+    assert seen == []
 
 
 @pytest.mark.asyncio

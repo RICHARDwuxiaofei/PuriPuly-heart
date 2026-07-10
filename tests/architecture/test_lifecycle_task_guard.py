@@ -32,7 +32,7 @@ LEGACY_TASK_CREATION_ALLOWLIST = Counter(
         ("src/puripuly_heart/core/overlay/presenter.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/overlay/process.py", ASYNCIO_CREATE_TASK): 2,
         ("src/puripuly_heart/providers/stt/soniox.py", ASYNCIO_CREATE_TASK): 3,
-        ("src/puripuly_heart/ui/app.py", RUN_TASK): 14,
+        ("src/puripuly_heart/ui/app.py", RUN_TASK): 15,
         ("src/puripuly_heart/ui/components/settings/api_key_field.py", RUN_TASK): 1,
         ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 3,
         ("src/puripuly_heart/ui/controller.py", LOOP_CREATE_TASK): 5,
@@ -59,6 +59,7 @@ NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST = Counter(
         ("src/puripuly_heart/core/runtime/local_stt_download.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/mic_test.py", ASYNCIO_CREATE_TASK): 2,
         ("src/puripuly_heart/core/runtime/receiver.py", ASYNCIO_CREATE_TASK): 1,
+        ("src/puripuly_heart/ui/desktop_overlay_repro.py", ASYNCIO_CREATE_TASK): 3,
     }
 )
 
@@ -98,7 +99,7 @@ TASK_CREATION_ALLOWLIST_RATIONALES = {
     (
         "src/puripuly_heart/ui/app.py",
         RUN_TASK,
-    ): "Flet UI callbacks must use page.run_task for async controller/service calls; each call remains UI-bound, not a background owner bypass",
+    ): "Flet UI callbacks, including peer-auto activation, must use page.run_task for async controller/service calls; each call remains UI-bound, not a background owner bypass",
     (
         "src/puripuly_heart/ui/components/settings/api_key_field.py",
         RUN_TASK,
@@ -171,6 +172,10 @@ TASK_CREATION_ALLOWLIST_RATIONALES = {
         "src/puripuly_heart/core/runtime/receiver.py",
         ASYNCIO_CREATE_TASK,
     ): "VrcMicReceiverRuntime is the named lifecycle owner for receiver tasks",
+    (
+        "src/puripuly_heart/ui/desktop_overlay_repro.py",
+        ASYNCIO_CREATE_TASK,
+    ): "DesktopOverlayReproOwner owns and gathers its renderer, diagnostic consumer, and static-backdrop tasks",
 }
 
 

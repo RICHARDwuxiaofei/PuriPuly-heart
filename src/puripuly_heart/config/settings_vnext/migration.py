@@ -137,7 +137,14 @@ def _prepare_vnext_migration_dict(data: Mapping[str, Any]) -> dict[str, Any]:
             desktop_audio["capture_target"] = _capture_target_to_dict(
                 _capture_target_from_legacy_output_device(desktop_audio.get("output_device"))
             )
-        desktop_audio.pop("output_device", None)
+        if "output_device" not in desktop_audio:
+            capture_target = desktop_audio.get("capture_target")
+            desktop_audio["output_device"] = (
+                capture_target.get("device_name", "")
+                if isinstance(capture_target, Mapping)
+                and capture_target.get("kind") == "named_output_device"
+                else ""
+            )
         intent["desktop_audio"] = desktop_audio
         prepared["intent"] = intent
     return prepared
@@ -375,6 +382,10 @@ def from_legacy_app_settings(
                 target_language=data["languages"]["target_language"],
                 peer_source_language=data["languages"]["peer_source_language"],
                 peer_target_language=data["languages"]["peer_target_language"],
+                peer_source_mode=data["languages"].get("peer_source_mode", "manual"),
+                peer_expected_languages=list(
+                    data["languages"].get("peer_expected_languages") or []
+                ),
                 recent_source_languages=list(data["languages"]["recent_source_languages"]),
                 recent_target_languages=list(data["languages"]["recent_target_languages"]),
             ),
@@ -384,6 +395,7 @@ def from_legacy_app_settings(
                 input_device=data["audio"]["input_device"],
             ),
             desktop_audio=DesktopAudioIntent(
+                output_device=data["desktop_audio"]["output_device"],
                 capture_target=_capture_target_from_legacy_output_device(
                     data["desktop_audio"]["output_device"]
                 ),
@@ -549,6 +561,8 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
         "target_language": intent.languages.target_language,
         "peer_source_language": intent.languages.peer_source_language,
         "peer_target_language": intent.languages.peer_target_language,
+        "peer_source_mode": intent.languages.peer_source_mode,
+        "peer_expected_languages": list(intent.languages.peer_expected_languages),
         "recent_source_languages": list(intent.languages.recent_source_languages),
         "recent_target_languages": list(intent.languages.recent_target_languages),
     }
@@ -560,9 +574,7 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
         }
     )
     data["desktop_audio"] = {
-        "output_device": _legacy_output_device_for_capture_target(
-            intent.desktop_audio.capture_target
-        ),
+        "output_device": intent.desktop_audio.output_device,
         "vad_speech_threshold": intent.desktop_audio.vad_speech_threshold,
         "vad_hangover_ms": intent.desktop_audio.vad_hangover_ms,
         "vad_pre_roll_ms": intent.desktop_audio.vad_pre_roll_ms,
@@ -727,12 +739,6 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
     }
     data["system_prompt"] = intent.prompts.system_prompt
     return data
-
-
-def _legacy_output_device_for_capture_target(capture_target: CaptureTargetIntent) -> str:
-    if capture_target.kind == "named_output_device":
-        return capture_target.device_name or ""
-    return ""
 
 
 def _legacy_provider_llm_for_translation(model: str, connection: str) -> str:

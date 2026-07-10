@@ -53,6 +53,7 @@ def test_result_statuses_cover_settings_runtime_secret_and_compensation_flows() 
         messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORED,
         messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORE_FAILED,
         messages.TRANSACTION_STATUS_REMOTE_ACTIVE_LOCAL_MISSING,
+        messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING,
     }
 
     message = messages.UserMessageRef(

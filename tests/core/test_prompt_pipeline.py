@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import uuid4
 
 import pytest
@@ -35,6 +35,9 @@ class FakeOscQueue:
 @dataclass
 class FakeLLMProvider:
     last_prompt: str | None = None
+    last_source_language: str | None = None
+    last_context: str | None = None
+    calls: list[dict[str, str]] = field(default_factory=list)
 
     async def translate(
         self,
@@ -46,8 +49,17 @@ class FakeLLMProvider:
         target_language: str,
         context: str = "",
     ) -> Translation:
-        _ = (text, source_language, target_language, context)
+        _ = (text, target_language)
         self.last_prompt = system_prompt
+        self.last_source_language = source_language
+        self.last_context = context
+        self.calls.append(
+            {
+                "text": text,
+                "source_language": source_language,
+                "context": context,
+            }
+        )
         return Translation(utterance_id=utterance_id, text="ok")
 
     async def close(self) -> None:
@@ -123,6 +135,96 @@ def test_hub_renders_peer_runtime_dynamic_prompt_placeholders() -> None:
     assert "${targetName}" not in prompt
     assert "${targetLanguageRules}" not in prompt
     assert "${translationExamples}" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_detected_peer_language_drives_prompt_context_and_request() -> None:
+    fake_llm = FakeLLMProvider()
+    clock = FakeClock()
+    hub = ClientHub(
+        stt=None,
+        llm=fake_llm,
+        osc=FakeOscQueue(),
+        clock=clock,
+        peer_translation_enabled=True,
+        peer_source_language="en",
+        peer_target_language="ja",
+        system_prompt="${sourceName}|${targetName}",
+    )
+    hub.peer_runtime.remember_context(
+        "previous Chinese run",
+        timestamp=clock.now(),
+        source_language="zh",
+        target_language="ja",
+    )
+
+    await hub._translate_text(
+        uuid4(),
+        "你好",
+        runtime=hub.peer_runtime,
+        detected_language="zh",
+    )
+
+    assert fake_llm.last_prompt == "Chinese|Japanese"
+    assert fake_llm.last_source_language == "zh"
+    assert fake_llm.last_context is not None
+    assert "previous Chinese run" in fake_llm.last_context
+
+
+@pytest.mark.asyncio
+async def test_sequential_detected_peer_runs_reuse_normalized_language_context() -> None:
+    fake_llm = FakeLLMProvider()
+    hub = ClientHub(
+        stt=None,
+        llm=fake_llm,
+        osc=FakeOscQueue(),
+        clock=FakeClock(),
+        peer_translation_enabled=True,
+        peer_source_language="en",
+        peer_target_language="ja",
+        system_prompt="${sourceName}|${targetName}",
+    )
+
+    await hub._translate_and_enqueue(
+        uuid4(),
+        "first Chinese run",
+        runtime=hub.peer_runtime,
+        detected_language="zh",
+    )
+    await hub._translate_and_enqueue(
+        uuid4(),
+        "second Chinese run",
+        runtime=hub.peer_runtime,
+        detected_language="zh",
+    )
+
+    assert [call["source_language"] for call in fake_llm.calls] == ["zh", "zh"]
+    assert "first Chinese run" in fake_llm.calls[1]["context"]
+    assert [entry.source_language for entry in hub.peer_runtime.translation_history] == ["zh", "zh"]
+
+
+@pytest.mark.asyncio
+async def test_unmapped_detected_peer_language_uses_source_only_path() -> None:
+    fake_llm = FakeLLMProvider()
+    hub = ClientHub(
+        stt=None,
+        llm=fake_llm,
+        osc=FakeOscQueue(),
+        clock=FakeClock(),
+        peer_translation_enabled=True,
+        peer_source_language="en",
+        peer_target_language="ja",
+    )
+
+    await hub._translate_and_enqueue(
+        uuid4(),
+        "unmapped",
+        runtime=hub.peer_runtime,
+        detected_language="xx",
+    )
+
+    assert fake_llm.last_prompt is None
+    assert hub.peer_runtime.translation_history == []
 
 
 @pytest.mark.asyncio

@@ -4138,7 +4138,28 @@ def test_on_peer_stt_selected_refreshes_api_visibility_and_redraws_immediately(
     assert pending is not None
     assert pending.provider.peer_stt == STTProviderName.SONIOX
     assert view._peer_stt_text.content.value == t("provider.soniox")
-    assert api_key_updates == ["peer_stt_text", "qwen_region_btn", "api_keys_column"]
+    assert "peer_stt_text" in api_key_updates
+    assert "qwen_region_btn" in api_key_updates
+    assert "api_keys_column" in api_key_updates
+    assert view._peer_auto_languages_card.visible is True
+
+
+def test_peer_auto_detection_languages_card_is_visible_only_for_peer_soniox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    view, _ = _make_settings_view(monkeypatch)
+    view._settings = settings
+
+    view._update_api_visibility()
+    assert view._peer_auto_languages_card.visible is False
+
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    settings.languages.peer_expected_languages = ["ja"]
+    view._update_api_visibility()
+
+    assert view._peer_auto_languages_card.visible is True
+    assert view._peer_auto_languages_editor._terms == ["ja"]
 
 
 def test_peer_provider_labels_are_backed_by_i18n(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4197,6 +4218,9 @@ def test_translation_connection_and_model_copy_is_backed_by_i18n(locale: str) ->
         "settings.translation_model.local_llm.description",
     ):
         assert key in bundle
+        if key == "settings.translation_model.gemini31_flash_lite.description":
+            assert bundle[key] == ""
+            continue
         assert bundle[key]
         assert bundle[key] != key
 
@@ -4230,7 +4254,7 @@ def test_translation_connection_and_model_copy_is_backed_by_i18n(locale: str) ->
             "settings.translation_model.gemma4.description": "Good for most situations We recommend using this model",
             "settings.translation_model.deepseek_v4_flash.description": "An option for people using PuriPuly in mainland China",
             "settings.translation_model.gemini3_flash.description": "Translation speed may be unstable",
-            "settings.translation_model.gemini31_flash_lite.description": "Translation speed may be unstable",
+            "settings.translation_model.gemini31_flash_lite.description": "",
             "settings.translation_model.qwen35_plus.description": "A strong alternative to DeepSeek",
             "settings.translation_model.local_llm.description": "You can use an OpenAI-compatible API",
         },
@@ -4238,7 +4262,7 @@ def test_translation_connection_and_model_copy_is_backed_by_i18n(locale: str) ->
             "settings.translation_model.gemma4.description": "대부분의 상황에서 좋아요 이 모델을 사용하는 걸 권장해요",
             "settings.translation_model.deepseek_v4_flash.description": "중국 대륙에서 사용하고 있는 사람들을 위한 선택이에요",
             "settings.translation_model.gemini3_flash.description": "번역 속도가 불안정할 수 있어요",
-            "settings.translation_model.gemini31_flash_lite.description": "번역 속도가 불안정할 수 있어요",
+            "settings.translation_model.gemini31_flash_lite.description": "",
             "settings.translation_model.qwen35_plus.description": "딥시크의 좋은 대안이에요",
             "settings.translation_model.local_llm.description": "OpenAI 호환 API를 사용할 수 있어요",
         },
@@ -4246,7 +4270,7 @@ def test_translation_connection_and_model_copy_is_backed_by_i18n(locale: str) ->
             "settings.translation_model.gemma4.description": "适合大多数情况 建议使用此模型",
             "settings.translation_model.deepseek_v4_flash.description": "适合在中国大陆使用 PuriPuly 的用户",
             "settings.translation_model.gemini3_flash.description": "翻译速度可能不稳定",
-            "settings.translation_model.gemini31_flash_lite.description": "翻译速度可能不稳定",
+            "settings.translation_model.gemini31_flash_lite.description": "",
             "settings.translation_model.qwen35_plus.description": "DeepSeek 的不错替代选择",
             "settings.translation_model.local_llm.description": "可以使用 OpenAI 兼容 API",
         },
@@ -5380,7 +5404,7 @@ def test_api_tab_places_independent_managed_key_card_above_api_keys(
     view, _ = _make_settings_view(monkeypatch)
     api_controls = _subtab_controls(view, "api")
 
-    assert len(api_controls) == 5
+    assert len(api_controls) == 6
     assert _row_card_titles(api_controls[0]) == [
         t("settings.section.stt"),
         t("settings.section.peer_stt"),
@@ -5395,8 +5419,9 @@ def test_api_tab_places_independent_managed_key_card_above_api_keys(
     assert api_controls[2] is view._local_llm_connection_card
     assert api_controls[3] is view._managed_key_card
     assert _row_card_titles(api_controls[3]) == [t("settings.managed_key.title")]
-    assert api_controls[4] is not view._api_keys_column
-    assert _row_card_titles(api_controls[4]) == [t("settings.section.api_keys")]
+    assert api_controls[4] is view._peer_auto_languages_card
+    assert api_controls[5] is not view._api_keys_column
+    assert _row_card_titles(api_controls[5]) == [t("settings.section.api_keys")]
 
 
 def test_api_tab_primary_value_typography_is_consistent_across_rows(

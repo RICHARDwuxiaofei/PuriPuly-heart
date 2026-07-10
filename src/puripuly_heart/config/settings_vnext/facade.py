@@ -117,7 +117,10 @@ def _preserve_existing_process_capture_target(
     legacy_settings: AppSettings,
     next_settings: AppSettingsVNext,
 ) -> AppSettingsVNext:
-    if legacy_settings.desktop_audio.output_device:
+    runtime_capture_target = legacy_settings.desktop_audio.runtime_capture_target
+    if runtime_capture_target is not None and runtime_capture_target.kind != "process":
+        return next_settings
+    if runtime_capture_target is None and legacy_settings.desktop_audio.output_device:
         return next_settings
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))

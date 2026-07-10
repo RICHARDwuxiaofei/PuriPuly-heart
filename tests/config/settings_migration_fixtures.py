@@ -25,6 +25,7 @@ from puripuly_heart.config.settings import (
     SecretsBackend,
     STTProviderName,
     TranslationConnection,
+    TranslationFallbackSettings,
     TranslationModel,
     TranslationSettings,
     from_dict,
@@ -53,6 +54,7 @@ DECISION_PENDING_CURRENT_DESTINATIONS: dict[str, str] = {}
 VNEXT_NATIVE_PERSISTED_LEAF_PATHS = frozenset(
     {
         "intent.desktop_audio.capture_target.kind",
+        "intent.desktop_audio.capture_target.device_name",
         "intent.desktop_audio.capture_target.process",
     }
 ) | frozenset(
@@ -83,12 +85,14 @@ CURRENT_USER_INTENT_DESTINATIONS = {
     "audio.ring_buffer_ms": "intent.audio.ring_buffer_ms",
     "cerebras.llm_model": "intent.translation.cerebras.llm_model",
     "deepgram_stt.model": "intent.stt.deepgram.model",
-    "desktop_audio.output_device": "intent.desktop_audio.capture_target.device_name",
+    "desktop_audio.output_device": "intent.desktop_audio.output_device",
     "desktop_audio.vad_hangover_ms": "intent.desktop_audio.vad_hangover_ms",
     "desktop_audio.vad_pre_roll_ms": "intent.desktop_audio.vad_pre_roll_ms",
     "desktop_audio.vad_speech_threshold": "intent.desktop_audio.vad_speech_threshold",
     "languages.peer_source_language": "intent.languages.peer_source_language",
     "languages.peer_target_language": "intent.languages.peer_target_language",
+    "languages.peer_source_mode": "intent.languages.peer_source_mode",
+    "languages.peer_expected_languages": "intent.languages.peer_expected_languages",
     "languages.recent_source_languages": "intent.languages.recent_source_languages",
     "languages.recent_target_languages": "intent.languages.recent_target_languages",
     "languages.source_language": "intent.languages.source_language",
@@ -98,14 +102,16 @@ CURRENT_USER_INTENT_DESTINATIONS = {
     "local_llm.extra_body": "intent.local_llm.extra_body",
     "local_llm.model": "intent.local_llm.model",
     "openrouter.broker_base_url": "intent.translation.openrouter_broker_base_url",
-    "openrouter.fallback_selection_alias": (
-        "intent.translation.openrouter_fallback_selection_alias"
-    ),
+    "openrouter.fallback_selection_alias": "intent.translation.fallback.selection_alias",
     "openrouter.llm_model": "intent.translation.openrouter_model",
     "openrouter.provider_routing": "intent.translation.openrouter_provider_routing",
     "openrouter.routing_mode": "intent.translation.openrouter_routing_mode",
     "openrouter.selected_source": "intent.translation.openrouter_selected_source",
     "openrouter.selection_alias": "intent.translation.openrouter_selection_alias",
+    "telemetry.consent": "intent.telemetry.consent",
+    "translation.fallback.connection": "intent.translation.fallback.connection",
+    "translation.fallback.enabled": "intent.translation.fallback.enabled",
+    "translation.fallback.model": "intent.translation.fallback.model",
     "osc.chatbox_address": "intent.osc.chatbox_address",
     "osc.chatbox_clear": "intent.osc.chatbox_clear",
     "osc.chatbox_include_source": "intent.osc.chatbox_include_source",
@@ -184,6 +190,18 @@ CURRENT_OPERATIONAL_STATE_DESTINATIONS = {
     "managed_identity.local_managed_claim_sources": (
         "state.managed_connection.local_managed_claim_sources"
     ),
+    "managed_identity.pending_delivery_ack_delivery_id": (
+        "state.managed_connection.pending_delivery_ack_delivery_id"
+    ),
+    "managed_identity.pending_delivery_ack_expires_at": (
+        "state.managed_connection.pending_delivery_ack_expires_at"
+    ),
+    "managed_identity.pending_delivery_ack_managed_credential_ref": (
+        "state.managed_connection.pending_delivery_ack_managed_credential_ref"
+    ),
+    "managed_identity.pending_delivery_ack_source": (
+        "state.managed_connection.pending_delivery_ack_source"
+    ),
     "managed_identity.referral_id": "state.managed_connection.referral_id",
     "managed_identity.release_token": "state.managed_connection.release_token",
     "managed_identity.release_token_expires_at": (
@@ -192,6 +210,10 @@ CURRENT_OPERATIONAL_STATE_DESTINATIONS = {
     "managed_identity.verified_hardware_hash": ("state.managed_connection.verified_hardware_hash"),
     "managed_identity.verified_hardware_hash_salt_version": (
         "state.managed_connection.verified_hardware_hash_salt_version"
+    ),
+    "telemetry_state.anonymous_id": "state.telemetry.anonymous_id",
+    "telemetry_state.sent_translation_success_dates_utc": (
+        "state.telemetry.sent_translation_success_dates_utc"
     ),
     "ui.github_star_prompt_clicked": "state.github_star_prompt.clicked",
     "ui.github_star_prompt_eligible_launch_count": (
@@ -273,6 +295,8 @@ EXPLICIT_MISSING_FIELD_DEFAULT_EXPECTATIONS: dict[str, Any] = {
     "ui.github_star_prompt_show_count": 0,
     # Missing referral identity state remains absent rather than inventing a value.
     "managed_identity.referral_id": None,
+    "languages.peer_source_mode": "manual",
+    "languages.peer_expected_languages": [],
 }
 
 
@@ -302,11 +326,18 @@ def maximal_v24_settings_fixture() -> dict[str, Any]:
             TranslationModel.QWEN_35_PLUS.value: TranslationConnection.OFFICIAL_BYOK,
             TranslationModel.LOCAL_LLM.value: TranslationConnection.OLLAMA,
         },
+        fallback=TranslationFallbackSettings(
+            enabled=True,
+            model=TranslationModel.GEMINI_3_FLASH,
+            connection=TranslationConnection.OPENROUTER,
+        ),
     )
     settings.languages.source_language = "ja"
     settings.languages.target_language = "zh-CN"
     settings.languages.peer_source_language = "fr"
     settings.languages.peer_target_language = "es"
+    settings.languages.peer_source_mode = "soniox_auto"
+    settings.languages.peer_expected_languages = ["fr", "ja"]
     settings.languages.recent_source_languages = ["fr", "de", "it"]
     settings.languages.recent_target_languages = ["es", "th", "vi"]
     settings.audio.ring_buffer_ms = 750
@@ -399,6 +430,15 @@ def maximal_v24_settings_fixture() -> dict[str, Any]:
     settings.managed_identity.founder_letter_seen_credential_ref = "fixture-founder-ref"
     settings.managed_identity.referral_id = "7KQ9M2"
     settings.managed_identity.local_managed_claim_sources = ("discord",)
+    settings.managed_identity.pending_delivery_ack_source = "discord"
+    settings.managed_identity.pending_delivery_ack_delivery_id = "fixture-delivery-id"
+    settings.managed_identity.pending_delivery_ack_managed_credential_ref = (
+        "fixture-pending-credential-ref"
+    )
+    settings.managed_identity.pending_delivery_ack_expires_at = "2026-07-10T00:00:00Z"
+    settings.telemetry.consent = "allow"
+    settings.telemetry_state.anonymous_id = "fixture-telemetry-anonymous-id"
+    settings.telemetry_state.sent_translation_success_dates_utc = ["2026-07-01", "2026-07-02"]
     settings.system_prompt = "Fixture system prompt text."
     settings.validate()
 
@@ -407,6 +447,9 @@ def maximal_v24_settings_fixture() -> dict[str, Any]:
     data["audio"]["internal_channels"] = "1"
     data["local_llm"]["backend"] = "fixture_backend"
     data["openrouter"]["provider_routing"] = OpenRouterProviderRouting.DEEPSEEK_ONLY.value
+    data["openrouter"][
+        "fallback_selection_alias"
+    ] = OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value
     return data
 
 

@@ -136,9 +136,19 @@ class FakeLanguageCard:
 
 class FakeLanguageModal:
     opened: list[tuple[str, list[str]]] = []
+    languages: list[tuple[str, str]] = []
 
-    def __init__(self, page, languages, on_select):
-        _ = (page, languages)
+    def __init__(
+        self,
+        page,
+        languages,
+        on_select,
+        label_for_code=None,
+        description_for_code=None,
+        disabled_codes=None,
+    ):
+        _ = (page, label_for_code, description_for_code, disabled_codes)
+        self.__class__.languages = list(languages)
         self.on_select = on_select
 
     def open(self, *, current: str, recent: list[str]) -> None:
@@ -559,6 +569,91 @@ def test_dashboard_apply_locale_and_dialog_open_paths(monkeypatch: pytest.Monkey
     warning_texts = [text for text, _is_error, _font in view.display_card.display_calls]
     assert dashboard_module.t("dashboard.warn_stt_key") in warning_texts
     assert dashboard_module.t("dashboard.warn_llm_key") in warning_texts
+
+
+def test_dashboard_peer_source_dialog_lists_automatic_soniox_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    attach_dummy_page(monkeypatch, view)
+
+    view._open_peer_source_dialog()
+
+    assert FakeLanguageModal.languages[0][0] == dashboard_module.PEER_SOURCE_MODE_SONIOX_AUTO
+
+
+def test_dashboard_automatic_peer_selection_preserves_manual_source_and_emits_auto_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    changes: list[tuple[str, str, str, str, str]] = []
+    view.on_language_change = lambda src, tgt, peer_src, peer_tgt, peer_mode: changes.append(
+        (src, tgt, peer_src, peer_tgt, peer_mode)
+    )
+    view.set_languages_from_codes("ko", "en", "ja", "fr")
+
+    view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_SONIOX_AUTO)
+
+    assert view._peer_source_lang_code == "ja"
+    assert changes[-1] == ("ko", "en", "ja", "fr", "soniox_auto")
+
+
+def test_dashboard_automatic_peer_callback_type_error_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    calls: list[tuple[str, ...]] = []
+
+    def fail_after_recording(*values: str) -> None:
+        calls.append(values)
+        raise TypeError("callback failure")
+
+    view.on_language_change = fail_after_recording
+
+    with pytest.raises(TypeError, match="callback failure"):
+        view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_SONIOX_AUTO)
+
+    assert len(calls) == 1
+    assert calls[0][-1] == "soniox_auto"
+
+
+def test_dashboard_automatic_peer_selection_rejects_legacy_callback_without_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    calls: list[tuple[str, str, str, str]] = []
+    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: calls.append(
+        (src, tgt, peer_src, peer_tgt)
+    )
+
+    with pytest.raises(TypeError, match="mode-aware callback"):
+        view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_SONIOX_AUTO)
+
+    assert calls == []
+
+
+def test_dashboard_peer_swap_keeps_automatic_mode_and_valid_languages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    changes: list[tuple[str, str, str, str, str]] = []
+    view.on_language_change = lambda src, tgt, peer_src, peer_tgt, peer_mode: changes.append(
+        (src, tgt, peer_src, peer_tgt, peer_mode)
+    )
+    view.set_languages_from_codes("ko", "en", "ja", "fr", "soniox_auto")
+
+    view._swap_peer_languages()
+
+    assert view._peer_source_mode == "soniox_auto"
+    assert view._peer_source_lang_code == "fr"
+    assert view._peer_target_lang_code == "ja"
+    assert changes[-1] == ("ko", "en", "fr", "ja", "soniox_auto")
+    assert view.language_card.languages[-1] == (
+        "name-ko",
+        "name-en",
+        dashboard_module.t("dashboard.peer_source.automatic_soniox"),
+        "name-ja",
+    )
 
 
 def test_dashboard_overlay_peer_buttons_render_consumer_contract_state_only(

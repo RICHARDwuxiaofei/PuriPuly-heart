@@ -1,3 +1,4 @@
+import inspect
 from typing import Callable
 
 import flet as ft
@@ -23,6 +24,17 @@ DASHBOARD_LANGUAGE_CARD_EXPAND = 1
 DASHBOARD_POWER_BUTTON_ICON_SIZE = 80
 DASHBOARD_POWER_BUTTON_LABEL_SIZE = 32
 OVERLAY_FAILURE_REASON_ONLY_NOTICE_REASONS = {"steamvr_not_running"}
+PEER_SOURCE_MODE_SONIOX_AUTO = "soniox_auto"
+
+
+def _accepts_positional_argument(callback: Callable[..., object], count: int) -> bool:
+    try:
+        inspect.signature(callback).bind(*([None] * count))
+    except TypeError:
+        return False
+    except ValueError:
+        return True
+    return True
 
 
 class DashboardView(ft.Column):
@@ -63,6 +75,8 @@ class DashboardView(ft.Column):
         self._target_lang_code = "en"
         self._peer_source_lang_code = "en"
         self._peer_target_lang_code = "ko"
+        self._peer_source_mode = "manual"
+        self._peer_auto_detect_available = True
         self._message_input_focused = False
 
         # Recent languages (max 3 each)
@@ -331,11 +345,29 @@ class DashboardView(ft.Column):
     def _open_peer_source_dialog(self):
         modal = LanguageModal(
             page=self.page,
-            languages=self._LANG_OPTIONS,
+            languages=((PEER_SOURCE_MODE_SONIOX_AUTO, ""), *self._LANG_OPTIONS),
             on_select=self._on_peer_source_select,
+            label_for_code=lambda code: (
+                t("dashboard.peer_source.automatic_soniox")
+                if code == PEER_SOURCE_MODE_SONIOX_AUTO
+                else language_name(code)
+            ),
+            description_for_code=lambda code: (
+                t("dashboard.peer_source.automatic_soniox.description")
+                if code == PEER_SOURCE_MODE_SONIOX_AUTO
+                else ""
+            ),
+            disabled_codes=(
+                set() if self._peer_auto_detect_available else {PEER_SOURCE_MODE_SONIOX_AUTO}
+            ),
         )
         modal.open(
-            current=self._effective_peer_source_lang_code(), recent=self._recent_source_langs
+            current=(
+                PEER_SOURCE_MODE_SONIOX_AUTO
+                if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO
+                else self._effective_peer_source_lang_code()
+            ),
+            recent=self._recent_source_langs,
         )
 
     def _open_peer_target_dialog(self):
@@ -364,6 +396,12 @@ class DashboardView(ft.Column):
         self._notify_language_change()
 
     def _on_peer_source_select(self, lang_code: str):
+        if lang_code == PEER_SOURCE_MODE_SONIOX_AUTO:
+            self._peer_source_mode = PEER_SOURCE_MODE_SONIOX_AUTO
+            self._refresh_language_card()
+            self._notify_language_change()
+            return
+        self._peer_source_mode = "manual"
         self._peer_source_lang_code = "" if lang_code == self._source_lang_code else lang_code
         self._add_to_recent(lang_code, is_source=True)
         self._refresh_language_card()
@@ -386,6 +424,13 @@ class DashboardView(ft.Column):
         self._notify_language_change()
 
     def _swap_peer_languages(self):
+        if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO:
+            manual_peer_source = self._peer_source_lang_code or self._source_lang_code
+            self._peer_source_lang_code = self._effective_peer_target_lang_code()
+            self._peer_target_lang_code = manual_peer_source
+            self._refresh_language_card()
+            self._notify_language_change()
+            return
         current_peer_source = self._effective_peer_source_lang_code()
         current_peer_target = self._effective_peer_target_lang_code()
         self._peer_source_lang_code = current_peer_target
@@ -406,14 +451,27 @@ class DashboardView(ft.Column):
 
     def _notify_language_change(self):
         if self.on_language_change:
-            self.on_language_change(
-                self._source_lang_code,
-                self._target_lang_code,
-                self._peer_source_lang_code,
-                self._peer_target_lang_code,
-            )
+            if _accepts_positional_argument(self.on_language_change, 5):
+                self.on_language_change(
+                    self._source_lang_code,
+                    self._target_lang_code,
+                    self._peer_source_lang_code,
+                    self._peer_target_lang_code,
+                    self._peer_source_mode,
+                )
+            else:
+                if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO:
+                    raise TypeError("peer automatic source mode requires a mode-aware callback")
+                self.on_language_change(
+                    self._source_lang_code,
+                    self._target_lang_code,
+                    self._peer_source_lang_code,
+                    self._peer_target_lang_code,
+                )
 
     def _effective_peer_source_lang_code(self) -> str:
+        if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO:
+            return PEER_SOURCE_MODE_SONIOX_AUTO
         return self._peer_source_lang_code or self._source_lang_code
 
     def _effective_peer_target_lang_code(self) -> str:
@@ -423,7 +481,11 @@ class DashboardView(ft.Column):
         self.language_card.set_languages(
             language_name(self._source_lang_code),
             language_name(self._target_lang_code),
-            language_name(self._effective_peer_source_lang_code()),
+            (
+                t("dashboard.peer_source.automatic_soniox")
+                if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO
+                else language_name(self._effective_peer_source_lang_code())
+            ),
             language_name(self._effective_peer_target_lang_code()),
         )
 
@@ -439,13 +501,18 @@ class DashboardView(ft.Column):
         target_code: str,
         peer_source_code: str = "",
         peer_target_code: str = "",
+        peer_source_mode: str = "manual",
     ) -> None:
         self._source_lang_code = source_code
         self._target_lang_code = target_code
         self._peer_source_lang_code = peer_source_code
         self._peer_target_lang_code = peer_target_code
+        self._peer_source_mode = peer_source_mode
         self._update_input_font()
         self._refresh_language_card()
+
+    def set_peer_auto_detect_available(self, available: bool) -> None:
+        self._peer_auto_detect_available = bool(available)
 
     def set_translation_enabled(self, enabled: bool) -> None:
         self.is_translation_on = bool(enabled)

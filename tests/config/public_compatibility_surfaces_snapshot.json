@@ -125,6 +125,8 @@
       "/v1/auth/qq/assert",
       "/v1/providers/openrouter/discord/issue",
       "/v1/providers/openrouter/issue",
+      "/v1/providers/openrouter/managed-key-delivery/ack",
+      "/v1/telemetry/translation-success-day",
       "/v1/trial/challenge",
       "/v1/trial/challenge/verify",
       "/v1/trial/status"
@@ -156,11 +158,19 @@
       },
       {
         "method": "POST",
+        "path": "/v1/telemetry/translation-success-day"
+      },
+      {
+        "method": "POST",
         "path": "/v1/providers/openrouter/issue"
       },
       {
         "method": "POST",
         "path": "/v1/providers/openrouter/discord/issue"
+      },
+      {
+        "method": "POST",
+        "path": "/v1/providers/openrouter/managed-key-delivery/ack"
       }
     ],
     "operations": {
@@ -251,7 +261,8 @@
         "request_body_fields": [
           "qq_identity",
           "credential",
-          "asserted_at"
+          "asserted_at",
+          "delivery_ack_supported"
         ],
         "success_response_fields": [
           "ok",
@@ -328,7 +339,11 @@
           "openrouter_user_id",
           "referral_bonus_applied",
           "referral_id",
-          "pass_status"
+          "pass_status",
+          "delivery_ack_required",
+          "delivery_id",
+          "delivery_ack_token",
+          "delivery_ack_expires_at"
         ]
       },
       "discord_issue": {
@@ -375,7 +390,11 @@
           "openrouter_user_id",
           "referral_bonus_applied",
           "referral_id",
-          "pass_status"
+          "pass_status",
+          "delivery_ack_required",
+          "delivery_id",
+          "delivery_ack_token",
+          "delivery_ack_expires_at"
         ]
       },
       "trial_status": {
@@ -404,6 +423,49 @@
           "referral_id",
           "pass_status"
         ]
+      },
+      "managed_key_delivery_ack": {
+        "method": "POST",
+        "path": "/v1/providers/openrouter/managed-key-delivery/ack",
+        "request_body_fields": [
+          "delivery_id",
+          "managed_credential_ref",
+          "delivery_ack_token"
+        ],
+        "success_response_fields": [
+          "ok"
+        ],
+        "success_response_source": {
+          "file": "managed-key-delivery.ts",
+          "function": "handleManagedKeyDeliveryAck",
+          "kind": "c_json_object"
+        },
+        "client_success_fields": [
+          "succeeded",
+          "status",
+          "message",
+          "diagnostics",
+          "referral_bonus_applied",
+          "referral_id",
+          "pass_status"
+        ]
+      },
+      "telemetry_translation_success_day": {
+        "method": "POST",
+        "path": "/v1/telemetry/translation-success-day",
+        "request_body_fields": [
+          "signal",
+          "telemetry_identifier",
+          "active_date_utc"
+        ],
+        "success_response_fields": [
+          "ok"
+        ],
+        "success_response_source": {
+          "file": "telemetry.ts",
+          "function": "handleTelemetryTranslationSuccessDay",
+          "kind": "c_json_object"
+        }
       }
     },
     "nested_shapes": {

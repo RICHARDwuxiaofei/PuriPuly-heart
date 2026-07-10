@@ -25,8 +25,8 @@ class TelemetryConsentDialog:
     def open(self) -> None:
         result = open_warm_document_dialog(
             self._page,
+            title=t("telemetry.consent.title"),
             body_paragraphs=(
-                t("telemetry.consent.title"),
                 t("telemetry.consent.body"),
                 t("telemetry.consent.excludes"),
             ),

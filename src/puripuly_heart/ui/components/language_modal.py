@@ -37,6 +37,9 @@ class LanguageModal:
         page: ft.Page,
         languages: Sequence[tuple[str, str]],
         on_select: Callable[[str], None],
+        label_for_code: Callable[[str], str] | None = None,
+        description_for_code: Callable[[str], str] | None = None,
+        disabled_codes: set[str] | None = None,
     ):
         """Initialize language modal.
 
@@ -44,10 +47,19 @@ class LanguageModal:
             page: Flet page for dialog management.
             languages: List of (code, name) tuples.
             on_select: Callback when a language is selected (receives code).
+            label_for_code: Optional callable to resolve display label from code.
+            description_for_code: Optional callable to resolve description text
+                from code. When a non-empty string is returned, it is rendered
+                below the language label in the list item.
+            disabled_codes: Optional set of codes that should be rendered as
+                disabled (not clickable, muted style).
         """
         self._page = page
         self._languages = languages
         self._on_select = on_select
+        self._label_for_code = label_for_code or language_name
+        self._description_for_code = description_for_code
+        self._disabled_codes = disabled_codes or set()
         self._dialog: ft.AlertDialog | None = None
 
     def open(
@@ -148,7 +160,7 @@ class LanguageModal:
 
             chip = ft.Container(
                 content=ft.Text(
-                    language_name(lang_code),
+                    self._label_for_code(lang_code),
                     size=16,  # Larger text for VR
                     weight=font_weight,
                     color=text_color,
@@ -180,11 +192,25 @@ class LanguageModal:
         """Build scrollable list of all languages (Bento Card Style)."""
         items = []
         for code, _name in self._languages:
-            is_selected = code == current
+            is_disabled = code in self._disabled_codes
+            is_selected = code == current and not is_disabled
 
-            # Bento Card Style
-            bg_color = COLOR_PRIMARY if is_selected else COLOR_BACKGROUND
-            text_color = ft.Colors.WHITE if is_selected else COLOR_NEUTRAL_DARK
+            # Colors
+            if is_disabled:
+                bg_color = COLOR_BACKGROUND
+                text_color = ft.Colors.with_opacity(0.35, COLOR_NEUTRAL_DARK)
+                desc_color = ft.Colors.with_opacity(0.35, COLOR_NEUTRAL_DARK)
+                border = None
+            else:
+                bg_color = COLOR_PRIMARY if is_selected else COLOR_BACKGROUND
+                text_color = ft.Colors.WHITE if is_selected else COLOR_NEUTRAL_DARK
+                desc_color = (
+                    ft.Colors.with_opacity(0.8, ft.Colors.WHITE)
+                    if is_selected
+                    else COLOR_NEUTRAL_DARK
+                )
+                border = None
+
             font_weight = ft.FontWeight.BOLD
 
             # Shadow for depth
@@ -198,30 +224,57 @@ class LanguageModal:
                 else None
             )
 
-            item = ft.Container(
-                content=ft.Text(
-                    language_name(code),
-                    size=20,  # Much Larger text for VR
+            description = (
+                self._description_for_code(code) if self._description_for_code is not None else ""
+            )
+            if description:
+                content: ft.Control = ft.Column(
+                    controls=[
+                        ft.Text(
+                            self._label_for_code(code),
+                            size=20,
+                            color=text_color,
+                            weight=font_weight,
+                            text_align=ft.TextAlign.CENTER,
+                        ),
+                        ft.Text(
+                            description,
+                            size=16,
+                            color=desc_color,
+                            text_align=ft.TextAlign.CENTER,
+                        ),
+                    ],
+                    spacing=8,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            else:
+                content = ft.Text(
+                    self._label_for_code(code),
+                    size=20,
                     color=text_color,
                     weight=font_weight,
                     text_align=ft.TextAlign.CENTER,
-                ),
+                )
+
+            item = ft.Container(
+                content=content,
                 bgcolor=bg_color,
                 border_radius=16,
-                padding=ft.padding.all(24),  # Much Larger padding (approx 120-130px total height)
+                border=border,
+                padding=ft.padding.all(24),
                 alignment=ft.alignment.center,
-                on_click=lambda e, selected=code: self._select(selected),
-                on_hover=self._on_item_hover,
+                on_click=None if is_disabled else lambda e, selected=code: self._select(selected),
+                on_hover=None if is_disabled else self._on_item_hover,
                 animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
                 shadow=shadow,
-                height=110,  # Explicit height to ensure 4 items fit (600px content area / 4 = 150px)
+                height=110,
             )
             items.append(item)
 
         return ft.ListView(
             controls=items,
             expand=True,
-            spacing=16,  # Increased spacing
+            spacing=16,
             padding=ft.padding.only(right=8, bottom=12),
         )
 
@@ -249,19 +302,28 @@ class LanguageModal:
     def _on_item_hover(self, e: ft.ControlEvent) -> None:
         """Handle hover effect on list cards."""
         container = e.control
-        text_control = container.content
+        content = container.content
 
         is_hovering = e.data == "true"
         # If text is white, it's selected. Don't hover.
-        is_selected = text_control.color == ft.Colors.WHITE
+        if isinstance(content, ft.Column) and content.controls:
+            text_control = content.controls[0]
+            desc_control = content.controls[1] if len(content.controls) > 1 else None
+        else:
+            text_control = content
+            desc_control = None
+
+        is_selected = getattr(text_control, "color", None) == ft.Colors.WHITE
 
         if not is_selected:
             if is_hovering:
                 text_control.color = COLOR_PRIMARY
-                # container.bgcolor = ft.Colors.with_opacity(0.05, COLOR_PRIMARY) # Optional tint
+                if desc_control:
+                    desc_control.color = COLOR_PRIMARY
             else:
                 text_control.color = COLOR_NEUTRAL_DARK
-                # container.bgcolor = COLOR_BACKGROUND
+                if desc_control:
+                    desc_control.color = COLOR_NEUTRAL_DARK
 
             container.update()
 

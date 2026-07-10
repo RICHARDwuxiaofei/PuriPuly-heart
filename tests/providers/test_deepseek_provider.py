@@ -231,10 +231,11 @@ async def test_httpx_deepseek_client_logs_safe_request_failure(
         "[Basic][LLM] DeepSeek request failed [translate]: "
         "category=service_unavailable code=provider.service_unavailable status=503" in rendered_logs
     )
-    assert "message=upstream unavailable token=[redacted]" in "\n".join(caplog.messages)
-    assert "upstream unavailable token=[redacted]" in str(caplog.records[-1].message)
+    assert "message=upstream unavailable" in rendered_logs
+    assert "[redacted]" in rendered_logs
     assert raw_detail not in rendered_logs
     assert "deepseek-secret-123" not in rendered_logs
+    assert "token=deepseek-secret-123" not in rendered_logs
 
 
 @pytest.mark.asyncio

@@ -235,9 +235,9 @@ class FailingAckTokenSetAndManagedKeyDeleteSecretStore(InMemorySecretStore):
     fail_managed_key_delete: bool = False
 
     def set(self, key: str, value: str) -> None:
-        super().set(key, value)
         if key == "openrouter_managed_delivery_ack_token":
             raise RuntimeError("ack token set failed")
+        super().set(key, value)
 
     def delete(self, key: str) -> None:
         if self.fail_managed_key_delete and key == OPENROUTER_MANAGED_API_KEY_SECRET:
@@ -520,7 +520,6 @@ async def test_managed_china_prepare_uses_only_qq_key_with_active_entitlement_st
     settings.managed_identity.active_managed_credential_ref = "managed-ref-qq"
     settings.managed_identity.active_managed_expires_at = "2026-08-03T06:00:00.000Z"
     secrets = InMemorySecretStore()
-    secrets.set(OPENROUTER_MANAGED_API_KEY_SECRET, "standard-managed-key")
     secrets.set(OPENROUTER_MANAGED_QQ_API_KEY_SECRET, "qq-managed-key")
     client = FakeManagedReleaseClient()
     service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
@@ -540,7 +539,6 @@ async def test_managed_china_prepare_requires_qq_auth_without_active_entitlement
     settings.translation.model = TranslationModel.DEEPSEEK_V4_FLASH
     settings.translation.connection = TranslationConnection.MANAGED_CHINA
     secrets = InMemorySecretStore()
-    secrets.set(OPENROUTER_MANAGED_API_KEY_SECRET, "standard-managed-key")
     secrets.set(OPENROUTER_MANAGED_QQ_API_KEY_SECRET, "qq-managed-key")
     client = FakeManagedReleaseClient()
     service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
@@ -563,7 +561,6 @@ async def test_managed_china_prepare_does_not_start_standard_discord_challenge_w
     settings.translation.connection = TranslationConnection.MANAGED_CHINA
     settings.managed_identity.active_managed_credential_ref = "managed-ref-qq"
     secrets = InMemorySecretStore()
-    secrets.set(OPENROUTER_MANAGED_API_KEY_SECRET, "standard-managed-key")
     client = FakeManagedReleaseClient()
     service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
 
@@ -584,7 +581,6 @@ async def test_managed_china_llm_start_requires_qq_auth_without_standard_fallbac
     settings.translation.connection = TranslationConnection.MANAGED_CHINA
     settings.managed_identity.active_managed_credential_ref = "managed-ref-qq"
     secrets = InMemorySecretStore()
-    secrets.set(OPENROUTER_MANAGED_API_KEY_SECRET, "standard-managed-key")
     client = FakeManagedReleaseClient(issue_result=ManagedOpenRouterIssueSuccess("issued-key"))
     service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
 
@@ -666,7 +662,6 @@ async def test_standard_managed_prepare_preserves_discord_flow_without_reading_q
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     settings.translation.connection = TranslationConnection.MANAGED
     secrets = InMemorySecretStore()
-    secrets.set(OPENROUTER_MANAGED_QQ_API_KEY_SECRET, "qq-managed-key")
     service, _settings, _secrets, client, harness = _make_discord_service(
         settings=settings,
         secrets=secrets,
@@ -679,7 +674,7 @@ async def test_standard_managed_prepare_preserves_discord_flow_without_reading_q
     assert client.calls[-1][0] == "discord_issue"
     assert harness.listeners[0].closed is True
     assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
-    assert secrets.get(OPENROUTER_MANAGED_QQ_API_KEY_SECRET) == "qq-managed-key"
+    assert secrets.get(OPENROUTER_MANAGED_QQ_API_KEY_SECRET) is None
 
 
 @pytest.mark.asyncio
@@ -1134,7 +1129,6 @@ async def test_managed_status_refresh_failure_is_distinguishable_from_absent_pas
     ensure_managed_identity_bundle(
         ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
     )
-    secrets.fail_managed_key_delete = True
     client = FakeManagedReleaseClient(
         trial_status_result=ManagedOpenRouterReleaseError(
             code="trial_unavailable",
@@ -1380,7 +1374,6 @@ async def test_issue_persists_managed_user_identifier_after_managed_key_success(
     ensure_managed_identity_bundle(
         ManagedIdentityStateAdapter(settings, lambda _updated: None), secrets
     )
-    secrets.fail_managed_key_delete = True
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     _set_verified_snapshot(settings)
@@ -1578,8 +1571,9 @@ async def test_direct_issue_ack_token_store_and_key_rollback_failure_forces_futu
 
     assert first.behavior == ManagedOpenRouterReleaseBehavior.RETRY
     assert second.behavior == ManagedOpenRouterReleaseBehavior.RETRY
-    assert settings.managed_identity.pending_delivery_ack_source == "discord"
-    assert settings.managed_identity.pending_delivery_ack_source == "discord"
+    assert settings.managed_identity.pending_delivery_ack_source is None
+    assert settings.managed_identity.pending_delivery_ack_delivery_id is None
+    assert secrets.get("openrouter_managed_delivery_ack_token") is None
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,7 @@ import sys
 import threading
 import traceback
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -23,6 +23,9 @@ from typing import Any, Protocol, cast
 import flet as ft
 import numpy as np
 
+from puripuly_heart.app.ports.canonical_settings_persistence import (
+    CanonicalSettingsPersistencePort,
+)
 from puripuly_heart.app.ports.runtime_apply import RuntimeApplyRequest
 from puripuly_heart.app.ports.secret_store import (
     SecretReadResult,
@@ -33,6 +36,9 @@ from puripuly_heart.app.ports.settings_repository import (
     SettingsCommitRequest,
     SettingsCommitResult,
     SettingsSnapshot,
+)
+from puripuly_heart.app.services.canonical_settings_persistence import (
+    compose_canonical_settings_persistence,
 )
 from puripuly_heart.app.services.capture_target_settings import persist_desktop_audio_capture_target
 from puripuly_heart.app.services.managed_auth_claims import (
@@ -96,7 +102,7 @@ from puripuly_heart.app.wiring import (
     build_managed_identity_state_port,
     build_openrouter_credential_runtime_config,
     build_openrouter_release_runtime_config,
-    build_peer_stt_provider_signature,
+    build_peer_stt_provider_signature_from_vnext,
     copy_stable_secrets_to_vnext_namespace,
     create_llm_provider,
     create_peer_stt_backend,
@@ -105,9 +111,10 @@ from puripuly_heart.app.wiring import (
     create_secret_store,
     create_stt_backend,
     resolve_overlay_config,
-    resolve_peer_stt_runtime_config,
+    resolve_peer_stt_runtime_config_from_vnext,
 )
 from puripuly_heart.config.audio_host_api import normalize_input_host_api
+from puripuly_heart.config.capture_target_resolution import resolve_desktop_audio_capture_target
 from puripuly_heart.config.llm_profiles import (
     get_openrouter_selection_alias_for_model_and_source,
     profile_for_alias,
@@ -144,6 +151,7 @@ from puripuly_heart.config.settings import (
     save_settings,
 )
 from puripuly_heart.config.settings_vnext.schema import (
+    AppSettingsVNext,
     CaptureTargetIntent,
     ProcessCaptureTargetIntent,
 )
@@ -490,6 +498,16 @@ def _callable_accepts_keyword(callable_obj: object, keyword: str) -> bool:
     )
 
 
+def _callable_accepts_positional_arguments(callable_obj: object, count: int) -> bool:
+    try:
+        inspect.signature(callable_obj).bind(*([None] * count))
+    except TypeError:
+        return False
+    except ValueError:
+        return True
+    return True
+
+
 def _raise_lifecycle_cleanup_failures(message: str, failures: list[Exception]) -> None:
     if not failures:
         return
@@ -547,11 +565,6 @@ def _github_star_prompt_latest_timestamp(*values: str | None) -> str | None:
     return latest[1] if latest is not None else None
 
 
-def _validate_and_save_settings(config_path: Path, settings: AppSettings) -> None:
-    settings.validate()
-    save_settings(config_path, settings)
-
-
 class _StrictSettingsSaveFailed(Exception):
     pass
 
@@ -560,6 +573,7 @@ class _StrictSettingsSaveFailed(Exception):
 class _ControllerSettingsPatchRepository:
     controller: GuiController
     committed_settings: AppSettings
+    base_settings: AppSettings | None = None
     surface: str = "translation_provider"
 
     async def load(self) -> SettingsSnapshot:
@@ -567,15 +581,32 @@ class _ControllerSettingsPatchRepository:
         return SettingsSnapshot(values=_settings_snapshot_values(settings), revision=None)
 
     async def save(self, request: SettingsCommitRequest) -> SettingsCommitResult:
-        next_settings = copy.deepcopy(self.committed_settings)
-        _apply_managed_pending_delivery_ack_patch(next_settings, request.values)
+        base_settings = self.base_settings
+        next_settings = copy.deepcopy(base_settings or self.committed_settings)
+        if (
+            base_settings is None
+            and "state" not in request.values
+            and "intent" not in request.values
+        ):
+            next_settings = copy.deepcopy(self.committed_settings)
+        elif all(isinstance(path, str) and "." in path for path in request.values):
+            _apply_settings_path_patch(next_settings, request.values)
+        elif "state" in request.values or "intent" in request.values:
+            _apply_managed_pending_delivery_ack_patch(next_settings, request.values)
+        else:
+            next_settings = copy.deepcopy(self.committed_settings)
+        self.controller._begin_canonical_mutation()
+        self.controller._update_canonical_settings_from_legacy_delta(
+            base_settings or next_settings,
+            next_settings,
+        )
         try:
             await asyncio.to_thread(
-                _validate_and_save_settings,
-                self.controller.config_path,
+                self.controller._persist_settings_at_controller_boundary,
                 next_settings,
             )
         except Exception:
+            self.controller._rollback_canonical_mutation()
             self.controller._log_error("Failed to save settings mutation")
             return SettingsCommitResult(
                 succeeded=False,
@@ -588,7 +619,8 @@ class _ControllerSettingsPatchRepository:
                     surface=self.surface,
                 ),
             )
-        _apply_managed_pending_delivery_ack_patch(self.committed_settings, request.values)
+        self.committed_settings = next_settings
+        self.controller._remember_canonical_legacy_projection(next_settings)
         return SettingsCommitResult(
             succeeded=True,
             snapshot=SettingsSnapshot(
@@ -611,16 +643,55 @@ def _apply_managed_pending_delivery_ack_patch(
     if not isinstance(managed, Mapping):
         return
     field_map = {
+        "installation_id": "installation_id",
+        "release_token": "release_token",
+        "release_token_expires_at": "release_token_expires_at",
+        "verified_hardware_hash": "verified_hardware_hash",
+        "verified_hardware_hash_salt_version": "verified_hardware_hash_salt_version",
+        "active_managed_credential_ref": "active_managed_credential_ref",
+        "active_managed_expires_at": "active_managed_expires_at",
+        "founder_letter_seen_credential_ref": "founder_letter_seen_credential_ref",
+        "referral_id": "referral_id",
+        "local_managed_claim_sources": "local_managed_claim_sources",
         "pending_delivery_ack_source": "pending_delivery_ack_source",
         "pending_delivery_ack_delivery_id": "pending_delivery_ack_delivery_id",
         "pending_delivery_ack_managed_credential_ref": "pending_delivery_ack_managed_credential_ref",
         "pending_delivery_ack_expires_at": "pending_delivery_ack_expires_at",
     }
-    if not any(key in managed for key in field_map):
-        return
     for source_key, attr_name in field_map.items():
-        value = managed.get(source_key)
-        setattr(settings.managed_identity, attr_name, value if isinstance(value, str) else None)
+        if source_key not in managed:
+            continue
+        value = managed[source_key]
+        if attr_name == "local_managed_claim_sources":
+            setattr(
+                settings.managed_identity,
+                attr_name,
+                tuple(value) if isinstance(value, list) else (),
+            )
+        elif attr_name == "verified_hardware_hash_salt_version":
+            setattr(settings.managed_identity, attr_name, value if type(value) is int else None)
+        else:
+            setattr(settings.managed_identity, attr_name, value if isinstance(value, str) else None)
+
+
+def _managed_identity_delta(baseline: object, current: object) -> dict[str, object]:
+    baseline_values = asdict(baseline)
+    current_values = asdict(current)
+    return {
+        field_name: copy.deepcopy(value)
+        for field_name, value in current_values.items()
+        if baseline_values.get(field_name) != value
+    }
+
+
+def _apply_managed_identity_delta(settings: AppSettings, values: Mapping[str, object]) -> None:
+    for field_name, value in values.items():
+        setattr(settings.managed_identity, field_name, copy.deepcopy(value))
+
+
+def _restore_managed_identity(settings: AppSettings, snapshot: object) -> None:
+    for field_name, value in asdict(snapshot).items():
+        setattr(settings.managed_identity, field_name, copy.deepcopy(value))
 
 
 @dataclass(slots=True)
@@ -771,8 +842,52 @@ class GuiController:
     settings_mutation_service: SettingsMutationService | None = None
     provider_verifier: _ControllerProviderVerifier | None = None
     telemetry_client: TranslationSuccessTelemetryClientPort | None = None
+    canonical_settings_persistence: CanonicalSettingsPersistencePort[
+        AppSettings, AppSettingsVNext
+    ] = field(
+        default_factory=compose_canonical_settings_persistence,
+        repr=False,
+    )
 
     settings: AppSettings | None = None
+    vnext_settings: AppSettingsVNext | None = None
+    _vnext_settings_authoritative: bool = field(init=False, default=False, repr=False)
+    _canonical_persistence_port_enabled: bool = field(
+        init=False,
+        default=False,
+        repr=False,
+    )
+    _canonical_mutation_rollback_snapshot: AppSettingsVNext | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _canonical_mutation_rollback_legacy_snapshot: AppSettings | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _canonical_mutation_rollback_active_settings: AppSettings | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _canonical_mutation_rollback_authoritative: bool = field(
+        init=False,
+        default=False,
+        repr=False,
+    )
+    _canonical_mutation_rollback_pending: bool = field(
+        init=False,
+        default=False,
+        repr=False,
+    )
+    _canonical_mutation_depth: int = field(init=False, default=0, repr=False)
+    _canonical_legacy_projection_snapshot: AppSettings | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     last_settings_mutation_result: TransactionResult | None = field(
         init=False,
         default=None,
@@ -1061,6 +1176,10 @@ class GuiController:
 
     async def start(self) -> None:
         self.settings = self._load_or_init_settings(self.config_path)
+        self.vnext_settings = self._load_canonical_vnext_settings(self.config_path, self.settings)
+        self._vnext_settings_authoritative = True
+        self._canonical_persistence_port_enabled = True
+        self._remember_canonical_legacy_projection(self.settings)
         self.settings.ui.overlay_enabled = False
         self.settings.ui.peer_translation_enabled = False
         self._sync_overlay_calibration_cache(self.settings)
@@ -1335,8 +1454,15 @@ class GuiController:
     def _build_peer_stt_runtime_signature(self, settings: AppSettings) -> tuple[object, ...]:
         return self._build_peer_runtime_config(settings).runtime_signature
 
-    def _build_peer_stt_provider_signature(self, settings: AppSettings) -> tuple[object, ...]:
-        return build_peer_stt_provider_signature(settings)
+    def _build_peer_stt_provider_signature(
+        self,
+        settings: AppSettings,
+        *,
+        canonical_settings: AppSettingsVNext | None = None,
+    ) -> tuple[object, ...]:
+        return build_peer_stt_provider_signature_from_vnext(
+            canonical_settings or self._canonical_vnext_settings_for(settings)
+        )
 
     def _managed_openrouter_can_attempt_translation(self) -> bool:
         return bool(
@@ -1502,7 +1628,7 @@ class GuiController:
         secret_store_port = _ControllerSecretStorePortAdapter(secret_store)
         managed_state = build_managed_identity_state_port(
             settings,
-            lambda updated: save_settings(self.config_path, updated),
+            self._managed_identity_persistence_callback(settings),
         )
         return ManagedAuthClaimGuard(
             managed_state=managed_state,
@@ -1525,7 +1651,7 @@ class GuiController:
         secret_store_port = _ControllerSecretStorePortAdapter(secret_store)
         managed_state = build_managed_identity_state_port(
             self.settings,
-            lambda updated: save_settings(self.config_path, updated),
+            self._managed_identity_persistence_callback(self.settings),
         )
         auth_service = QqManagedAuthService(
             broker_client=broker_client,
@@ -1599,7 +1725,7 @@ class GuiController:
             secret_store_port = _ControllerSecretStorePortAdapter(secret_store)
             managed_state = build_managed_identity_state_port(
                 updated,
-                lambda next_settings: save_settings(self.config_path, next_settings),
+                self._managed_identity_persistence_callback(updated),
             )
             identity = ManagedIdentityPreflightAdapter(
                 managed_state=managed_state,
@@ -1635,6 +1761,7 @@ class GuiController:
                 secret_store=secret_store_port,
                 settings_repository=_ControllerSettingsPatchRepository(
                     controller=self,
+                    base_settings=self.settings,
                     committed_settings=updated,
                     surface="managed_connection_auth",
                 ),
@@ -1653,6 +1780,7 @@ class GuiController:
                     broker_metadata={"flow": "managed_connection_auth"},
                 )
             )
+            self._complete_canonical_mutation()
             self.last_settings_mutation_result = result
             if result.status == TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING:
                 self.settings = updated
@@ -2798,6 +2926,16 @@ class GuiController:
                 "peer_target_language",
                 merged.languages.peer_target_language,
             )
+        if (
+            merged.provider.peer_stt != STTProviderName.SONIOX
+            and merged.languages.peer_source_mode == "soniox_auto"
+        ):
+            merged.languages.peer_source_mode = "manual"
+            recent_source = merged.languages.recent_source_languages
+            if recent_source:
+                merged.languages.peer_source_language = recent_source[0]
+            else:
+                merged.languages.peer_source_language = merged.languages.source_language
         return merged
 
     def _peer_runtime_should_be_active(self, settings: AppSettings) -> bool:
@@ -3669,23 +3807,25 @@ class GuiController:
         next_desktop.position.validate()
 
     def _build_peer_runtime_config(self, settings: AppSettings) -> PeerRuntimeConfig:
-        backend = resolve_peer_stt_runtime_config(settings)
-        provider_signature = build_peer_stt_provider_signature(settings)
-        capture_target = self._resolve_peer_capture_target(settings)
+        vnext_settings = self._canonical_vnext_settings_for(settings)
+        backend = resolve_peer_stt_runtime_config_from_vnext(vnext_settings)
+        provider_signature = build_peer_stt_provider_signature_from_vnext(vnext_settings)
+        desktop_audio = vnext_settings.intent.desktop_audio
+        capture_target = resolve_desktop_audio_capture_target(desktop_audio.capture_target)
         return PeerRuntimeConfig(
             backend=backend,
-            output_device=settings.desktop_audio.output_device,
-            vad_threshold=settings.desktop_audio.vad_speech_threshold,
-            vad_hangover_ms=settings.desktop_audio.vad_hangover_ms,
-            vad_pre_roll_ms=settings.desktop_audio.vad_pre_roll_ms,
+            output_device=desktop_audio.output_device,
+            vad_threshold=desktop_audio.vad_speech_threshold,
+            vad_hangover_ms=desktop_audio.vad_hangover_ms,
+            vad_pre_roll_ms=desktop_audio.vad_pre_roll_ms,
             provider_signature=provider_signature,
             runtime_signature=(
                 backend.source_language,
-                settings.desktop_audio.output_device,
+                desktop_audio.output_device,
                 capture_target,
-                settings.desktop_audio.vad_speech_threshold,
-                settings.desktop_audio.vad_hangover_ms,
-                settings.desktop_audio.vad_pre_roll_ms,
+                desktop_audio.vad_speech_threshold,
+                desktop_audio.vad_hangover_ms,
+                desktop_audio.vad_pre_roll_ms,
                 provider_signature,
             ),
             capture_target=capture_target,
@@ -5172,6 +5312,7 @@ class GuiController:
         target_code: str,
         peer_source_code: str = "",
         peer_target_code: str = "",
+        peer_source_mode: str = "manual",
     ) -> None:
         if self.settings is None:
             return
@@ -5179,9 +5320,18 @@ class GuiController:
         updated = copy.deepcopy(self.settings)
         updated.languages.source_language = source_code
         updated.languages.target_language = target_code
+        updated.languages.peer_source_mode = peer_source_mode
         updated.languages.peer_source_language = peer_source_code
         updated.languages.peer_target_language = peer_target_code
-        await self.apply_settings(updated)
+        self._begin_canonical_mutation(
+            legacy_snapshot=self._canonical_legacy_projection_snapshot or self.settings
+        )
+        self._capture_runtime_signatures_before_canonical_mutation()
+        self._update_canonical_settings_from_legacy_delta(self.settings, updated)
+        try:
+            await self.apply_settings(updated)
+        finally:
+            self._complete_canonical_mutation()
 
     def _remember_settings_view_order22_baseline(self, settings: AppSettings | None) -> None:
         self._settings_view_order22_baseline = (
@@ -5403,6 +5553,16 @@ class GuiController:
         strict_persistence_errors: bool = False,
         reload_settings_view: bool = True,
     ) -> None:
+        if persist:
+            self._begin_canonical_mutation(
+                legacy_snapshot=self._canonical_legacy_projection_snapshot or self.settings
+            )
+            self._capture_runtime_signatures_before_canonical_mutation()
+            self._update_canonical_settings_from_legacy_delta(
+                self._canonical_legacy_projection_snapshot or self.settings,
+                settings,
+            )
+
         def _effective_peer_language(language: str, peer_language: str) -> str:
             return peer_language or language
 
@@ -5527,11 +5687,15 @@ class GuiController:
         if persist:
             if strict_persistence_errors:
                 try:
-                    _validate_and_save_settings(self.config_path, self.settings)
+                    self._persist_settings_at_controller_boundary(self.settings)
                 except Exception:
+                    self._rollback_canonical_mutation()
                     raise _StrictSettingsSaveFailed from None
+                else:
+                    self._remember_canonical_legacy_projection(self.settings)
             else:
-                self._save_settings()
+                if self._save_settings() is False:
+                    return
         await self._broadcast_desktop_runtime_control_payloads(desktop_runtime_controls)
         previous_strict_clipboard_runtime_errors = self._strict_runtime_errors_for_clipboard_watcher
         self._strict_runtime_errors_for_clipboard_watcher = strict_runtime_errors
@@ -5667,6 +5831,8 @@ class GuiController:
         self._remember_settings_view_order22_baseline(self.settings)
         self._remember_settings_view_order23_baseline(self.settings)
         self._remember_settings_view_order24_baseline(self.settings)
+        if persist:
+            self._complete_canonical_mutation()
 
     async def _apply_order22_order23_order24_settings_via_mutation_services(
         self,
@@ -5837,6 +6003,7 @@ class GuiController:
         ) != _settings_snapshot_values(next_settings)
         repository = _ControllerSettingsPatchRepository(
             controller=self,
+            base_settings=base_settings,
             committed_settings=committed_settings,
             surface="stt_language_audio",
         )
@@ -5861,6 +6028,7 @@ class GuiController:
         )
 
         result = await service.mutate(request)
+        self._complete_canonical_mutation()
         self.last_settings_mutation_result = result
         if not _settings_mutation_committed(result):
             self.settings = copy.deepcopy(base_settings)
@@ -5932,6 +6100,7 @@ class GuiController:
         ) != _settings_snapshot_values(next_settings)
         repository = _ControllerSettingsPatchRepository(
             controller=self,
+            base_settings=base_settings,
             committed_settings=committed_settings,
             surface="overlay_osc_output",
         )
@@ -5955,6 +6124,7 @@ class GuiController:
         )
 
         result = await service.mutate(request)
+        self._complete_canonical_mutation()
         self.last_settings_mutation_result = result
         if not _settings_mutation_committed(result):
             self.settings = copy.deepcopy(base_settings)
@@ -5997,6 +6167,7 @@ class GuiController:
     ) -> TransactionResult:
         repository = _ControllerSettingsPatchRepository(
             controller=self,
+            base_settings=self.settings or committed_settings,
             committed_settings=committed_settings,
             surface="ui_prompt_clipboard_state",
         )
@@ -6010,7 +6181,9 @@ class GuiController:
             expected_revision=None,
             correlation_id=None,
         )
-        return await service.mutate(request)
+        result = await service.mutate(request)
+        self._complete_canonical_mutation()
+        return result
 
     async def _apply_ui_prompt_clipboard_state_settings_via_mutation_service(
         self,
@@ -6149,35 +6322,37 @@ class GuiController:
 
         await self._preserve_github_star_prompt_observation_before_settings_replace(next_settings)
 
-        if settings is not None and not force_rebuild_llm:
-            routed = (
-                await self._apply_order21_order22_order24_provider_settings_via_mutation_services(
+        try:
+            if settings is not None and not force_rebuild_llm:
+                routed = await self._apply_order21_order22_order24_provider_settings_via_mutation_services(
                     next_settings,
                 )
-            )
-            if routed:
-                return
-            routed = await self._apply_translation_provider_settings_via_mutation_service(
-                next_settings,
-            )
-            if routed:
-                return
-            routed = await self._apply_ui_prompt_clipboard_state_settings_via_mutation_service(
-                next_settings,
-            )
-            if routed:
-                return
+                if routed:
+                    return
+                routed = await self._apply_translation_provider_settings_via_mutation_service(
+                    next_settings,
+                )
+                if routed:
+                    return
+                routed = await self._apply_ui_prompt_clipboard_state_settings_via_mutation_service(
+                    next_settings,
+                )
+                if routed:
+                    return
 
-        await self._apply_providers_direct(
-            next_settings,
-            force_rebuild_llm=force_rebuild_llm,
-        )
+            await self._apply_providers_direct(
+                next_settings,
+                force_rebuild_llm=force_rebuild_llm,
+            )
+        finally:
+            self._sync_ui_from_settings()
 
     def _build_provider_runtime_apply_plan(
         self,
         next_settings: AppSettings,
         *,
         force_rebuild_llm: bool,
+        canonical_settings: AppSettingsVNext | None = None,
     ) -> _ProviderRuntimeApplyPlan:
         prev_settings = self.settings
         prev_self_provider_signature = self._last_self_stt_provider_signature
@@ -6197,7 +6372,10 @@ class GuiController:
                 prev_llm_provider_signature = self._build_llm_provider_signature(prev_settings)
 
         next_self_provider_signature = self._build_self_stt_provider_signature(next_settings)
-        next_peer_provider_signature = self._build_peer_stt_provider_signature(next_settings)
+        next_peer_provider_signature = self._build_peer_stt_provider_signature(
+            next_settings,
+            canonical_settings=canonical_settings,
+        )
         next_llm_provider_signature = self._build_llm_provider_signature(next_settings)
 
         return _ProviderRuntimeApplyPlan(
@@ -6379,9 +6557,14 @@ class GuiController:
         plan = self._build_provider_runtime_apply_plan(
             committed_settings,
             force_rebuild_llm=False,
+            canonical_settings=self._canonical_vnext_after_legacy_delta(
+                base_settings,
+                committed_settings,
+            ),
         )
         repository = _ControllerSettingsPatchRepository(
             controller=self,
+            base_settings=base_settings,
             committed_settings=committed_settings,
         )
         runtime_apply = _ControllerProviderRuntimeApply(
@@ -6401,6 +6584,7 @@ class GuiController:
         )
 
         result = await service.mutate(request)
+        self._complete_canonical_mutation()
         self.last_settings_mutation_result = result
         if not _settings_mutation_committed(result):
             return True
@@ -6410,6 +6594,10 @@ class GuiController:
             fallback_plan = self._build_provider_runtime_apply_plan(
                 next_settings,
                 force_rebuild_llm=False,
+                canonical_settings=self._canonical_vnext_after_legacy_delta(
+                    committed_settings,
+                    next_settings,
+                ),
             )
             try:
                 await self._apply_providers_direct(
@@ -6477,9 +6665,14 @@ class GuiController:
         plan = self._build_provider_runtime_apply_plan(
             committed_settings,
             force_rebuild_llm=False,
+            canonical_settings=self._canonical_vnext_after_legacy_delta(
+                base_settings,
+                committed_settings,
+            ),
         )
         repository = _ControllerSettingsPatchRepository(
             controller=self,
+            base_settings=base_settings,
             committed_settings=committed_settings,
             surface="stt_language_audio",
         )
@@ -6506,6 +6699,7 @@ class GuiController:
         )
 
         result = await service.mutate(request)
+        self._complete_canonical_mutation()
         self.last_settings_mutation_result = result
         if not _settings_mutation_committed(result):
             self.settings = copy.deepcopy(base_settings)
@@ -6516,6 +6710,10 @@ class GuiController:
             fallback_plan = self._build_provider_runtime_apply_plan(
                 next_settings,
                 force_rebuild_llm=False,
+                canonical_settings=self._canonical_vnext_after_legacy_delta(
+                    committed_settings,
+                    next_settings,
+                ),
             )
             try:
                 await self._apply_providers_direct(
@@ -6578,6 +6776,14 @@ class GuiController:
             )
             if routed:
                 return
+        self._begin_canonical_mutation(
+            legacy_snapshot=self._canonical_legacy_projection_snapshot or self.settings
+        )
+        self._capture_runtime_signatures_before_canonical_mutation()
+        self._update_canonical_settings_from_legacy_delta(
+            self._canonical_legacy_projection_snapshot or self.settings,
+            next_settings,
+        )
         if plan is None:
             plan = self._build_provider_runtime_apply_plan(
                 next_settings,
@@ -6586,13 +6792,18 @@ class GuiController:
         self.settings = next_settings
         if strict_persistence_errors:
             try:
-                _validate_and_save_settings(self.config_path, self.settings)
+                self._persist_settings_at_controller_boundary(self.settings)
             except Exception:
+                self._rollback_canonical_mutation()
                 raise _StrictSettingsSaveFailed from None
+            else:
+                self._remember_canonical_legacy_projection(self.settings)
         else:
-            self._save_settings()
+            if self._save_settings() is False:
+                return
         await self._apply_provider_runtime_plan(next_settings, plan)
         self._remember_settings_view_order22_baseline(self.settings)
+        self._complete_canonical_mutation()
 
     async def _apply_provider_runtime_plan(
         self,
@@ -6673,6 +6884,172 @@ class GuiController:
         path.parent.mkdir(parents=True, exist_ok=True)
         save_settings(path, settings)
         return settings
+
+    def _load_canonical_vnext_settings(
+        self,
+        path: Path,
+        compatibility_settings: AppSettings,
+    ) -> AppSettingsVNext:
+        return self.canonical_settings_persistence.load(path, compatibility_settings)
+
+    def _persist_settings_at_controller_boundary(self, settings: AppSettings) -> None:
+        canonical = self.vnext_settings
+        if self._canonical_persistence_port_enabled and canonical is not None:
+            self.canonical_settings_persistence.persist(
+                self.config_path,
+                canonical,
+            )
+            return
+        save_settings(self.config_path, settings)
+
+    def _canonical_vnext_settings_for(self, settings: AppSettings) -> AppSettingsVNext:
+        projected = self.canonical_settings_persistence.project(
+            settings,
+            canonical=self.vnext_settings,
+            authoritative=self._vnext_settings_authoritative,
+        )
+        if settings is self.settings and not self._vnext_settings_authoritative:
+            self.vnext_settings = projected
+        return projected
+
+    def _update_canonical_settings_from_legacy_delta(
+        self,
+        base_settings: AppSettings | None,
+        next_settings: AppSettings,
+    ) -> AppSettingsVNext:
+        self.vnext_settings = self._canonical_vnext_after_legacy_delta(
+            base_settings,
+            next_settings,
+        )
+        self._vnext_settings_authoritative = True
+        return self.vnext_settings
+
+    def _canonical_vnext_after_legacy_delta(
+        self,
+        base_settings: AppSettings | None,
+        next_settings: AppSettings,
+    ) -> AppSettingsVNext:
+        return self.canonical_settings_persistence.apply_legacy_delta(
+            canonical=self.vnext_settings,
+            base_settings=base_settings,
+            next_settings=next_settings,
+        )
+
+    def _update_canonical_settings_from_compatibility_mutation(
+        self,
+        settings: AppSettings,
+    ) -> AppSettingsVNext:
+        return self._update_canonical_settings_from_legacy_delta(self.settings, settings)
+
+    def _remember_canonical_legacy_projection(self, settings: AppSettings) -> None:
+        self._canonical_legacy_projection_snapshot = copy.deepcopy(settings)
+
+    def _managed_identity_persistence_callback(
+        self,
+        bound_settings: AppSettings,
+    ) -> Callable[[AppSettings], None]:
+        bound_snapshot = copy.deepcopy(bound_settings.managed_identity)
+
+        def persist(settings: AppSettings) -> None:
+            nonlocal bound_snapshot
+            self._persist_active_controller_settings(
+                settings,
+                bound_managed_snapshot=bound_snapshot,
+            )
+            bound_snapshot = copy.deepcopy(settings.managed_identity)
+
+        return persist
+
+    def _persist_active_controller_settings(
+        self,
+        settings: AppSettings,
+        *,
+        bound_managed_snapshot: object | None = None,
+    ) -> None:
+        active_settings = self.settings or settings
+        baseline = self._canonical_legacy_projection_snapshot or active_settings
+        managed_baseline = (
+            bound_managed_snapshot
+            if bound_managed_snapshot is not None
+            else baseline.managed_identity
+        )
+        managed_delta = _managed_identity_delta(managed_baseline, settings.managed_identity)
+        next_settings = copy.deepcopy(active_settings)
+        _apply_managed_identity_delta(next_settings, managed_delta)
+        self._begin_canonical_mutation(legacy_snapshot=baseline)
+        self._update_canonical_settings_from_legacy_delta(baseline, next_settings)
+        try:
+            self._persist_settings_at_controller_boundary(next_settings)
+        except Exception:
+            self._rollback_canonical_mutation()
+            _restore_managed_identity(settings, managed_baseline)
+            raise
+        self.settings = next_settings
+        self._remember_canonical_legacy_projection(next_settings)
+        self._complete_canonical_mutation()
+
+    def _begin_canonical_mutation(
+        self,
+        *,
+        legacy_snapshot: AppSettings | None = None,
+    ) -> None:
+        if self._canonical_mutation_depth == 0:
+            self._canonical_mutation_rollback_snapshot = (
+                self.canonical_settings_persistence.snapshot(self.vnext_settings)
+            )
+            self._canonical_mutation_rollback_active_settings = self.settings
+            self._canonical_mutation_rollback_legacy_snapshot = copy.deepcopy(
+                legacy_snapshot if legacy_snapshot is not None else self.settings
+            )
+            self._canonical_mutation_rollback_authoritative = self._vnext_settings_authoritative
+            self._canonical_mutation_rollback_pending = True
+        self._canonical_mutation_depth += 1
+
+    def _rollback_canonical_mutation(self) -> None:
+        if not self._canonical_mutation_rollback_pending:
+            return
+        self.vnext_settings = self.canonical_settings_persistence.rollback(
+            self._canonical_mutation_rollback_snapshot
+        )
+        active_settings = self._canonical_mutation_rollback_active_settings
+        legacy_snapshot = self._canonical_mutation_rollback_legacy_snapshot
+        if active_settings is not None and legacy_snapshot is not None:
+            for settings_field in fields(AppSettings):
+                setattr(
+                    active_settings,
+                    settings_field.name,
+                    copy.deepcopy(getattr(legacy_snapshot, settings_field.name)),
+                )
+            self.settings = active_settings
+        else:
+            self.settings = legacy_snapshot
+        self._vnext_settings_authoritative = self._canonical_mutation_rollback_authoritative
+        self._canonical_mutation_depth = 1
+        self._complete_canonical_mutation()
+
+    def _complete_canonical_mutation(self) -> None:
+        if self._canonical_mutation_depth == 0:
+            return
+        self._canonical_mutation_depth -= 1
+        if self._canonical_mutation_depth:
+            return
+        self._canonical_mutation_rollback_snapshot = None
+        self._canonical_mutation_rollback_legacy_snapshot = None
+        self._canonical_mutation_rollback_active_settings = None
+        self._canonical_mutation_rollback_authoritative = False
+        self._canonical_mutation_rollback_pending = False
+
+    def _capture_runtime_signatures_before_canonical_mutation(self) -> None:
+        if self.settings is None:
+            return
+        if self._last_peer_stt_provider_signature is None:
+            self._last_peer_stt_provider_signature = self._build_peer_stt_provider_signature(
+                self.settings
+            )
+        if self._last_peer_stt_runtime_signature is None:
+            self._last_peer_stt_runtime_signature = self._build_peer_stt_runtime_signature(
+                self.settings
+            )
 
     def _get_provider_verifier(self) -> _ControllerProviderVerifier:
         if self.provider_verifier is None:
@@ -6906,6 +7283,11 @@ class GuiController:
         next_settings.ui.overlay_enabled = self.settings.ui.overlay_enabled
         next_settings.ui.peer_translation_enabled = self.settings.ui.peer_translation_enabled
         self.settings = next_settings
+        self.vnext_settings = self._load_canonical_vnext_settings(
+            self.config_path,
+            next_settings,
+        )
+        self._vnext_settings_authoritative = True
         self._peer_process_warning_reason = None
         await self._refresh_peer_stt_runtime()
         self._sync_effective_hub_flags(self.settings)
@@ -7479,7 +7861,7 @@ class GuiController:
             openrouter_config=build_openrouter_release_runtime_config(release_settings),
             managed_state=build_managed_identity_state_port(
                 self.settings,
-                lambda updated: save_settings(self.config_path, updated),
+                self._managed_identity_persistence_callback(self.settings),
             ),
             secrets=secrets,
             client=client,
@@ -8592,6 +8974,7 @@ class GuiController:
         secret_store_port = _ControllerSecretStorePortAdapter(secret_store)
         settings_repository = _ControllerSettingsPatchRepository(
             controller=self,
+            base_settings=self.settings,
             committed_settings=updated,
             surface="openrouter_pkce",
         )
@@ -8622,6 +9005,7 @@ class GuiController:
             self._log_error("OpenRouter PKCE settings commit failed")
             self.last_settings_mutation_result = commit_result
             self._maybe_show_founder_letter_after_pkce_failure(launch_source)
+            self._complete_canonical_mutation()
             return False
 
         runtime_result = await runtime_apply_port.apply_runtime(
@@ -8637,11 +9021,13 @@ class GuiController:
                 message=runtime_result.message,
                 diagnostics=runtime_result.diagnostics,
             )
+            self._complete_canonical_mutation()
             return True
 
         self.last_settings_mutation_result = _runtime_apply_result_as_degraded_transaction(
             runtime_result
         )
+        self._complete_canonical_mutation()
         return True
 
     def _maybe_show_founder_letter_after_pkce_failure(self, launch_source: str) -> None:
@@ -8652,40 +9038,72 @@ class GuiController:
             with contextlib.suppress(Exception):
                 show_founder_letter_dialog()
 
-    def _save_settings(self) -> None:
+    def _save_settings(self) -> bool:
         assert self.settings is not None
+        owns_mutation = self._canonical_mutation_depth == 0
+        baseline = self._canonical_legacy_projection_snapshot or self.settings
+        if owns_mutation:
+            self._begin_canonical_mutation(legacy_snapshot=baseline)
+        self._update_canonical_settings_from_legacy_delta(baseline, self.settings)
         try:
-            save_settings(self.config_path, self.settings)
+            self._persist_settings_at_controller_boundary(self.settings)
         except Exception as exc:
+            self._rollback_canonical_mutation()
             self._log_error(f"Failed to save settings: {exc}")
+            return False
+        else:
+            self._remember_canonical_legacy_projection(self.settings)
+            if owns_mutation:
+                self._complete_canonical_mutation()
+            return True
 
     def persist_settings(self) -> None:
         """Persist current settings, propagating persistence errors to the caller."""
         assert self.settings is not None
-        save_settings(self.config_path, self.settings)
+        owns_mutation = self._canonical_mutation_depth == 0
+        baseline = self._canonical_legacy_projection_snapshot or self.settings
+        if owns_mutation:
+            self._begin_canonical_mutation(legacy_snapshot=baseline)
+        self._update_canonical_settings_from_legacy_delta(baseline, self.settings)
+        try:
+            self._persist_settings_at_controller_boundary(self.settings)
+        except Exception:
+            self._rollback_canonical_mutation()
+            raise
+        self._remember_canonical_legacy_projection(self.settings)
+        if owns_mutation:
+            self._complete_canonical_mutation()
 
     def _sync_ui_from_settings(self) -> None:
         settings = self.settings
         if settings is None:
             return
 
-        # Dashboard language dropdowns are initialized by the view; set values if present.
-        with contextlib.suppress(Exception):
-            dash = getattr(self.app, "view_dashboard", None)
-            if dash is not None:
+        dash = getattr(self.app, "view_dashboard", None)
+        if dash is not None:
+            if _callable_accepts_positional_arguments(dash.set_languages_from_codes, 5):
+                dash.set_languages_from_codes(
+                    settings.languages.source_language,
+                    settings.languages.target_language,
+                    settings.languages.peer_source_language,
+                    settings.languages.peer_target_language,
+                    settings.languages.peer_source_mode,
+                )
+            else:
                 dash.set_languages_from_codes(
                     settings.languages.source_language,
                     settings.languages.target_language,
                     settings.languages.peer_source_language,
                     settings.languages.peer_target_language,
                 )
-                # Load recent languages from settings
-                dash.set_recent_languages(
-                    settings.languages.recent_source_languages,
-                    settings.languages.recent_target_languages,
-                )
-                # Connect callback for persistence
-                dash.on_recent_languages_change = self._on_recent_languages_change
+            dash.set_recent_languages(
+                settings.languages.recent_source_languages,
+                settings.languages.recent_target_languages,
+            )
+            dash.on_recent_languages_change = self._on_recent_languages_change
+            dash.set_peer_auto_detect_available(
+                settings.provider.peer_stt == STTProviderName.SONIOX
+            )
 
         with contextlib.suppress(Exception):
             view_settings = getattr(self.app, "view_settings", None)
