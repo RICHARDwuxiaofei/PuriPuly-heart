@@ -267,6 +267,8 @@ def test_maximal_v24_fixture_round_trip_retains_explicit_stable_fields() -> None
         "desktop_audio.output_device",
         "local_llm.base_url",
         "managed_identity.installation_id",
+        "languages.peer_expected_languages",
+        "languages.peer_source_mode",
         "openrouter.broker_base_url",
         "provider.peer_stt",
         "provider.stt",

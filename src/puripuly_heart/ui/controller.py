@@ -14,7 +14,7 @@ import sys
 import threading
 import traceback
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -23,6 +23,9 @@ from typing import Any, Protocol, cast
 import flet as ft
 import numpy as np
 
+from puripuly_heart.app.ports.canonical_settings_persistence import (
+    CanonicalSettingsPersistencePort,
+)
 from puripuly_heart.app.ports.runtime_apply import RuntimeApplyRequest
 from puripuly_heart.app.ports.secret_store import (
     SecretReadResult,
@@ -33,6 +36,9 @@ from puripuly_heart.app.ports.settings_repository import (
     SettingsCommitRequest,
     SettingsCommitResult,
     SettingsSnapshot,
+)
+from puripuly_heart.app.services.canonical_settings_persistence import (
+    compose_canonical_settings_persistence,
 )
 from puripuly_heart.app.services.managed_auth_claims import (
     MANAGED_AUTH_CLAIM_SOURCE_DISCORD,
@@ -136,10 +142,7 @@ from puripuly_heart.config.settings import (
     new_settings_for_first_run,
     normalize_owned_referral_id,
     save_settings,
-    save_vnext_settings,
 )
-from puripuly_heart.config.settings_vnext import serialization as vnext_serialization
-from puripuly_heart.config.settings_vnext.migration import from_legacy_app_settings
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.config.vad_defaults import DEFAULT_STABLE_VAD_HANGOVER_MS
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
@@ -433,26 +436,6 @@ def _settings_snapshot_value(value: object) -> object:
 
 def _settings_snapshot_values(settings: AppSettings) -> dict[str, Any]:
     return cast(dict[str, Any], _settings_snapshot_value(asdict(settings)))
-
-
-def _apply_changed_mapping_values(
-    target: dict[str, Any],
-    baseline: Mapping[str, object],
-    next_values: Mapping[str, object],
-) -> None:
-    for key in baseline:
-        if key not in next_values:
-            target.pop(key, None)
-    for key, next_value in next_values.items():
-        previous_value = baseline.get(key)
-        if isinstance(previous_value, Mapping) and isinstance(next_value, Mapping):
-            target_value = target.get(key)
-            if not isinstance(target_value, dict):
-                target_value = {}
-                target[key] = target_value
-            _apply_changed_mapping_values(target_value, previous_value, next_value)
-        elif previous_value != next_value:
-            target[key] = copy.deepcopy(next_value)
 
 
 def _managed_connection_auth_settings_values(settings: AppSettings) -> dict[str, Any]:
@@ -837,6 +820,12 @@ class GuiController:
     settings_mutation_service: SettingsMutationService | None = None
     provider_verifier: _ControllerProviderVerifier | None = None
     telemetry_client: TranslationSuccessTelemetryClientPort | None = None
+    canonical_settings_persistence: CanonicalSettingsPersistencePort[
+        AppSettings, AppSettingsVNext
+    ] = field(
+        default_factory=compose_canonical_settings_persistence,
+        repr=False,
+    )
 
     settings: AppSettings | None = None
     vnext_settings: AppSettingsVNext | None = None
@@ -852,6 +841,11 @@ class GuiController:
         repr=False,
     )
     _canonical_mutation_rollback_legacy_snapshot: AppSettings | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _canonical_mutation_rollback_active_settings: AppSettings | None = field(
         init=False,
         default=None,
         repr=False,
@@ -6821,33 +6815,27 @@ class GuiController:
         path: Path,
         compatibility_settings: AppSettings,
     ) -> AppSettingsVNext:
-        from puripuly_heart.config.settings_vnext.facade import load_vnext_settings
-
-        result = load_vnext_settings(path)
-        if result.settings is not None:
-            return result.settings
-        return from_legacy_app_settings(compatibility_settings)
+        return self.canonical_settings_persistence.load(path, compatibility_settings)
 
     def _persist_settings_at_controller_boundary(self, settings: AppSettings) -> None:
         canonical = self.vnext_settings
         if self._canonical_persistence_port_enabled and canonical is not None:
-            result = save_vnext_settings(self.config_path, canonical)
-            if not result.ok:
-                status = getattr(result.status, "value", result.status)
-                message = result.error.message if result.error is not None else status
-                raise RuntimeError(message)
+            self.canonical_settings_persistence.persist(
+                self.config_path,
+                canonical,
+            )
             return
         save_settings(self.config_path, settings)
 
     def _canonical_vnext_settings_for(self, settings: AppSettings) -> AppSettingsVNext:
-        if self.vnext_settings is None:
-            return from_legacy_app_settings(settings)
-        if not self._vnext_settings_authoritative:
-            if settings is self.settings:
-                self.vnext_settings = from_legacy_app_settings(settings)
-                return self.vnext_settings
-            return from_legacy_app_settings(settings)
-        return self.vnext_settings
+        projected = self.canonical_settings_persistence.project(
+            settings,
+            canonical=self.vnext_settings,
+            authoritative=self._vnext_settings_authoritative,
+        )
+        if settings is self.settings and not self._vnext_settings_authoritative:
+            self.vnext_settings = projected
+        return projected
 
     def _update_canonical_settings_from_legacy_delta(
         self,
@@ -6866,17 +6854,11 @@ class GuiController:
         base_settings: AppSettings | None,
         next_settings: AppSettings,
     ) -> AppSettingsVNext:
-        converted_next = from_legacy_app_settings(next_settings)
-        if self.vnext_settings is None or base_settings is None:
-            return converted_next
-        converted_base = from_legacy_app_settings(base_settings)
-        canonical_data = vnext_serialization.to_dict(self.vnext_settings)
-        _apply_changed_mapping_values(
-            canonical_data,
-            vnext_serialization.to_dict(converted_base),
-            vnext_serialization.to_dict(converted_next),
+        return self.canonical_settings_persistence.apply_legacy_delta(
+            canonical=self.vnext_settings,
+            base_settings=base_settings,
+            next_settings=next_settings,
         )
-        return vnext_serialization.from_dict(canonical_data)
 
     def _update_canonical_settings_from_compatibility_mutation(
         self,
@@ -6937,7 +6919,10 @@ class GuiController:
         legacy_snapshot: AppSettings | None = None,
     ) -> None:
         if self._canonical_mutation_depth == 0:
-            self._canonical_mutation_rollback_snapshot = self.vnext_settings
+            self._canonical_mutation_rollback_snapshot = (
+                self.canonical_settings_persistence.snapshot(self.vnext_settings)
+            )
+            self._canonical_mutation_rollback_active_settings = self.settings
             self._canonical_mutation_rollback_legacy_snapshot = copy.deepcopy(
                 legacy_snapshot if legacy_snapshot is not None else self.settings
             )
@@ -6948,8 +6933,21 @@ class GuiController:
     def _rollback_canonical_mutation(self) -> None:
         if not self._canonical_mutation_rollback_pending:
             return
-        self.vnext_settings = self._canonical_mutation_rollback_snapshot
-        self.settings = self._canonical_mutation_rollback_legacy_snapshot
+        self.vnext_settings = self.canonical_settings_persistence.rollback(
+            self._canonical_mutation_rollback_snapshot
+        )
+        active_settings = self._canonical_mutation_rollback_active_settings
+        legacy_snapshot = self._canonical_mutation_rollback_legacy_snapshot
+        if active_settings is not None and legacy_snapshot is not None:
+            for settings_field in fields(AppSettings):
+                setattr(
+                    active_settings,
+                    settings_field.name,
+                    copy.deepcopy(getattr(legacy_snapshot, settings_field.name)),
+                )
+            self.settings = active_settings
+        else:
+            self.settings = legacy_snapshot
         self._vnext_settings_authoritative = self._canonical_mutation_rollback_authoritative
         self._canonical_mutation_depth = 1
         self._complete_canonical_mutation()
@@ -6962,6 +6960,7 @@ class GuiController:
             return
         self._canonical_mutation_rollback_snapshot = None
         self._canonical_mutation_rollback_legacy_snapshot = None
+        self._canonical_mutation_rollback_active_settings = None
         self._canonical_mutation_rollback_authoritative = False
         self._canonical_mutation_rollback_pending = False
 

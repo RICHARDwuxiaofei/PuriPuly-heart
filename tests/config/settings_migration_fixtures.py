@@ -85,6 +85,8 @@ CURRENT_USER_INTENT_DESTINATIONS = {
     "desktop_audio.vad_speech_threshold": "intent.desktop_audio.vad_speech_threshold",
     "languages.peer_source_language": "intent.languages.peer_source_language",
     "languages.peer_target_language": "intent.languages.peer_target_language",
+    "languages.peer_source_mode": "intent.languages.peer_source_mode",
+    "languages.peer_expected_languages": "intent.languages.peer_expected_languages",
     "languages.recent_source_languages": "intent.languages.recent_source_languages",
     "languages.recent_target_languages": "intent.languages.recent_target_languages",
     "languages.source_language": "intent.languages.source_language",
@@ -287,6 +289,8 @@ EXPLICIT_MISSING_FIELD_DEFAULT_EXPECTATIONS: dict[str, Any] = {
     "ui.github_star_prompt_show_count": 0,
     # Missing referral identity state remains absent rather than inventing a value.
     "managed_identity.referral_id": None,
+    "languages.peer_source_mode": "manual",
+    "languages.peer_expected_languages": [],
 }
 
 
@@ -326,6 +330,8 @@ def maximal_v24_settings_fixture() -> dict[str, Any]:
     settings.languages.target_language = "zh-CN"
     settings.languages.peer_source_language = "fr"
     settings.languages.peer_target_language = "es"
+    settings.languages.peer_source_mode = "soniox_auto"
+    settings.languages.peer_expected_languages = ["fr", "ja"]
     settings.languages.recent_source_languages = ["fr", "de", "it"]
     settings.languages.recent_target_languages = ["es", "th", "vi"]
     settings.audio.ring_buffer_ms = 750

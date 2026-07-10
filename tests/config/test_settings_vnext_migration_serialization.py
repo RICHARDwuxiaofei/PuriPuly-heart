@@ -453,7 +453,11 @@ def test_existing_settings_default_to_unknown_telemetry_without_identifier() -> 
     migration = _migration()
     serialization = _serialization()
 
-    serialized = serialization.to_dict(migration.from_dict(maximal_v24_settings_fixture()))
+    existing = maximal_v24_settings_fixture()
+    existing["telemetry"] = {}
+    existing["telemetry_state"] = {}
+
+    serialized = serialization.to_dict(migration.from_dict(existing))
 
     assert serialized["intent"]["telemetry"] == {"consent": "unknown"}
     assert serialized["state"]["telemetry"] == {

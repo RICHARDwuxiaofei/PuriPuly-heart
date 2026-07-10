@@ -18,6 +18,9 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.app.adapters import (
+    settings_vnext_canonical_persistence as canonical_persistence_adapter_module,
+)
 from puripuly_heart.app.services import provider_runtime_apply as provider_runtime_apply_module
 from puripuly_heart.app.services import settings_mutation
 from puripuly_heart.config.audio_host_api import (
@@ -3970,7 +3973,7 @@ def test_failed_canonical_persistence_rolls_back_peer_auto_intent(
     controller._update_canonical_settings_from_compatibility_mutation(pending)
     controller.settings = pending
     monkeypatch.setattr(
-        controller_module,
+        canonical_persistence_adapter_module,
         "save_vnext_settings",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("save failed")),
     )
@@ -4009,7 +4012,7 @@ def test_active_controller_persistence_preserves_canonical_peer_intent(
     controller._remember_canonical_legacy_projection(legacy)
     saved: list[AppSettingsVNext] = []
     monkeypatch.setattr(
-        controller_module,
+        canonical_persistence_adapter_module,
         "save_vnext_settings",
         lambda _path, settings: saved.append(settings) or SimpleNamespace(ok=True),
     )
@@ -4050,7 +4053,7 @@ def test_failed_active_in_place_managed_persistence_restores_legacy_and_canonica
     controller._canonical_persistence_port_enabled = True
     controller._remember_canonical_legacy_projection(legacy)
     monkeypatch.setattr(
-        controller_module,
+        canonical_persistence_adapter_module,
         "save_vnext_settings",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("save failed")),
     )
@@ -4096,7 +4099,7 @@ def test_stale_managed_adapter_persists_only_managed_delta_on_current_settings(
     controller._remember_canonical_legacy_projection(active_settings)
     saved: list[AppSettingsVNext] = []
     monkeypatch.setattr(
-        controller_module,
+        canonical_persistence_adapter_module,
         "save_vnext_settings",
         lambda _path, settings: saved.append(settings) or SimpleNamespace(ok=True),
     )
@@ -4147,7 +4150,7 @@ def test_failed_stale_managed_adapter_persistence_restores_active_and_bound_sett
     controller._canonical_persistence_port_enabled = True
     controller._remember_canonical_legacy_projection(active_settings)
     monkeypatch.setattr(
-        controller_module,
+        canonical_persistence_adapter_module,
         "save_vnext_settings",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("save failed")),
     )
@@ -4185,7 +4188,7 @@ def test_direct_save_stages_legacy_delta_without_overwriting_canonical_peer_inte
     controller._remember_canonical_legacy_projection(legacy)
     saved: list[AppSettingsVNext] = []
     monkeypatch.setattr(
-        controller_module,
+        canonical_persistence_adapter_module,
         "save_vnext_settings",
         lambda _path, settings: saved.append(settings) or SimpleNamespace(ok=True),
     )
@@ -4267,7 +4270,7 @@ async def test_settings_repository_commits_only_scoped_delta_to_canonical_vnext(
     stale_full_draft.provider.peer_stt = STTProviderName.DEEPGRAM
     saved: list[AppSettingsVNext] = []
     monkeypatch.setattr(
-        controller_module,
+        canonical_persistence_adapter_module,
         "save_vnext_settings",
         lambda _path, settings: saved.append(settings) or SimpleNamespace(ok=True),
     )
@@ -4320,7 +4323,7 @@ async def test_failed_scoped_persistence_restores_canonical_and_legacy_before_ru
     controller._remember_canonical_legacy_projection(legacy)
     runtime_calls: list[str] = []
     monkeypatch.setattr(
-        controller_module,
+        canonical_persistence_adapter_module,
         "save_vnext_settings",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("save failed")),
     )

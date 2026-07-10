@@ -15,7 +15,7 @@ from puripuly_heart.core.orchestrator.hub import (
     ClientHub,
     ContextEntry,
 )
-from puripuly_heart.domain.events import UIEventType
+from puripuly_heart.domain.events import STTFinalEvent, UIEventType
 from puripuly_heart.domain.models import Transcript
 
 # ── Mock classes ──────────────────────────────────────────────────────────────
@@ -868,16 +868,17 @@ class TestContextLogging:
             channel="peer",
         )
 
-        await hub._handle_transcript(transcript, is_final=True, source="Peer")
-        await hub._ensure_translation(transcript)
-        await asyncio.gather(*hub.peer_runtime.translation_tasks.values(), return_exceptions=True)
+        await hub._handle_stt_event(
+            STTFinalEvent(utterance_id=transcript.utterance_id, transcript=transcript)
+        )
+        await hub.peer_final_runs.wait_for_idle()
 
-        bundle = hub.get_or_create_bundle(transcript.utterance_id, channel="peer")
+        events = [await hub.ui_events.get(), await hub.ui_events.get()]
+        translation_event = events[1]
+        bundle = hub.get_or_create_bundle(translation_event.utterance_id, channel="peer")
 
         assert bundle.translation is not None
         assert hub.osc.messages == []
-
-        events = [await hub.ui_events.get(), await hub.ui_events.get()]
         assert [event.type for event in events] == [
             UIEventType.TRANSCRIPT_FINAL,
             UIEventType.TRANSLATION_DONE,
