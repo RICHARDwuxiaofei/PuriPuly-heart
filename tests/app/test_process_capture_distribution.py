@@ -59,7 +59,9 @@ def test_release_workflow_runs_packaged_installed_strict_smoke_and_alternate_ins
     assert '"/DMyAppId=$InstallerTestAppId"' in script
     assert '$InstallerTestAppId = "{{C2E4A7B1-59F3-4C89-9D21-7E6B5A4032F8}"' in script
     assert '"/DSkipLocalSttProvisioning=1"' in script
-    assert "process-capture-runtime-check" in script
+    assert 'ArgumentList @("process-capture-runtime-check")' not in script
+    assert "PURIPULY_HEART_RELEASE_PROCESS_CAPTURE_SMOKE" in script
+    assert '"/DProcessCaptureSmokeArtifactRoot=$processCaptureSmokeArtifactRoot"' in script
     assert "native_process_specific" in script
     assert "device_fallback_used" in script
 
@@ -71,6 +73,21 @@ def test_installer_smoke_skip_is_compile_time_only_and_production_default_is_unc
     assert "Local STT provisioning skipped for isolated installer smoke." in script
     assert f'#define MyAppId "{{{PRODUCTION_APP_ID}}}"' not in script
     assert '#define MyAppId "{{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"' in script
+    assert "#ifdef ProcessCaptureSmokeArtifactRoot" in script
+    assert 'DestDir: "{app}\\process-capture-smoke"' in script
+
+
+def test_production_build_and_cli_omit_release_only_smoke_helper() -> None:
+    spec = (ROOT / "build.spec").read_text(encoding="utf-8")
+    main_source = (ROOT / "src/puripuly_heart/main.py").read_text(encoding="utf-8")
+    helper_spec = (ROOT / "scripts/release/process-capture-runtime-smoke.spec").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'os.environ.get("PURIPULY_HEART_RELEASE_PROCESS_CAPTURE_SMOKE") == "1"' in spec
+    assert "noarchive=release_smoke" in spec
+    assert "process-capture-runtime-check" not in main_source
+    assert "must not collect duplicate production modules" in helper_spec
 
 
 def test_installer_isolation_rejects_production_identity_and_workspace(tmp_path: Path) -> None:
@@ -101,18 +118,25 @@ def test_runtime_report_requires_native_hash_strict_mode_and_no_fallback(tmp_pat
     native = tmp_path / "proctap" / "_native.cp312-win_amd64.pyd"
     native.parent.mkdir()
     native.write_bytes(b"native")
+    helper = tmp_path / "PuriPulyHeartProcessCaptureSmoke.exe"
+    helper.write_bytes(b"helper")
     report = {
-        "schema": "puripuly-heart/process-capture-runtime-check/v1",
+        "schema": "puripuly-heart/process-capture-packaged-smoke/v1",
         "status": "passed",
         "proctap_version": "1.0.3",
         "proctap_module": str(tmp_path / "proctap" / "__init__.py"),
-        "native_module": str(native),
-        "native_sha256": hashlib.sha256(b"native").hexdigest(),
+        "runtime_native_module": str(native),
+        "runtime_native_sha256": hashlib.sha256(b"native").hexdigest(),
+        "artifact_native_module": str(native),
+        "artifact_native_sha256": hashlib.sha256(b"native").hexdigest(),
+        "helper_executable": str(helper),
+        "helper_executable_sha256": hashlib.sha256(b"helper").hexdigest(),
         "native_process_specific": True,
         "capture_started": True,
         "device_fallback_used": False,
         "credentials_used": False,
         "network_used": False,
+        "release_only_helper": True,
     }
 
     validate_runtime_report(report, expected_root=tmp_path)
@@ -153,6 +177,7 @@ def test_distribution_evidence_schema_is_strict(tmp_path: Path) -> None:
         "technical_status": "passed",
         "overlay": {},
         "workflow": {},
+        "release_only_smoke": {},
         "commands": [],
     }
 
@@ -242,10 +267,10 @@ def test_checked_in_distribution_evidence_matches_schema_and_manual_claim_rules(
     assert evidence["status"] == "closed_with_waiver"
     provenance = evidence["installer_isolation"]["installer_provenance"]
     assert provenance["release_installer_sha256"] == (
-        "08903c06ec5a76610279c5338875e28beea831e1cec7da62e37b8c6a7d123e74"
+        "2f4ce203fcc7100657462f0bfe4ad48e4dfa89b1b633a4e34aa1a07ea7d13add"
     )
     assert provenance["isolated_installer_sha256"] == (
-        "222d81b45b20e27f3ffbdc30fcdb6e330ea78f4f78e94d97bbf26485d14cd629"
+        "356dde0162a7cb2688e75f6b4dbd4ffdde970d5b5b30c8f25ad71032f23fab9a"
     )
     assert provenance["release_installer_sha256"] != provenance["isolated_installer_sha256"]
     assert matrix["discord_stable"].status == "waived"
@@ -253,3 +278,6 @@ def test_checked_in_distribution_evidence_matches_schema_and_manual_claim_rules(
     assert matrix["vrchat"].status == "waived"
     assert matrix["vrchat"].result == "not_tested"
     assert all(cell.status != "passed" for cell in matrix.values())
+    assert evidence["release_only_smoke"]["production_dist_helper_present"] is False
+    assert evidence["release_only_smoke"]["production_installer_helper_included"] is False
+    assert evidence["release_only_smoke"]["installed_only_by_alternate_app_id_installer"] is True

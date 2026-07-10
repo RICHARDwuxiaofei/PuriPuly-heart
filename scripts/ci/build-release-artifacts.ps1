@@ -281,7 +281,10 @@ function Invoke-SoxrRuntimeSmokeCheck {
 function Invoke-ProcessCaptureRuntimeSmokeCheck {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$ExePath,
+        [string]$HelperExePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ArtifactRoot,
 
         [Parameter(Mandatory = $true)]
         [string]$ReportPath,
@@ -290,17 +293,12 @@ function Invoke-ProcessCaptureRuntimeSmokeCheck {
         [string]$Label
     )
 
-    $previousReportPath = $env:PURIPULY_HEART_PROCESS_CAPTURE_RUNTIME_REPORT_PATH
-    $env:PURIPULY_HEART_PROCESS_CAPTURE_RUNTIME_REPORT_PATH = $ReportPath
-    try {
-        $smokeTest = Start-Process -FilePath $ExePath -ArgumentList @("process-capture-runtime-check") -Wait -PassThru
-    } finally {
-        if ($null -eq $previousReportPath) {
-            Remove-Item Env:PURIPULY_HEART_PROCESS_CAPTURE_RUNTIME_REPORT_PATH -ErrorAction SilentlyContinue
-        } else {
-            $env:PURIPULY_HEART_PROCESS_CAPTURE_RUNTIME_REPORT_PATH = $previousReportPath
-        }
-    }
+    $smokeTest = Start-Process -FilePath $HelperExePath -ArgumentList @(
+        "--artifact-root",
+        $ArtifactRoot,
+        "--report",
+        $ReportPath
+    ) -Wait -PassThru
 
     if ($smokeTest.ExitCode -ne 0) {
         throw "$Label process-capture runtime smoke test failed with exit code $($smokeTest.ExitCode)"
@@ -313,17 +311,22 @@ function Invoke-ProcessCaptureRuntimeSmokeCheck {
         $report.proctap_version -ne "1.0.3" -or
         $report.native_process_specific -ne $true -or
         $report.capture_started -ne $true -or
+        $report.release_only_helper -ne $true -or
         $report.device_fallback_used -ne $false -or
         $report.credentials_used -ne $false -or
         $report.network_used -ne $false) {
         throw "$Label process-capture runtime report failed strict validation"
     }
-    if (-not (Test-Path ([string]$report.native_module))) {
-        throw "$Label packaged ProcTap native module not found: $($report.native_module)"
+    if (-not (Test-Path ([string]$report.artifact_native_module))) {
+        throw "$Label packaged ProcTap native module not found: $($report.artifact_native_module)"
     }
-    $nativeHash = Get-FileSha256 -Path ([string]$report.native_module)
-    if ($nativeHash -ne ([string]$report.native_sha256)) {
+    $nativeHash = Get-FileSha256 -Path ([string]$report.artifact_native_module)
+    if ($nativeHash -ne ([string]$report.artifact_native_sha256)) {
         throw "$Label packaged ProcTap native module hash mismatch"
+    }
+    $helperHash = Get-FileSha256 -Path $HelperExePath
+    if ($helperHash -ne ([string]$report.helper_executable_sha256)) {
+        throw "$Label release-only process-capture smoke helper hash mismatch"
     }
 }
 
@@ -385,6 +388,11 @@ $processCaptureRuntimeReportDir = Join-Path $PWD "build/process-capture-runtime-
 $packagedProcessCaptureRuntimeReportPath = Join-Path $processCaptureRuntimeReportDir "packaged-process-capture-runtime-check.json"
 $installedProcessCaptureRuntimeReportPath = Join-Path $processCaptureRuntimeReportDir "installed-process-capture-runtime-check.json"
 $reinstalledProcessCaptureRuntimeReportPath = Join-Path $processCaptureRuntimeReportDir "reinstalled-process-capture-runtime-check.json"
+$processCaptureSmokeBuildRoot = Join-Path $releaseBuildRoot "process-capture-smoke"
+$processCaptureSmokeDistDir = Join-Path $processCaptureSmokeBuildRoot "dist"
+$processCaptureSmokeWorkDir = Join-Path $processCaptureSmokeBuildRoot "work"
+$processCaptureSmokeArtifactRoot = Join-Path $processCaptureSmokeDistDir "PuriPulyHeartProcessCaptureSmoke"
+$processCaptureSmokeHelperPath = Join-Path $processCaptureSmokeArtifactRoot "PuriPulyHeartProcessCaptureSmoke.exe"
 $packagedSoxrComplianceDir = Join-Path $distDir "third_party\soxr"
 $packagedSoxrLicensePath = Join-Path $packagedSoxrComplianceDir "COPYING.LGPL-2.1.txt"
 $packagedSoxrSourceBundlePath = $null
@@ -457,9 +465,39 @@ Invoke-ExternalProcess -FilePath $pythonCommand -ArgumentList @(
     "build.spec"
 )
 
+Write-Host "Building release-only process-capture smoke helper..."
+$previousProcessCaptureSmokeBuild = $env:PURIPULY_HEART_RELEASE_PROCESS_CAPTURE_SMOKE
+$env:PURIPULY_HEART_RELEASE_PROCESS_CAPTURE_SMOKE = "1"
+try {
+    Invoke-ExternalProcess -FilePath $pythonCommand -ArgumentList @(
+        "-m",
+        "PyInstaller",
+        "--clean",
+        "--noconfirm",
+        "--distpath",
+        $processCaptureSmokeDistDir,
+        "--workpath",
+        $processCaptureSmokeWorkDir,
+        "build.spec"
+    )
+} finally {
+    if ($null -eq $previousProcessCaptureSmokeBuild) {
+        Remove-Item Env:PURIPULY_HEART_RELEASE_PROCESS_CAPTURE_SMOKE -ErrorAction SilentlyContinue
+    } else {
+        $env:PURIPULY_HEART_RELEASE_PROCESS_CAPTURE_SMOKE = $previousProcessCaptureSmokeBuild
+    }
+}
+if (-not (Test-Path $processCaptureSmokeHelperPath)) {
+    throw "Release-only process-capture smoke helper not found: $processCaptureSmokeHelperPath"
+}
+
 $exePath = Join-Path $PWD "dist/PuriPulyHeart/PuriPulyHeart.exe"
 if (-not (Test-Path $exePath)) {
     throw "Packaged executable not found: $exePath"
+}
+$productionPackagedSmokeHelperPath = Join-Path $distDir "PuriPulyHeartProcessCaptureSmoke.exe"
+if (Test-Path $productionPackagedSmokeHelperPath) {
+    throw "Production packaged application must omit the release-only process-capture smoke helper"
 }
 
 $packagedLocalQwenRuntimeDir = Resolve-PackagedLocalQwenRuntimeDir -DistDir $distDir
@@ -599,7 +637,7 @@ if ($localQwenRuntimeSmokeTest.ExitCode -ne 0) {
 }
 
 Invoke-SoxrRuntimeSmokeCheck -ExePath $exePath -ReportPath $packagedSoxrRuntimeReportPath -ExpectedExtensionPath $packagedSoxrExtensionPath -ExpectedSoxrDllPath $packagedSoxrDllPath -Label "Packaged"
-Invoke-ProcessCaptureRuntimeSmokeCheck -ExePath $exePath -ReportPath $packagedProcessCaptureRuntimeReportPath -Label "Packaged"
+Invoke-ProcessCaptureRuntimeSmokeCheck -HelperExePath $processCaptureSmokeHelperPath -ArtifactRoot $processCaptureSmokeArtifactRoot -ReportPath $packagedProcessCaptureRuntimeReportPath -Label "Packaged production-collected smoke"
 
 Write-Host "Smoke-testing packaged overlay executable..."
 Invoke-External -FilePath $packagedOverlayPath -ArgumentList @("--check-startup-contract")
@@ -643,6 +681,8 @@ $InstallerSmokeDir = Join-Path $env:LOCALAPPDATA "Programs\PuriPulyHeart-LocalST
 $InstallerSmokeAppDataRoot = Join-Path $env:TEMP "PuriPulyHeart-LocalSTT-Test-AppData"
 $InstallerSmokeLogPath = Join-Path $env:TEMP "PuriPulyHeart-LocalSTT-Test.log"
 $InstallerReinstallSmokeLogPath = Join-Path $env:TEMP "PuriPulyHeart-LocalSTT-Test-reinstall.log"
+$installedProcessCaptureSmokeArtifactRoot = Join-Path $InstallerSmokeDir "process-capture-smoke"
+$installedProcessCaptureSmokeHelperPath = Join-Path $installedProcessCaptureSmokeArtifactRoot "PuriPulyHeartProcessCaptureSmoke.exe"
 $installedExePath = Join-Path $InstallerSmokeDir "PuriPulyHeart.exe"
 $installedOpenVrDllPath = Join-Path $InstallerSmokeDir "openvr_api.dll"
 $installedNotoCjkFontPath = Join-Path $InstallerSmokeDir "puripuly_heart\data\fonts\NotoSansCJK-Medium.ttc"
@@ -699,6 +739,7 @@ Write-Host "Building smoke-test installer with alternate AppId..."
 Invoke-ExternalProcess -FilePath $isccPath -ArgumentList @(
     "/DMyAppId=$InstallerTestAppId",
     "/DSkipLocalSttProvisioning=1",
+    "/DProcessCaptureSmokeArtifactRoot=$processCaptureSmokeArtifactRoot",
     "/O$InstallerSmokeBuildDir",
     "installer.iss"
 ) -WorkingDirectory $PWD
@@ -744,6 +785,9 @@ if ($installerSmokeLog -match [regex]::Escape("Local STT provisioning completed 
 if (-not (Test-Path $installedExePath)) {
     throw "Installed app executable not found after installer smoke: $installedExePath"
 }
+if (-not (Test-Path $installedProcessCaptureSmokeHelperPath)) {
+    throw "Installed release-only process-capture smoke helper not found: $installedProcessCaptureSmokeHelperPath"
+}
 if (-not (Test-Path $installedOpenVrDllPath)) {
     throw "Installed OpenVR runtime DLL not found after installer smoke: $installedOpenVrDllPath"
 }
@@ -771,7 +815,7 @@ if (-not (Test-Path $installedSoxrSourceBundlePath)) {
 }
 
 Invoke-SoxrRuntimeSmokeCheck -ExePath $installedExePath -ReportPath $installedSoxrRuntimeReportPath -ExpectedExtensionPath $installedSoxrExtensionPath -ExpectedSoxrDllPath $installedSoxrDllPath -Label "Installed"
-Invoke-ProcessCaptureRuntimeSmokeCheck -ExePath $installedExePath -ReportPath $installedProcessCaptureRuntimeReportPath -Label "Installed"
+Invoke-ProcessCaptureRuntimeSmokeCheck -HelperExePath $installedProcessCaptureSmokeHelperPath -ArtifactRoot $installedProcessCaptureSmokeArtifactRoot -ReportPath $installedProcessCaptureRuntimeReportPath -Label "Installed"
 
 $expectedInstalledSoxrDllHash = (Get-FileHash -Path $packagedSoxrDllPath -Algorithm SHA256).Hash
 $expectedInstalledSoxrLicenseHash = (Get-FileHash -Path $packagedSoxrLicensePath -Algorithm SHA256).Hash
@@ -876,7 +920,24 @@ if (Test-Path $legacyRootLevelSoxrDllPath) {
 }
 
 Invoke-SoxrRuntimeSmokeCheck -ExePath $installedExePath -ReportPath $reinstalledSoxrRuntimeReportPath -ExpectedExtensionPath $installedSoxrExtensionPath -ExpectedSoxrDllPath $installedSoxrDllPath -Label "Reinstalled"
-Invoke-ProcessCaptureRuntimeSmokeCheck -ExePath $installedExePath -ReportPath $reinstalledProcessCaptureRuntimeReportPath -Label "Reinstalled"
+Invoke-ProcessCaptureRuntimeSmokeCheck -HelperExePath $installedProcessCaptureSmokeHelperPath -ArtifactRoot $installedProcessCaptureSmokeArtifactRoot -ReportPath $reinstalledProcessCaptureRuntimeReportPath -Label "Reinstalled"
+
+$installedUninstallerPath = Join-Path $InstallerSmokeDir "unins000.exe"
+if (-not (Test-Path $installedUninstallerPath)) {
+    throw "Isolated installer smoke uninstaller not found: $installedUninstallerPath"
+}
+$uninstallSmoke = Start-Process -FilePath $installedUninstallerPath -ArgumentList @(
+    "/VERYSILENT",
+    "/SUPPRESSMSGBOXES",
+    "/NORESTART"
+) -Wait -PassThru
+if ($uninstallSmoke.ExitCode -ne 0) {
+    throw "Isolated installer smoke cleanup failed with exit code $($uninstallSmoke.ExitCode)"
+}
+Start-Sleep -Seconds 1
+if (Test-Path $InstallerSmokeDir) {
+    throw "Isolated installer smoke directory remains after cleanup: $InstallerSmokeDir"
+}
 
 Write-Host "Generating SHA256..."
 $hash = (Get-FileHash -Path $installerPath -Algorithm SHA256).Hash

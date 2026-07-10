@@ -717,7 +717,10 @@ def test_settings_config_path_marks_custom_config_as_explicit(tmp_path) -> None:
     assert explicit is True
 
 
-def test_main_dispatches_process_capture_runtime_check(monkeypatch) -> None:
-    monkeypatch.setattr(main_module, "run_process_capture_runtime_check", lambda: 0)
+def test_production_cli_does_not_advertise_or_accept_process_capture_smoke(capsys) -> None:
+    help_text = main_module.build_parser().format_help()
 
-    assert main_module.main(["process-capture-runtime-check"]) == 0
+    assert "process-capture-runtime-check" not in help_text
+    with pytest.raises(SystemExit):
+        main_module.main(["process-capture-runtime-check"])
+    assert "process-capture-runtime-check" not in capsys.readouterr().out

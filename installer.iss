@@ -7,9 +7,13 @@
 #define MyAppVersion "2.2.2"
 #define MyAppPublisher "salee"
 #define MyAppURL "https://github.com/kapitalismho/PuriPuly-heart"
-#define MyAppExeName "PuriPulyHeart.exe"
+#ifndef MyAppExeName
+  #define MyAppExeName "PuriPulyHeart.exe"
+#endif
 #define MyOverlayExeName "PuriPulyHeartOverlay.exe"
-#define MyPackagedAppDir "dist\PuriPulyHeart"
+#ifndef MyPackagedAppDir
+  #define MyPackagedAppDir "dist\PuriPulyHeart"
+#endif
 #define MyStagedOverlayDir "build\overlay"
 #define NotoCjkFontRelativePath "puripuly_heart\data\fonts\NotoSansCJK-Medium.ttc"
 #define LocalSttManifestRelativePath "puripuly_heart\data\models\qwen3-asr-0.6b-int8-sherpa.manifest.json"
@@ -95,6 +99,9 @@ Source: "{#MyStagedOverlayDir}\{#MyOverlayExeName}"; DestDir: "{app}"; Flags: ig
 ; Installer build/install never resolves SteamVR paths for openvr_api.dll.
 ; Bundled CJK font is staged at {#MyPackagedAppDir}\{#NotoCjkFontRelativePath}; the recursive packaged-tree copy installs it to {app}\{#NotoCjkFontRelativePath}.
 Source: "{#MyPackagedAppDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "{#MyAppExeName},{#MyOverlayExeName}"
+#ifdef ProcessCaptureSmokeArtifactRoot
+Source: "{#ProcessCaptureSmokeArtifactRoot}\*"; DestDir: "{app}\process-capture-smoke"; Flags: ignoreversion recursesubdirs createallsubdirs
+#endif
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
 [Icons]

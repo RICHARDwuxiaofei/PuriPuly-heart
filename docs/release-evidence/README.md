@@ -54,3 +54,8 @@ Distribution schema v2 keeps installer identities separate:
 `isolated_installer_sha256` identifies the exact alternate-AppId artifact used by installer smoke.
 The isolated artifact timestamp and associated install-log timestamp/hash are recorded alongside
 them; validators reject equal or file-swapped provenance.
+
+Distribution schema v3 uses `PuriPulyHeartProcessCaptureSmoke.exe`, a release-only frozen helper,
+to exercise the strict factory against packaged and isolated-installed native contents. The normal
+application CLI and production installer omit this helper. Only the exact alternate-AppId smoke
+installer includes it, and isolated uninstall cleanup removes it with the test installation.
