@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from uuid import uuid4
 
 import pytest
 
@@ -10,8 +11,8 @@ from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.vad.gating import SpeechEnd, SpeechStart
-from puripuly_heart.domain.events import UIEventType
-from puripuly_heart.domain.models import Translation
+from puripuly_heart.domain.events import STTFinalEvent, UIEventType
+from puripuly_heart.domain.models import FinalLanguageRun, Transcript, Translation
 from tests.helpers.fakes import RecordingOscQueue, samples
 
 
@@ -154,6 +155,50 @@ async def test_peer_desktop_transcripts_are_routed_to_peer_runtime_and_never_sen
     assert osc.messages == []
     assert event.type == UIEventType.TRANSCRIPT_FINAL
     assert event.channel == "peer"
+
+
+def test_peer_logical_turn_projection_preserves_final_language_runs() -> None:
+    hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), clock=FakeClock(_now=10.0))
+    parent_utterance_id = uuid4()
+    runs = (
+        FinalLanguageRun(text="日本語", language="ja"),
+        FinalLanguageRun(text="中文", language="zh"),
+    )
+
+    parent_id, projected = hub._peer_logical_turn_transcript(
+        Transcript(
+            utterance_id=parent_utterance_id,
+            text="日本語中文",
+            is_final=True,
+            channel="peer",
+            final_language_runs=runs,
+        )
+    )
+
+    assert parent_id == parent_utterance_id
+    assert projected.utterance_id != parent_utterance_id
+    assert projected.final_language_runs == runs
+
+
+@pytest.mark.asyncio
+async def test_peer_final_event_preserves_language_runs_at_the_current_consumer_boundary() -> None:
+    hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), clock=FakeClock(_now=10.0))
+    parent_utterance_id = uuid4()
+    runs = (FinalLanguageRun(text="中文", language="zh"),)
+    transcript = Transcript(
+        utterance_id=parent_utterance_id,
+        text="中文",
+        is_final=True,
+        channel="peer",
+        final_language_runs=runs,
+    )
+
+    await hub._handle_stt_event(STTFinalEvent(parent_utterance_id, transcript))
+
+    event = await hub.ui_events.get()
+    assert event.type == UIEventType.TRANSCRIPT_FINAL
+    assert isinstance(event.payload, Transcript)
+    assert event.payload.final_language_runs == runs
 
 
 @pytest.mark.asyncio

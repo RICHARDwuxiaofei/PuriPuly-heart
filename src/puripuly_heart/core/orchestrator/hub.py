@@ -18,7 +18,11 @@ from puripuly_heart.core.error_messages import (
     provider_failure_report,
     stt_failure_report,
 )
-from puripuly_heart.core.language import get_llm_language_name
+from puripuly_heart.core.language import (
+    DetectedLanguageForLLM,
+    get_llm_language_name,
+    map_detected_language_for_llm,
+)
 from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterUserFacingError,
@@ -123,6 +127,10 @@ class _LatencyTimeline:
 
 class _StaleProviderCompletion(Exception):
     """Internal signal for provider calls completed by a replaced provider handle."""
+
+
+class _UnmappedDetectedLanguage(Exception):
+    pass
 
 
 def _safe_log_arg(value: object) -> object:
@@ -784,6 +792,7 @@ class ClientHub:
             is_final=True,
             created_at=transcript.created_at,
             channel="peer",
+            final_language_runs=transcript.final_language_runs,
         )
 
     def _emit_exception_summary(
@@ -1045,12 +1054,13 @@ class ClientHub:
         timestamp: float,
         *,
         runtime: ChannelRuntime | None = None,
+        source_language: str | None = None,
     ) -> None:
         runtime = runtime or self.self_runtime
         runtime.remember_context(
             text,
             timestamp=timestamp,
-            source_language=self._source_language_for(runtime),
+            source_language=source_language or self._source_language_for(runtime),
             target_language=self._target_language_for(runtime),
             max_entries=max(self.context_max_entries, self.integrated_context_max_entries),
         )
@@ -2906,13 +2916,40 @@ class ClientHub:
             return self.peer_target_language
         return self.target_language
 
-    def _format_system_prompt(self, runtime: ChannelRuntime | None = None) -> str:
+    def _format_system_prompt(
+        self,
+        runtime: ChannelRuntime | None = None,
+        *,
+        source_name: str | None = None,
+    ) -> str:
         runtime = runtime or self.self_runtime
         return render_translation_prompt_template(
             self.system_prompt,
-            source_name=get_llm_language_name(self._source_language_for(runtime)),
+            source_name=source_name or get_llm_language_name(self._source_language_for(runtime)),
             target_name=get_llm_language_name(self._target_language_for(runtime)),
         )
+
+    def _detected_language_for_llm(
+        self,
+        detected_language: str | None,
+    ) -> DetectedLanguageForLLM | None:
+        if detected_language is None:
+            return None
+        return map_detected_language_for_llm(detected_language)
+
+    def _request_source_language(
+        self,
+        runtime: ChannelRuntime,
+        *,
+        detected_language: str | None = None,
+    ) -> tuple[str, str] | None:
+        detected = self._detected_language_for_llm(detected_language)
+        if detected_language is not None:
+            if detected is None:
+                return None
+            return detected.code, detected.name
+        source_language = self._source_language_for(runtime)
+        return source_language, get_llm_language_name(source_language)
 
     def _other_runtime(self, runtime: ChannelRuntime) -> ChannelRuntime:
         return self.peer_runtime if runtime is self.self_runtime else self.self_runtime
@@ -2950,10 +2987,12 @@ class ClientHub:
         text: str,
         *,
         runtime: ChannelRuntime | None = None,
+        detected_language: str | None = None,
     ) -> tuple[str, str, float]:
         formatted_prompt, context_str, now, _ = self._prepare_llm_request_with_mode(
             text,
             runtime=runtime,
+            detected_language=detected_language,
         )
         return formatted_prompt, context_str, now
 
@@ -2962,9 +3001,17 @@ class ClientHub:
         text: str,
         *,
         runtime: ChannelRuntime | None = None,
+        detected_language: str | None = None,
     ) -> tuple[str, str, float, ContextMode]:
         _ = text
         runtime = runtime or self.self_runtime
+        request_source = self._request_source_language(
+            runtime,
+            detected_language=detected_language,
+        )
+        if request_source is None:
+            raise _UnmappedDetectedLanguage
+        source_language, source_name = request_source
         requested_mode: ContextMode = "integrated" if self.integrated_context_enabled else "local"
         now = self.clock.now()
         other_runtime = self._other_runtime(runtime)
@@ -2973,14 +3020,14 @@ class ClientHub:
             other_runtime=other_runtime,
             requested_mode=requested_mode,
             peer_translation_enabled=self.peer_translation_enabled,
-            source_language=self._source_language_for(runtime),
+            source_language=source_language,
             target_language=self._target_language_for(runtime),
             other_source_language=self._source_language_for(other_runtime),
             other_target_language=self._target_language_for(other_runtime),
         )
         self._log_context_mode_change(runtime=runtime, applied_mode=applied_mode)
         self._log_context_application(text=text, runtime=runtime, context=context_str)
-        formatted_prompt = self._format_system_prompt(runtime)
+        formatted_prompt = self._format_system_prompt(runtime, source_name=source_name)
         return formatted_prompt, context_str, now, applied_mode
 
     def _normalize_translation(
@@ -3021,6 +3068,7 @@ class ClientHub:
         *,
         runtime: ChannelRuntime | None = None,
         record_latency: bool = True,
+        detected_language: str | None = None,
     ) -> Translation:
         llm_request = self._capture_llm_provider_request()
         if llm_request is None:
@@ -3031,6 +3079,7 @@ class ClientHub:
         formatted_prompt, context_str, _ = self._prepare_llm_request(
             text,
             runtime=runtime,
+            detected_language=detected_language,
         )
         if record_latency:
             self._record_latency_stage(
@@ -3038,7 +3087,13 @@ class ClientHub:
                 utterance_id=utterance_id,
                 stage="llm_request_start",
             )
-        request_source_language = self._source_language_for(runtime)
+        request_source = self._request_source_language(
+            runtime,
+            detected_language=detected_language,
+        )
+        if request_source is None:
+            raise _UnmappedDetectedLanguage
+        request_source_language, _ = request_source
         request_target_language = self._target_language_for(runtime)
         try:
             translation = await llm.translate(
@@ -3121,34 +3176,58 @@ class ClientHub:
         text: str,
         *,
         runtime: ChannelRuntime | None = None,
+        detected_language: str | None = None,
     ) -> None:
         llm_request = self._capture_llm_provider_request()
         if llm_request is None:
             return
         llm, llm_generation = llm_request
         runtime = runtime or self.self_runtime
+        if self._request_source_language(runtime, detected_language=detected_language) is None:
+            if runtime.channel == "peer":
+                await self._finalize_peer_source_only(
+                    Transcript(
+                        utterance_id=utterance_id,
+                        text=text,
+                        is_final=True,
+                        created_at=self.clock.now(),
+                        channel="peer",
+                    ),
+                    close_is_final=False,
+                    finalize_latency=True,
+                )
+                if self._should_deny_peer_chatbox_attempt(runtime):
+                    await self._deny_peer_chatbox_attempt(utterance_id)
+                return
+            raise _UnmappedDetectedLanguage
         applied_mode: ContextMode | None = None
         peer_overlay_active = runtime.channel == "peer" and self.overlay_sink is not None
         try:
             formatted_prompt, context_str, now, applied_mode = self._prepare_llm_request_with_mode(
                 text,
                 runtime=runtime,
+                detected_language=detected_language,
             )
 
-            # Add current text to context history at REQUEST time
+            request_source = self._request_source_language(
+                runtime,
+                detected_language=detected_language,
+            )
+            if request_source is None:
+                raise _UnmappedDetectedLanguage
+            request_source_language, _ = request_source
+            request_target_language = self._target_language_for(runtime)
             self._remember_context_entry(
                 text,
                 now,
                 runtime=runtime,
+                source_language=request_source_language,
             )
             self._record_latency_stage(
                 channel=runtime.channel,
                 utterance_id=utterance_id,
                 stage="llm_request_start",
             )
-
-            request_source_language = self._source_language_for(runtime)
-            request_target_language = self._target_language_for(runtime)
             try:
                 raw_translation = await llm.translate(
                     utterance_id=utterance_id,

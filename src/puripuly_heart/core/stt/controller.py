@@ -37,7 +37,7 @@ from puripuly_heart.domain.events import (
     STTSessionState,
     STTSessionStateEvent,
 )
-from puripuly_heart.domain.models import ChannelId, Transcript
+from puripuly_heart.domain.models import ChannelId, FinalLanguageRun, Transcript
 
 
 @dataclass(frozen=True, slots=True)
@@ -661,6 +661,7 @@ class ManagedSTTProvider:
         text: str,
         is_final: bool,
         created_at: float,
+        final_language_runs: tuple[FinalLanguageRun, ...] = (),
     ) -> Transcript:
         return Transcript(
             utterance_id=utterance_id,
@@ -668,6 +669,7 @@ class ManagedSTTProvider:
             is_final=is_final,
             created_at=created_at,
             channel=self.channel,
+            final_language_runs=final_language_runs,
         )
 
     def _drop_stale_pending_final_utterance_ids(self) -> None:
@@ -821,6 +823,7 @@ class ManagedSTTProvider:
                     text=ev.text,
                     is_final=ev.is_final,
                     created_at=created_at,
+                    final_language_runs=ev.final_language_runs,
                 )
                 if ev.is_final:
                     await self._events.put(STTFinalEvent(utterance_id, transcript))

@@ -29,6 +29,12 @@ class SttCompatibilityWarning:
     language_code: str
 
 
+@dataclass(frozen=True, slots=True)
+class DetectedLanguageForLLM:
+    code: str
+    name: str
+
+
 # Supported languages for UI (union of Deepgram Nova-3 + Qwen ASR)
 SUPPORTED_LANGUAGES: dict[str, LanguageInfo] = {
     "ar": LanguageInfo(code="ar", name="Arabic"),
@@ -90,6 +96,16 @@ def get_llm_language_name(code: str) -> str:
     """Get human-readable language name for LLM prompts. Falls back to 'English'."""
     info = get_language_info(code)
     return info.name if info else "English"
+
+
+def map_detected_language_for_llm(language: str) -> DetectedLanguageForLLM | None:
+    normalized = language.strip().replace("_", "-").lower()
+    if normalized == "zh":
+        return DetectedLanguageForLLM(code="zh", name="Chinese")
+    info = get_language_info(normalized)
+    if info is None:
+        return None
+    return DetectedLanguageForLLM(code=info.code, name=info.name)
 
 
 # Qwen ASR language code mapping (ISO 639-1 -> Qwen ASR codes)
