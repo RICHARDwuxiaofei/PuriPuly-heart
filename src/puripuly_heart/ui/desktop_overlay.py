@@ -1706,6 +1706,9 @@ class RendererDiagnosticPortClosed(Exception):
     pass
 
 
+_DIAGNOSTIC_PORT_CLOSED = object()
+
+
 @dataclass(frozen=True, slots=True)
 class RendererDiagnosticEnvelope:
     record: Mapping[str, object]
@@ -1745,7 +1748,9 @@ class DetailedRendererDiagnosticPort:
 class DiagnosticLocalRendererPort:
     acknowledgement_timeout_s: float = 1.0
     requires_commit_acknowledgement: bool = True
-    _events: asyncio.Queue[RendererDiagnosticEnvelope] = field(default_factory=asyncio.Queue)
+    _events: asyncio.Queue[RendererDiagnosticEnvelope | object] = field(
+        default_factory=asyncio.Queue
+    )
     _closed: asyncio.Event = field(default_factory=asyncio.Event)
     _acknowledgements: dict[int, RendererCommitAcknowledgement] = field(default_factory=dict)
 
@@ -1758,21 +1763,13 @@ class DiagnosticLocalRendererPort:
         await self._events.put(envelope)
 
     async def next_event(self) -> RendererDiagnosticEnvelope:
-        event_task = asyncio.create_task(self._events.get())
-        close_task = asyncio.create_task(self._closed.wait())
-        try:
-            done, _pending = await asyncio.wait(
-                {event_task, close_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if close_task in done:
-                raise RendererDiagnosticPortClosed
-            return event_task.result()
-        finally:
-            for task in (event_task, close_task):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(event_task, close_task, return_exceptions=True)
+        event = await self._events.get()
+        if event is _DIAGNOSTIC_PORT_CLOSED:
+            await self._events.put(_DIAGNOSTIC_PORT_CLOSED)
+            raise RendererDiagnosticPortClosed
+        if not isinstance(event, RendererDiagnosticEnvelope):
+            raise RendererDiagnosticPortClosed
+        return event
 
     def acknowledge_render_commit(self, renderer_revision: int) -> bool:
         acknowledgement = self._acknowledgements.pop(renderer_revision, None)
@@ -1795,9 +1792,58 @@ class DiagnosticLocalRendererPort:
         if self._closed.is_set():
             return
         self._closed.set()
+        while True:
+            try:
+                self._events.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        await self._events.put(_DIAGNOSTIC_PORT_CLOSED)
         for acknowledgement in self._acknowledgements.values():
             acknowledgement.fail("port_closed")
         self._acknowledgements.clear()
+
+
+@dataclass(slots=True)
+class DiagnosticIngressGate:
+    _expected_revisions: tuple[int, ...] = ()
+    _queued_revisions: set[int] = field(default_factory=set)
+    _queued: asyncio.Event = field(default_factory=asyncio.Event)
+    _released: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def hold(self, revisions: tuple[int, ...]) -> None:
+        if not revisions or self._expected_revisions:
+            raise RuntimeError("diagnostic ingress gate is already active")
+        self._expected_revisions = revisions
+        self._queued_revisions.clear()
+        self._queued.clear()
+        self._released.clear()
+
+    async def snapshot_enqueued(self, revision: int) -> None:
+        if revision not in self._expected_revisions:
+            return
+        self._queued_revisions.add(revision)
+        if self._queued_revisions == set(self._expected_revisions):
+            self._queued.set()
+
+    async def wait_until_queued(self, timeout_s: float) -> None:
+        try:
+            await asyncio.wait_for(self._queued.wait(), timeout=timeout_s)
+        except TimeoutError as exc:
+            raise RendererDiagnosticAcknowledgementTimeout from exc
+
+    def release(self) -> None:
+        if not self._queued.is_set():
+            raise RuntimeError("diagnostic ingress batch was not fully queued")
+        self._released.set()
+
+    async def wait_for_release(self, revision: int) -> None:
+        if not self._expected_revisions or revision != self._expected_revisions[0]:
+            return
+        await self._released.wait()
+        self._expected_revisions = ()
+        self._queued_revisions.clear()
+        self._queued.clear()
+        self._released.clear()
 
 
 class RendererWindow(Protocol):
@@ -3600,6 +3646,7 @@ class DesktopOverlayRenderer:
         lifecycle_sink: LifecycleSink | None = None,
         parent_monitor: ParentMonitor | None = None,
         diagnostic_port: RendererDiagnosticPort | None = None,
+        diagnostic_ingress_gate: DiagnosticIngressGate | None = None,
     ) -> None:
         self.manifest = manifest
         self.lifecycle_sink = lifecycle_sink or StdoutLifecycleSink()
@@ -3612,6 +3659,7 @@ class DesktopOverlayRenderer:
         self.diagnostic_port = diagnostic_port or DetailedRendererDiagnosticPort(
             logging_mode=manifest.logging_mode
         )
+        self._diagnostic_ingress_gate = diagnostic_ingress_gate
         self._shutdown_event = asyncio.Event()
         self._shutdown_lock = asyncio.Lock()
         self._shutdown_complete = False
@@ -3893,6 +3941,8 @@ class DesktopOverlayRenderer:
 
     async def enqueue_snapshot(self, snapshot: OverlayPresentationSnapshot) -> None:
         await self._ui_queue.put(("snapshot", snapshot))
+        if self._diagnostic_ingress_gate is not None:
+            await self._diagnostic_ingress_gate.snapshot_enqueued(snapshot.revision)
 
     async def enqueue_runtime_control(self, payload: dict[str, object]) -> None:
         await self._ui_queue.put(("runtime_control", dict(payload)))
@@ -3917,6 +3967,8 @@ class DesktopOverlayRenderer:
 
             try:
                 if kind == "snapshot" and isinstance(payload, OverlayPresentationSnapshot):
+                    if self._diagnostic_ingress_gate is not None:
+                        await self._diagnostic_ingress_gate.wait_for_release(payload.revision)
                     barrier = await self._dispatch_pending_snapshot_batch(payload)
                     if barrier is not None:
                         barrier_kind, barrier_payload = barrier

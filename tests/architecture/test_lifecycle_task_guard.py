@@ -59,6 +59,7 @@ NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST = Counter(
         ("src/puripuly_heart/core/runtime/local_stt_download.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/mic_test.py", ASYNCIO_CREATE_TASK): 2,
         ("src/puripuly_heart/core/runtime/receiver.py", ASYNCIO_CREATE_TASK): 1,
+        ("src/puripuly_heart/ui/desktop_overlay_repro.py", ASYNCIO_CREATE_TASK): 3,
     }
 )
 
@@ -171,6 +172,10 @@ TASK_CREATION_ALLOWLIST_RATIONALES = {
         "src/puripuly_heart/core/runtime/receiver.py",
         ASYNCIO_CREATE_TASK,
     ): "VrcMicReceiverRuntime is the named lifecycle owner for receiver tasks",
+    (
+        "src/puripuly_heart/ui/desktop_overlay_repro.py",
+        ASYNCIO_CREATE_TASK,
+    ): "DesktopOverlayReproOwner owns and gathers its renderer, diagnostic consumer, and static-backdrop tasks",
 }
 
 
