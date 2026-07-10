@@ -1,0 +1,5 @@
+{
+  "control_excluded_amplitude_max": 0.005,
+  "control_to_target_ratio_max": 0.1,
+  "target_present_amplitude_min": 0.05
+}

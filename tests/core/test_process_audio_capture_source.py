@@ -326,6 +326,9 @@ def test_proctap_factory_lazily_uses_public_capture_constructor(monkeypatch) -> 
         def __init__(self, pid: int, on_data) -> None:
             created["pid"] = pid
             created["on_data"] = on_data
+            self._backend = SimpleNamespace(
+                _native=SimpleNamespace(is_process_specific=lambda: True)
+            )
 
         def start(self) -> None:
             return None
@@ -357,6 +360,60 @@ def test_proctap_factory_lazily_uses_public_capture_constructor(monkeypatch) -> 
     assert imported == ["proctap"]
     assert created == {"pid": 102, "on_data": callback}
     assert "DesktopLoopback" not in source_module.__dict__
+
+
+@pytest.mark.parametrize("native_state", [False, "missing", "throws"])
+def test_proctap_factory_rejects_unverified_native_mode_and_closes(
+    monkeypatch, native_state: object
+) -> None:
+    captures = []
+
+    class PublicCapture:
+        def __init__(self, _pid: int, on_data) -> None:  # noqa: ANN001
+            _ = on_data
+            self.closed = False
+            self.started = False
+            if native_state == "missing":
+                self._backend = SimpleNamespace(_native=SimpleNamespace())
+            elif native_state == "throws":
+
+                def fail_verification() -> bool:
+                    raise RuntimeError("native detail")
+
+                self._backend = SimpleNamespace(
+                    _native=SimpleNamespace(is_process_specific=fail_verification)
+                )
+            else:
+                self._backend = SimpleNamespace(
+                    _native=SimpleNamespace(is_process_specific=lambda: native_state)
+                )
+            captures.append(self)
+
+        def start(self) -> None:
+            self.started = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    import puripuly_heart.core.audio.process_source as source_module
+
+    monkeypatch.setattr(
+        source_module.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(ProcessAudioCapture=PublicCapture),
+    )
+
+    with pytest.raises(
+        ProcessAudioCaptureSetupError, match="mode could not be verified"
+    ) as exc_info:
+        ProcTapProcessAudioCaptureFactory(platform_availability=_supported).create(
+            pid=102,
+            on_data=lambda _data, _frames: None,
+        )
+
+    assert captures[0].closed is True
+    assert captures[0].started is False
+    assert "native detail" not in str(exc_info.value)
 
 
 @pytest.mark.asyncio

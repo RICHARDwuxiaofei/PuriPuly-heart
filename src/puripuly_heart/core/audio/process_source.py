@@ -75,7 +75,33 @@ class ProcTapProcessAudioCaptureFactory:
             raise ProcessAudioCaptureUnavailableError("process capture platform is unavailable")
         module = importlib.import_module("proctap")
         capture_type = getattr(module, "ProcessAudioCapture")
-        return capture_type(pid, on_data=on_data)
+        capture = capture_type(pid, on_data=on_data)
+        try:
+            verify_proctap_1_0_3_process_specific(capture)
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                capture.close()
+            if isinstance(exc, ProcessAudioCaptureSetupError):
+                raise
+            raise ProcessAudioCaptureSetupError(
+                "process capture mode could not be verified"
+            ) from None
+        return capture
+
+
+def verify_proctap_1_0_3_process_specific(capture: object) -> bool:
+    backend = getattr(capture, "_backend", None)
+    native = getattr(backend, "_native", None)
+    verifier = getattr(native, "is_process_specific", None)
+    if not callable(verifier):
+        raise ProcessAudioCaptureSetupError("process capture mode could not be verified")
+    try:
+        verified = verifier()
+    except Exception:
+        raise ProcessAudioCaptureSetupError("process capture mode could not be verified") from None
+    if verified is not True:
+        raise ProcessAudioCaptureSetupError("process capture mode could not be verified")
+    return True
 
 
 @dataclass(slots=True)
