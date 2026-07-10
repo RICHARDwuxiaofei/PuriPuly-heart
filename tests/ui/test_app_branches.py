@@ -165,8 +165,8 @@ def test_telemetry_consent_dialog_shown_only_for_unknown_and_localized() -> None
     assert len(app.page.opened) == 1
     texts = _dialog_text_values(app.page.opened[0])
     assert app_module.t("telemetry.consent.title") in texts
-    assert app_module.t("telemetry.consent.body") in texts
-    assert app_module.t("telemetry.consent.privacy") in texts
+    assert any(app_module.t("telemetry.consent.body") in text for text in texts)
+    assert any(app_module.t("telemetry.consent.excludes") in text for text in texts)
 
     app.controller.settings.telemetry.consent = "decline"
     assert app.maybe_show_telemetry_consent_dialog() is False

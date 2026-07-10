@@ -75,6 +75,7 @@ class WarmDocumentDialogResult:
     action_row: ft.Row
     initial_action_buttons: tuple[ft.TextButton, ...]
     set_actions: Callable[[Sequence[WarmDocumentDialogAction]], tuple[ft.TextButton, ...]]
+    title_text: ft.Text | None = None
 
 
 def split_body_paragraphs(body: str) -> list[str]:
@@ -89,6 +90,7 @@ def open_warm_document_dialog(
     page: ft.Page,
     *,
     body_paragraphs: Sequence[str],
+    title: str | None = None,
     extra_body_controls: Sequence[ft.Control] | None = None,
     body_spacing: int = PARAGRAPH_SPACING,
     action_top_margin: int = ACTION_TOP_MARGIN,
@@ -145,14 +147,28 @@ def open_warm_document_dialog(
             for action in normalize_actions(action_specs)
         )
 
+    title_text: ft.Text | None = None
+    if title is not None and title.strip():
+        title_text = ft.Text(
+            title.strip(),
+            size=BODY_TEXT_SIZE,
+            color=COLOR_ON_BACKGROUND,
+            selectable=True,
+            weight=ft.FontWeight.BOLD,
+        )
     body_text = ft.Text(
         join_body_paragraphs(body_paragraphs),
         size=BODY_TEXT_SIZE,
         color=COLOR_ON_BACKGROUND,
         selectable=True,
     )
+    body_controls: list[ft.Control] = []
+    if title_text is not None:
+        body_controls.append(title_text)
+    body_controls.append(body_text)
+    body_controls.extend(extra_body_controls or ())
     body = ft.Column(
-        controls=[body_text, *(extra_body_controls or ())],
+        controls=body_controls,
         spacing=body_spacing,
         tight=True,
     )
@@ -215,4 +231,5 @@ def open_warm_document_dialog(
         action_row=action_row,
         initial_action_buttons=initial_action_buttons,
         set_actions=set_actions,
+        title_text=title_text,
     )
