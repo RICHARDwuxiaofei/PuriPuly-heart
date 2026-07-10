@@ -18,8 +18,17 @@ use puripuly_heart_overlay::{
     OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
     OverlayPresentationSnapshot, OverlayRuntime, PresentationBackend, PresentationOutcome,
     PresentationStage, PresentationStrategy, ReadinessOutcome, RenderedFrame, RuntimeFailure,
-    StartupError, EXPECTED_CONTRACT_VERSION,
+    StartupError, EXPECTED_CONTRACT_VERSION, NATIVE_FRESH_RETRY_CADENCE,
+    NATIVE_FRESH_RETRY_DEADLINE, NATIVE_FRESH_RETRY_MAX_COMPLETED,
 };
+
+#[test]
+fn native_fresh_retry_production_policy_matches_dd_002() {
+    assert_eq!(NATIVE_FRESH_RETRY_CADENCE, Duration::from_millis(100));
+    assert_eq!(NATIVE_FRESH_RETRY_DEADLINE, Duration::from_secs(2));
+    assert_eq!(NATIVE_FRESH_RETRY_MAX_COMPLETED, 20);
+    assert_ne!(u64::MAX, 0);
+}
 
 fn test_manifest() -> OverlayManifest {
     OverlayManifest {
@@ -311,20 +320,25 @@ struct OwnedSubmitterState {
 struct OwnedSubmitterProbe {
     state: Arc<OwnedSubmitterState>,
     fail_submit: bool,
+    fail_on_submission: Option<usize>,
+    submit_delay: Duration,
 }
 
 impl OverlayFrameSubmitter for OwnedSubmitterProbe {
     fn submit_frame(&mut self, frame: &RenderedFrame) -> Result<(), OpenVrError> {
-        self.state
-            .operations
-            .lock()
-            .unwrap()
-            .push(if frame.layout().visible_blocks.is_empty() {
-                "submit:empty"
-            } else {
-                "submit:text"
-            });
-        if self.fail_submit {
+        std::thread::sleep(self.submit_delay);
+        let mut operations = self.state.operations.lock().unwrap();
+        let submission = operations
+            .iter()
+            .filter(|operation| operation.starts_with("submit"))
+            .count()
+            + 1;
+        operations.push(if frame.layout().visible_blocks.is_empty() {
+            "submit:empty"
+        } else {
+            "submit:text"
+        });
+        if self.fail_submit || self.fail_on_submission == Some(submission) {
             return Err(OpenVrError::Submit("owned submit failed".into()));
         }
         Ok(())
@@ -1845,6 +1859,8 @@ async fn production_owner_coalesces_retry_and_releases_resources_on_shutdown() {
     let submitter = OwnedSubmitterProbe {
         state: state.clone(),
         fail_submit: false,
+        fail_on_submission: None,
+        submit_delay: Duration::ZERO,
     };
     let mut owner = NativePresentationOwner::new(
         snapshot,
@@ -1878,12 +1894,511 @@ async fn production_owner_coalesces_retry_and_releases_resources_on_shutdown() {
 }
 
 #[tokio::test]
+async fn production_owner_runs_independent_self_and_peer_fresh_schedules_to_exact_max() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 1,
+                    "native_fresh_render_generations": {"self": u64::MAX, "peer": 0},
+                    "blocks": [
+                        block("self:auto", "self", "self", "", true),
+                        block("peer:auto", "peer", "peer", "", true)
+                    ]
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        ws.send(Message::Text(
+            json!({"type": "shutdown"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let state = Arc::new(OwnedSubmitterState::default());
+    let submitter = OwnedSubmitterProbe {
+        state: state.clone(),
+        fail_submit: false,
+        fail_on_submission: None,
+        submit_delay: Duration::ZERO,
+    };
+    let mut owner = NativePresentationOwner::new_with_retry_policy_for_test(
+        snapshot,
+        CaptionRenderer::new_for_test().unwrap(),
+        submitter,
+        Duration::from_millis(1),
+        Duration::from_millis(50),
+        2,
+    );
+
+    owner
+        .run(&mut bridge, &test_logger("automatic-channel-retries").await)
+        .await
+        .unwrap();
+
+    let submits = state
+        .operations
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|operation| operation.starts_with("submit"))
+        .count();
+    assert_eq!(submits, 5);
+    let audit = owner.fresh_retry_audit_for_test();
+    let scheduled_self = audit
+        .iter()
+        .find(|fact| fact.0 == "self" && fact.2 == "scheduled")
+        .unwrap();
+    let first_self_completion = audit
+        .iter()
+        .find(|fact| fact.0 == "self" && fact.2 == "completed")
+        .unwrap();
+    assert!(first_self_completion.4 >= scheduled_self.4 + Duration::from_millis(1));
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|fact| fact.2 == "completed")
+            .map(|fact| (fact.0, fact.1, fact.3))
+            .collect::<Vec<_>>(),
+        vec![
+            ("self", u64::MAX, 1),
+            ("peer", 0, 1),
+            ("self", u64::MAX, 2),
+            ("peer", 0, 2),
+        ]
+    );
+    assert!(owner.resources_released());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn production_owner_replaces_channel_token_and_empty_snapshot_cancels_schedule() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({"type":"snapshot","payload":{
+                "revision":1,
+                "native_fresh_render_generations":{"self":u64::MAX},
+                "blocks":[block("self:replace","self","one","",true)]
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        ws.send(Message::Text(
+            json!({"type":"snapshot","payload":{
+                "revision":2,
+                "native_fresh_render_generations":{"self":0},
+                "blocks":[block("self:replace","self","two","",true)]
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        ws.send(Message::Text(
+            json!({"type":"snapshot","payload":{
+                "revision":3,
+                "native_fresh_render_generations":{"self":0},
+                "blocks":[]
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        ws.send(Message::Text(json!({"type":"shutdown"}).to_string().into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let state = Arc::new(OwnedSubmitterState::default());
+    let retry_submitter = OwnedSubmitterProbe {
+        state: state.clone(),
+        fail_submit: false,
+        fail_on_submission: None,
+        submit_delay: Duration::ZERO,
+    };
+    let mut owner = NativePresentationOwner::new_with_retry_policy_for_test(
+        snapshot,
+        CaptionRenderer::new_for_test().unwrap(),
+        retry_submitter,
+        Duration::from_millis(50),
+        Duration::from_secs(1),
+        20,
+    );
+    let retry = owner.retry_handle();
+
+    owner
+        .run(&mut bridge, &test_logger("replacement-empty-cancel").await)
+        .await
+        .unwrap();
+
+    assert_eq!(owner.runtime().state().snapshot().revision, 3);
+    assert!(owner.runtime().state().blocks().is_empty());
+    assert!(owner.resources_released());
+    assert!(!retry.request());
+    let submit_count = state
+        .operations
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|operation| operation.starts_with("submit"))
+        .count();
+    let audit = owner.fresh_retry_audit_for_test();
+    let replacement_scheduled_at = audit
+        .iter()
+        .find(|fact| fact.0 == "self" && fact.1 == 0 && fact.2 == "scheduled")
+        .unwrap()
+        .4;
+    assert!(!audit.iter().any(|fact| {
+        fact.0 == "self"
+            && fact.1 == u64::MAX
+            && fact.2 == "completed"
+            && fact.4 > replacement_scheduled_at
+    }));
+    assert!(audit
+        .iter()
+        .any(|fact| fact.0 == "self" && fact.1 == 0 && fact.2 == "cancelled"));
+    let completed_count = audit.iter().filter(|fact| fact.2 == "completed").count();
+    assert_eq!(submit_count, 3 + completed_count);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn production_owner_preemption_rebases_unchanged_token_after_pending_snapshot() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({"type":"snapshot","payload":{
+                "revision":1,
+                "native_fresh_render_generations":{"self":7},
+                "blocks":[block("self:preempt","self","one","",true)]
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        loop {
+            let message = ws.next().await.unwrap().unwrap();
+            if message.to_text().unwrap().contains("overlay_ready") {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(22)).await;
+        ws.send(Message::Text(
+            json!({"type":"snapshot","payload":{
+                "revision":2,
+                "native_fresh_render_generations":{"self":7},
+                "blocks":[block("self:preempt","self","two","",true)]
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        ws.send(Message::Text(json!({"type":"shutdown"}).to_string().into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    renderer.set_test_readiness_pending_yields_on_call(2, usize::MAX);
+    let state = Arc::new(OwnedSubmitterState::default());
+    let mut owner = NativePresentationOwner::new_with_retry_policy_for_test(
+        snapshot,
+        renderer,
+        OwnedSubmitterProbe {
+            state: state.clone(),
+            fail_submit: false,
+            fail_on_submission: None,
+            submit_delay: Duration::ZERO,
+        },
+        Duration::from_millis(20),
+        Duration::from_millis(200),
+        1,
+    );
+
+    owner
+        .run(
+            &mut bridge,
+            &test_logger("unchanged-token-preemption").await,
+        )
+        .await
+        .unwrap();
+
+    let audit = owner.fresh_retry_audit_for_test();
+    let preempted = audit
+        .iter()
+        .find(|fact| fact.0 == "self" && fact.1 == 7 && fact.2 == "preempted")
+        .unwrap();
+    assert_eq!(preempted.3, 0);
+    let completed = audit
+        .iter()
+        .find(|fact| fact.0 == "self" && fact.1 == 7 && fact.2 == "completed")
+        .unwrap();
+    assert_eq!(completed.3, 1);
+    assert!(completed.4 >= preempted.4 + Duration::from_millis(20));
+    assert_eq!(owner.runtime().state().snapshot().revision, 2);
+    assert_eq!(owner.runtime().state().blocks()[0].primary_text, "two");
+    assert_eq!(
+        state
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|operation| operation.starts_with("submit"))
+            .count(),
+        3
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn production_owner_active_schedule_submission_failure_is_terminal() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({"type":"snapshot","payload":{
+                "revision":1,
+                "native_fresh_render_generations":{"self":9},
+                "blocks":[block("self:failure","self","text","",true)]
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let state = Arc::new(OwnedSubmitterState::default());
+    let mut owner = NativePresentationOwner::new_with_retry_policy_for_test(
+        snapshot,
+        CaptionRenderer::new_for_test().unwrap(),
+        OwnedSubmitterProbe {
+            state: state.clone(),
+            fail_submit: false,
+            fail_on_submission: Some(2),
+            submit_delay: Duration::ZERO,
+        },
+        Duration::from_millis(10),
+        Duration::from_millis(100),
+        2,
+    );
+    let retry = owner.retry_handle();
+
+    let failure = owner
+        .run(
+            &mut bridge,
+            &test_logger("active-schedule-submit-failure").await,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(failure, RuntimeFailure::OpenVr(_)));
+    assert!(owner.resources_released());
+    assert!(!retry.request());
+    assert_eq!(
+        state
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|operation| operation.starts_with("submit"))
+            .count(),
+        2
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn production_owner_active_schedule_readiness_failure_is_terminal() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({"type":"snapshot","payload":{
+                "revision":1,
+                "native_fresh_render_generations":{"peer":4},
+                "blocks":[block("peer:failure","peer","text","",true)]
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    renderer.set_test_readiness_terminal_outcome_on_call(2, ReadinessOutcome::Failed);
+    let state = Arc::new(OwnedSubmitterState::default());
+    let mut owner = NativePresentationOwner::new_with_retry_policy_for_test(
+        snapshot,
+        renderer,
+        OwnedSubmitterProbe {
+            state: state.clone(),
+            fail_submit: false,
+            fail_on_submission: None,
+            submit_delay: Duration::ZERO,
+        },
+        Duration::from_millis(10),
+        Duration::from_millis(100),
+        2,
+    );
+    let retry = owner.retry_handle();
+
+    let failure = owner
+        .run(
+            &mut bridge,
+            &test_logger("active-schedule-readiness-failure").await,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(failure, RuntimeFailure::ReadinessFailed);
+    assert!(owner.resources_released());
+    assert!(!retry.request());
+    assert_eq!(
+        state
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|operation| operation.starts_with("submit"))
+            .count(),
+        1
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn production_owner_slow_submission_has_no_catch_up_and_expires_cleanly() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({"type":"snapshot","payload":{
+                "revision":1,
+                "native_fresh_render_generations":{"self":12},
+                "blocks":[block("self:slow","self","text","",true)]
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        ws.send(Message::Text(json!({"type":"shutdown"}).to_string().into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let state = Arc::new(OwnedSubmitterState::default());
+    let mut owner = NativePresentationOwner::new_with_retry_policy_for_test(
+        snapshot,
+        CaptionRenderer::new_for_test().unwrap(),
+        OwnedSubmitterProbe {
+            state: state.clone(),
+            fail_submit: false,
+            fail_on_submission: None,
+            submit_delay: Duration::from_millis(20),
+        },
+        Duration::from_millis(5),
+        Duration::from_millis(90),
+        20,
+    );
+
+    owner
+        .run(&mut bridge, &test_logger("slow-no-catch-up").await)
+        .await
+        .unwrap();
+
+    let audit = owner.fresh_retry_audit_for_test();
+    let completions = audit
+        .iter()
+        .filter(|fact| fact.2 == "completed")
+        .collect::<Vec<_>>();
+    assert_eq!(completions.len(), 3);
+    for pair in completions.windows(2) {
+        assert!(pair[1].4 >= pair[0].4 + Duration::from_millis(20));
+    }
+    assert_eq!(
+        state
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|operation| operation.starts_with("submit"))
+            .count(),
+        4
+    );
+    assert!(!owner.runtime().redraw_requested());
+    assert!(owner.resources_released());
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn production_owner_releases_resources_on_terminal_submission_failure() {
     let (mut bridge, server) = connect_test_bridge().await;
     let state = Arc::new(OwnedSubmitterState::default());
     let submitter = OwnedSubmitterProbe {
         state: state.clone(),
         fail_submit: true,
+        fail_on_submission: None,
+        submit_delay: Duration::ZERO,
     };
     let mut owner = NativePresentationOwner::new(
         OverlayPresentationSnapshot::default(),

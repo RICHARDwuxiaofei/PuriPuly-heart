@@ -172,6 +172,9 @@ pub struct CaptionRenderer {
     openvr_adapter_identity: AdapterIdentity,
     test_readiness_pending_yields: Cell<usize>,
     test_readiness_terminal_outcome: Cell<Option<ReadinessOutcome>>,
+    test_readiness_call_count: Cell<usize>,
+    test_readiness_pending_on_call: Cell<Option<(usize, usize)>>,
+    test_readiness_terminal_on_call: Cell<Option<(usize, ReadinessOutcome)>>,
 }
 
 impl CaptionRenderer {
@@ -263,6 +266,9 @@ impl CaptionRenderer {
             }),
             test_readiness_pending_yields: Cell::new(0),
             test_readiness_terminal_outcome: Cell::new(None),
+            test_readiness_call_count: Cell::new(0),
+            test_readiness_pending_on_call: Cell::new(None),
+            test_readiness_terminal_on_call: Cell::new(None),
         })
     }
 
@@ -309,6 +315,20 @@ impl CaptionRenderer {
         &self,
         cancellation: &ReadinessCancellation,
     ) -> ReadinessOutcome {
+        let call = self.test_readiness_call_count.get() + 1;
+        self.test_readiness_call_count.set(call);
+        if let Some((target_call, yields)) = self.test_readiness_pending_on_call.get() {
+            if call == target_call {
+                self.test_readiness_pending_yields.set(yields);
+                self.test_readiness_pending_on_call.set(None);
+            }
+        }
+        if let Some((target_call, outcome)) = self.test_readiness_terminal_on_call.get() {
+            if call == target_call {
+                self.test_readiness_terminal_outcome.set(Some(outcome));
+                self.test_readiness_terminal_on_call.set(None);
+            }
+        }
         while self.test_readiness_pending_yields.get() > 0 {
             if cancellation.is_cancelled() {
                 self.test_readiness_pending_yields.set(0);
@@ -329,6 +349,22 @@ impl CaptionRenderer {
 
     pub fn set_test_readiness_pending_yields(&self, yields: usize) {
         self.test_readiness_pending_yields.set(yields);
+    }
+
+    #[doc(hidden)]
+    pub fn set_test_readiness_pending_yields_on_call(&self, call: usize, yields: usize) {
+        self.test_readiness_pending_on_call
+            .set(Some((call, yields)));
+    }
+
+    #[doc(hidden)]
+    pub fn set_test_readiness_terminal_outcome_on_call(
+        &self,
+        call: usize,
+        outcome: ReadinessOutcome,
+    ) {
+        self.test_readiness_terminal_on_call
+            .set(Some((call, outcome)));
     }
 
     pub fn set_test_readiness_terminal_outcome(&self, outcome: ReadinessOutcome) {

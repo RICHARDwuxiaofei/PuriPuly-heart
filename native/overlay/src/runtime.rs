@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::time::Duration;
 
@@ -577,12 +577,12 @@ impl PresentationRuntime {
         snapshot_received_at: Option<Instant>,
         receive_to_apply_us: Option<u128>,
         preemptible: bool,
-    ) -> Result<Option<Result<BridgeIncoming, BridgeError>>, RuntimeFailure> {
+    ) -> Result<FrameCycleOutcome, RuntimeFailure> {
         if self.stopped {
             return Err(RuntimeFailure::Stopped);
         }
         if self.first_texture_submitted && !self.redraw_requested {
-            return Ok(None);
+            return Ok(FrameCycleOutcome::NoWork);
         }
 
         let presentation_backend = renderer.presentation_backend();
@@ -774,7 +774,9 @@ impl PresentationRuntime {
         if readiness_outcome != ReadinessOutcome::Ready {
             self.emit_pending_presentation_diagnostics(logger).await?;
             if readiness_outcome == ReadinessOutcome::Cancelled && pending_message.is_some() {
-                return Ok(pending_message);
+                return Ok(FrameCycleOutcome::Preempted(
+                    pending_message.expect("cancelled readiness has pending message"),
+                ));
             }
             let failure = match readiness_outcome {
                 ReadinessOutcome::TimedOut => RuntimeFailure::ReadinessTimedOut,
@@ -884,7 +886,7 @@ impl PresentationRuntime {
             self.emit_ready(bridge, logger).await?;
         }
 
-        Ok(None)
+        Ok(FrameCycleOutcome::Submitted)
     }
 
     pub async fn run_event_loop<S: OverlayFrameSubmitter>(
@@ -927,9 +929,13 @@ impl PresentationRuntime {
         bridge: &mut BridgeClient,
         logger: &OverlayLogger,
     ) -> Result<(), RuntimeFailure> {
-        let mut pending_message = self
+        let mut pending_message = match self
             .submit_frame_if_needed_with_timing(renderer, openvr, bridge, logger, None, None, true)
-            .await?;
+            .await?
+        {
+            FrameCycleOutcome::Preempted(message) => Some(message),
+            FrameCycleOutcome::Submitted | FrameCycleOutcome::NoWork => None,
+        };
         while let Some(message) = pending_message.take() {
             let (continue_running, next_message) = self
                 .handle_bridge_message(message, renderer, openvr, bridge, logger)
@@ -959,7 +965,7 @@ impl PresentationRuntime {
                             renderer, openvr, bridge, logger, None, None, true,
                         )
                         .await?;
-                    return Ok((true, pending));
+                    return Ok((true, pending.pending_message()));
                 }
                 Ok((true, None))
             }
@@ -982,7 +988,7 @@ impl PresentationRuntime {
                         true,
                     )
                     .await?;
-                Ok((true, pending))
+                Ok((true, pending.pending_message()))
             }
             Ok(BridgeIncoming::Event(event)) => {
                 self.handle_event(event).await?;
@@ -994,7 +1000,7 @@ impl PresentationRuntime {
                         renderer, openvr, bridge, logger, None, None, true,
                     )
                     .await?;
-                Ok((true, pending))
+                Ok((true, pending.pending_message()))
             }
             Err(BridgeError::Disconnected) => {
                 logger
@@ -1150,6 +1156,77 @@ pub struct NativePresentationRetryHandle {
     sender: mpsc::Sender<()>,
 }
 
+#[derive(Debug)]
+enum FrameCycleOutcome {
+    Submitted,
+    Preempted(Result<BridgeIncoming, BridgeError>),
+    NoWork,
+}
+
+impl FrameCycleOutcome {
+    fn pending_message(self) -> Option<Result<BridgeIncoming, BridgeError>> {
+        match self {
+            Self::Preempted(message) => Some(message),
+            Self::Submitted | Self::NoWork => None,
+        }
+    }
+}
+
+pub const NATIVE_FRESH_RETRY_CADENCE: Duration = Duration::from_millis(100);
+pub const NATIVE_FRESH_RETRY_DEADLINE: Duration = Duration::from_secs(2);
+pub const NATIVE_FRESH_RETRY_MAX_COMPLETED: u32 = 20;
+const NATIVE_FRESH_AUDIT_CAPACITY: usize = 128;
+
+#[derive(Debug, Clone, Copy)]
+struct NativeFreshRetryPolicy {
+    cadence: Duration,
+    deadline: Duration,
+    max_completed: u32,
+}
+
+impl Default for NativeFreshRetryPolicy {
+    fn default() -> Self {
+        Self {
+            cadence: NATIVE_FRESH_RETRY_CADENCE,
+            deadline: NATIVE_FRESH_RETRY_DEADLINE,
+            max_completed: NATIVE_FRESH_RETRY_MAX_COMPLETED,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FreshRetryChannel {
+    SelfChannel,
+    Peer,
+}
+
+impl FreshRetryChannel {
+    fn name(self) -> &'static str {
+        match self {
+            Self::SelfChannel => "self",
+            Self::Peer => "peer",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeFreshSchedule {
+    channel: FreshRetryChannel,
+    trigger_generation: u64,
+    completed: u32,
+    deadline: Instant,
+    next_due: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeFreshAuditFact {
+    channel: FreshRetryChannel,
+    trigger_generation: u64,
+    outcome: &'static str,
+    completed: u32,
+    at: Duration,
+}
+
 impl NativePresentationRetryHandle {
     pub fn request(&self) -> bool {
         match self.sender.try_send(()) {
@@ -1165,6 +1242,14 @@ pub struct NativePresentationOwner<S: OverlayFrameSubmitter> {
     openvr: Option<S>,
     retry_sender: Option<mpsc::Sender<()>>,
     retry_receiver: mpsc::Receiver<()>,
+    retry_policy: NativeFreshRetryPolicy,
+    observed_self_generation: Option<u64>,
+    observed_peer_generation: Option<u64>,
+    self_schedule: Option<NativeFreshSchedule>,
+    peer_schedule: Option<NativeFreshSchedule>,
+    audit_started_at: Instant,
+    fresh_retry_audit: VecDeque<NativeFreshAuditFact>,
+    fresh_retry_audit_dropped: u64,
 }
 
 impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
@@ -1180,7 +1265,33 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
             openvr: Some(openvr),
             retry_sender: Some(retry_sender),
             retry_receiver,
+            retry_policy: NativeFreshRetryPolicy::default(),
+            observed_self_generation: None,
+            observed_peer_generation: None,
+            self_schedule: None,
+            peer_schedule: None,
+            audit_started_at: Instant::now(),
+            fresh_retry_audit: VecDeque::with_capacity(NATIVE_FRESH_AUDIT_CAPACITY),
+            fresh_retry_audit_dropped: 0,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn new_with_retry_policy_for_test(
+        snapshot: OverlayPresentationSnapshot,
+        renderer: CaptionRenderer,
+        openvr: S,
+        cadence: Duration,
+        deadline: Duration,
+        max_completed: u32,
+    ) -> Self {
+        let mut owner = Self::new(snapshot, renderer, openvr);
+        owner.retry_policy = NativeFreshRetryPolicy {
+            cadence,
+            deadline,
+            max_completed,
+        };
+        owner
     }
 
     pub fn runtime(&self) -> &PresentationRuntime {
@@ -1199,6 +1310,212 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
 
     pub fn resources_released(&self) -> bool {
         self.renderer.is_none() && self.openvr.is_none() && self.retry_sender.is_none()
+    }
+
+    #[doc(hidden)]
+    pub fn fresh_retry_audit_for_test(
+        &self,
+    ) -> Vec<(&'static str, u64, &'static str, u32, Duration)> {
+        self.fresh_retry_audit
+            .iter()
+            .map(|fact| {
+                (
+                    fact.channel.name(),
+                    fact.trigger_generation,
+                    fact.outcome,
+                    fact.completed,
+                    fact.at,
+                )
+            })
+            .collect()
+    }
+
+    #[doc(hidden)]
+    pub fn fresh_retry_audit_dropped_for_test(&self) -> u64 {
+        self.fresh_retry_audit_dropped
+    }
+
+    async fn record_fresh_retry(
+        &mut self,
+        logger: &OverlayLogger,
+        schedule: NativeFreshSchedule,
+        outcome: &'static str,
+    ) -> Result<(), RuntimeFailure> {
+        self.push_fresh_retry_audit(schedule, outcome);
+        log_fresh_retry(logger, schedule, outcome, self.retry_policy).await
+    }
+
+    fn push_fresh_retry_audit(&mut self, schedule: NativeFreshSchedule, outcome: &'static str) {
+        if self.fresh_retry_audit.len() == NATIVE_FRESH_AUDIT_CAPACITY {
+            self.fresh_retry_audit.pop_front();
+            self.fresh_retry_audit_dropped += 1;
+        }
+        self.fresh_retry_audit.push_back(NativeFreshAuditFact {
+            channel: schedule.channel,
+            trigger_generation: schedule.trigger_generation,
+            outcome,
+            completed: schedule.completed,
+            at: self.audit_started_at.elapsed(),
+        });
+    }
+
+    fn finish_initial_reconcile(
+        &mut self,
+        result: Result<(), RuntimeFailure>,
+    ) -> Result<(), RuntimeFailure> {
+        if result.is_err() {
+            self.teardown();
+        }
+        result
+    }
+
+    fn channel_generation(&self, channel: FreshRetryChannel) -> Option<u64> {
+        let generations = self
+            .runtime
+            .state()
+            .snapshot()
+            .native_fresh_render_generations
+            .as_ref();
+        match channel {
+            FreshRetryChannel::SelfChannel => generations.and_then(|value| value.self_generation),
+            FreshRetryChannel::Peer => generations.and_then(|value| value.peer),
+        }
+    }
+
+    fn channel_has_target(&self, channel: FreshRetryChannel) -> bool {
+        self.runtime.state().blocks().iter().any(|block| {
+            block.channel == channel.name()
+                && block.block_variant == OverlayPresentationBlockVariant::Finalized
+                && !block.primary_text.trim().is_empty()
+        })
+    }
+
+    async fn reconcile_fresh_schedules(
+        &mut self,
+        logger: &OverlayLogger,
+    ) -> Result<(), RuntimeFailure> {
+        for channel in [FreshRetryChannel::SelfChannel, FreshRetryChannel::Peer] {
+            let generation = self.channel_generation(channel);
+            let observed = match channel {
+                FreshRetryChannel::SelfChannel => &mut self.observed_self_generation,
+                FreshRetryChannel::Peer => &mut self.observed_peer_generation,
+            };
+            let changed = generation.is_some() && generation != *observed;
+            *observed = generation;
+            let has_target = self.channel_has_target(channel);
+            let schedule = match channel {
+                FreshRetryChannel::SelfChannel => &mut self.self_schedule,
+                FreshRetryChannel::Peer => &mut self.peer_schedule,
+            };
+            if !has_target || generation.is_none() {
+                if let Some(cancelled) = schedule.take() {
+                    self.record_fresh_retry(logger, cancelled, "cancelled")
+                        .await?;
+                }
+                continue;
+            }
+            if changed {
+                let now = Instant::now();
+                let next = NativeFreshSchedule {
+                    channel,
+                    trigger_generation: generation.expect("checked generation"),
+                    completed: 0,
+                    deadline: now + self.retry_policy.deadline,
+                    next_due: now + self.retry_policy.cadence,
+                };
+                *schedule = Some(next);
+                self.record_fresh_retry(logger, next, "scheduled").await?;
+            }
+        }
+        Ok(())
+    }
+
+    fn next_fresh_due(&self) -> Option<Instant> {
+        [self.self_schedule, self.peer_schedule]
+            .into_iter()
+            .flatten()
+            .map(|schedule| schedule.next_due)
+            .min()
+    }
+
+    fn due_fresh_channel(&self, now: Instant) -> Option<FreshRetryChannel> {
+        [self.self_schedule, self.peer_schedule]
+            .into_iter()
+            .flatten()
+            .filter(|schedule| schedule.next_due <= now)
+            .min_by_key(|schedule| schedule.next_due)
+            .map(|schedule| schedule.channel)
+    }
+
+    async fn run_due_fresh_attempt(
+        &mut self,
+        channel: FreshRetryChannel,
+        bridge: &mut BridgeClient,
+        logger: &OverlayLogger,
+    ) -> Result<FrameCycleOutcome, RuntimeFailure> {
+        let current = match channel {
+            FreshRetryChannel::SelfChannel => self.self_schedule,
+            FreshRetryChannel::Peer => self.peer_schedule,
+        };
+        let Some(schedule) = current else {
+            return Ok(FrameCycleOutcome::NoWork);
+        };
+        if Instant::now() >= schedule.deadline {
+            match channel {
+                FreshRetryChannel::SelfChannel => self.self_schedule = None,
+                FreshRetryChannel::Peer => self.peer_schedule = None,
+            }
+            self.record_fresh_retry(logger, schedule, "expired").await?;
+            return Ok(FrameCycleOutcome::NoWork);
+        }
+        self.runtime.request_native_presentation_retry();
+        let outcome = {
+            let renderer = self.renderer.as_ref().expect("active renderer");
+            let openvr = self.openvr.as_mut().expect("active OpenVR session");
+            self.runtime
+                .submit_frame_if_needed_with_timing(
+                    renderer, openvr, bridge, logger, None, None, true,
+                )
+                .await?
+        };
+        let audit = {
+            let slot = match channel {
+                FreshRetryChannel::SelfChannel => &mut self.self_schedule,
+                FreshRetryChannel::Peer => &mut self.peer_schedule,
+            };
+            if !slot
+                .as_ref()
+                .is_some_and(|active| active.trigger_generation == schedule.trigger_generation)
+            {
+                None
+            } else {
+                match &outcome {
+                    FrameCycleOutcome::Submitted => {
+                        let active = slot.as_mut().expect("same active schedule");
+                        active.completed += 1;
+                        let completed = *active;
+                        if active.completed >= self.retry_policy.max_completed
+                            || Instant::now() >= active.deadline
+                        {
+                            *slot = None;
+                        } else {
+                            active.next_due = Instant::now() + self.retry_policy.cadence;
+                        }
+                        Some((completed, "completed"))
+                    }
+                    FrameCycleOutcome::Preempted(_) => {
+                        let active = slot.as_mut().expect("same active schedule");
+                        active.next_due = Instant::now() + self.retry_policy.cadence;
+                        Some((*active, "preempted"))
+                    }
+                    FrameCycleOutcome::NoWork => None,
+                }
+            }
+        };
+        if let Some((fact, outcome_name)) = audit {
+            self.record_fresh_retry(logger, fact, outcome_name).await?;
+        }
+        Ok(outcome)
     }
 
     pub async fn run(
@@ -1221,6 +1538,8 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
             self.teardown();
             return Ok(());
         }
+        let reconcile_result = self.reconcile_fresh_schedules(logger).await;
+        self.finish_initial_reconcile(reconcile_result)?;
 
         let result = self.run_owned_event_loop(bridge, logger).await;
         self.teardown();
@@ -1240,6 +1559,13 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
             } else {
                 tokio::select! {
                     biased;
+                    _ = sleep_until(self.next_fresh_due().unwrap_or_else(Instant::now)), if self.next_fresh_due().is_some() => {
+                        if let Some(channel) = self.due_fresh_channel(Instant::now()) {
+                            let outcome = self.run_due_fresh_attempt(channel, bridge, logger).await?;
+                            pending_message = outcome.pending_message();
+                        }
+                        None
+                    }
                     retry = self.retry_receiver.recv() => {
                         if retry.is_none() {
                             return Ok(());
@@ -1251,7 +1577,8 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
                             .submit_frame_if_needed_with_timing(
                                 renderer, openvr, bridge, logger, None, None, true,
                             )
-                            .await?;
+                            .await?
+                            .pending_message();
                         None
                     }
                     _ = sleep_until(hide_deadline.unwrap_or_else(Instant::now)), if hide_deadline.is_some() => {
@@ -1273,6 +1600,7 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
                     return Ok(());
                 }
                 pending_message = preempted_message;
+                self.reconcile_fresh_schedules(logger).await?;
             }
         }
     }
@@ -1280,6 +1608,8 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
     fn teardown(&mut self) {
         self.retry_sender = None;
         self.retry_receiver.close();
+        self.self_schedule = None;
+        self.peer_schedule = None;
         self.runtime.shutdown_presentation();
         if let Some(openvr) = self.openvr.as_mut() {
             let _ = openvr.set_overlay_visible(false);
@@ -1287,6 +1617,28 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
         self.openvr = None;
         self.renderer = None;
     }
+}
+
+async fn log_fresh_retry(
+    logger: &OverlayLogger,
+    schedule: NativeFreshSchedule,
+    outcome: &str,
+    policy: NativeFreshRetryPolicy,
+) -> Result<(), RuntimeFailure> {
+    log_runtime_info(
+        logger,
+        format!(
+            "native_fresh_retry channel={} trigger_generation={} outcome={} completed={} max={} cadence_ms={} deadline_ms={} physical_hmd_visibility=not_observable",
+            schedule.channel.name(),
+            schedule.trigger_generation,
+            outcome,
+            schedule.completed,
+            policy.max_completed,
+            policy.cadence.as_millis(),
+            policy.deadline.as_millis(),
+        ),
+    )
+    .await
 }
 
 fn peer_overlay_first_emit_block_ids_from_snapshot(
@@ -2209,8 +2561,10 @@ mod tests {
         format_snapshot_slot_correlation_log, format_state_snapshot_log,
         format_two_row_window_closed_log, peer_overlay_first_emit_block_ids_from_snapshot,
         peer_overlay_first_render_block_ids_from_caption_blocks, prepare_openvr_runtime,
-        DiagnosticRow, FrameStageDurations, OverlayRuntime, RenderedDiagnosticRow,
-        SnapshotApplyOutcome, StartupError, TwoRowWindowState,
+        DiagnosticRow, FrameStageDurations, FreshRetryChannel, NativeFreshSchedule,
+        NativePresentationOwner, OverlayRuntime, RenderedDiagnosticRow, RuntimeFailure,
+        SnapshotApplyOutcome, StartupError, TwoRowWindowState, NATIVE_FRESH_AUDIT_CAPACITY,
+        NATIVE_FRESH_RETRY_MAX_COMPLETED,
     };
     use crate::logging::{OverlayLogger, OverlayLoggingMode};
     use crate::openvr::{
@@ -2220,7 +2574,7 @@ mod tests {
     use crate::presentation::{PresentationBackend, PresentationOutcome, PresentationStage};
     use crate::renderer::{
         CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
-        CaptionPresentation, FontLanguageBucket, FontSource, RenderDiagnostics,
+        CaptionPresentation, CaptionRenderer, FontLanguageBucket, FontSource, RenderDiagnostics,
         StyleBucketSourceCount,
     };
     use crate::state::{
@@ -2233,6 +2587,59 @@ mod tests {
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
+
+    #[test]
+    fn native_fresh_audit_capacity_covers_simultaneous_production_journey() {
+        let maximum_journey = 2 * (NATIVE_FRESH_RETRY_MAX_COMPLETED as usize + 2);
+        assert!(NATIVE_FRESH_AUDIT_CAPACITY >= maximum_journey);
+    }
+
+    #[test]
+    fn native_fresh_audit_drops_oldest_with_bounded_count() {
+        let mut owner = NativePresentationOwner::new(
+            OverlayPresentationSnapshot::default(),
+            CaptionRenderer::new_for_test().unwrap(),
+            FakeOpenVr::default(),
+        );
+        let now = tokio::time::Instant::now();
+        for generation in 0..=NATIVE_FRESH_AUDIT_CAPACITY as u64 {
+            owner.push_fresh_retry_audit(
+                NativeFreshSchedule {
+                    channel: FreshRetryChannel::SelfChannel,
+                    trigger_generation: generation,
+                    completed: 0,
+                    deadline: now,
+                    next_due: now,
+                },
+                "scheduled",
+            );
+        }
+
+        assert_eq!(owner.fresh_retry_audit.len(), NATIVE_FRESH_AUDIT_CAPACITY);
+        assert_eq!(owner.fresh_retry_audit_dropped, 1);
+        assert_eq!(
+            owner.fresh_retry_audit.front().unwrap().trigger_generation,
+            1
+        );
+    }
+
+    #[test]
+    fn initial_reconcile_failure_path_releases_owner_resources_and_handle() {
+        let mut owner = NativePresentationOwner::new(
+            OverlayPresentationSnapshot::default(),
+            CaptionRenderer::new_for_test().unwrap(),
+            FakeOpenVr::default(),
+        );
+        let retry = owner.retry_handle();
+
+        let result = owner.finish_initial_reconcile(Err(RuntimeFailure::Bridge(
+            "injected reconcile logging failure".into(),
+        )));
+
+        assert!(matches!(result, Err(RuntimeFailure::Bridge(_))));
+        assert!(owner.resources_released());
+        assert!(!retry.request());
+    }
     use std::time::Duration;
     use tokio::io::AsyncWrite;
     use tokio::time::Instant;
