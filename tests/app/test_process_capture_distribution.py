@@ -7,17 +7,39 @@ from pathlib import Path
 import pytest
 
 from puripuly_heart.release_evidence.windows_process_distribution import (
+    APPROVED_ALTERNATE_APP_ID,
     CLIENT_KEYS,
     DISTRIBUTION_EVIDENCE_SCHEMA,
     PRODUCTION_APP_ID,
     ManualClientCell,
+    build_installer_provenance,
     validate_distribution_evidence,
     validate_installer_isolation,
+    validate_installer_provenance,
     validate_manual_matrix,
     validate_runtime_report,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _provenance_fixture(tmp_path: Path) -> dict[str, object]:
+    release = tmp_path / "release.exe"
+    isolated = tmp_path / "isolated.exe"
+    log = tmp_path / "install.log"
+    release.write_bytes(b"release")
+    isolated.write_bytes(b"isolated")
+    log.write_bytes(b"log")
+    return {
+        "release_installer_path": str(release),
+        "release_installer_sha256": hashlib.sha256(b"release").hexdigest(),
+        "isolated_installer_path": str(isolated),
+        "isolated_installer_sha256": hashlib.sha256(b"isolated").hexdigest(),
+        "isolated_installer_last_write_utc": "2026-07-10T18:13:25Z",
+        "isolated_install_log_path": str(log),
+        "isolated_install_log_sha256": hashlib.sha256(b"log").hexdigest(),
+        "isolated_install_log_last_write_utc": "2026-07-10T18:13:33Z",
+    }
 
 
 def test_build_spec_collects_pinned_proctap_hidden_imports_and_native_binary() -> None:
@@ -116,7 +138,7 @@ def test_manual_matrix_cannot_claim_unavailable_clients_and_carries_risk() -> No
         validate_manual_matrix(matrix)
 
 
-def test_distribution_evidence_schema_is_strict() -> None:
+def test_distribution_evidence_schema_is_strict(tmp_path: Path) -> None:
     evidence = {
         "schema": DISTRIBUTION_EVIDENCE_SCHEMA,
         "status": "passed",
@@ -124,7 +146,7 @@ def test_distribution_evidence_schema_is_strict() -> None:
         "supported_target": {},
         "packaged": {},
         "installed": {},
-        "installer_isolation": {},
+        "installer_isolation": {"installer_provenance": _provenance_fixture(tmp_path)},
         "manual_matrix": {},
         "manual_matrix_complete": False,
         "manual_matrix_status": "waived",
@@ -137,6 +159,51 @@ def test_distribution_evidence_schema_is_strict() -> None:
     validate_distribution_evidence(evidence)
     with pytest.raises(ValueError, match="schema"):
         validate_distribution_evidence({**evidence, "extra": json.loads("true")})
+
+
+def test_installer_provenance_generator_distinguishes_release_and_isolated_artifacts(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    release_dir = workspace / "installer_output"
+    isolated_dir = tmp_path / "isolated"
+    release_dir.mkdir(parents=True)
+    isolated_dir.mkdir()
+    release = release_dir / "setup.exe"
+    isolated = isolated_dir / "setup.exe"
+    log = isolated_dir / "install.log"
+    release.write_bytes(b"release-identity")
+    isolated.write_bytes(b"alternate-identity")
+    log.write_bytes(b"installed alternate")
+
+    provenance = build_installer_provenance(
+        release_installer_path=release,
+        isolated_installer_path=isolated,
+        isolated_install_log_path=log,
+        alternate_app_id=APPROVED_ALTERNATE_APP_ID,
+        workspace_root=workspace,
+    )
+
+    assert provenance["release_installer_sha256"] == hashlib.sha256(b"release-identity").hexdigest()
+    assert (
+        provenance["isolated_installer_sha256"] == hashlib.sha256(b"alternate-identity").hexdigest()
+    )
+    swapped = {
+        **provenance,
+        "release_installer_sha256": provenance["isolated_installer_sha256"],
+        "isolated_installer_sha256": provenance["release_installer_sha256"],
+    }
+    with pytest.raises(ValueError, match="file/hash association"):
+        validate_installer_provenance(swapped, validate_files=True)
+
+    with pytest.raises(ValueError, match="workspace release output"):
+        build_installer_provenance(
+            release_installer_path=isolated,
+            isolated_installer_path=release,
+            isolated_install_log_path=log,
+            alternate_app_id=APPROVED_ALTERNATE_APP_ID,
+            workspace_root=workspace,
+        )
 
 
 def test_release_workflow_uses_short_overlay_target_and_verifies_current_version() -> None:
@@ -173,6 +240,14 @@ def test_checked_in_distribution_evidence_matches_schema_and_manual_claim_rules(
     assert evidence["manual_matrix_complete"] is False
     assert evidence["manual_matrix_status"] == "waived"
     assert evidence["status"] == "closed_with_waiver"
+    provenance = evidence["installer_isolation"]["installer_provenance"]
+    assert provenance["release_installer_sha256"] == (
+        "08903c06ec5a76610279c5338875e28beea831e1cec7da62e37b8c6a7d123e74"
+    )
+    assert provenance["isolated_installer_sha256"] == (
+        "222d81b45b20e27f3ffbdc30fcdb6e330ea78f4f78e94d97bbf26485d14cd629"
+    )
+    assert provenance["release_installer_sha256"] != provenance["isolated_installer_sha256"]
     assert matrix["discord_stable"].status == "waived"
     assert matrix["discord_stable"].result == "not_tested"
     assert matrix["vrchat"].status == "waived"

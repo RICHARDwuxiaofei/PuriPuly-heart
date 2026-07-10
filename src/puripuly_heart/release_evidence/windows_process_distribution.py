@@ -4,11 +4,13 @@ import hashlib
 import json
 import ntpath
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-DISTRIBUTION_EVIDENCE_SCHEMA = "puripuly-heart/windows-process-distribution/v1"
+DISTRIBUTION_EVIDENCE_SCHEMA = "puripuly-heart/windows-process-distribution/v2"
 PRODUCTION_APP_ID = "{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
+APPROVED_ALTERNATE_APP_ID = "{C2E4A7B1-59F3-4C89-9D21-7E6B5A4032F8}"
 CLIENT_KEYS = ("vrchat", "discord_stable", "discord_ptb", "discord_canary")
 ClientStatus = Literal["passed", "waived", "unavailable", "not_run"]
 
@@ -72,6 +74,90 @@ def validate_runtime_report(report: dict[str, object], *, expected_root: Path) -
         raise ValueError("reported ProcTap native module hash does not match")
 
 
+def build_installer_provenance(
+    *,
+    release_installer_path: Path,
+    isolated_installer_path: Path,
+    isolated_install_log_path: Path,
+    alternate_app_id: str,
+    workspace_root: Path,
+) -> dict[str, object]:
+    if alternate_app_id != APPROVED_ALTERNATE_APP_ID:
+        raise ValueError("isolated installer provenance requires the approved alternate AppId")
+    release = release_installer_path.resolve()
+    isolated = isolated_installer_path.resolve()
+    log = isolated_install_log_path.resolve()
+    workspace = workspace_root.resolve()
+    expected_release_dir = workspace / "installer_output"
+    if expected_release_dir != release.parent:
+        raise ValueError("release installer must come from the workspace release output")
+    if workspace == isolated or workspace in isolated.parents:
+        raise ValueError("isolated installer artifact must be outside the workspace")
+    for path in (release, isolated, log):
+        if not path.is_file():
+            raise ValueError("installer provenance input is missing")
+    release_hash = _sha256(release)
+    isolated_hash = _sha256(isolated)
+    if release_hash == isolated_hash:
+        raise ValueError("release and isolated installer artifacts must be distinct")
+    isolated_timestamp = isolated.stat().st_mtime
+    log_timestamp = log.stat().st_mtime
+    if log_timestamp < isolated_timestamp:
+        raise ValueError("isolated installer log predates the installer artifact")
+    value = {
+        "release_installer_path": str(release),
+        "release_installer_sha256": release_hash,
+        "isolated_installer_path": str(isolated),
+        "isolated_installer_sha256": isolated_hash,
+        "isolated_installer_last_write_utc": _utc_timestamp(isolated_timestamp),
+        "isolated_install_log_path": str(log),
+        "isolated_install_log_sha256": _sha256(log),
+        "isolated_install_log_last_write_utc": _utc_timestamp(log_timestamp),
+    }
+    validate_installer_provenance(value, validate_files=True)
+    return value
+
+
+def validate_installer_provenance(value: object, *, validate_files: bool = False) -> None:
+    required = {
+        "release_installer_path",
+        "release_installer_sha256",
+        "isolated_installer_path",
+        "isolated_installer_sha256",
+        "isolated_installer_last_write_utc",
+        "isolated_install_log_path",
+        "isolated_install_log_sha256",
+        "isolated_install_log_last_write_utc",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise ValueError("invalid installer provenance schema")
+    release_hash = value["release_installer_sha256"]
+    isolated_hash = value["isolated_installer_sha256"]
+    log_hash = value["isolated_install_log_sha256"]
+    if not all(
+        isinstance(item, str)
+        and len(item) == 64
+        and all(character in "0123456789abcdef" for character in item)
+        for item in (release_hash, isolated_hash, log_hash)
+    ):
+        raise ValueError("invalid installer provenance hash")
+    if release_hash == isolated_hash:
+        raise ValueError("release and isolated installer hashes cannot be swapped or equal")
+    if validate_files:
+        file_hashes = (
+            (Path(str(value["release_installer_path"])), release_hash),
+            (Path(str(value["isolated_installer_path"])), isolated_hash),
+            (Path(str(value["isolated_install_log_path"])), log_hash),
+        )
+        for path, expected_hash in file_hashes:
+            if not path.is_file() or _sha256(path) != expected_hash:
+                raise ValueError("installer provenance file/hash association is invalid")
+    isolated_time = datetime.fromisoformat(str(value["isolated_installer_last_write_utc"]))
+    log_time = datetime.fromisoformat(str(value["isolated_install_log_last_write_utc"]))
+    if log_time < isolated_time:
+        raise ValueError("isolated installer log timestamp is not associated with the artifact")
+
+
 def validate_manual_matrix(matrix: dict[str, ManualClientCell]) -> None:
     if tuple(matrix) != CLIENT_KEYS:
         raise ValueError("manual client matrix keys or order are invalid")
@@ -121,6 +207,10 @@ def validate_distribution_evidence(evidence: dict[str, object]) -> None:
         "blocked",
     }:
         raise ValueError("invalid Windows process distribution evidence status")
+    installer_isolation = evidence.get("installer_isolation")
+    if not isinstance(installer_isolation, dict):
+        raise ValueError("invalid installer isolation evidence")
+    validate_installer_provenance(installer_isolation.get("installer_provenance"))
 
 
 def _sha256(path: Path) -> str:
@@ -140,3 +230,7 @@ def load_report(path: Path) -> dict[str, object]:
 
 def artifact_sha256(path: Path) -> str:
     return _sha256(path)
+
+
+def _utc_timestamp(value: float) -> str:
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")

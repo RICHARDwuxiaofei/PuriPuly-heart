@@ -48,3 +48,9 @@ Discord Stable execution because no credential-free automatic client-audio actio
 and the user declined assisted manual execution. Those cells remain `waived` with result
 `not_tested`; they are never counted as successful runs. PTB and Canary remain unavailable, and
 the multilevel ancestry risk remains attached to every client cell.
+
+Distribution schema v2 keeps installer identities separate:
+`release_installer_sha256` identifies the production-identity release artifact, while
+`isolated_installer_sha256` identifies the exact alternate-AppId artifact used by installer smoke.
+The isolated artifact timestamp and associated install-log timestamp/hash are recorded alongside
+them; validators reject equal or file-swapped provenance.

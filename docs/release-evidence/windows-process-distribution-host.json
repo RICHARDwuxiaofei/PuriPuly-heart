@@ -27,8 +27,16 @@
     "alternate_app_id": "{C2E4A7B1-59F3-4C89-9D21-7E6B5A4032F8}",
     "cleanup": "uninstaller_exit_0_and_install_directory_removed",
     "install_dir": "C:/Users/salee/AppData/Local/Programs/PuriPulyHeart-LocalSTT-Test",
-    "installer_log_sha256": "94c94aa64b4516d15f1766da92d4f5f255fc54daec3579b6969033e36d7967b8",
-    "installer_sha256": "08903c06ec5a76610279c5338875e28beea831e1cec7da62e37b8c6a7d123e74",
+    "installer_provenance": {
+      "isolated_install_log_last_write_utc": "2026-07-10T18:13:33.329657Z",
+      "isolated_install_log_path": "C:\\Users\\salee\\AppData\\Local\\Temp\\PuriPulyHeart-LocalSTT-Test.log",
+      "isolated_install_log_sha256": "94c94aa64b4516d15f1766da92d4f5f255fc54daec3579b6969033e36d7967b8",
+      "isolated_installer_last_write_utc": "2026-07-10T18:13:25.164586Z",
+      "isolated_installer_path": "C:\\Users\\salee\\AppData\\Local\\Temp\\PuriPulyHeart-Installer-Smoke\\PuriPulyHeart-Setup-2.2.2.exe",
+      "isolated_installer_sha256": "222d81b45b20e27f3ffbdc30fcdb6e330ea78f4f78e94d97bbf26485d14cd629",
+      "release_installer_path": "C:\\Users\\salee\\Documents\\dev\\puripuly_heart\\.worktrees\\iw-vnext-process-specific-peer-audio-capture\\installer_output\\PuriPulyHeart-Setup-2.2.2.exe",
+      "release_installer_sha256": "08903c06ec5a76610279c5338875e28beea831e1cec7da62e37b8c6a7d123e74"
+    },
     "local_stt_provisioning": "compile_time_skipped_for_isolated_no_network_smoke",
     "production_app_id_used": false,
     "production_install_path_used": false
@@ -88,7 +96,7 @@
       "status": "passed"
     }
   },
-  "schema": "puripuly-heart/windows-process-distribution/v1",
+  "schema": "puripuly-heart/windows-process-distribution/v2",
   "status": "closed_with_waiver",
   "supported_target": {
     "implementation": "CPython",
