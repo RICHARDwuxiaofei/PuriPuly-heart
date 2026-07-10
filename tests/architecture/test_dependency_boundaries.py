@@ -218,11 +218,13 @@ LAYER_RULES = (
     ),
     LayerRule(
         layer=APP_COMPOSITION,
-        prefixes=("puripuly_heart.app.services.canonical_settings_persistence",),
+        prefixes=(
+            "puripuly_heart.app.services.canonical_settings_persistence",
+            "puripuly_heart.app.wiring_composition",
+        ),
         forbidden_layers=frozenset(
             {
                 UI_ADAPTERS_RENDERERS,
-                ADAPTERS,
                 PROVIDERS,
             }
         ),
@@ -264,7 +266,10 @@ LAYER_RULES = (
     ),
     LayerRule(
         layer=SETTINGS_PERSISTENCE_ADAPTERS,
-        prefixes=("puripuly_heart.app.adapters.settings_vnext_canonical_persistence",),
+        prefixes=(
+            "puripuly_heart.app.adapters.canonical_state_repository",
+            "puripuly_heart.app.adapters.settings_vnext_canonical_persistence",
+        ),
         forbidden_layers=frozenset(
             {
                 UI_ADAPTERS_RENDERERS,
@@ -618,12 +623,6 @@ KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementVio
             "src/puripuly_heart/ui/views/settings.py",
             "AppSettings",
             "SettingsView remains a UI editor for the public AppSettings compatibility model while controller/app services own persistence; replacing the view draft model is deferred UI-rendering work, not active runtime resolution.",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
-            "src/puripuly_heart/core/telemetry.py",
-            "AppSettings",
-            "Translation-success telemetry service mutates and persists consent/anonymous identity through the public AppSettings compatibility model until a dedicated telemetry state port is extracted.",
         ),
     }
 )
@@ -1525,6 +1524,26 @@ def test_dependency_boundary_allowlist_matches_current_violations() -> None:
         f"{_format_violations(unexpected)}\n"
         "Stale allowlist entries:\n"
         f"{_format_violations(stale)}"
+    )
+
+
+def test_canonical_state_service_does_not_compose_concrete_adapter() -> None:
+    service_path = SOURCE_PACKAGE_ROOT / "app" / "services" / "canonical_state_repositories.py"
+    tree = ast.parse(service_path.read_text(encoding="utf-8"))
+    assert not any(
+        isinstance(node, ast.ImportFrom)
+        and (node.module or "").startswith("puripuly_heart.app.adapters")
+        for node in ast.walk(tree)
+    )
+
+
+def test_wiring_composition_is_the_only_c1_service_path_allowed_to_import_adapters() -> None:
+    assert _layer_for_module("puripuly_heart.app.wiring_composition") == APP_COMPOSITION
+    violations = _dependency_violations()
+    assert not any(
+        violation.importer == "src/puripuly_heart/app/wiring_composition.py"
+        and violation.imported.startswith("puripuly_heart.app.adapters")
+        for violation in violations
     )
 
 

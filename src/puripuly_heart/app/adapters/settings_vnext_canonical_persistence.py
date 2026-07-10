@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from puripuly_heart.config.settings_vnext import serialization
+from puripuly_heart.config.settings_vnext.compat import canonical_settings_path_lock
 from puripuly_heart.config.settings_vnext.facade import load_vnext_settings, save_vnext_settings
 from puripuly_heart.config.settings_vnext.migration import from_legacy_app_settings
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
@@ -44,6 +45,36 @@ class SettingsVNextCanonicalPersistenceAdapter:
             status = getattr(result.status, "value", result.status)
             message = result.error.message if result.error is not None else status
             raise RuntimeError(message)
+
+    def persist_delta(
+        self,
+        path: Path,
+        *,
+        baseline: AppSettingsVNext,
+        next_settings: AppSettingsVNext,
+    ) -> AppSettingsVNext:
+        if baseline.intent.telemetry.consent != next_settings.intent.telemetry.consent:
+            raise RuntimeError("telemetry consent requires atomic telemetry state transition")
+        with canonical_settings_path_lock(path):
+            load_result = load_vnext_settings(path)
+            if load_result.settings is None:
+                status = getattr(load_result.status, "value", load_result.status)
+                message = load_result.error.message if load_result.error is not None else status
+                raise RuntimeError(f"canonical latest load failed: {message}")
+            latest = load_result.settings
+            merged_data = serialization.to_dict(latest)
+            _apply_changed_mapping_values(
+                merged_data,
+                serialization.to_dict(baseline),
+                serialization.to_dict(next_settings),
+            )
+            merged = serialization.from_dict(merged_data)
+            result = save_vnext_settings(path, merged)
+            if not result.ok:
+                status = getattr(result.status, "value", result.status)
+                message = result.error.message if result.error is not None else status
+                raise RuntimeError(message)
+            return merged
 
     def project(
         self,

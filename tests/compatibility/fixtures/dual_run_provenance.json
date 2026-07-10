@@ -11,15 +11,26 @@
     "working_tree_repairs": ["P-003", "P-012", "P-017", "P-020", "P-034", "P-035"],
     "repair_manifest": {
       "files": [
+        "src/puripuly_heart/app/adapters/canonical_state_repository.py",
+        "src/puripuly_heart/app/adapters/settings_vnext_canonical_persistence.py",
+        "src/puripuly_heart/app/ports/canonical_settings_persistence.py",
+        "src/puripuly_heart/app/ports/canonical_state_repository.py",
+        "src/puripuly_heart/app/services/canonical_state_repositories.py",
+        "src/puripuly_heart/app/services/telemetry_operational_state.py",
+        "src/puripuly_heart/app/wiring_composition.py",
         "src/puripuly_heart/config/prompts.py",
+        "src/puripuly_heart/config/settings_vnext/compat.py",
+        "src/puripuly_heart/config/settings_vnext/serialization.py",
         "src/puripuly_heart/core/runtime/provider_handle.py",
         "src/puripuly_heart/core/runtime/self_audio.py",
         "src/puripuly_heart/core/stt/controller.py",
-        "src/puripuly_heart/ui/controller.py",
-        "src/puripuly_heart/data/i18n/zh-CN.json"
+        "src/puripuly_heart/core/telemetry.py",
+        "src/puripuly_heart/data/i18n/zh-CN.json",
+        "src/puripuly_heart/ui/app.py",
+        "src/puripuly_heart/ui/controller.py"
       ],
-      "production_source_sha256": "be4a818a0d060d7b6199b815ea2ca1ae055d21c11b59ef9c960bd106f2c8f944",
-      "git_binary_patch_sha256": "a76a06a2e670b9ed6eddfe7e4db48c46f888abc727f34f842bf54cacb2586a4a"
+      "production_source_sha256": "642afa2e238ae16ef33c0d3d410eec98639b4952fbdbe59308d99a81afb5735a",
+      "git_binary_patch_sha256": "e0b5e07c707413b97bcf8e3966719c680881096841f5ea92caa1afc972a4e5ed"
     },
     "repair_base": "b4ace2631793aa1a1e384c0440b8ec7f315559ae"
   },

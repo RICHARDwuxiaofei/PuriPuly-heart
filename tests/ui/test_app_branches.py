@@ -23,6 +23,7 @@ from puripuly_heart.config.settings import (
     TranslationConnection,
     TranslationModel,
     TranslationSettings,
+    with_telemetry_consent,
 )
 from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 from puripuly_heart.core.runtime import OAuthRuntime
@@ -117,6 +118,10 @@ class TelemetryController:
     async def apply_settings(self, settings: AppSettings) -> None:
         self.settings = settings
         self.applied.append(settings)
+
+    async def set_telemetry_consent(self, consent: str) -> bool:
+        self.settings = with_telemetry_consent(self.settings, consent)
+        return True
 
     async def record_telemetry_translation_success_day(self) -> None:
         self.telemetry_success_recorded = True

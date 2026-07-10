@@ -92,6 +92,9 @@ from puripuly_heart.app.services.settings_mutation_legacy import (
     settings_path_snapshot_for_stt_language_audio,
     settings_path_snapshot_for_ui_prompt_clipboard_state,
 )
+from puripuly_heart.app.services.telemetry_operational_state import (
+    TelemetryOperationalStateOwner,
+)
 from puripuly_heart.app.wiring import (
     DiscordManagedBrokerClientAdapter,
     DiscordOAuthAuthAdapter,
@@ -111,6 +114,7 @@ from puripuly_heart.app.wiring import (
     resolve_overlay_config,
     resolve_peer_stt_runtime_config_from_vnext,
 )
+from puripuly_heart.app.wiring_composition import create_canonical_state_repositories
 from puripuly_heart.config.audio_host_api import normalize_input_host_api
 from puripuly_heart.config.llm_profiles import (
     get_openrouter_selection_alias_for_model_and_source,
@@ -2325,21 +2329,51 @@ class GuiController:
             level=logging.INFO,
         )
 
+    async def set_telemetry_consent(self, consent: str) -> bool:
+        repositories = create_canonical_state_repositories(self.config_path)
+        owner = TelemetryOperationalStateOwner(repositories.unit_of_work)
+        snapshot = await owner.set_consent(consent)
+        if snapshot is None:
+            self._telemetry_diagnostics_sink(
+                "consent_persist_failed",
+                {"phase": "consent_persist"},
+            )
+            return False
+        try:
+            projected = await asyncio.to_thread(load_settings, self.config_path)
+        except Exception:
+            self._telemetry_diagnostics_sink(
+                "consent_projection_failed",
+                {"phase": "consent_projection"},
+            )
+            return False
+        self.settings = projected
+        self.vnext_settings = await asyncio.to_thread(
+            self._load_canonical_vnext_settings,
+            self.config_path,
+            projected,
+        )
+        self._remember_canonical_legacy_projection(projected)
+        return True
+
     async def record_telemetry_translation_success_day(
         self,
     ) -> TranslationSuccessTelemetryResult:
         if self.settings is None:
             return TranslationSuccessTelemetryResult(status="skipped_no_settings")
 
-        async def _persist(updated: AppSettings) -> bool:
-            await self.apply_settings(updated)
-            return self.last_settings_mutation_result is not None and _settings_mutation_committed(
-                self.last_settings_mutation_result
-            )
+        repositories = create_canonical_state_repositories(self.config_path)
+        owner = TelemetryOperationalStateOwner(
+            repositories.unit_of_work,
+        )
 
+        telemetry_snapshot = await owner.load()
+        if telemetry_snapshot is None:
+            self._telemetry_diagnostics_sink("state_load_failed", {"phase": "state_load"})
+            return TranslationSuccessTelemetryResult(status="state_load_failed")
         return await self._get_telemetry_service().record_translation_success_day(
-            self.settings,
-            persist_sent_date=_persist,
+            telemetry_snapshot,
+            persist_sent_date=owner.mark_translation_success_date_sent,
         )
 
     async def _preserve_github_star_prompt_observation_before_settings_replace(
@@ -6824,9 +6858,13 @@ class GuiController:
     def _persist_settings_at_controller_boundary(self, settings: AppSettings) -> None:
         canonical = self.vnext_settings
         if self._canonical_persistence_port_enabled and canonical is not None:
-            self.canonical_settings_persistence.persist(
+            baseline = self._canonical_mutation_rollback_snapshot
+            if baseline is None:
+                raise RuntimeError("canonical persistence delta baseline missing")
+            self.vnext_settings = self.canonical_settings_persistence.persist_delta(
                 self.config_path,
-                canonical,
+                baseline=baseline,
+                next_settings=canonical,
             )
             return
         save_settings(self.config_path, settings)

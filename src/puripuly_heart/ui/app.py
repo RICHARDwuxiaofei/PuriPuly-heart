@@ -12,7 +12,6 @@ import flet as ft
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
-    with_telemetry_consent,
 )
 from puripuly_heart.core.discord_oauth_loopback import (
     render_discord_oauth_callback_completion_page,
@@ -634,8 +633,8 @@ class TranslatorApp:
             settings = getattr(self.controller, "settings", None)
             if settings is None:
                 return
-            updated = with_telemetry_consent(settings, consent)
-            await self.controller.apply_settings(updated)
+            if not await self.controller.set_telemetry_consent(consent):
+                return
             sync_telemetry = getattr(self.view_settings, "sync_telemetry_settings", None)
             if callable(sync_telemetry) and self.controller.settings is not None:
                 sync_telemetry(self.controller.settings)

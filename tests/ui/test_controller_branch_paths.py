@@ -53,6 +53,7 @@ from puripuly_heart.config.settings import (
     TranslationSettings,
     to_dict,
 )
+from puripuly_heart.config.settings_vnext.facade import save_vnext_settings
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core import messages
 from puripuly_heart.core.audio.format import AudioFrameF32
@@ -3935,6 +3936,7 @@ def test_unrelated_legacy_apply_preserves_canonical_peer_auto_intent_after_save_
             ),
         ),
     )
+    assert save_vnext_settings(controller.config_path, controller.vnext_settings).ok
     controller._vnext_settings_authoritative = True
     controller._canonical_persistence_port_enabled = True
     expected_signature = controller._build_peer_stt_provider_signature(legacy)
@@ -4002,6 +4004,7 @@ def test_failed_canonical_persistence_rolls_back_peer_auto_intent(
 
 def test_active_controller_persistence_preserves_canonical_peer_intent(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
     legacy = AppSettings()
@@ -4020,6 +4023,8 @@ def test_active_controller_persistence_preserves_canonical_peer_intent(
         ),
     )
     controller.vnext_settings = canonical
+    controller.config_path = tmp_path / "settings.json"
+    assert save_vnext_settings(controller.config_path, canonical).ok
     controller._vnext_settings_authoritative = True
     controller._canonical_persistence_port_enabled = True
     controller._remember_canonical_legacy_projection(legacy)
@@ -4083,6 +4088,7 @@ def test_failed_active_in_place_managed_persistence_restores_legacy_and_canonica
 
 def test_stale_managed_adapter_persists_only_managed_delta_on_current_settings(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
     stale_settings = AppSettings()
@@ -4107,6 +4113,8 @@ def test_stale_managed_adapter_persists_only_managed_delta_on_current_settings(
             ),
         ),
     )
+    controller.config_path = tmp_path / "settings.json"
+    assert save_vnext_settings(controller.config_path, controller.vnext_settings).ok
     controller._vnext_settings_authoritative = True
     controller._canonical_persistence_port_enabled = True
     controller._remember_canonical_legacy_projection(active_settings)
@@ -4179,6 +4187,7 @@ def test_failed_stale_managed_adapter_persistence_restores_active_and_bound_sett
 
 def test_direct_save_stages_legacy_delta_without_overwriting_canonical_peer_intent(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
     legacy = AppSettings()
@@ -4196,6 +4205,8 @@ def test_direct_save_stages_legacy_delta_without_overwriting_canonical_peer_inte
             ),
         ),
     )
+    controller.config_path = tmp_path / "settings.json"
+    assert save_vnext_settings(controller.config_path, controller.vnext_settings).ok
     controller._vnext_settings_authoritative = True
     controller._canonical_persistence_port_enabled = True
     controller._remember_canonical_legacy_projection(legacy)
@@ -4260,6 +4271,7 @@ def test_nested_canonical_completion_keeps_outer_rollback_snapshot() -> None:
 @pytest.mark.asyncio
 async def test_settings_repository_commits_only_scoped_delta_to_canonical_vnext(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
     legacy = AppSettings()
@@ -4277,6 +4289,8 @@ async def test_settings_repository_commits_only_scoped_delta_to_canonical_vnext(
             ),
         ),
     )
+    controller.config_path = tmp_path / "settings.json"
+    assert save_vnext_settings(controller.config_path, controller.vnext_settings).ok
     controller._vnext_settings_authoritative = True
     controller._canonical_persistence_port_enabled = True
     stale_full_draft = copy.deepcopy(legacy)

@@ -13,6 +13,14 @@ class CanonicalSettingsPersistencePort(Protocol[LegacySettingsT, CanonicalSettin
 
     def persist(self, path: Path, settings: CanonicalSettingsT) -> None: ...
 
+    def persist_delta(
+        self,
+        path: Path,
+        *,
+        baseline: CanonicalSettingsT,
+        next_settings: CanonicalSettingsT,
+    ) -> CanonicalSettingsT: ...
+
     def project(
         self,
         settings: LegacySettingsT,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -52,11 +55,38 @@ class BackupCreationError(OSError):
     pass
 
 
+_PATH_LOCKS_GUARD = threading.Lock()
+_PATH_LOCKS: dict[Path, threading.RLock] = {}
+
+
+@contextmanager
+def canonical_settings_path_lock(path: Path) -> Iterator[None]:
+    resolved = path.resolve()
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.setdefault(resolved, threading.RLock())
+    with lock:
+        yield
+
+
 def load_vnext_settings(
     path: Path,
     *,
     now: datetime | None = None,
     max_backup_attempts: int = 100,
+) -> VNextSettingsLoadResult:
+    with canonical_settings_path_lock(path):
+        return _load_vnext_settings_locked(
+            path,
+            now=now,
+            max_backup_attempts=max_backup_attempts,
+        )
+
+
+def _load_vnext_settings_locked(
+    path: Path,
+    *,
+    now: datetime | None,
+    max_backup_attempts: int,
 ) -> VNextSettingsLoadResult:
     try:
         original_bytes = path.read_bytes()
@@ -122,15 +152,16 @@ def load_vnext_settings(
 
 
 def save_vnext_settings(path: Path, settings: AppSettingsVNext) -> VNextSettingsSaveResult:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(path, serialization.to_json_text(settings), encoding="utf-8")
-    except Exception as exc:
-        return VNextSettingsSaveResult(
-            status=SettingsPersistenceStatus.SAVE_FAILED,
-            error=_error(SettingsPersistenceStatus.SAVE_FAILED, exc),
-        )
-    return VNextSettingsSaveResult(status=SettingsPersistenceStatus.SUCCESS)
+    with canonical_settings_path_lock(path):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(path, serialization.to_json_text(settings), encoding="utf-8")
+        except Exception as exc:
+            return VNextSettingsSaveResult(
+                status=SettingsPersistenceStatus.SAVE_FAILED,
+                error=_error(SettingsPersistenceStatus.SAVE_FAILED, exc),
+            )
+        return VNextSettingsSaveResult(status=SettingsPersistenceStatus.SUCCESS)
 
 
 def _requires_canonical_save(raw: dict[str, Any], settings: AppSettingsVNext) -> bool:
