@@ -1110,6 +1110,8 @@ def test_broker_v1_snapshot_freezes_request_success_and_error_envelopes() -> Non
         "issue",
         "discord_issue",
         "trial_status",
+        "managed_key_delivery_ack",
+        "telemetry_translation_success_day",
     )
 
     assert tuple(operations) == expected_operation_names

@@ -32,7 +32,7 @@ LEGACY_TASK_CREATION_ALLOWLIST = Counter(
         ("src/puripuly_heart/core/overlay/presenter.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/overlay/process.py", ASYNCIO_CREATE_TASK): 2,
         ("src/puripuly_heart/providers/stt/soniox.py", ASYNCIO_CREATE_TASK): 3,
-        ("src/puripuly_heart/ui/app.py", RUN_TASK): 14,
+        ("src/puripuly_heart/ui/app.py", RUN_TASK): 15,
         ("src/puripuly_heart/ui/components/settings/api_key_field.py", RUN_TASK): 1,
         ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 3,
         ("src/puripuly_heart/ui/controller.py", LOOP_CREATE_TASK): 5,

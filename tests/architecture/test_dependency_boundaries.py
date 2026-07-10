@@ -579,6 +579,12 @@ KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementVio
             "AppSettings",
             "SettingsView remains a UI editor for the public AppSettings compatibility model while controller/app services own persistence; replacing the view draft model is deferred UI-rendering work, not active runtime resolution.",
         ),
+        SettingsRuntimeConfinementViolation(
+            "legacy-settings-api-import",
+            "src/puripuly_heart/core/telemetry.py",
+            "AppSettings",
+            "Translation-success telemetry service mutates and persists consent/anonymous identity through the public AppSettings compatibility model until a dedicated telemetry state port is extracted.",
+        ),
     }
 )
 
