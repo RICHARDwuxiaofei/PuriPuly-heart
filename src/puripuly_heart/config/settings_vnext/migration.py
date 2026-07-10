@@ -11,6 +11,7 @@ from puripuly_heart.config.settings_vnext.schema import (
     VNEXT_SETTINGS_SCHEMA_VERSION,
     AppSettingsVNext,
     AudioIntent,
+    CaptureTargetIntent,
     CerebrasTranslationIntent,
     ClipboardIntent,
     DeepgramSTTIntent,
@@ -126,7 +127,44 @@ def _prepare_vnext_migration_dict(data: Mapping[str, Any]) -> dict[str, Any]:
         translation.pop("openrouter_fallback_selection_alias", None)
         intent["translation"] = translation
         prepared["intent"] = intent
+    if isinstance(intent, dict):
+        desktop_audio = (
+            dict(intent.get("desktop_audio", {}))
+            if isinstance(intent.get("desktop_audio"), Mapping)
+            else {}
+        )
+        if "capture_target" not in desktop_audio:
+            desktop_audio["capture_target"] = _capture_target_to_dict(
+                _capture_target_from_legacy_output_device(desktop_audio.get("output_device"))
+            )
+        desktop_audio.pop("output_device", None)
+        intent["desktop_audio"] = desktop_audio
+        prepared["intent"] = intent
     return prepared
+
+
+def _capture_target_from_legacy_output_device(value: object) -> CaptureTargetIntent:
+    if isinstance(value, str) and value.strip():
+        return CaptureTargetIntent.named_output_device(value)
+    return CaptureTargetIntent.default_output_device()
+
+
+def _capture_target_to_dict(target: CaptureTargetIntent) -> dict[str, object]:
+    process = target.process
+    return {
+        "kind": target.kind,
+        "device_name": target.device_name,
+        "process": (
+            None
+            if process is None
+            else {
+                "kind": process.kind,
+                "executable_identity": process.executable_identity,
+                "discord_channel": process.discord_channel,
+                "executable_basename": process.executable_basename,
+            }
+        ),
+    }
 
 
 def _fallback_intent_to_dict(intent: TranslationFallbackIntent) -> dict[str, object]:
@@ -346,7 +384,9 @@ def from_legacy_app_settings(
                 input_device=data["audio"]["input_device"],
             ),
             desktop_audio=DesktopAudioIntent(
-                output_device=data["desktop_audio"]["output_device"],
+                capture_target=_capture_target_from_legacy_output_device(
+                    data["desktop_audio"]["output_device"]
+                ),
                 vad_speech_threshold=float(data["desktop_audio"]["vad_speech_threshold"]),
                 vad_hangover_ms=int(data["desktop_audio"]["vad_hangover_ms"]),
                 vad_pre_roll_ms=int(data["desktop_audio"]["vad_pre_roll_ms"]),
@@ -520,7 +560,9 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
         }
     )
     data["desktop_audio"] = {
-        "output_device": intent.desktop_audio.output_device,
+        "output_device": _legacy_output_device_for_capture_target(
+            intent.desktop_audio.capture_target
+        ),
         "vad_speech_threshold": intent.desktop_audio.vad_speech_threshold,
         "vad_hangover_ms": intent.desktop_audio.vad_hangover_ms,
         "vad_pre_roll_ms": intent.desktop_audio.vad_pre_roll_ms,
@@ -685,6 +727,12 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
     }
     data["system_prompt"] = intent.prompts.system_prompt
     return data
+
+
+def _legacy_output_device_for_capture_target(capture_target: CaptureTargetIntent) -> str:
+    if capture_target.kind == "named_output_device":
+        return capture_target.device_name or ""
+    return ""
 
 
 def _legacy_provider_llm_for_translation(model: str, connection: str) -> str:

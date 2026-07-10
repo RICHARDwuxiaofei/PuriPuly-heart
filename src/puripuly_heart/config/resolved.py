@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ntpath
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -66,6 +67,14 @@ _RAW_SECRET_BEARING_OPTION_NAMES: Final = frozenset(
         "token",
         "token_value",
     }
+)
+_DISCORD_BASENAME_BY_CHANNEL: Final[dict[str, str]] = {
+    "stable": "Discord.exe",
+    "ptb": "DiscordPTB.exe",
+    "canary": "DiscordCanary.exe",
+}
+_DISCORD_BASENAMES_CASEFOLDED: Final[frozenset[str]] = frozenset(
+    basename.casefold() for basename in _DISCORD_BASENAME_BY_CHANNEL.values()
 )
 
 
@@ -271,6 +280,104 @@ class ResolvedSTTConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedDesktopAudioCaptureTarget:
+    kind: Literal["default_output_device", "named_output_device", "process"]
+    device_name: str | None = None
+    process_kind: Literal["generic_executable", "vrchat", "discord"] | None = None
+    executable_identity: str | None = None
+    discord_channel: str | None = None
+    executable_basename: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind == "default_output_device":
+            if any(
+                value is not None
+                for value in (
+                    self.device_name,
+                    self.process_kind,
+                    self.executable_identity,
+                    self.discord_channel,
+                    self.executable_basename,
+                )
+            ):
+                raise ValueError("default output target cannot include device or process data")
+            return
+        if self.kind == "named_output_device":
+            if not isinstance(self.device_name, str) or not self.device_name.strip():
+                raise ValueError("named output target requires a device name")
+            if any(
+                value is not None
+                for value in (
+                    self.process_kind,
+                    self.executable_identity,
+                    self.discord_channel,
+                    self.executable_basename,
+                )
+            ):
+                raise ValueError("named output target cannot include process data")
+            return
+        if self.kind != "process" or self.device_name is not None:
+            raise ValueError("process target requires a process identity")
+        if self.process_kind == "generic_executable":
+            _require_resolved_executable_identity(self.executable_identity)
+            if (
+                ntpath.basename(self.executable_identity).casefold()
+                in _DISCORD_BASENAMES_CASEFOLDED
+            ):
+                raise ValueError("generic process target cannot identify Discord")
+            if self.discord_channel is not None or self.executable_basename is not None:
+                raise ValueError("generic process target cannot include Discord identity")
+            return
+        if self.process_kind == "vrchat":
+            _require_resolved_executable_identity(self.executable_identity)
+            if ntpath.basename(self.executable_identity).casefold() != "vrchat.exe":
+                raise ValueError("VRChat process target must identify VRChat.exe")
+            if self.discord_channel is not None or self.executable_basename is not None:
+                raise ValueError("VRChat process target cannot include Discord identity")
+            return
+        if self.process_kind == "discord":
+            if self.executable_identity is not None:
+                raise ValueError("Discord process target cannot include an executable identity")
+            if not isinstance(self.discord_channel, str):
+                raise ValueError("Discord process target requires a channel")
+            channel = self.discord_channel.strip().casefold()
+            if channel not in _DISCORD_BASENAME_BY_CHANNEL:
+                raise ValueError("Discord process target has an unsupported channel")
+            if self.discord_channel != channel:
+                raise ValueError("Discord process target channel must be canonical")
+            if self.executable_basename != _DISCORD_BASENAME_BY_CHANNEL[channel]:
+                raise ValueError("Discord process target basename does not match its channel")
+            return
+        raise ValueError("process target has an unsupported process kind")
+
+
+def _require_resolved_executable_identity(value: object) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError("process target requires an executable identity")
+    normalized = ntpath.normcase(ntpath.normpath(value))
+    if (
+        value != normalized
+        or not _is_drive_qualified_absolute_windows_path(value)
+        or not ntpath.basename(value).casefold().endswith(".exe")
+    ):
+        raise ValueError(
+            "process target executable identity must be a normalized absolute executable path"
+        )
+
+
+def _is_drive_qualified_absolute_windows_path(value: str) -> bool:
+    if value.startswith(("\\\\.\\", "\\\\?\\", "\\??\\", "\\Device\\")):
+        return False
+    drive, tail = ntpath.splitdrive(value)
+    is_drive_qualified = (
+        len(drive) == 2 and drive[0].isalpha() and drive[1] == ":" and tail.startswith("\\")
+    )
+    unc_root = drive[2:].split("\\") if drive.startswith("\\\\") else ()
+    is_fully_qualified_unc = len(unc_root) == 2 and all(unc_root) and tail.startswith("\\")
+    return is_drive_qualified or is_fully_qualified_unc
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedOverlayConfig:
     enabled: bool
     target: OverlayTarget
@@ -337,6 +444,7 @@ __all__ = [
     "RUNTIME_CHANNEL_SELF",
     "RUNTIME_CHANNELS",
     "ResolvedCredentialRequirement",
+    "ResolvedDesktopAudioCaptureTarget",
     "ResolvedFeatureState",
     "ResolvedLLMConfig",
     "ResolvedLLMFallbackPlan",

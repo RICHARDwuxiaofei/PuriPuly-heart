@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import json
+import ntpath
 import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import date
-from typing import Final
+from typing import Final, Literal
 
 from puripuly_heart.config.audio_host_api import WINDOWS_WASAPI_COMPATIBILITY_HOST_API
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
 
-VNEXT_SETTINGS_SCHEMA_VERSION: Final = 26
+VNEXT_SETTINGS_SCHEMA_VERSION: Final = 27
 
 DEFAULT_OPENROUTER_BROKER_BASE_URL: Final = "https://puripuly-heart-broker.kapitalismho.workers.dev"
 DEFAULT_CUSTOM_VOCAB_TERMS: Final[Mapping[str, tuple[str, ...]]] = {
@@ -420,8 +421,144 @@ class AudioIntent:
 
 
 @dataclass(frozen=True, slots=True)
+class ProcessCaptureTargetIntent:
+    kind: Literal["generic_executable", "vrchat", "discord"]
+    executable_identity: str | None = None
+    discord_channel: str | None = None
+    executable_basename: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind == "generic_executable":
+            identity = _normalize_executable_identity(self.executable_identity)
+            if self.discord_channel is not None or self.executable_basename is not None:
+                raise ValueError("generic executable targets cannot include Discord identity")
+            if ntpath.basename(identity).casefold() in _DISCORD_BASENAME_BY_CHANNEL_CASEFOLDED:
+                raise ValueError("Discord targets must use a Discord channel identity")
+            object.__setattr__(self, "executable_identity", identity)
+            return
+        if self.kind == "vrchat":
+            identity = _normalize_executable_identity(self.executable_identity)
+            if ntpath.basename(identity).casefold() != "vrchat.exe":
+                raise ValueError("VRChat targets must identify VRChat.exe")
+            if self.discord_channel is not None or self.executable_basename is not None:
+                raise ValueError("VRChat targets cannot include Discord identity")
+            object.__setattr__(self, "executable_identity", identity)
+            return
+        if self.kind == "discord":
+            channel = _normalize_discord_channel(self.discord_channel)
+            basename = _DISCORD_BASENAME_BY_CHANNEL[channel]
+            if self.executable_identity is not None:
+                raise ValueError("Discord targets cannot persist an installation path")
+            if self.executable_basename not in (None, basename):
+                raise ValueError("Discord target basename does not match its channel")
+            object.__setattr__(self, "discord_channel", channel)
+            object.__setattr__(self, "executable_basename", basename)
+            return
+        raise ValueError(f"unsupported process capture target kind: {self.kind}")
+
+    @classmethod
+    def generic_executable(cls, executable_identity: str) -> ProcessCaptureTargetIntent:
+        return cls(kind="generic_executable", executable_identity=executable_identity)
+
+    @classmethod
+    def vrchat(cls, executable_identity: str) -> ProcessCaptureTargetIntent:
+        return cls(kind="vrchat", executable_identity=executable_identity)
+
+    @classmethod
+    def discord(cls, channel: str) -> ProcessCaptureTargetIntent:
+        return cls(kind="discord", discord_channel=channel)
+
+
+_DISCORD_BASENAME_BY_CHANNEL: Final[dict[str, str]] = {
+    "stable": "Discord.exe",
+    "ptb": "DiscordPTB.exe",
+    "canary": "DiscordCanary.exe",
+}
+_DISCORD_BASENAME_BY_CHANNEL_CASEFOLDED: Final[frozenset[str]] = frozenset(
+    basename.casefold() for basename in _DISCORD_BASENAME_BY_CHANNEL.values()
+)
+
+
+def _normalize_executable_identity(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("process executable identity must be non-empty")
+    normalized = ntpath.normcase(ntpath.normpath(value.strip().replace("/", "\\")))
+    if (
+        not normalized
+        or normalized in (".", "\\")
+        or not _is_drive_qualified_absolute_windows_path(normalized)
+        or not ntpath.basename(normalized).casefold().endswith(".exe")
+    ):
+        raise ValueError("process executable identity must name an executable")
+    return normalized
+
+
+def _is_drive_qualified_absolute_windows_path(value: str) -> bool:
+    if value.startswith(("\\\\.\\", "\\\\?\\", "\\??\\", "\\Device\\")):
+        return False
+    drive, tail = ntpath.splitdrive(value)
+    is_drive_qualified = (
+        len(drive) == 2 and drive[0].isalpha() and drive[1] == ":" and tail.startswith("\\")
+    )
+    unc_root = drive[2:].split("\\") if drive.startswith("\\\\") else ()
+    is_fully_qualified_unc = len(unc_root) == 2 and all(unc_root) and tail.startswith("\\")
+    return is_drive_qualified or is_fully_qualified_unc
+
+
+def _normalize_discord_channel(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Discord target channel must be a string")
+    channel = value.strip().casefold()
+    if channel not in _DISCORD_BASENAME_BY_CHANNEL:
+        raise ValueError("unsupported Discord target channel")
+    return channel
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureTargetIntent:
+    kind: Literal["default_output_device", "named_output_device", "process"] = (
+        "default_output_device"
+    )
+    device_name: str | None = None
+    process: ProcessCaptureTargetIntent | None = None
+
+    def __post_init__(self) -> None:
+        process = self.process
+        if isinstance(process, Mapping):
+            process = ProcessCaptureTargetIntent(**dict(process))
+            object.__setattr__(self, "process", process)
+        if self.kind == "default_output_device":
+            if self.device_name is not None or process is not None:
+                raise ValueError("default output target cannot include device or process data")
+            return
+        if self.kind == "named_output_device":
+            if not isinstance(self.device_name, str) or not self.device_name.strip():
+                raise ValueError("named output target requires a non-empty device name")
+            if process is not None:
+                raise ValueError("named output target cannot include process data")
+            return
+        if self.kind == "process":
+            if self.device_name is not None or not isinstance(process, ProcessCaptureTargetIntent):
+                raise ValueError("process target requires only a process identity")
+            return
+        raise ValueError(f"unsupported capture target kind: {self.kind}")
+
+    @classmethod
+    def default_output_device(cls) -> CaptureTargetIntent:
+        return cls()
+
+    @classmethod
+    def named_output_device(cls, device_name: str) -> CaptureTargetIntent:
+        return cls(kind="named_output_device", device_name=device_name)
+
+    @classmethod
+    def process_target(cls, process: ProcessCaptureTargetIntent) -> CaptureTargetIntent:
+        return cls(kind="process", process=process)
+
+
+@dataclass(frozen=True, slots=True)
 class DesktopAudioIntent:
-    output_device: str = ""
+    capture_target: CaptureTargetIntent = field(default_factory=CaptureTargetIntent)
     vad_speech_threshold: float = 0.6
     vad_hangover_ms: int = 500
     vad_pre_roll_ms: int = 500
@@ -709,6 +846,21 @@ class AppSettingsVNext:
     state: PersistedOperationalState = field(default_factory=PersistedOperationalState)
 
 
+def with_capture_target(
+    settings: AppSettingsVNext,
+    capture_target: CaptureTargetIntent,
+) -> AppSettingsVNext:
+    if not isinstance(capture_target, CaptureTargetIntent):
+        raise TypeError("capture target mutation requires CaptureTargetIntent")
+    return replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            desktop_audio=replace(settings.intent.desktop_audio, capture_target=capture_target),
+        ),
+    )
+
+
 def with_telemetry_consent(
     settings: AppSettingsVNext,
     consent: str,
@@ -741,6 +893,7 @@ def with_telemetry_consent(
 __all__ = [
     "AppSettingsVNext",
     "AudioIntent",
+    "CaptureTargetIntent",
     "ClipboardIntent",
     "CerebrasTranslationIntent",
     "DeepgramSTTIntent",
@@ -765,6 +918,7 @@ __all__ = [
     "PeerSTTIntent",
     "PeerTranslationState",
     "PersistedOperationalState",
+    "ProcessCaptureTargetIntent",
     "PromptIntent",
     "ProviderVerificationEntry",
     "ProviderVerificationState",
@@ -782,5 +936,6 @@ __all__ = [
     "UiIntent",
     "UserIntentSettings",
     "VNEXT_SETTINGS_SCHEMA_VERSION",
+    "with_capture_target",
     "with_telemetry_consent",
 ]

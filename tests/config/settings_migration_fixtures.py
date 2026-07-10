@@ -51,6 +51,11 @@ ADR_RESOLVED_CURRENT_DESTINATIONS = {
 }
 DECISION_PENDING_CURRENT_DESTINATIONS: dict[str, str] = {}
 VNEXT_NATIVE_PERSISTED_LEAF_PATHS = frozenset(
+    {
+        "intent.desktop_audio.capture_target.kind",
+        "intent.desktop_audio.capture_target.process",
+    }
+) | frozenset(
     f"state.provider_verification.{provider}.{field}"
     for provider in (
         "alibaba_beijing",
@@ -78,7 +83,7 @@ CURRENT_USER_INTENT_DESTINATIONS = {
     "audio.ring_buffer_ms": "intent.audio.ring_buffer_ms",
     "cerebras.llm_model": "intent.translation.cerebras.llm_model",
     "deepgram_stt.model": "intent.stt.deepgram.model",
-    "desktop_audio.output_device": "intent.desktop_audio.output_device",
+    "desktop_audio.output_device": "intent.desktop_audio.capture_target.device_name",
     "desktop_audio.vad_hangover_ms": "intent.desktop_audio.vad_hangover_ms",
     "desktop_audio.vad_pre_roll_ms": "intent.desktop_audio.vad_pre_roll_ms",
     "desktop_audio.vad_speech_threshold": "intent.desktop_audio.vad_speech_threshold",

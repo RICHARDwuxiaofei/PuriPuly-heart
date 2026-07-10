@@ -23,11 +23,14 @@ from puripuly_heart.config.settings import (
 from puripuly_heart.config.settings_vnext.schema import (
     VNEXT_SETTINGS_SCHEMA_VERSION,
     AppSettingsVNext,
+    CaptureTargetIntent,
     PersistedOperationalState,
+    ProcessCaptureTargetIntent,
     ProviderVerificationEntry,
     ProviderVerificationState,
     TelemetryOperationalState,
     TranslationFallbackIntent,
+    with_capture_target,
     with_telemetry_consent,
 )
 from tests.config.settings_migration_fixtures import (
@@ -602,6 +605,519 @@ def test_vnext_settings_version_is_loaded_as_metadata_not_input() -> None:
 
     assert loaded.settings_version == VNEXT_SETTINGS_SCHEMA_VERSION
     assert serialization.to_dict(loaded)["settings_version"] == VNEXT_SETTINGS_SCHEMA_VERSION
+
+
+@pytest.mark.parametrize(
+    ("legacy_output_device", "kind", "device_name"),
+    [
+        ("", "default_output_device", None),
+        ("Fixture Speakers", "named_output_device", "Fixture Speakers"),
+    ],
+)
+def test_legacy_output_device_migrates_to_canonical_capture_target(
+    legacy_output_device: str,
+    kind: str,
+    device_name: str | None,
+) -> None:
+    migration = _migration()
+    serialization = _serialization()
+    raw = to_dict(AppSettings())
+    raw["desktop_audio"]["output_device"] = legacy_output_device
+
+    settings = migration.from_dict(raw)
+    serialized = serialization.to_dict(settings)
+
+    assert settings.intent.desktop_audio.capture_target.kind == kind
+    assert settings.intent.desktop_audio.capture_target.device_name == device_name
+    assert serialized["intent"]["desktop_audio"]["capture_target"] == {
+        "kind": kind,
+        "device_name": device_name,
+        "process": None,
+    }
+    assert "output_device" not in serialized["intent"]["desktop_audio"]
+    assert (
+        migration.to_legacy_dict(settings)["desktop_audio"]["output_device"] == legacy_output_device
+    )
+
+
+@pytest.mark.parametrize(
+    ("legacy_output_device", "kind", "device_name"),
+    [
+        ("", "default_output_device", None),
+        ("Fixture Speakers", "named_output_device", "Fixture Speakers"),
+    ],
+)
+def test_pre_v27_canonical_vnext_output_device_migration_backs_up_before_rewrite(
+    tmp_path: Path,
+    legacy_output_device: str,
+    kind: str,
+    device_name: str | None,
+) -> None:
+    compat = _compat()
+    serialization = _serialization()
+    fixed_now = datetime(2026, 7, 10, 1, 2, 3, tzinfo=timezone.utc)
+    path = tmp_path / "settings.json"
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["settings_version"] = VNEXT_SETTINGS_SCHEMA_VERSION - 1
+    raw["intent"]["desktop_audio"].pop("capture_target")
+    raw["intent"]["desktop_audio"]["output_device"] = legacy_output_device
+    original_bytes = _write_json_bytes(path, raw)
+
+    result = compat.load_vnext_settings(path, now=fixed_now)
+
+    assert result.status == compat.SettingsPersistenceStatus.SUCCESS
+    assert result.migrated is True
+    assert result.backup_path == tmp_path / "settings.json.pre-v26.20260710T010203Z.bak"
+    assert result.backup_path.read_bytes() == original_bytes
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["intent"]["desktop_audio"]["capture_target"] == {
+        "kind": kind,
+        "device_name": device_name,
+        "process": None,
+    }
+    assert "output_device" not in persisted["intent"]["desktop_audio"]
+
+
+@pytest.mark.parametrize(
+    ("input_channel", "channel", "basename"),
+    [
+        ("STABLE", "stable", "Discord.exe"),
+        ("PTB", "ptb", "DiscordPTB.exe"),
+        ("Canary", "canary", "DiscordCanary.exe"),
+    ],
+)
+def test_process_capture_target_round_trips_with_discord_update_resistant_identity(
+    input_channel: str,
+    channel: str,
+    basename: str,
+) -> None:
+    serialization = _serialization()
+    migration = _migration()
+    from puripuly_heart.config.capture_target_resolution import resolve_desktop_audio_capture_target
+
+    settings = AppSettingsVNext(
+        intent=replace(
+            AppSettingsVNext().intent,
+            desktop_audio=replace(
+                AppSettingsVNext().intent.desktop_audio,
+                capture_target=CaptureTargetIntent.process_target(
+                    ProcessCaptureTargetIntent.discord(input_channel)
+                ),
+            ),
+        )
+    )
+
+    serialized = serialization.to_dict(settings)
+    restored = migration.from_dict(serialized)
+
+    target = serialized["intent"]["desktop_audio"]["capture_target"]
+    assert target["kind"] == "process"
+    assert target["process"] == {
+        "kind": "discord",
+        "executable_identity": None,
+        "discord_channel": channel,
+        "executable_basename": basename,
+    }
+    assert restored == settings
+    resolved = resolve_desktop_audio_capture_target(settings.intent.desktop_audio.capture_target)
+    assert resolved.discord_channel == channel
+    assert resolved.executable_basename == basename
+    assert migration.to_legacy_dict(settings)["desktop_audio"]["output_device"] == ""
+
+
+def test_generic_process_identity_is_normalized_without_relocation() -> None:
+    serialization = _serialization()
+    migration = _migration()
+    original_identity = r"C:/Apps/Example/Example.EXE"
+    target = CaptureTargetIntent.process_target(
+        ProcessCaptureTargetIntent.generic_executable(original_identity)
+    )
+    settings = AppSettingsVNext(
+        intent=replace(
+            AppSettingsVNext().intent,
+            desktop_audio=replace(AppSettingsVNext().intent.desktop_audio, capture_target=target),
+        )
+    )
+
+    restored = migration.from_dict(serialization.to_dict(settings))
+
+    assert restored.intent.desktop_audio.capture_target.process is not None
+    assert restored.intent.desktop_audio.capture_target.process.executable_identity == (
+        r"c:\apps\example\example.exe"
+    )
+    assert (
+        restored.intent.desktop_audio.capture_target.process.executable_identity
+        != original_identity
+    )
+
+
+@pytest.mark.parametrize(
+    "process",
+    [
+        ProcessCaptureTargetIntent.generic_executable(r"\\server\share\example.exe"),
+        ProcessCaptureTargetIntent.vrchat(r"\\server\share\VRChat.exe"),
+    ],
+)
+def test_persisted_process_targets_accept_fully_qualified_unc_identities(
+    process: ProcessCaptureTargetIntent,
+) -> None:
+    serialization = _serialization()
+    migration = _migration()
+    settings = AppSettingsVNext(
+        intent=replace(
+            AppSettingsVNext().intent,
+            desktop_audio=replace(
+                AppSettingsVNext().intent.desktop_audio,
+                capture_target=CaptureTargetIntent.process_target(process),
+            ),
+        )
+    )
+
+    restored = migration.from_dict(serialization.to_dict(settings))
+
+    assert restored.intent.desktop_audio.capture_target.process == process
+
+
+@pytest.mark.parametrize(
+    ("process_kind", "identity", "accepted"),
+    [
+        ("generic_executable", r"C:\Apps\example.exe", True),
+        ("generic_executable", r"\\server\share\example.exe", True),
+        ("generic_executable", r"C:example.exe", False),
+        ("generic_executable", r"\??\C:\example.exe", False),
+        ("generic_executable", r"\Device\Audio\example.exe", False),
+        ("vrchat", r"C:\Apps\VRChat.exe", True),
+        ("vrchat", r"\\server\share\VRChat.exe", True),
+        ("vrchat", r"C:VRChat.exe", False),
+        ("vrchat", r"\??\C:\VRChat.exe", False),
+        ("vrchat", r"\Device\Audio\VRChat.exe", False),
+    ],
+)
+def test_persisted_process_identity_path_matrix(
+    process_kind: str,
+    identity: str,
+    accepted: bool,
+) -> None:
+    factory = getattr(ProcessCaptureTargetIntent, process_kind)
+
+    if accepted:
+        assert factory(identity).executable_identity is not None
+        return
+    with pytest.raises(ValueError, match="executable"):
+        factory(identity)
+
+
+@pytest.mark.parametrize(
+    ("process_kind", "identity", "accepted"),
+    [
+        ("generic_executable", r"c:\apps\example.exe", True),
+        ("generic_executable", r"\\server\share\example.exe", True),
+        ("generic_executable", r"c:example.exe", False),
+        ("generic_executable", r"\??\c:\example.exe", False),
+        ("generic_executable", r"\device\audio\example.exe", False),
+        ("vrchat", r"c:\apps\vrchat.exe", True),
+        ("vrchat", r"\\server\share\vrchat.exe", True),
+        ("vrchat", r"c:vrchat.exe", False),
+        ("vrchat", r"\??\c:\vrchat.exe", False),
+        ("vrchat", r"\device\audio\vrchat.exe", False),
+    ],
+)
+def test_resolved_process_identity_path_matrix(
+    process_kind: str,
+    identity: str,
+    accepted: bool,
+) -> None:
+    from puripuly_heart.config.resolved import ResolvedDesktopAudioCaptureTarget
+
+    kwargs = {
+        "kind": "process",
+        "process_kind": process_kind,
+        "executable_identity": identity,
+    }
+    if accepted:
+        assert ResolvedDesktopAudioCaptureTarget(**kwargs).executable_identity == identity
+        return
+    with pytest.raises(ValueError, match="executable identity"):
+        ResolvedDesktopAudioCaptureTarget(**kwargs)
+
+
+def test_capture_target_validation_rejects_ambiguous_or_path_bound_discord_values() -> None:
+    with pytest.raises(ValueError, match="non-empty device name"):
+        CaptureTargetIntent.named_output_device("   ")
+    with pytest.raises(ValueError, match="VRChat.exe"):
+        ProcessCaptureTargetIntent.vrchat(r"C:\Apps\Other.exe")
+    with pytest.raises(ValueError, match="installation path"):
+        ProcessCaptureTargetIntent(
+            kind="discord",
+            executable_identity=r"C:\Users\example\AppData\Discord\app-1.0\Discord.exe",
+            discord_channel="stable",
+        )
+    with pytest.raises(ValueError, match="executable"):
+        ProcessCaptureTargetIntent.generic_executable("Example.exe")
+    with pytest.raises(ValueError, match="executable"):
+        ProcessCaptureTargetIntent.vrchat(r"\VRChat\VRChat.exe")
+    with pytest.raises(ValueError, match="executable"):
+        ProcessCaptureTargetIntent.generic_executable(r"\\server\example.exe")
+    with pytest.raises(ValueError, match="executable"):
+        ProcessCaptureTargetIntent.vrchat(r"\\server\VRChat.exe")
+    with pytest.raises(ValueError, match="executable"):
+        ProcessCaptureTargetIntent.generic_executable(r"\\.\pipe\capture.exe")
+    with pytest.raises(ValueError, match="executable"):
+        ProcessCaptureTargetIntent.vrchat(r"\\.\pipe\VRChat.exe")
+    with pytest.raises(ValueError, match="executable"):
+        ProcessCaptureTargetIntent.generic_executable(r"\\?\c:\capture.exe")
+    with pytest.raises(ValueError, match="executable"):
+        ProcessCaptureTargetIntent.vrchat(r"\\?\c:\VRChat.exe")
+    with pytest.raises(ValueError, match="Discord channel identity"):
+        ProcessCaptureTargetIntent.generic_executable(r"C:\Apps\Discord\Discord.exe")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"kind": "process", "process_kind": "generic_executable"},
+        {
+            "kind": "process",
+            "process_kind": "generic_executable",
+            "executable_identity": r"C:\Apps\Discord\Discord.exe",
+        },
+        {
+            "kind": "process",
+            "process_kind": "generic_executable",
+            "executable_identity": "example.exe",
+        },
+        {
+            "kind": "process",
+            "process_kind": "vrchat",
+            "executable_identity": r"C:\Apps\Other.exe",
+        },
+        {
+            "kind": "process",
+            "process_kind": "vrchat",
+            "executable_identity": r"\VRChat\VRChat.exe",
+        },
+        {
+            "kind": "process",
+            "process_kind": "generic_executable",
+            "executable_identity": r"\\server\example.exe",
+        },
+        {
+            "kind": "process",
+            "process_kind": "vrchat",
+            "executable_identity": r"\\server\vrchat.exe",
+        },
+        {
+            "kind": "process",
+            "process_kind": "generic_executable",
+            "executable_identity": r"\\.\pipe\capture.exe",
+        },
+        {
+            "kind": "process",
+            "process_kind": "vrchat",
+            "executable_identity": r"\\.\pipe\vrchat.exe",
+        },
+        {
+            "kind": "process",
+            "process_kind": "generic_executable",
+            "executable_identity": r"\\?\c:\capture.exe",
+        },
+        {
+            "kind": "process",
+            "process_kind": "vrchat",
+            "executable_identity": r"\\?\c:\vrchat.exe",
+        },
+        {
+            "kind": "process",
+            "process_kind": "discord",
+            "discord_channel": "stable",
+            "executable_basename": "DiscordPTB.exe",
+        },
+        {
+            "kind": "process",
+            "process_kind": "discord",
+            "executable_identity": r"C:\Apps\Discord\Discord.exe",
+            "discord_channel": "stable",
+            "executable_basename": "Discord.exe",
+        },
+        {
+            "kind": "process",
+            "process_kind": "discord",
+            "discord_channel": "Stable",
+            "executable_basename": "Discord.exe",
+        },
+    ],
+)
+def test_resolved_process_capture_target_rejects_incomplete_or_malformed_values(
+    kwargs: dict[str, object],
+) -> None:
+    from puripuly_heart.config.resolved import ResolvedDesktopAudioCaptureTarget
+
+    with pytest.raises(ValueError):
+        ResolvedDesktopAudioCaptureTarget(**kwargs)
+
+
+def test_resolved_process_capture_target_accepts_canonical_generic_vrchat_and_discord_values() -> (
+    None
+):
+    from puripuly_heart.config.resolved import ResolvedDesktopAudioCaptureTarget
+
+    generic = ResolvedDesktopAudioCaptureTarget(
+        kind="process",
+        process_kind="generic_executable",
+        executable_identity=r"c:\apps\example\example.exe",
+    )
+    vrchat = ResolvedDesktopAudioCaptureTarget(
+        kind="process",
+        process_kind="vrchat",
+        executable_identity=r"c:\vrchat\vrchat.exe",
+    )
+    discord = ResolvedDesktopAudioCaptureTarget(
+        kind="process",
+        process_kind="discord",
+        discord_channel="canary",
+        executable_basename="DiscordCanary.exe",
+    )
+    generic_unc = ResolvedDesktopAudioCaptureTarget(
+        kind="process",
+        process_kind="generic_executable",
+        executable_identity=r"\\server\share\example.exe",
+    )
+    vrchat_unc = ResolvedDesktopAudioCaptureTarget(
+        kind="process",
+        process_kind="vrchat",
+        executable_identity=r"\\server\share\vrchat.exe",
+    )
+
+    assert generic.process_kind == "generic_executable"
+    assert vrchat.process_kind == "vrchat"
+    assert discord.discord_channel == "canary"
+    assert generic_unc.executable_identity == r"\\server\share\example.exe"
+    assert vrchat_unc.executable_identity == r"\\server\share\vrchat.exe"
+
+
+def test_capture_target_mutation_updates_only_immutable_vnext_intent() -> None:
+    original = AppSettingsVNext()
+    target = CaptureTargetIntent.process_target(
+        ProcessCaptureTargetIntent.generic_executable(r"C:\Apps\Example\Example.exe")
+    )
+
+    updated = with_capture_target(original, target)
+
+    assert updated is not original
+    assert original.intent.desktop_audio.capture_target.kind == "default_output_device"
+    assert updated.intent.desktop_audio.capture_target == target
+    assert updated.state == original.state
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        (
+            CaptureTargetIntent.default_output_device(),
+            {"kind": "default_output_device", "device_name": None},
+        ),
+        (
+            CaptureTargetIntent.named_output_device("Fixture Speakers"),
+            {"kind": "named_output_device", "device_name": "Fixture Speakers"},
+        ),
+        (
+            CaptureTargetIntent.process_target(
+                ProcessCaptureTargetIntent.generic_executable(r"C:\Apps\example.exe")
+            ),
+            {
+                "kind": "process",
+                "process_kind": "generic_executable",
+                "executable_identity": r"c:\apps\example.exe",
+            },
+        ),
+        (
+            CaptureTargetIntent.process_target(
+                ProcessCaptureTargetIntent.vrchat(r"C:\Apps\VRChat.exe")
+            ),
+            {
+                "kind": "process",
+                "process_kind": "vrchat",
+                "executable_identity": r"c:\apps\vrchat.exe",
+            },
+        ),
+        (
+            CaptureTargetIntent.process_target(ProcessCaptureTargetIntent.discord("PTB")),
+            {
+                "kind": "process",
+                "process_kind": "discord",
+                "discord_channel": "ptb",
+                "executable_basename": "DiscordPTB.exe",
+            },
+        ),
+    ],
+)
+def test_capture_target_resolution_covers_all_target_kinds(
+    target: CaptureTargetIntent,
+    expected: dict[str, str | None],
+) -> None:
+    from puripuly_heart.config.capture_target_resolution import resolve_desktop_audio_capture_target
+
+    resolved = resolve_desktop_audio_capture_target(target)
+
+    for field, value in expected.items():
+        assert getattr(resolved, field) == value
+
+
+@pytest.mark.parametrize(
+    ("target", "legacy_output_device"),
+    [
+        (CaptureTargetIntent.default_output_device(), ""),
+        (CaptureTargetIntent.named_output_device("Fixture Speakers"), "Fixture Speakers"),
+        (
+            CaptureTargetIntent.process_target(
+                ProcessCaptureTargetIntent.generic_executable(r"C:\Apps\example.exe")
+            ),
+            "",
+        ),
+    ],
+)
+def test_capture_target_legacy_facade_projection(
+    target: CaptureTargetIntent,
+    legacy_output_device: str,
+) -> None:
+    migration = _migration()
+    settings = AppSettingsVNext(
+        intent=replace(
+            AppSettingsVNext().intent,
+            desktop_audio=replace(AppSettingsVNext().intent.desktop_audio, capture_target=target),
+        )
+    )
+
+    legacy = migration.to_legacy_dict(settings)
+
+    assert legacy["desktop_audio"]["output_device"] == legacy_output_device
+
+
+def test_capture_target_resolution_excludes_pids_and_runtime_state() -> None:
+    from puripuly_heart.config.capture_target_resolution import resolve_desktop_audio_capture_target
+
+    target = CaptureTargetIntent.process_target(
+        ProcessCaptureTargetIntent.vrchat(r"C:\VRChat\VRChat.exe")
+    )
+
+    resolved = resolve_desktop_audio_capture_target(target)
+    serialized = _serialization().to_dict(
+        AppSettingsVNext(
+            intent=replace(
+                AppSettingsVNext().intent,
+                desktop_audio=replace(
+                    AppSettingsVNext().intent.desktop_audio, capture_target=target
+                ),
+            )
+        )
+    )
+
+    assert resolved.kind == "process"
+    assert resolved.process_kind == "vrchat"
+    assert resolved.executable_identity == r"c:\vrchat\vrchat.exe"
+    assert not {"pid", "active", "warning", "retry", "capture_state"}.intersection(
+        serialized["intent"]["desktop_audio"]["capture_target"]
+    )
 
 
 def test_save_vnext_settings_normalizes_stale_settings_version_to_current(
