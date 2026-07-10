@@ -174,4 +174,28 @@ def _peer_helper_text(
         )
     if peer_warning_reason == "runtime_unavailable":
         return t("settings.peer_translation.warning.runtime_unavailable")
+    if peer_warning_reason == "process_unavailable_no_process":
+        return t("settings.peer_translation.warning.process_unavailable_no_process")
+    if peer_warning_reason == "process_unavailable_ambiguous":
+        return t("settings.peer_translation.warning.process_unavailable_ambiguous")
+    if peer_warning_reason == "process_unavailable_ineligible":
+        return t("settings.peer_translation.warning.process_unavailable_ineligible")
+    if peer_warning_reason == "process_unavailable_unsupported_platform":
+        return t("settings.peer_translation.warning.process_unavailable_unsupported_platform")
+    if peer_warning_reason == "process_setup_failed":
+        return t("settings.peer_translation.warning.process_setup_failed")
+    if peer_warning_reason == "process_target_exited":
+        return t("settings.peer_translation.warning.process_target_exited")
+    if peer_warning_reason == "process_source_failed":
+        return t("settings.peer_translation.warning.process_source_failed")
+    if peer_warning_reason == "process_provider_failed":
+        return t("settings.peer_translation.warning.process_provider_failed")
+    if peer_warning_reason is not None and peer_warning_reason.startswith("process_"):
+        return t("settings.peer_translation.warning.process_capture_failed")
     return t("settings.peer_translation.disabled.overlay_required")
+
+
+def is_process_capture_warning_reason(reason: str | None) -> bool:
+    if reason is None:
+        return False
+    return reason.startswith("process_")

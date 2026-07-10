@@ -10,7 +10,10 @@ from puripuly_heart.ui.components.language_modal import LanguageModal
 from puripuly_heart.ui.components.power_button import PowerButton
 from puripuly_heart.ui.fonts import font_for_language
 from puripuly_heart.ui.i18n import get_locale, language_name, t
-from puripuly_heart.ui.overlay_peer_contract import OverlayPeerConsumerContract
+from puripuly_heart.ui.overlay_peer_contract import (
+    OverlayPeerConsumerContract,
+    is_process_capture_warning_reason,
+)
 
 DASHBOARD_LAYOUT_GAP = 12
 DASHBOARD_CONTROL_REGION_EXPAND = 45
@@ -47,6 +50,13 @@ class DashboardView(ft.Column):
         self._local_stt_notice_status: str | None = None
         self._local_stt_notice_percent: int | None = None
         self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
+        self._process_capture_warning_active = False
+        self._process_capture_warning_reason: str | None = None
+        self._process_capture_warning_locale: str | None = None
+        self._process_capture_warning_text = ""
+        self._current_display_text: str | None = None
+        self._primary_display_revision = 0
+        self._process_capture_warning_display_revision: int | None = None
 
         # Current language settings
         self._source_lang_code = "ko"
@@ -65,6 +75,7 @@ class DashboardView(ft.Column):
         self.on_toggle_stt = None
         self.on_toggle_overlay = None
         self.on_toggle_peer_translation = None
+        self.on_retry_peer_process_capture = None
         self.on_language_change = None
         self.on_recent_languages_change = None  # For persistence
         self.on_message_input_activity = None
@@ -198,9 +209,19 @@ class DashboardView(ft.Column):
             self.on_toggle_overlay(enabled)
 
     def _toggle_peer_translation(self) -> None:
+        contract = self._overlay_peer_contract
+        if (
+            contract is not None
+            and contract.peer.intent_enabled
+            and contract.peer.state == "warning"
+            and is_process_capture_warning_reason(contract.peer.warning_reason)
+        ):
+            if self.on_retry_peer_process_capture:
+                self.on_retry_peer_process_capture()
+            return
         enabled = True
-        if self._overlay_peer_contract is not None:
-            enabled = not self._overlay_peer_contract.peer.intent_enabled
+        if contract is not None:
+            enabled = not contract.peer.intent_enabled
         if self.on_toggle_peer_translation:
             self.on_toggle_peer_translation(enabled)
 
@@ -408,6 +429,8 @@ class DashboardView(ft.Column):
 
     def set_status(self, status: str) -> None:
         self.is_connected = status == "connected"
+        self._primary_display_revision += 1
+        self._current_display_text = None
         self.display_card.set_status(status, font_family=self._ui_font())
 
     def set_languages_from_codes(
@@ -439,6 +462,41 @@ class DashboardView(ft.Column):
     def set_overlay_peer_contract(self, contract: OverlayPeerConsumerContract) -> None:
         self._overlay_peer_contract = contract
         self._sync_overlay_peer_buttons()
+        process_warning = (
+            contract.peer.state == "warning"
+            and is_process_capture_warning_reason(contract.peer.warning_reason)
+            and bool(contract.peer.helper_text)
+        )
+        if process_warning:
+            warning_changed = (
+                not self._process_capture_warning_active
+                or self._process_capture_warning_reason != contract.peer.warning_reason
+                or (
+                    self._process_capture_warning_text != contract.peer.helper_text
+                    and self._process_capture_warning_locale == get_locale()
+                )
+            )
+            self._process_capture_warning_active = True
+            self._process_capture_warning_reason = contract.peer.warning_reason
+            if warning_changed:
+                self._process_capture_warning_text = contract.peer.helper_text
+                self._process_capture_warning_locale = get_locale()
+                self.set_display_text(contract.peer.helper_text)
+                self._process_capture_warning_display_revision = self._primary_display_revision
+            return
+        if self._process_capture_warning_active:
+            warning_text = self._process_capture_warning_text
+            self._process_capture_warning_active = False
+            self._process_capture_warning_reason = None
+            self._process_capture_warning_locale = None
+            self._process_capture_warning_text = ""
+            warning_display_revision = self._process_capture_warning_display_revision
+            self._process_capture_warning_display_revision = None
+            if (
+                self._current_display_text == warning_text
+                and self._primary_display_revision == warning_display_revision
+            ):
+                self.set_display_text("")
 
     def set_translation_needs_key(self, needs_key: bool, *, update_ui: bool = True) -> None:
         self.translation_needs_key = bool(needs_key)
@@ -468,6 +526,8 @@ class DashboardView(ft.Column):
         debug_prefix: str | None = None,
     ) -> None:
         """Update the display card primary line with new text."""
+        self._primary_display_revision += 1
+        self._current_display_text = text
         font_family = font_for_language(language_code) if language_code else self._ui_font()
         self.display_card.set_display(
             text,
@@ -612,9 +672,9 @@ class DashboardView(ft.Column):
             t("dashboard.language.peer"),
         )
         self._refresh_language_card()
-        if self._stt_showing_warning:
+        if not self._process_capture_warning_active and self._stt_showing_warning:
             self.set_display_text(t("dashboard.warn_stt_key"))
-        elif self._translation_showing_warning:
+        elif not self._process_capture_warning_active and self._translation_showing_warning:
             self.set_display_text(t("dashboard.warn_llm_key"))
 
     def set_recent_languages(self, source: list[str], target: list[str]) -> None:

@@ -163,6 +163,7 @@ class TranslatorApp:
         self.view_dashboard.on_toggle_stt = self._on_stt_toggle
         self.view_dashboard.on_toggle_overlay = self._on_overlay_toggle
         self.view_dashboard.on_toggle_peer_translation = self._on_peer_translation_toggle
+        self.view_dashboard.on_retry_peer_process_capture = self._on_retry_peer_process_capture
         self.view_dashboard.on_language_change = self._on_language_change
 
         self.view_settings.on_settings_changed = self._on_settings_changed
@@ -174,6 +175,16 @@ class TranslatorApp:
         self.view_settings.on_local_llm_secret_changed = self._on_local_llm_secret_changed
         self.view_settings.on_start_microphone_test = self._on_start_microphone_test
         self.view_settings.on_telemetry_consent_change = self._on_telemetry_consent_change
+        self.view_settings.on_list_loopback_capture_options = (
+            lambda: self.controller.list_loopback_capture_options()
+        )
+        self.view_settings.on_current_loopback_capture_option = (
+            lambda: self.controller.current_loopback_capture_option_value()
+        )
+        self.view_settings.on_apply_loopback_capture_option = self._on_apply_loopback_capture_option
+        self.view_settings.on_loopback_capture_summary = (
+            lambda: self.controller.loopback_capture_summary()
+        )
         self.view_settings.on_desktop_overlay_lock_change = self._on_desktop_overlay_lock_change
         self.view_settings.on_desktop_overlay_size_change = self._on_desktop_overlay_size_change
         self.view_settings.on_desktop_overlay_recovery_action = (
@@ -1033,6 +1044,20 @@ class TranslatorApp:
             await self.controller.set_peer_translation_enabled(enabled)
 
         self.page.run_task(_task)
+
+    def _on_retry_peer_process_capture(self) -> None:
+        self._log_basic("[Dashboard] Peer process capture retry requested")
+
+        async def _task():
+            await self.controller.retry_peer_process_capture()
+
+        self._queue_settings_mutation_task(_task)
+
+    def _on_apply_loopback_capture_option(self, value: str) -> None:
+        async def _task():
+            await self.controller.apply_loopback_capture_option(value)
+
+        self._queue_settings_mutation_task(_task)
 
     def _on_language_change(
         self,
