@@ -997,10 +997,9 @@ impl DirectWriteLayoutEngine {
             trimming_sign,
         ) {
             Ok(text_format) => (text_format, resolved_style.descriptor()),
-            Err(error) if !resolved_style.is_style_failure_fallback => {
+            Err(_error) if !resolved_style.is_style_failure_fallback => {
                 eprintln!(
-                    "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
-                    resolved_style.family_name, resolved_style.locale, error
+                    "[overlay][WARN] renderer_diagnostic stage=layout_text_format_resolution outcome=fallback reason=style_resolution_failed"
                 );
                 let fallback = FontResolver::style_resolution_failure_fallback_for_bucket_locale(
                     resolved_style.bucket,
@@ -1117,20 +1116,18 @@ impl DirectWriteLayoutEngine {
             let family = match self.find_font_family(family_name) {
                 Ok(Some(family)) => family,
                 Ok(None) => continue,
-                Err(error) => {
+                Err(_error) => {
                     eprintln!(
-                        "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
-                        family_name, requested_style.locale, error
+                        "[overlay][WARN] renderer_diagnostic stage=layout_font_family_resolution outcome=fallback reason=family_lookup_failed"
                     );
                     break;
                 }
             };
             let Some(weight) = (match resolve_family_weight(&family, policy) {
                 Ok(weight) => weight,
-                Err(error) => {
+                Err(_error) => {
                     eprintln!(
-                        "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
-                        family_name, requested_style.locale, error
+                        "[overlay][WARN] renderer_diagnostic stage=layout_font_weight_resolution outcome=fallback reason=weight_lookup_failed"
                     );
                     break;
                 }

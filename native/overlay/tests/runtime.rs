@@ -13,7 +13,8 @@ use puripuly_heart_overlay::{
     CaptionChannel, CaptionRenderer, FakeOpenVr, OpenVrError, OverlayBridgeEvent,
     OverlayFrameSubmitter, OverlayLoggingMode, OverlayManifest, OverlayPresentationBlock,
     OverlayPresentationBlockVariant, OverlayPresentationCalibration, OverlayPresentationSnapshot,
-    OverlayRuntime, RenderedFrame, RuntimeFailure, StartupError, EXPECTED_CONTRACT_VERSION,
+    OverlayRuntime, PresentationOutcome, PresentationStage, RenderedFrame, RuntimeFailure,
+    StartupError, EXPECTED_CONTRACT_VERSION,
 };
 
 fn test_manifest() -> OverlayManifest {
@@ -251,6 +252,8 @@ struct RecordingSubmitter {
     operations: Vec<&'static str>,
     visibility_changes: Vec<bool>,
     last_visible: Option<bool>,
+    fail_show: bool,
+    fail_hide: bool,
 }
 
 impl RecordingSubmitter {
@@ -261,6 +264,8 @@ impl RecordingSubmitter {
             operations: Vec::new(),
             visibility_changes: Vec::new(),
             last_visible: None,
+            fail_show: false,
+            fail_hide: false,
         }
     }
 }
@@ -284,6 +289,9 @@ impl OverlayFrameSubmitter for RecordingSubmitter {
 
     fn set_overlay_visible(&mut self, visible: bool) -> Result<(), OpenVrError> {
         self.operations.push(if visible { "show" } else { "hide" });
+        if (visible && self.fail_show) || (!visible && self.fail_hide) {
+            return Err(OpenVrError::Submit("visibility failed".into()));
+        }
         self.last_visible = Some(visible);
         self.visibility_changes.push(visible);
         Ok(())
@@ -406,6 +414,52 @@ async fn runtime_stops_cleanly_on_shutdown_event() {
         .unwrap();
 
     assert!(runtime.is_stopped());
+    assert!(runtime.presentation_diagnostics().records().is_empty());
+}
+
+#[tokio::test]
+async fn runtime_rejects_submission_after_shutdown_without_new_work() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let logger = test_logger("post-shutdown-submit").await;
+    let (mut bridge, server) = connect_test_bridge().await;
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
+    let mut submitter = RecordingSubmitter::default();
+    runtime
+        .handle_event(OverlayBridgeEvent::Shutdown)
+        .await
+        .unwrap();
+
+    let error = runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, RuntimeFailure::Stopped);
+    assert_eq!(submitter.calls, 0);
+    assert!(runtime.presentation_diagnostics().records().is_empty());
+    drop(bridge);
+    let _ = server.await.unwrap();
+}
+
+#[tokio::test]
+async fn runtime_rejects_submission_after_bridge_loss_without_new_work() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let logger = test_logger("post-bridge-loss-submit").await;
+    let (mut bridge, server) = connect_test_bridge().await;
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
+    let mut submitter = RecordingSubmitter::default();
+    runtime.handle_bridge_loss_for_test().await.unwrap();
+
+    let error = runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, RuntimeFailure::Stopped);
+    assert_eq!(submitter.calls, 0);
+    assert!(runtime.presentation_diagnostics().records().is_empty());
+    drop(bridge);
+    let _ = server.await.unwrap();
 }
 
 #[tokio::test]
@@ -462,6 +516,76 @@ async fn runtime_emits_overlay_ready_only_after_first_texture_submit() {
     assert!(messages
         .iter()
         .any(|message| message["type"] == "overlay_ready"));
+}
+
+#[tokio::test]
+async fn runtime_correlates_allowlisted_presentation_stages_without_payload_data() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let logger = test_logger("safe-presentation-correlation").await;
+    let (mut bridge, server) = connect_test_bridge().await;
+    let mut unsafe_block = block(
+        "raw-user-identifier",
+        "peer",
+        "private caption transcript",
+        "private translation payload",
+        true,
+    );
+    unsafe_block.update_id = Some("provider-payload-identifier".into());
+    unsafe_block.session_scope = Some("credential-like-session".into());
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 934,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![unsafe_block],
+    });
+    let mut submitter = RecordingSubmitter::default();
+
+    runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+
+    let records = runtime.presentation_diagnostics().records();
+    assert_eq!(records.len(), 6);
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.stage)
+            .collect::<Vec<_>>(),
+        vec![
+            PresentationStage::LogicalRevisionAccepted,
+            PresentationStage::RenderReturned,
+            PresentationStage::ReadinessObserved,
+            PresentationStage::SubmissionAttempted,
+            PresentationStage::SubmissionReturned,
+            PresentationStage::VisibilityObserved,
+        ]
+    );
+    assert_eq!(records[2].outcome, PresentationOutcome::LegacyNotObserved);
+    assert_eq!(records[4].outcome, PresentationOutcome::Success);
+    assert_eq!(records[5].desired_visible, Some(true));
+    assert_eq!(records[5].observed_runtime_visible, Some(true));
+    assert!(records
+        .iter()
+        .skip(1)
+        .all(|record| record.logical_revision == records[0].logical_revision));
+    assert!(records
+        .iter()
+        .skip(1)
+        .all(|record| record.render_generation == Some(1)));
+    let serialized = serde_json::to_string(records).unwrap();
+    for prohibited in [
+        "raw-user-identifier",
+        "private caption transcript",
+        "private translation payload",
+        "provider-payload-identifier",
+        "credential-like-session",
+    ] {
+        assert!(!serialized.contains(prohibited));
+    }
+    assert!(serialized.contains("physical_hmd_visibility\":\"not_observable"));
+
+    drop(bridge);
+    let _ = server.await.unwrap();
 }
 
 #[tokio::test]
@@ -890,9 +1014,101 @@ async fn runtime_does_not_emit_overlay_ready_when_first_texture_submit_fails() {
     assert_eq!(submitter.calls, 1);
     assert!(matches!(err, RuntimeFailure::OpenVr(_)));
     assert!(!runtime.ready_sent());
+    let records = runtime.presentation_diagnostics().records();
+    assert_eq!(
+        records.back().unwrap().stage,
+        PresentationStage::SubmissionReturned
+    );
+    assert_eq!(
+        records.back().unwrap().outcome,
+        PresentationOutcome::Failure
+    );
     assert!(!messages
         .iter()
         .any(|message| message["type"] == "overlay_ready"));
+}
+
+#[tokio::test]
+async fn runtime_records_failed_show_visibility_without_false_observation() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let logger = test_logger("failed-show-visibility").await;
+    let (mut bridge, server) = connect_test_bridge().await;
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![block("self:show", "self", "visible", "", true)],
+    });
+    let mut submitter = RecordingSubmitter {
+        fail_show: true,
+        ..RecordingSubmitter::default()
+    };
+
+    let error = runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, RuntimeFailure::OpenVr(_)));
+    let visibility = runtime.presentation_diagnostics().records().back().unwrap();
+    assert_eq!(visibility.stage, PresentationStage::VisibilityObserved);
+    assert_eq!(visibility.outcome, PresentationOutcome::Failure);
+    assert_eq!(visibility.desired_visible, Some(true));
+    assert_eq!(visibility.observed_runtime_visible, Some(false));
+    assert_eq!(submitter.operations, vec!["submit:text", "show"]);
+    assert!(!runtime.ready_sent());
+    drop(bridge);
+    let _ = server.await.unwrap();
+}
+
+#[tokio::test]
+async fn runtime_records_failed_hide_visibility_without_false_observation() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let logger = test_logger("failed-hide-visibility").await;
+    let (mut bridge, server) = connect_test_bridge().await;
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![block("self:hide", "self", "visible", "", true)],
+    });
+    let mut submitter = RecordingSubmitter::default();
+    runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+    runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 2,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![],
+    });
+    runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+    let grace_visibility = runtime.presentation_diagnostics().records().back().unwrap();
+    assert_eq!(
+        grace_visibility.stage,
+        PresentationStage::VisibilityObserved
+    );
+    assert_eq!(grace_visibility.outcome, PresentationOutcome::Success);
+    assert_eq!(grace_visibility.desired_visible, Some(true));
+    assert_eq!(grace_visibility.observed_runtime_visible, Some(true));
+    submitter.fail_hide = true;
+    tokio::time::sleep(Duration::from_millis(550)).await;
+
+    let error = runtime
+        .run_event_loop(&mut bridge, &renderer, &mut submitter, &logger)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, RuntimeFailure::OpenVr(_)));
+    let visibility = runtime.presentation_diagnostics().records().back().unwrap();
+    assert_eq!(visibility.stage, PresentationStage::VisibilityObserved);
+    assert_eq!(visibility.outcome, PresentationOutcome::Failure);
+    assert_eq!(visibility.desired_visible, Some(false));
+    assert_eq!(visibility.observed_runtime_visible, Some(true));
+    assert_eq!(submitter.operations.last(), Some(&"hide"));
+    drop(bridge);
+    let _ = server.await.unwrap();
 }
 
 #[tokio::test]
@@ -972,6 +1188,91 @@ async fn runtime_submits_same_peer_refresh_target_when_session_scope_nonce_chang
         submitter.operations,
         vec!["submit:empty", "submit:text", "show", "submit:text"]
     );
+    let submissions = runtime
+        .presentation_diagnostics()
+        .records()
+        .iter()
+        .filter(|record| record.stage == PresentationStage::SubmissionReturned)
+        .map(|record| (record.logical_revision, record.render_generation))
+        .collect::<Vec<_>>();
+    assert_eq!(submissions, vec![(1, Some(1)), (2, Some(2)), (2, Some(3))]);
+    assert_eq!(
+        runtime
+            .presentation_diagnostics()
+            .records()
+            .iter()
+            .filter(|record| record.stage == PresentationStage::LogicalRevisionAccepted)
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn runtime_self_refresh_keeps_logical_identity_and_fresh_render_cadence() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let logger = test_logger("self-refresh-logical-identity").await;
+    let (mut bridge, server) = connect_test_bridge().await;
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
+    let mut submitter = RecordingSubmitter::default();
+    runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+    let self_refresh_1 = OverlayPresentationBlock {
+        id: "self:finalized".into(),
+        occupant_key: "self:finalized".into(),
+        appearance_seq: 1,
+        channel: "self".into(),
+        block_variant: OverlayPresentationBlockVariant::Finalized,
+        primary_text: "stable self caption".into(),
+        secondary_text: "stable translation".into(),
+        secondary_enabled: true,
+        primary_language: None,
+        secondary_language: None,
+        update_id: Some("self-update".into()),
+        origin_wall_clock_ms: None,
+        session_scope: Some("self_presentation_refresh=1".into()),
+    };
+    let self_refresh_2 = OverlayPresentationBlock {
+        session_scope: Some("self_presentation_refresh=2".into()),
+        ..self_refresh_1.clone()
+    };
+
+    for (revision, block) in [(1, self_refresh_1), (2, self_refresh_2)] {
+        let outcome = runtime.apply_snapshot(OverlayPresentationSnapshot {
+            revision,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![block],
+        });
+        assert!(matches!(
+            outcome,
+            SnapshotApplyOutcome::Applied {
+                visual_changed: true,
+                redraw_requested: true,
+                ..
+            }
+        ));
+        runtime
+            .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(submitter.calls, 3);
+    assert_eq!(
+        submitter.operations,
+        vec!["submit:empty", "submit:text", "show", "submit:text"]
+    );
+    let submissions = runtime
+        .presentation_diagnostics()
+        .records()
+        .iter()
+        .filter(|record| record.stage == PresentationStage::SubmissionReturned)
+        .map(|record| (record.logical_revision, record.render_generation))
+        .collect::<Vec<_>>();
+    assert_eq!(submissions, vec![(1, Some(1)), (2, Some(2)), (2, Some(3))]);
+    drop(bridge);
+    let _ = server.await.unwrap();
 }
 
 #[tokio::test]

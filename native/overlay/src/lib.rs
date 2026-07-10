@@ -2,6 +2,7 @@ pub mod bridge;
 pub mod logging;
 pub mod manifest;
 pub mod openvr;
+pub mod presentation;
 pub mod renderer;
 pub mod runtime;
 pub mod state;
@@ -14,6 +15,11 @@ pub use manifest::{load_manifest, validate_manifest, OverlayManifest, EXPECTED_C
 pub use openvr::{
     submit_texture, FakeOpenVr, OpenVrError, OpenVrOverlay, OverlayFrameSubmitter,
     OverlayPlacementPolicy,
+};
+pub use presentation::{
+    AdapterIdentity, PendingPresentationDiagnostics, PhysicalHmdVisibility, PresentationBackend,
+    PresentationCorrelation, PresentationDiagnosticRecord, PresentationDiagnostics,
+    PresentationOutcome, PresentationStage, PresentationStrategy,
 };
 #[cfg(windows)]
 pub use renderer::WindowsBundledFontCollection;

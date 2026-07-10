@@ -42,6 +42,15 @@ impl OverlayLogger {
         self.log_line("INFO", message.as_ref()).await
     }
 
+    pub async fn detailed_info(&self, message: impl AsRef<str>) -> io::Result<bool> {
+        if !self.is_detailed() {
+            return Ok(false);
+        }
+        self.write_stream_line(true, &format!("[overlay][INFO] {}", message.as_ref()))
+            .await?;
+        Ok(true)
+    }
+
     pub async fn warn(&self, message: impl AsRef<str>) -> io::Result<()> {
         self.log_line("WARN", message.as_ref()).await
     }
@@ -73,7 +82,11 @@ impl OverlayLogger {
             .unwrap_or(false)
     }
 
-    fn from_streams(stdout: LogStream, stderr: LogStream, mode: OverlayLoggingMode) -> Self {
+    pub(crate) fn from_streams(
+        stdout: LogStream,
+        stderr: LogStream,
+        mode: OverlayLoggingMode,
+    ) -> Self {
         Self {
             stdout: Mutex::new(stdout),
             stderr: Mutex::new(stderr),

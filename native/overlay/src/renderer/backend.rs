@@ -74,6 +74,7 @@ use super::types::{
     DamageBand, RenderDiagnostics, ResolvedFrameLayout, StyleBucketSourceCount,
     TextStyleDescriptor,
 };
+use crate::presentation::PresentationBackend;
 
 #[cfg(windows)]
 const DEBUG_OVERLAY_DAMAGE_BOTTOM_PX: f32 = 112.0;
@@ -196,6 +197,10 @@ impl CaptionRenderer {
 
     pub fn set_presentation(&self, presentation: CaptionPresentation) {
         self.presentation.replace(presentation);
+    }
+
+    pub fn presentation_backend(&self) -> PresentationBackend {
+        self.backend.borrow().presentation_backend()
     }
 }
 
@@ -352,6 +357,15 @@ impl RenderBackend {
             }
         }
     }
+
+    fn presentation_backend(&self) -> PresentationBackend {
+        match self {
+            #[cfg(windows)]
+            Self::Windows(renderer) => renderer.presentation_backend,
+            #[cfg(not(windows))]
+            Self::Test(_) => PresentationBackend::Test,
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -416,13 +430,14 @@ struct WindowsCaptionRenderer {
     font_warmup_attempts: u32,
     font_warmup_failures: u32,
     _d3d_device: ID3D11Device,
+    presentation_backend: PresentationBackend,
 }
 
 #[cfg(windows)]
 impl WindowsCaptionRenderer {
     fn new() -> Result<Self, CaptionRenderError> {
         let renderer_init_started = Instant::now();
-        let (device, _context) = create_d3d_device()?;
+        let (device, _context, presentation_backend) = create_d3d_device()?;
         let d2d_factory = create_d2d_factory()?;
         let dwrite_factory = create_dwrite_factory()?;
         let factory2: IDWriteFactory2 = dwrite_factory
@@ -513,6 +528,7 @@ impl WindowsCaptionRenderer {
             font_warmup_attempts: 0,
             font_warmup_failures: 0,
             _d3d_device: device,
+            presentation_backend,
         };
         let warmup_stats = renderer.warm_up_cjk_fonts();
         renderer.font_warmup_attempts = warmup_stats.attempts;
@@ -537,13 +553,13 @@ impl WindowsCaptionRenderer {
         for (language, sample) in CJK_WARMUP_SAMPLES {
             for (role, font_size_px) in sizes {
                 attempts += 1;
-                if let Err(error) =
+                if let Err(_error) =
                     self.warm_up_cjk_text_format_layout(language, sample, role, font_size_px)
                 {
                     failures += 1;
                     eprintln!(
-                        "[overlay][WARN] cjk_font_warmup_failure language={} role={} font_size_px={:.2} error={}",
-                        language, role, font_size_px, error
+                        "[overlay][WARN] renderer_diagnostic stage=cjk_font_warmup outcome=failure reason=directwrite_operation_failed language={} role={} font_size_px={:.2}",
+                        language, role, font_size_px
                     );
                 }
             }
@@ -1081,7 +1097,7 @@ impl WindowsCaptionRenderer {
                 }
                 layout
             }
-            Err(error) => {
+            Err(_error) => {
                 diagnostics.heuristic_layout_fallback_count += 1;
                 if first_cjk_layout_diagnostic_outcome(
                     cjk_layout_started.as_ref(),
@@ -1091,13 +1107,14 @@ impl WindowsCaptionRenderer {
                 {
                     if let Some(started) = cjk_layout_started.as_ref() {
                         eprintln!(
-                            "[overlay][DIAG] first_cjk_layout_failure_ms={} error={error}",
+                            "[overlay][DIAG] renderer_diagnostic stage=first_cjk_layout outcome=failure reason=directwrite_layout_failed elapsed_ms={}",
                             started.elapsed().as_millis()
                         );
                     }
                 }
                 eprintln!(
-                    "[overlay][WARN] catastrophic_directwrite_layout_failure stage=layout_cache error={error}"
+                    "{}",
+                    format_renderer_failure_diagnostic("layout_cache", "directwrite_layout_failed")
                 );
                 policy.resolve_blocks_for_presentation(blocks, width, height, presentation)
             }
@@ -1280,13 +1297,11 @@ impl WindowsCaptionRenderer {
         self.frame_text_format_cache_misses += 1;
 
         eprintln!(
-            "[overlay][DIAG] text_format_cache_miss style_key={:?} font_size_key={} resolved_bucket={:?} source={:?} family={} locale={} cache_size_before={}",
+            "[overlay][DIAG] renderer_diagnostic stage=text_format_cache outcome=miss style_key={:?} font_size_key={} resolved_bucket={:?} source={:?} cache_size_before={}",
             resolved_style.style_key,
             font_size_key,
             resolved_style.bucket,
             resolved_style.source,
-            resolved_style.family_name,
-            resolved_style.locale,
             self.caches.text_format_cache.len()
         );
         let (text_format, actual_style_key) = self.create_text_format_for_resolved_style(
@@ -1339,8 +1354,7 @@ impl WindowsCaptionRenderer {
         ) {
             TextFormatCollectionRoute::FallbackToSystem => {
                 eprintln!(
-                    "[overlay][WARN] bundled_font_collection_missing_before_text_format family={} locale={}",
-                    resolved_style.family_name, resolved_style.locale
+                    "[overlay][WARN] renderer_diagnostic stage=text_format_resolution outcome=fallback reason=bundled_collection_unavailable"
                 );
                 let fallback_style = fallback_resolved_text_style_for_bucket_locale(
                     resolved_style.bucket,
@@ -1395,10 +1409,9 @@ impl WindowsCaptionRenderer {
         };
         let text_format = match create_result {
             Ok(text_format) => text_format,
-            Err(error) if resolved_style.source != FontSource::SystemFallbackSentinel => {
+            Err(_error) if resolved_style.source != FontSource::SystemFallbackSentinel => {
                 eprintln!(
-                    "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
-                    resolved_style.family_name, resolved_style.locale, error
+                    "[overlay][WARN] renderer_diagnostic stage=text_format_resolution outcome=fallback reason=style_resolution_failed"
                 );
                 let fallback = FontResolver::style_resolution_failure_fallback_for_bucket_locale(
                     resolved_style.bucket,
@@ -1538,20 +1551,18 @@ impl WindowsCaptionRenderer {
             let family = match self.find_font_family(family_name) {
                 Ok(Some(family)) => family,
                 Ok(None) => continue,
-                Err(error) => {
+                Err(_error) => {
                     eprintln!(
-                        "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
-                        family_name, requested_style.locale, error
+                        "[overlay][WARN] renderer_diagnostic stage=font_family_resolution outcome=fallback reason=family_lookup_failed"
                     );
                     break;
                 }
             };
             let Some(weight) = (match resolve_family_weight(&family, policy) {
                 Ok(weight) => weight,
-                Err(error) => {
+                Err(_error) => {
                     eprintln!(
-                        "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
-                        family_name, requested_style.locale, error
+                        "[overlay][WARN] renderer_diagnostic stage=font_weight_resolution outcome=fallback reason=weight_lookup_failed"
                     );
                     break;
                 }
@@ -1626,6 +1637,11 @@ fn d2d_color(color: (f32, f32, f32, f32)) -> D2D1_COLOR_F {
 }
 
 #[cfg(windows)]
+fn format_renderer_failure_diagnostic(stage: &'static str, reason: &'static str) -> String {
+    format!("[overlay][WARN] renderer_diagnostic stage={stage} outcome=failure reason={reason}")
+}
+
+#[cfg(windows)]
 fn create_dwrite_factory() -> Result<IDWriteFactory, CaptionRenderError> {
     unsafe {
         DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
@@ -1643,8 +1659,8 @@ fn initialize_bundled_font_collection(
         Ok(path) => path,
         Err(error) => {
             let reason = format!("resolve bundled font runtime path: {error}");
-            eprintln!("[overlay][WARN] bundled_font_unavailable {reason}");
-            log_font_bundle_load(started, "unavailable", &reason);
+            eprintln!("[overlay][WARN] renderer_diagnostic stage=font_bundle_load outcome=unavailable reason=path_resolution_failed");
+            log_font_bundle_load(started, "unavailable", "path_resolution_failed");
             return (
                 font_resolver_with_bundle_unavailable(reason, ui_language_hint),
                 None,
@@ -1653,8 +1669,7 @@ fn initialize_bundled_font_collection(
     };
     match WindowsBundledFontCollection::load_with_factory(factory, &path) {
         Ok(collection) => {
-            let detail = collection.path().display().to_string();
-            log_font_bundle_load(started, "available", &detail);
+            log_font_bundle_load(started, "available", "loaded");
             (
                 font_resolver_with_bundle_available(ui_language_hint),
                 Some(collection),
@@ -1662,8 +1677,8 @@ fn initialize_bundled_font_collection(
         }
         Err(error) => {
             let reason = format!("{} ({})", path.display(), error);
-            eprintln!("[overlay][WARN] bundled_font_unavailable {reason}");
-            log_font_bundle_load(started, "unavailable", &reason);
+            eprintln!("[overlay][WARN] renderer_diagnostic stage=font_bundle_load outcome=unavailable reason=collection_load_failed");
+            log_font_bundle_load(started, "unavailable", "collection_load_failed");
             (
                 font_resolver_with_bundle_unavailable(reason, ui_language_hint),
                 None,
@@ -1673,12 +1688,12 @@ fn initialize_bundled_font_collection(
 }
 
 #[cfg(windows)]
-fn log_font_bundle_load(started: Instant, status: &str, detail: &str) {
+fn log_font_bundle_load(started: Instant, status: &str, reason: &str) {
     eprintln!(
-        "[overlay][DIAG] font_bundle_load_ms={} status={} detail={}",
+        "[overlay][DIAG] renderer_diagnostic stage=font_bundle_load elapsed_ms={} status={} reason={}",
         started.elapsed().as_millis(),
         status,
-        detail
+        reason
     );
 }
 
@@ -1792,7 +1807,8 @@ fn create_d2d_factory() -> Result<ID2D1Factory1, CaptionRenderError> {
 }
 
 #[cfg(windows)]
-fn create_d3d_device() -> Result<(ID3D11Device, ID3D11DeviceContext), CaptionRenderError> {
+fn create_d3d_device(
+) -> Result<(ID3D11Device, ID3D11DeviceContext, PresentationBackend), CaptionRenderError> {
     let feature_levels = [
         D3D_FEATURE_LEVEL_11_1,
         D3D_FEATURE_LEVEL_11_0,
@@ -1801,7 +1817,11 @@ fn create_d3d_device() -> Result<(ID3D11Device, ID3D11DeviceContext), CaptionRen
     ];
 
     create_d3d_device_for_driver(D3D_DRIVER_TYPE_HARDWARE, &feature_levels)
-        .or_else(|_| create_d3d_device_for_driver(D3D_DRIVER_TYPE_WARP, &feature_levels))
+        .map(|(device, context)| (device, context, PresentationBackend::D3d11Hardware))
+        .or_else(|_| {
+            create_d3d_device_for_driver(D3D_DRIVER_TYPE_WARP, &feature_levels)
+                .map(|(device, context)| (device, context, PresentationBackend::D3d11Warp))
+        })
 }
 
 #[cfg(windows)]
@@ -2094,6 +2114,8 @@ fn bounds_intersect_damage_band(bounds: BlockBounds, damage_band: DamageBand) ->
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::format_renderer_failure_diagnostic;
     use super::prepare_layout_for_render;
     use crate::renderer::{
         BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
@@ -2106,6 +2128,20 @@ mod tests {
         FontResolver::with_bundle_available()
             .resolve(Some(language), "漢字")
             .style_key()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn renderer_failure_diagnostic_contains_only_allowlisted_categories() {
+        let line = format_renderer_failure_diagnostic("layout_cache", "directwrite_layout_failed");
+
+        assert_eq!(
+            line,
+            "[overlay][WARN] renderer_diagnostic stage=layout_cache outcome=failure reason=directwrite_layout_failed"
+        );
+        for prohibited in ["error=", "path=", "family=", "locale=", "stack", "C:\\"] {
+            assert!(!line.contains(prohibited));
+        }
     }
 
     fn layout_key(seed: &str) -> LayoutCacheKey {
