@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -7,8 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from puripuly_heart.config.process_capture_resolution import (
+    ProcessCaptureTargetUnavailableError,
+)
 from puripuly_heart.config.resolved import ResolvedDesktopAudioCaptureTarget
 from puripuly_heart.config.settings import AppSettings
+from puripuly_heart.config.settings_vnext.facade import load_settings, save_settings_with_result
 from puripuly_heart.config.settings_vnext.schema import ProcessCaptureTargetIntent
 from puripuly_heart.core.runtime.peer_channel import (
     PeerRuntimeDiagnostic,
@@ -360,7 +365,8 @@ def test_list_options_preserves_saved_process_when_stopped(
 def test_settings_capture_target_refresh_preserves_unrelated_drafts() -> None:
     view = SettingsView.__new__(SettingsView)
     baseline_settings = AppSettings()
-    provider_draft = object()
+    provider_draft = AppSettings()
+    provider_draft.system_prompt = "provider draft"
     view._settings = baseline_settings
     view._provider_settings_draft = provider_draft
     view.has_provider_changes = True
@@ -380,11 +386,164 @@ def test_settings_capture_target_refresh_preserves_unrelated_drafts() -> None:
 
     assert view._settings is baseline_settings
     assert view._provider_settings_draft is provider_draft
+    assert view._provider_settings_draft.system_prompt == "provider draft"
     assert view.has_provider_changes is True
     assert view.has_pending_prompt_changes is True
     assert view._desktop_overlay_pending_size_preset == "large"
     assert view._audio_settings.desktop_output_device == "Saved device"
     assert view._loopback_audio_text.content.value == "VRChat"
+
+
+@pytest.mark.parametrize(
+    ("initial_target", "committed_target", "committed_output"),
+    [
+        (
+            ResolvedDesktopAudioCaptureTarget(kind="named_output_device", device_name="Speakers"),
+            ResolvedDesktopAudioCaptureTarget(
+                kind="process",
+                process_kind="vrchat",
+                executable_identity=r"c:\vrchat\vrchat.exe",
+            ),
+            "",
+        ),
+        (
+            ResolvedDesktopAudioCaptureTarget(
+                kind="process",
+                process_kind="vrchat",
+                executable_identity=r"c:\vrchat\vrchat.exe",
+            ),
+            ResolvedDesktopAudioCaptureTarget(kind="named_output_device", device_name="Headset"),
+            "Headset",
+        ),
+    ],
+)
+def test_settings_capture_target_rebase_updates_all_retained_apply_sources(
+    initial_target: ResolvedDesktopAudioCaptureTarget,
+    committed_target: ResolvedDesktopAudioCaptureTarget,
+    committed_output: str,
+) -> None:
+    view = SettingsView.__new__(SettingsView)
+    retained = AppSettings()
+    retained.desktop_audio.output_device = initial_target.device_name or ""
+    retained.desktop_audio.runtime_capture_target = initial_target
+    retained.stt.vad_speech_threshold = 0.31
+    retained.system_prompt = "retained prompt"
+    draft = copy.deepcopy(retained)
+    draft.stt.vad_speech_threshold = 0.73
+    draft.system_prompt = "draft prompt"
+    view._settings = retained
+    view._provider_settings_draft = draft
+    view.has_provider_changes = True
+    view.has_pending_prompt_changes = True
+    view._audio_settings = SimpleNamespace(
+        desktop_output_device=retained.desktop_audio.output_device
+    )
+    view._loopback_audio_text = SimpleNamespace(
+        content=SimpleNamespace(value="", size=None),
+        page=None,
+        update=lambda: None,
+    )
+    view.on_loopback_capture_summary = lambda: "Committed target"
+    committed = AppSettings()
+    committed.desktop_audio.output_device = committed_output
+    committed.desktop_audio.runtime_capture_target = committed_target
+
+    view.refresh_loopback_capture_target(committed)
+    view.refresh_loopback_capture_target(committed)
+
+    for rebased in (retained, draft):
+        assert rebased.desktop_audio.output_device == committed_output
+        assert rebased.desktop_audio.runtime_capture_target == committed_target
+    assert retained.stt.vad_speech_threshold == 0.31
+    assert draft.stt.vad_speech_threshold == 0.73
+    assert retained.system_prompt == "retained prompt"
+    assert draft.system_prompt == "draft prompt"
+    assert view.has_provider_changes is True
+    assert view.has_pending_prompt_changes is True
+
+
+@pytest.mark.asyncio
+async def test_failed_process_warning_survives_unrelated_draft_apply_without_device_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "settings.json"
+    initial = AppSettings()
+    initial.desktop_audio.output_device = "Speakers"
+    assert save_settings_with_result(path, initial).ok
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=path,
+    )
+    controller.settings = load_settings(path)
+    controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
+    view = SettingsView.__new__(SettingsView)
+    view._settings = copy.deepcopy(controller.settings)
+    view._provider_settings_draft = copy.deepcopy(controller.settings)
+    view._provider_settings_draft.stt.vad_speech_threshold = 0.77
+    view._provider_settings_draft.system_prompt = "pending prompt"
+    view.has_provider_changes = True
+    view.has_pending_prompt_changes = True
+    view._audio_settings = SimpleNamespace(desktop_output_device="Speakers")
+    view._loopback_audio_text = SimpleNamespace(
+        content=SimpleNamespace(value="", size=None),
+        page=None,
+        update=lambda: None,
+    )
+    view.on_loopback_capture_summary = lambda: controller.loopback_capture_summary()
+    controller.app = SimpleNamespace(view_settings=view)
+
+    async def refresh_peer_stt_runtime(_self) -> None:
+        return None
+
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", refresh_peer_stt_runtime)
+    monkeypatch.setattr(GuiController, "_sync_effective_hub_flags", lambda *_args: None)
+    monkeypatch.setattr(GuiController, "_refresh_overlay_peer_consumers", lambda *_args: None)
+    await controller.apply_loopback_capture_option("process:vrchat:c:\\vrchat\\vrchat.exe")
+    controller._on_peer_runtime_diagnostic(
+        PeerRuntimeDiagnostic(
+            reason=PeerRuntimeFailureReason.PROCESS_TARGET_UNAVAILABLE,
+            capture_kind="process",
+            process_unavailable_reason="no_process",
+        )
+    )
+    warning_reason = controller._peer_process_warning_reason
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.desktop_audio.runtime_capture_target is not None
+    assert pending.desktop_audio.runtime_capture_target.kind == "process"
+    assert save_settings_with_result(path, pending).ok
+    reloaded = load_settings(path)
+    reloaded.ui.peer_translation_enabled = controller.settings.ui.peer_translation_enabled
+    reloaded.ui.peer_translation_eula_accepted = (
+        controller.settings.ui.peer_translation_eula_accepted
+    )
+    controller.settings = reloaded
+
+    persisted = load_settings(path)
+    config = controller._build_peer_runtime_config(controller.settings)
+    assert persisted.desktop_audio.runtime_capture_target.kind == "process"
+    assert config.capture_target.kind == "process"
+    assert controller._peer_process_warning_reason == warning_reason
+    assert controller.peer_warning_action_is_retry() is True
+    monkeypatch.setattr(
+        controller_module,
+        "DesktopLoopbackAudioSource",
+        lambda **_kwargs: pytest.fail("device fallback constructed"),
+    )
+
+    class UnavailableResolver:
+        def __init__(self, *, snapshots):
+            _ = snapshots
+
+        def resolve_for_start(self, _target):
+            return SimpleNamespace(identity=None, unavailable_reason="no_process")
+
+    monkeypatch.setattr(controller_module, "ProcessCaptureResolver", UnavailableResolver)
+    with pytest.raises(ProcessCaptureTargetUnavailableError):
+        controller._create_peer_audio_source_from_runtime_config(config)
 
 
 @pytest.mark.asyncio

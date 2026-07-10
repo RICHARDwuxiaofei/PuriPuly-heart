@@ -494,6 +494,7 @@ class SettingsView(ft.Column):
         )
 
     def refresh_loopback_capture_target(self, settings: AppSettings) -> None:
+        self._rebase_retained_loopback_capture_target(settings)
         self._audio_settings.desktop_output_device = settings.desktop_audio.output_device
         summary = (
             self.on_loopback_capture_summary()
@@ -506,6 +507,15 @@ class SettingsView(ft.Column):
         )
         if getattr(self._loopback_audio_text, "page", None) is not None:
             self._loopback_audio_text.update()
+
+    def _rebase_retained_loopback_capture_target(self, settings: AppSettings) -> None:
+        for retained in (self._settings, self._provider_settings_draft):
+            if retained is None:
+                continue
+            retained.desktop_audio.output_device = settings.desktop_audio.output_device
+            retained.desktop_audio.runtime_capture_target = (
+                settings.desktop_audio.runtime_capture_target
+            )
 
     def _on_text_hover(self, e: ft.ControlEvent) -> None:
         """Handle hover effect on clickable text."""
