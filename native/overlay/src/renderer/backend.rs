@@ -1,9 +1,9 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 #[cfg(windows)]
 use std::mem::ManuallyDrop;
 #[cfg(windows)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use windows::core::{Interface, PCWSTR};
@@ -23,14 +23,15 @@ use windows::Win32::Graphics::Direct2D::{
 };
 #[cfg(windows)]
 use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_10_1,
-    D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
+    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_10_0,
+    D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 #[cfg(windows)]
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Query, ID3D11Texture2D,
+    D3D11_ASYNC_GETDATA_DONOTFLUSH, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_QUERY_DESC, D3D11_QUERY_EVENT, D3D11_SDK_VERSION,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
 };
 #[cfg(windows)]
 use windows::Win32::Graphics::DirectWrite::{
@@ -44,8 +45,10 @@ use windows::Win32::Graphics::DirectWrite::{
 #[cfg(windows)]
 use windows::Win32::Graphics::Dxgi::{
     Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
-    IDXGIDevice, IDXGISurface,
+    IDXGIAdapter, IDXGIDevice, IDXGISurface,
 };
+#[cfg(windows)]
+use windows_core::BOOL;
 #[cfg(windows)]
 use windows_numerics::{Matrix3x2, Vector2};
 
@@ -74,7 +77,38 @@ use super::types::{
     DamageBand, RenderDiagnostics, ResolvedFrameLayout, StyleBucketSourceCount,
     TextStyleDescriptor,
 };
-use crate::presentation::PresentationBackend;
+use crate::openvr::OpenVrOutputAdapter;
+use crate::presentation::{
+    AdapterIdentity, AdapterMatch, PresentationBackend, ReadinessCancellation, ReadinessOutcome,
+};
+
+#[cfg(windows)]
+const GPU_READINESS_TIMEOUT: Duration = Duration::from_millis(50);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GpuReadinessProbe {
+    Ready,
+    Pending,
+    Failed,
+}
+
+async fn resolve_bounded_gpu_readiness(
+    cancellation: &ReadinessCancellation,
+    mut timed_out: impl FnMut() -> bool,
+    mut poll: impl FnMut() -> GpuReadinessProbe,
+) -> ReadinessOutcome {
+    loop {
+        if cancellation.is_cancelled() {
+            return ReadinessOutcome::Cancelled;
+        }
+        match poll() {
+            GpuReadinessProbe::Ready => return ReadinessOutcome::Ready,
+            GpuReadinessProbe::Failed => return ReadinessOutcome::Failed,
+            GpuReadinessProbe::Pending if timed_out() => return ReadinessOutcome::TimedOut,
+            GpuReadinessProbe::Pending => tokio::task::yield_now().await,
+        }
+    }
+}
 
 #[cfg(windows)]
 const DEBUG_OVERLAY_DAMAGE_BOTTOM_PX: f32 = 112.0;
@@ -135,6 +169,9 @@ pub struct CaptionRenderer {
     policy: CaptionLayoutPolicy,
     presentation: RefCell<CaptionPresentation>,
     backend: RefCell<RenderBackend>,
+    openvr_adapter_identity: AdapterIdentity,
+    test_readiness_pending_yields: Cell<usize>,
+    test_readiness_terminal_outcome: Cell<Option<ReadinessOutcome>>,
 }
 
 impl CaptionRenderer {
@@ -144,6 +181,24 @@ impl CaptionRenderer {
 
     pub fn new_for_test() -> Result<Self, CaptionRenderError> {
         Self::with_policy(CaptionLayoutPolicy::default(), BackendMode::Test)
+    }
+
+    pub fn new_for_openvr(
+        output_adapter: &OpenVrOutputAdapter,
+    ) -> Result<Self, CaptionRenderError> {
+        let renderer = Self::with_policy_and_adapter(
+            CaptionLayoutPolicy::default(),
+            BackendMode::Runtime,
+            Some(output_adapter),
+        )?;
+        if matches!(output_adapter.identity(), AdapterIdentity::DxgiLuid { .. })
+            && renderer.adapter_match(output_adapter.identity()) != AdapterMatch::Match
+        {
+            return Err(CaptionRenderError::HardwareDevice(
+                "renderer adapter does not match OpenVR output adapter".into(),
+            ));
+        }
+        Ok(renderer)
     }
 
     pub fn render_empty_frame(&self) -> Result<RenderedFrame, CaptionRenderError> {
@@ -185,13 +240,29 @@ impl CaptionRenderer {
         policy: CaptionLayoutPolicy,
         backend_mode: BackendMode,
     ) -> Result<Self, CaptionRenderError> {
+        Self::with_policy_and_adapter(policy, backend_mode, None)
+    }
+
+    fn with_policy_and_adapter(
+        policy: CaptionLayoutPolicy,
+        backend_mode: BackendMode,
+        output_adapter: Option<&OpenVrOutputAdapter>,
+    ) -> Result<Self, CaptionRenderError> {
         Ok(Self {
             policy,
             presentation: RefCell::new(CaptionPresentation::default()),
+            openvr_adapter_identity: output_adapter
+                .map(OpenVrOutputAdapter::requested_identity)
+                .unwrap_or(match backend_mode {
+                    BackendMode::Runtime => AdapterIdentity::Unavailable,
+                    BackendMode::Test => AdapterIdentity::Test,
+                }),
             backend: RefCell::new(match backend_mode {
-                BackendMode::Runtime => RenderBackend::new_runtime()?,
+                BackendMode::Runtime => RenderBackend::new_runtime(output_adapter)?,
                 BackendMode::Test => RenderBackend::new_test()?,
             }),
+            test_readiness_pending_yields: Cell::new(0),
+            test_readiness_terminal_outcome: Cell::new(None),
         })
     }
 
@@ -202,8 +273,70 @@ impl CaptionRenderer {
     pub fn presentation_backend(&self) -> PresentationBackend {
         self.backend.borrow().presentation_backend()
     }
+
+    pub fn adapter_identity(&self) -> AdapterIdentity {
+        self.backend.borrow().adapter_identity()
+    }
+
+    pub fn openvr_adapter_identity(&self) -> AdapterIdentity {
+        self.openvr_adapter_identity
+    }
+
+    pub fn adapter_match(&self, openvr_adapter: AdapterIdentity) -> AdapterMatch {
+        match (openvr_adapter, self.adapter_identity()) {
+            (
+                AdapterIdentity::DxgiLuid {
+                    high: a_high,
+                    low: a_low,
+                },
+                AdapterIdentity::DxgiLuid {
+                    high: b_high,
+                    low: b_low,
+                },
+            ) => {
+                if a_high == b_high && a_low == b_low {
+                    AdapterMatch::Match
+                } else {
+                    AdapterMatch::Mismatch
+                }
+            }
+            (AdapterIdentity::Test, AdapterIdentity::Test) => AdapterMatch::Match,
+            _ => AdapterMatch::Unavailable,
+        }
+    }
+
+    pub async fn prepare_frame_for_submission(
+        &self,
+        cancellation: &ReadinessCancellation,
+    ) -> ReadinessOutcome {
+        while self.test_readiness_pending_yields.get() > 0 {
+            if cancellation.is_cancelled() {
+                self.test_readiness_pending_yields.set(0);
+                return ReadinessOutcome::Cancelled;
+            }
+            self.test_readiness_pending_yields
+                .set(self.test_readiness_pending_yields.get() - 1);
+            tokio::task::yield_now().await;
+        }
+        if let Some(outcome) = self.test_readiness_terminal_outcome.take() {
+            return outcome;
+        }
+        self.backend
+            .borrow()
+            .prepare_frame_for_submission(cancellation)
+            .await
+    }
+
+    pub fn set_test_readiness_pending_yields(&self, yields: usize) {
+        self.test_readiness_pending_yields.set(yields);
+    }
+
+    pub fn set_test_readiness_terminal_outcome(&self, outcome: ReadinessOutcome) {
+        self.test_readiness_terminal_outcome.set(Some(outcome));
+    }
 }
 
+#[derive(Clone, Copy)]
 enum BackendMode {
     Runtime,
     Test,
@@ -308,10 +441,12 @@ enum RenderBackend {
 }
 
 impl RenderBackend {
-    fn new_runtime() -> Result<Self, CaptionRenderError> {
+    fn new_runtime(
+        output_adapter: Option<&OpenVrOutputAdapter>,
+    ) -> Result<Self, CaptionRenderError> {
         #[cfg(windows)]
         {
-            return WindowsCaptionRenderer::new().map(Self::Windows);
+            return WindowsCaptionRenderer::new(output_adapter).map(Self::Windows);
         }
 
         #[cfg(not(windows))]
@@ -325,7 +460,7 @@ impl RenderBackend {
     fn new_test() -> Result<Self, CaptionRenderError> {
         #[cfg(windows)]
         {
-            return WindowsCaptionRenderer::new().map(Self::Windows);
+            return WindowsCaptionRenderer::new(None).map(Self::Windows);
         }
 
         #[cfg(not(windows))]
@@ -364,6 +499,29 @@ impl RenderBackend {
             Self::Windows(renderer) => renderer.presentation_backend,
             #[cfg(not(windows))]
             Self::Test(_) => PresentationBackend::Test,
+        }
+    }
+
+    fn adapter_identity(&self) -> AdapterIdentity {
+        match self {
+            #[cfg(windows)]
+            Self::Windows(renderer) => renderer.adapter_identity,
+            #[cfg(not(windows))]
+            Self::Test(_) => AdapterIdentity::Test,
+        }
+    }
+
+    async fn prepare_frame_for_submission(
+        &self,
+        cancellation: &ReadinessCancellation,
+    ) -> ReadinessOutcome {
+        match self {
+            #[cfg(windows)]
+            Self::Windows(renderer) => renderer.prepare_frame_for_submission(cancellation).await,
+            #[cfg(not(windows))]
+            Self::Test(_) if cancellation.is_cancelled() => ReadinessOutcome::Cancelled,
+            #[cfg(not(windows))]
+            Self::Test(_) => ReadinessOutcome::Ready,
         }
     }
 }
@@ -430,14 +588,17 @@ struct WindowsCaptionRenderer {
     font_warmup_attempts: u32,
     font_warmup_failures: u32,
     _d3d_device: ID3D11Device,
+    d3d_context: ID3D11DeviceContext,
     presentation_backend: PresentationBackend,
+    adapter_identity: AdapterIdentity,
 }
 
 #[cfg(windows)]
 impl WindowsCaptionRenderer {
-    fn new() -> Result<Self, CaptionRenderError> {
+    fn new(output_adapter: Option<&OpenVrOutputAdapter>) -> Result<Self, CaptionRenderError> {
         let renderer_init_started = Instant::now();
-        let (device, _context, presentation_backend) = create_d3d_device()?;
+        let (device, d3d_context, presentation_backend) = create_d3d_device(output_adapter)?;
+        let adapter_identity = renderer_adapter_identity(&device)?;
         let d2d_factory = create_d2d_factory()?;
         let dwrite_factory = create_dwrite_factory()?;
         let factory2: IDWriteFactory2 = dwrite_factory
@@ -528,7 +689,9 @@ impl WindowsCaptionRenderer {
             font_warmup_attempts: 0,
             font_warmup_failures: 0,
             _d3d_device: device,
+            d3d_context,
             presentation_backend,
+            adapter_identity,
         };
         let warmup_stats = renderer.warm_up_cjk_fonts();
         renderer.font_warmup_attempts = warmup_stats.attempts;
@@ -539,6 +702,54 @@ impl WindowsCaptionRenderer {
             warmup_stats.elapsed_ms
         );
         Ok(renderer)
+    }
+
+    async fn prepare_frame_for_submission(
+        &self,
+        cancellation: &ReadinessCancellation,
+    ) -> ReadinessOutcome {
+        if cancellation.is_cancelled() {
+            return ReadinessOutcome::Cancelled;
+        }
+        let description = D3D11_QUERY_DESC {
+            Query: D3D11_QUERY_EVENT,
+            MiscFlags: 0,
+        };
+        let mut query: Option<ID3D11Query> = None;
+        if unsafe { self._d3d_device.CreateQuery(&description, Some(&mut query)) }.is_err() {
+            return ReadinessOutcome::Failed;
+        }
+        let Some(query) = query else {
+            return ReadinessOutcome::Failed;
+        };
+        unsafe {
+            self.d3d_context.End(&query);
+            self.d3d_context.Flush();
+        }
+        let deadline = Instant::now() + GPU_READINESS_TIMEOUT;
+        resolve_bounded_gpu_readiness(
+            cancellation,
+            || Instant::now() >= deadline,
+            || {
+                let mut ready = BOOL::default();
+                let result = unsafe {
+                    self.d3d_context.GetData(
+                        &query,
+                        Some((&mut ready as *mut BOOL).cast()),
+                        std::mem::size_of::<BOOL>() as u32,
+                        D3D11_ASYNC_GETDATA_DONOTFLUSH.0 as u32,
+                    )
+                };
+                if result.is_err() {
+                    return GpuReadinessProbe::Failed;
+                }
+                if ready.as_bool() {
+                    return GpuReadinessProbe::Ready;
+                }
+                GpuReadinessProbe::Pending
+            },
+        )
+        .await
     }
 
     fn warm_up_cjk_fonts(&self) -> FontWarmupStats {
@@ -1808,6 +2019,7 @@ fn create_d2d_factory() -> Result<ID2D1Factory1, CaptionRenderError> {
 
 #[cfg(windows)]
 fn create_d3d_device(
+    output_adapter: Option<&OpenVrOutputAdapter>,
 ) -> Result<(ID3D11Device, ID3D11DeviceContext, PresentationBackend), CaptionRenderError> {
     let feature_levels = [
         D3D_FEATURE_LEVEL_11_1,
@@ -1816,16 +2028,19 @@ fn create_d3d_device(
         D3D_FEATURE_LEVEL_10_0,
     ];
 
-    create_d3d_device_for_driver(D3D_DRIVER_TYPE_HARDWARE, &feature_levels)
+    let adapter = output_adapter.and_then(OpenVrOutputAdapter::adapter);
+    let driver_type = if adapter.is_some() {
+        D3D_DRIVER_TYPE_UNKNOWN
+    } else {
+        D3D_DRIVER_TYPE_HARDWARE
+    };
+    create_d3d_device_for_driver(adapter, driver_type, &feature_levels)
         .map(|(device, context)| (device, context, PresentationBackend::D3d11Hardware))
-        .or_else(|_| {
-            create_d3d_device_for_driver(D3D_DRIVER_TYPE_WARP, &feature_levels)
-                .map(|(device, context)| (device, context, PresentationBackend::D3d11Warp))
-        })
 }
 
 #[cfg(windows)]
 fn create_d3d_device_for_driver(
+    adapter: Option<&IDXGIAdapter>,
     driver_type: windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE,
     feature_levels: &[windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL],
 ) -> Result<(ID3D11Device, ID3D11DeviceContext), CaptionRenderError> {
@@ -1834,7 +2049,7 @@ fn create_d3d_device_for_driver(
 
     unsafe {
         D3D11CreateDevice(
-            None,
+            adapter,
             driver_type,
             HMODULE::default(),
             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
@@ -1844,13 +2059,29 @@ fn create_d3d_device_for_driver(
             None,
             Some(&mut context),
         )
-        .map_err(|error| CaptionRenderError::Init(error.to_string()))?;
+        .map_err(|_| CaptionRenderError::HardwareDevice("D3D11 device creation failed".into()))?;
     }
 
-    let device = device.ok_or_else(|| CaptionRenderError::Init("d3d device missing".into()))?;
-    let context =
-        context.ok_or_else(|| CaptionRenderError::Init("d3d device context missing".into()))?;
+    let device =
+        device.ok_or_else(|| CaptionRenderError::HardwareDevice("D3D11 device missing".into()))?;
+    let context = context
+        .ok_or_else(|| CaptionRenderError::HardwareDevice("D3D11 context missing".into()))?;
     Ok((device, context))
+}
+
+#[cfg(windows)]
+fn renderer_adapter_identity(device: &ID3D11Device) -> Result<AdapterIdentity, CaptionRenderError> {
+    let dxgi_device: IDXGIDevice = device
+        .cast()
+        .map_err(|_| CaptionRenderError::Init("renderer adapter identity unavailable".into()))?;
+    let adapter = unsafe { dxgi_device.GetAdapter() }
+        .map_err(|_| CaptionRenderError::Init("renderer adapter identity unavailable".into()))?;
+    let description = unsafe { adapter.GetDesc() }
+        .map_err(|_| CaptionRenderError::Init("renderer adapter identity unavailable".into()))?;
+    Ok(AdapterIdentity::DxgiLuid {
+        high: description.AdapterLuid.HighPart,
+        low: description.AdapterLuid.LowPart,
+    })
 }
 
 #[cfg(windows)]
@@ -1924,6 +2155,9 @@ fn prefix_render_error(stage: &str, error: CaptionRenderError) -> CaptionRenderE
     match error {
         CaptionRenderError::Init(message) => {
             CaptionRenderError::Init(format!("{stage}: {message}"))
+        }
+        CaptionRenderError::HardwareDevice(message) => {
+            CaptionRenderError::HardwareDevice(format!("{stage}: {message}"))
         }
         CaptionRenderError::Draw(message) => {
             CaptionRenderError::Draw(format!("{stage}: {message}"))
@@ -2116,18 +2350,71 @@ fn bounds_intersect_damage_band(bounds: BlockBounds, damage_band: DamageBand) ->
 mod tests {
     #[cfg(windows)]
     use super::format_renderer_failure_diagnostic;
-    use super::prepare_layout_for_render;
+    use super::{prepare_layout_for_render, resolve_bounded_gpu_readiness, GpuReadinessProbe};
+    use crate::presentation::{ReadinessCancellation, ReadinessOutcome};
     use crate::renderer::{
         BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
         CaptionPresentation, FontLanguageBucket, FontResolver, FontSource, LayoutCacheKey,
         LineRole, ResolvedBlockLayout, ResolvedFrameLayout, ResolvedLineLayout, TextStyleKey,
         VisualBounds,
     };
+    use std::cell::Cell;
+    #[cfg(windows)]
+    use std::time::Duration;
 
     fn style_key(language: &str) -> TextStyleKey {
         FontResolver::with_bundle_available()
             .resolve(Some(language), "漢字")
             .style_key()
+    }
+
+    #[tokio::test]
+    async fn bounded_gpu_readiness_has_terminal_ready_timeout_cancelled_and_failed_outcomes() {
+        let cancellation = ReadinessCancellation::default();
+        let pending_polls = Cell::new(0usize);
+        assert_eq!(
+            resolve_bounded_gpu_readiness(
+                &cancellation,
+                || false,
+                || {
+                    pending_polls.set(pending_polls.get() + 1);
+                    if pending_polls.get() < 3 {
+                        GpuReadinessProbe::Pending
+                    } else {
+                        GpuReadinessProbe::Ready
+                    }
+                }
+            )
+            .await,
+            ReadinessOutcome::Ready
+        );
+        assert_eq!(pending_polls.get(), 3);
+        assert_eq!(
+            resolve_bounded_gpu_readiness(&cancellation, || true, || GpuReadinessProbe::Pending)
+                .await,
+            ReadinessOutcome::TimedOut
+        );
+        let live_cancellation = ReadinessCancellation::default();
+        let cancel_handle = live_cancellation.clone();
+        let (outcome, ()) = tokio::join!(
+            resolve_bounded_gpu_readiness(
+                &live_cancellation,
+                || false,
+                || GpuReadinessProbe::Pending
+            ),
+            async move {
+                tokio::task::yield_now().await;
+                cancel_handle.cancel();
+            }
+        );
+        assert_eq!(outcome, ReadinessOutcome::Cancelled);
+        assert_eq!(
+            resolve_bounded_gpu_readiness(&cancellation, || false, || GpuReadinessProbe::Failed)
+                .await,
+            ReadinessOutcome::Failed
+        );
+        #[cfg(windows)]
+        assert_eq!(super::GPU_READINESS_TIMEOUT, Duration::from_millis(50));
     }
 
     #[cfg(windows)]
@@ -2313,7 +2600,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn line_cache_key_and_text_format_key_share_resolved_style_identity() {
-        let renderer = super::WindowsCaptionRenderer::new()
+        let renderer = super::WindowsCaptionRenderer::new(None)
             .expect("Windows caption renderer should initialize for style-key test");
         let policy = CaptionLayoutPolicy::default();
         let layout = policy
@@ -2346,7 +2633,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn line_text_format_cache_key_uses_measured_line_style_without_reresolving_text() {
-        let renderer = super::WindowsCaptionRenderer::new()
+        let renderer = super::WindowsCaptionRenderer::new(None)
             .expect("Windows caption renderer should initialize for style-key test");
         let policy = CaptionLayoutPolicy::default();
         let resolved_line_style =

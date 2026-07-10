@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use serde_json::json;
 use thiserror::Error;
 use tokio::io::{self, AsyncWriteExt};
@@ -18,7 +19,10 @@ use crate::openvr::{
     format_openvr_visibility_api_call_log, perform_startup_preflight, FrameTimingSample,
     OpenVrOverlay, OpenVrStartupPreflightError, OverlayFrameSubmitter,
 };
-use crate::presentation::{PresentationBackend, PresentationCorrelation, PresentationDiagnostics};
+use crate::presentation::{
+    PresentationBackend, PresentationCorrelation, PresentationDiagnostics, ReadinessCancellation,
+    ReadinessOutcome,
+};
 use crate::renderer::{
     CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionDebugOverlay, CaptionLayoutResult,
     CaptionPresentation, CaptionRenderer,
@@ -33,6 +37,8 @@ use crate::state::{
 const EMPTY_OVERLAY_HIDE_DELAY: Duration = Duration::from_millis(500);
 const TWO_ROW_WINDOW_STABILITY_THRESHOLD_MS: u64 = 500;
 const PRESENTATION_DIAGNOSTIC_WRITE_TIMEOUT: Duration = Duration::from_millis(25);
+const GPU_READINESS_OWNER_TIMEOUT: Duration = Duration::from_millis(50);
+const MAX_IGNORED_MESSAGES_BEFORE_READINESS_POLL: usize = 8;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StartupError {
@@ -95,6 +101,12 @@ pub enum RuntimeFailure {
     Render(String),
     #[error("openvr submit failed: {0}")]
     OpenVr(String),
+    #[error("GPU readiness timed out")]
+    ReadinessTimedOut,
+    #[error("GPU readiness cancelled")]
+    ReadinessCancelled,
+    #[error("GPU readiness failed")]
+    ReadinessFailed,
 }
 
 impl RuntimeFailure {
@@ -102,6 +114,9 @@ impl RuntimeFailure {
         match self {
             Self::RuntimeDisconnected => "runtime_disconnected",
             Self::Stopped => "stopped",
+            Self::ReadinessTimedOut | Self::ReadinessCancelled | Self::ReadinessFailed => {
+                "renderer_init_failed"
+            }
             Self::Bridge(_) | Self::Render(_) | Self::OpenVr(_) => "unknown",
         }
     }
@@ -333,6 +348,14 @@ impl OverlayRuntime {
         changed
     }
 
+    fn runtime_logging_mode_would_change(
+        &self,
+        logger: &OverlayLogger,
+        mode: OverlayLoggingMode,
+    ) -> bool {
+        logger.is_detailed() != matches!(mode, OverlayLoggingMode::Detailed)
+    }
+
     async fn emit_snapshot_slot_correlation_if_changed(
         &mut self,
         logger: &OverlayLogger,
@@ -523,8 +546,9 @@ impl OverlayRuntime {
         bridge: &mut BridgeClient,
         logger: &OverlayLogger,
     ) -> Result<(), RuntimeFailure> {
-        self.submit_frame_if_needed_with_timing(renderer, openvr, bridge, logger, None, None)
+        self.submit_frame_if_needed_with_timing(renderer, openvr, bridge, logger, None, None, false)
             .await
+            .map(|_| ())
     }
 
     async fn submit_frame_if_needed_with_timing<S: OverlayFrameSubmitter>(
@@ -535,15 +559,22 @@ impl OverlayRuntime {
         logger: &OverlayLogger,
         snapshot_received_at: Option<Instant>,
         receive_to_apply_us: Option<u128>,
-    ) -> Result<(), RuntimeFailure> {
+        preemptible: bool,
+    ) -> Result<Option<Result<BridgeIncoming, BridgeError>>, RuntimeFailure> {
         if self.stopped {
             return Err(RuntimeFailure::Stopped);
         }
         if self.first_texture_submitted && !self.redraw_requested {
-            return Ok(());
+            return Ok(None);
         }
 
         let presentation_backend = renderer.presentation_backend();
+        let openvr_adapter_identity = renderer.openvr_adapter_identity();
+        self.presentation_diagnostics.configure_adapter_handoff(
+            openvr_adapter_identity,
+            renderer.adapter_identity(),
+            renderer.adapter_match(openvr_adapter_identity),
+        );
         if self.pending_logical_revision_acceptance {
             self.presentation_diagnostics
                 .accept_logical_revision(presentation_backend);
@@ -672,8 +703,70 @@ impl OverlayRuntime {
         } else {
             None
         };
-        self.presentation_diagnostics
-            .record_legacy_readiness(presentation_correlation, presentation_backend);
+        let readiness_cancellation = ReadinessCancellation::default();
+        if self.stopped {
+            readiness_cancellation.cancel();
+        }
+        let mut readiness =
+            Box::pin(renderer.prepare_frame_for_submission(&readiness_cancellation));
+        let mut pending_message = None;
+        let readiness_deadline = Instant::now() + GPU_READINESS_OWNER_TIMEOUT;
+        let mut ignored_message_count = 0usize;
+        let readiness_outcome = if preemptible {
+            loop {
+                tokio::select! {
+                    biased;
+                    message = bridge.next_message() => {
+                        let ignored = matches!(message, Ok(BridgeIncoming::Heartbeat)) || matches!(
+                            &message,
+                            Ok(BridgeIncoming::Control(control))
+                                if !self.runtime_logging_mode_would_change(
+                                    logger,
+                                    control.logging_mode,
+                                )
+                        );
+                        if ignored {
+                            if Instant::now() >= readiness_deadline {
+                                break ReadinessOutcome::TimedOut;
+                            }
+                            ignored_message_count += 1;
+                            if ignored_message_count >= MAX_IGNORED_MESSAGES_BEFORE_READINESS_POLL {
+                                ignored_message_count = 0;
+                                if let Some(outcome) = readiness.as_mut().now_or_never() {
+                                    break outcome;
+                                }
+                            }
+                            continue;
+                        }
+                        readiness_cancellation.cancel();
+                        pending_message = Some(message);
+                        break readiness.await;
+                    }
+                    _ = sleep_until(readiness_deadline) => break ReadinessOutcome::TimedOut,
+                    outcome = &mut readiness => break outcome,
+                }
+            }
+        } else {
+            readiness.await
+        };
+        self.presentation_diagnostics.record_readiness(
+            presentation_correlation,
+            presentation_backend,
+            readiness_outcome,
+        );
+        if readiness_outcome != ReadinessOutcome::Ready {
+            self.emit_pending_presentation_diagnostics(logger).await?;
+            if readiness_outcome == ReadinessOutcome::Cancelled && pending_message.is_some() {
+                return Ok(pending_message);
+            }
+            let failure = match readiness_outcome {
+                ReadinessOutcome::TimedOut => RuntimeFailure::ReadinessTimedOut,
+                ReadinessOutcome::Cancelled => RuntimeFailure::ReadinessCancelled,
+                ReadinessOutcome::Failed => RuntimeFailure::ReadinessFailed,
+                ReadinessOutcome::Ready => unreachable!(),
+            };
+            return Err(failure);
+        }
         self.presentation_diagnostics
             .record_submission_attempt(presentation_correlation, presentation_backend);
         let submission_result = openvr.submit_frame(&frame);
@@ -774,7 +867,7 @@ impl OverlayRuntime {
             self.emit_ready(bridge, logger).await?;
         }
 
-        Ok(())
+        Ok(None)
     }
 
     pub async fn run_event_loop<S: OverlayFrameSubmitter>(
@@ -784,23 +877,52 @@ impl OverlayRuntime {
         openvr: &mut S,
         logger: &OverlayLogger,
     ) -> Result<(), RuntimeFailure> {
+        let mut pending_message = None;
         loop {
             let hide_deadline = self.hide_deadline;
-
-            tokio::select! {
-                _ = sleep_until(hide_deadline.unwrap_or_else(Instant::now)), if hide_deadline.is_some() => {
-                    self.handle_hide_deadline(openvr, logger).await?;
-                }
-                message = bridge.next_message() => {
-                    if !self
-                        .handle_bridge_message(message, renderer, openvr, bridge, logger)
-                        .await?
-                    {
-                        return Ok(());
+            let message = if let Some(message) = pending_message.take() {
+                Some(message)
+            } else {
+                tokio::select! {
+                    _ = sleep_until(hide_deadline.unwrap_or_else(Instant::now)), if hide_deadline.is_some() => {
+                        self.handle_hide_deadline(openvr, logger).await?;
+                        None
                     }
+                    message = bridge.next_message() => Some(message)
                 }
+            };
+            if let Some(message) = message {
+                let (continue_running, preempted_message) = self
+                    .handle_bridge_message(message, renderer, openvr, bridge, logger)
+                    .await?;
+                if !continue_running {
+                    return Ok(());
+                }
+                pending_message = preempted_message;
             }
         }
+    }
+
+    pub async fn submit_initial_frame_message_aware<S: OverlayFrameSubmitter>(
+        &mut self,
+        renderer: &CaptionRenderer,
+        openvr: &mut S,
+        bridge: &mut BridgeClient,
+        logger: &OverlayLogger,
+    ) -> Result<(), RuntimeFailure> {
+        let mut pending_message = self
+            .submit_frame_if_needed_with_timing(renderer, openvr, bridge, logger, None, None, true)
+            .await?;
+        while let Some(message) = pending_message.take() {
+            let (continue_running, next_message) = self
+                .handle_bridge_message(message, renderer, openvr, bridge, logger)
+                .await?;
+            if !continue_running {
+                return Ok(());
+            }
+            pending_message = next_message;
+        }
+        Ok(())
     }
 
     async fn handle_bridge_message<S: OverlayFrameSubmitter>(
@@ -810,15 +932,19 @@ impl OverlayRuntime {
         openvr: &mut S,
         bridge: &mut BridgeClient,
         logger: &OverlayLogger,
-    ) -> Result<bool, RuntimeFailure> {
+    ) -> Result<(bool, Option<Result<BridgeIncoming, BridgeError>>), RuntimeFailure> {
         match message {
-            Ok(BridgeIncoming::Heartbeat) => Ok(true),
+            Ok(BridgeIncoming::Heartbeat) => Ok((true, None)),
             Ok(BridgeIncoming::Control(control)) => {
                 if self.apply_runtime_logging_mode(logger, control.logging_mode) {
-                    self.submit_frame_if_needed(renderer, openvr, bridge, logger)
+                    let pending = self
+                        .submit_frame_if_needed_with_timing(
+                            renderer, openvr, bridge, logger, None, None, true,
+                        )
                         .await?;
+                    return Ok((true, pending));
                 }
-                Ok(true)
+                Ok((true, None))
             }
             Ok(BridgeIncoming::Snapshot(snapshot)) => {
                 let snapshot_received_at = Instant::now();
@@ -828,25 +954,30 @@ impl OverlayRuntime {
                 let _ = outcome;
                 self.emit_pending_visible_update_applied_diagnostics(logger)
                     .await?;
-                self.submit_frame_if_needed_with_timing(
-                    renderer,
-                    openvr,
-                    bridge,
-                    logger,
-                    Some(snapshot_received_at),
-                    Some(receive_to_apply_us),
-                )
-                .await?;
-                Ok(true)
+                let pending = self
+                    .submit_frame_if_needed_with_timing(
+                        renderer,
+                        openvr,
+                        bridge,
+                        logger,
+                        Some(snapshot_received_at),
+                        Some(receive_to_apply_us),
+                        true,
+                    )
+                    .await?;
+                Ok((true, pending))
             }
             Ok(BridgeIncoming::Event(event)) => {
                 self.handle_event(event).await?;
                 if self.stopped {
-                    return Ok(false);
+                    return Ok((false, None));
                 }
-                self.submit_frame_if_needed(renderer, openvr, bridge, logger)
+                let pending = self
+                    .submit_frame_if_needed_with_timing(
+                        renderer, openvr, bridge, logger, None, None, true,
+                    )
                     .await?;
-                Ok(true)
+                Ok((true, pending))
             }
             Err(BridgeError::Disconnected) => {
                 logger
@@ -1673,13 +1804,17 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
         .emit_snapshot_slot_correlation_if_changed(&logger)
         .await;
     if let Err(error) = runtime
-        .submit_frame_if_needed(&renderer, &mut openvr, &mut bridge, &logger)
+        .submit_initial_frame_message_aware(&renderer, &mut openvr, &mut bridge, &logger)
         .await
     {
         let startup_error = startup_error_from_runtime_failure(error);
         let _ = bridge.close().await;
         emit_startup_failure(&logger, &startup_error).await;
         return startup_error.exit_code();
+    }
+    if runtime.is_stopped() {
+        let _ = bridge.close().await;
+        return 0;
     }
 
     let runtime_result = runtime
@@ -1748,12 +1883,23 @@ fn startup_error_from_runtime_failure(error: RuntimeFailure) -> StartupError {
     match error {
         RuntimeFailure::Render(message) => StartupError::RendererInit(message),
         RuntimeFailure::OpenVr(message) => StartupError::OpenVrInit(message),
+        RuntimeFailure::ReadinessTimedOut
+        | RuntimeFailure::ReadinessCancelled
+        | RuntimeFailure::ReadinessFailed => StartupError::RendererInit(error.to_string()),
         RuntimeFailure::Bridge(message) => StartupError::Other(message),
         RuntimeFailure::RuntimeDisconnected => {
             StartupError::Other("runtime disconnected before ready".into())
         }
         RuntimeFailure::Stopped => StartupError::Other("runtime stopped before ready".into()),
     }
+}
+
+fn startup_error_from_openvr(error: crate::openvr::OpenVrError) -> StartupError {
+    StartupError::OpenVrInit(error.to_string())
+}
+
+fn startup_error_from_renderer(error: crate::renderer::CaptionRenderError) -> StartupError {
+    StartupError::RendererInit(error.to_string())
 }
 
 #[cfg(test)]
@@ -1767,22 +1913,20 @@ where
     F: FnOnce(&str) -> Result<T, OpenVrError>,
 {
     preflight().map_err(startup_error_from_preflight)?;
-    overlay_factory(overlay_instance_id)
-        .map_err(|error| StartupError::OpenVrInit(error.to_string()))
+    overlay_factory(overlay_instance_id).map_err(startup_error_from_openvr)
 }
 
 async fn initialize_runtime_resources(
     manifest: &OverlayManifest,
     logger: &OverlayLogger,
 ) -> Result<(CaptionRenderer, OpenVrOverlay), StartupError> {
-    let openvr = OpenVrOverlay::new(&manifest.overlay_instance_id)
-        .map_err(|error| StartupError::OpenVrInit(error.to_string()))?;
+    let openvr =
+        OpenVrOverlay::new(&manifest.overlay_instance_id).map_err(startup_error_from_openvr)?;
     logger
         .info("openvr_ready")
         .await
         .map_err(|error| StartupError::Other(error.to_string()))?;
-    let renderer =
-        create_runtime_renderer().map_err(|error| StartupError::RendererInit(error.to_string()))?;
+    let renderer = create_runtime_renderer(&openvr).map_err(startup_error_from_renderer)?;
     logger
         .info("renderer_resources_ready")
         .await
@@ -1790,14 +1934,17 @@ async fn initialize_runtime_resources(
     Ok((renderer, openvr))
 }
 
-fn create_runtime_renderer() -> Result<CaptionRenderer, crate::renderer::CaptionRenderError> {
+fn create_runtime_renderer(
+    openvr: &OpenVrOverlay,
+) -> Result<CaptionRenderer, crate::renderer::CaptionRenderError> {
     #[cfg(windows)]
     {
-        CaptionRenderer::new()
+        CaptionRenderer::new_for_openvr(&openvr.output_adapter())
     }
 
     #[cfg(not(windows))]
     {
+        let _ = openvr;
         CaptionRenderer::new_for_test()
     }
 }

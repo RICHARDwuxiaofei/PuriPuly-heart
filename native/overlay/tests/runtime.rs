@@ -9,12 +9,13 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 use puripuly_heart_overlay::logging::OverlayLogger;
 use puripuly_heart_overlay::runtime::SnapshotApplyOutcome;
 use puripuly_heart_overlay::{
-    run_with_manifest, submit_texture, validate_manifest, BridgeClient, CaptionBlock,
-    CaptionChannel, CaptionRenderer, FakeOpenVr, OpenVrError, OverlayBridgeEvent,
+    run_with_manifest, submit_texture, validate_manifest, AdapterIdentity, BridgeClient,
+    CaptionBlock, CaptionChannel, CaptionRenderer, FakeOpenVr, OpenVrError, OverlayBridgeEvent,
     OverlayFrameSubmitter, OverlayLoggingMode, OverlayManifest, OverlayPresentationBlock,
     OverlayPresentationBlockVariant, OverlayPresentationCalibration, OverlayPresentationSnapshot,
-    OverlayRuntime, PresentationOutcome, PresentationStage, RenderedFrame, RuntimeFailure,
-    StartupError, EXPECTED_CONTRACT_VERSION,
+    OverlayRuntime, PresentationBackend, PresentationOutcome, PresentationStage,
+    PresentationStrategy, ReadinessOutcome, RenderedFrame, RuntimeFailure, StartupError,
+    EXPECTED_CONTRACT_VERSION,
 };
 
 fn test_manifest() -> OverlayManifest {
@@ -350,10 +351,369 @@ async fn connect_test_bridge() -> (
     (client, server)
 }
 
+async fn connect_test_bridge_with_followups(
+    followups: Vec<serde_json::Value>,
+) -> (
+    BridgeClient,
+    OverlayPresentationSnapshot,
+    tokio::task::JoinHandle<Vec<serde_json::Value>>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 0,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": []
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        for followup in followups {
+            ws.send(Message::Text(followup.to_string().into()))
+                .await
+                .unwrap();
+        }
+        let mut messages = Vec::new();
+        while let Ok(Some(message)) = tokio::time::timeout(Duration::from_secs(5), ws.next()).await
+        {
+            let Ok(Message::Text(text)) = message else {
+                continue;
+            };
+            messages.push(serde_json::from_str(&text).unwrap());
+        }
+        messages
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    (bridge, snapshot, server)
+}
+
 async fn test_logger(name: &str) -> OverlayLogger {
     OverlayLogger::open(unique_log_dir(name), OverlayLoggingMode::Detailed)
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn event_loop_cancels_stale_readiness_submits_latest_then_handles_shutdown() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        for revision in [0, 1, 2] {
+            ws.send(Message::Text(
+                json!({
+                    "type": "snapshot",
+                    "payload": {
+                        "revision": revision,
+                        "calibration": OverlayPresentationCalibration::default(),
+                        "blocks": if revision == 0 { vec![] } else { vec![json!({
+                            "id": "self:cancel",
+                            "occupant_key": "self:cancel",
+                            "appearance_seq": 1,
+                            "channel": "self",
+                            "block_variant": "finalized",
+                            "primary_text": format!("synthetic-{revision}"),
+                            "secondary_text": "",
+                            "secondary_enabled": true
+                        })] }
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+            if revision == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        ws.send(Message::Text(
+            json!({"type": "shutdown"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (mut bridge, initial_snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    renderer.set_test_readiness_pending_yields(1_000_000);
+    let logger = test_logger("readiness-shutdown-preemption").await;
+    let mut runtime = OverlayRuntime::new(initial_snapshot);
+    let mut submitter = RecordingSubmitter::default();
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        runtime.run_event_loop(&mut bridge, &renderer, &mut submitter, &logger),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    server.await.unwrap();
+    assert_eq!(submitter.calls, 1);
+    assert_eq!(submitter.operations.first(), Some(&"submit:text"));
+    assert!(runtime.is_stopped());
+    assert!(runtime.presentation_diagnostics().records().is_empty());
+}
+
+#[tokio::test]
+async fn initial_readiness_processes_new_snapshot_before_submit_and_ready() {
+    let followup = json!({
+        "type": "snapshot",
+        "payload": {
+            "revision": 1,
+            "calibration": OverlayPresentationCalibration::default(),
+            "blocks": [json!({
+                "id": "self:initial-latest",
+                "occupant_key": "self:initial-latest",
+                "appearance_seq": 1,
+                "channel": "self",
+                "block_variant": "finalized",
+                "primary_text": "latest",
+                "secondary_text": "",
+                "secondary_enabled": true
+            })]
+        }
+    });
+    let (mut bridge, snapshot, server) = connect_test_bridge_with_followups(vec![followup]).await;
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    renderer.set_test_readiness_pending_yields(10_000);
+    let logger = test_logger("initial-readiness-snapshot-preemption").await;
+    let mut runtime = OverlayRuntime::new(snapshot);
+    let mut submitter = RecordingSubmitter::default();
+
+    runtime
+        .submit_initial_frame_message_aware(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+
+    assert_eq!(submitter.calls, 1);
+    assert_eq!(runtime.state().snapshot().revision, 1);
+    assert!(runtime.ready_sent());
+    drop(bridge);
+    let messages = server.await.unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["type"] == "overlay_ready")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn initial_shutdown_preempts_readiness_without_submit_or_ready() {
+    let (mut bridge, snapshot, server) =
+        connect_test_bridge_with_followups(vec![json!({"type": "shutdown"})]).await;
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    renderer.set_test_readiness_pending_yields(10_000);
+    let logger = test_logger("initial-readiness-shutdown-tie").await;
+    let mut runtime = OverlayRuntime::new(snapshot);
+    let mut submitter = RecordingSubmitter::default();
+
+    runtime
+        .submit_initial_frame_message_aware(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+
+    assert!(runtime.is_stopped());
+    assert_eq!(submitter.calls, 0);
+    assert!(!runtime.ready_sent());
+    drop(bridge);
+    assert!(server
+        .await
+        .unwrap()
+        .iter()
+        .all(|message| message["type"] != "overlay_ready"));
+}
+
+#[tokio::test]
+async fn heartbeat_and_noop_control_do_not_cancel_initial_readiness() {
+    let followups = vec![
+        json!({"type": "heartbeat"}),
+        json!({"type": "runtime_control", "payload": {"logging_mode": "detailed"}}),
+    ];
+    let (mut bridge, snapshot, server) = connect_test_bridge_with_followups(followups).await;
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    renderer.set_test_readiness_pending_yields(100);
+    let logger = test_logger("readiness-heartbeat-noop-control").await;
+    let mut runtime = OverlayRuntime::new(snapshot);
+    let mut submitter = RecordingSubmitter::default();
+
+    runtime
+        .submit_initial_frame_message_aware(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+
+    assert_eq!(submitter.calls, 1);
+    assert!(runtime
+        .presentation_diagnostics()
+        .records()
+        .iter()
+        .all(|record| record.outcome != PresentationOutcome::Cancelled));
+    drop(bridge);
+    let _ = server.await.unwrap();
+}
+
+#[tokio::test]
+async fn ignored_message_flood_polls_readiness_and_reaches_ready() {
+    let mut followups = Vec::new();
+    for index in 0..256 {
+        followups.push(if index % 2 == 0 {
+            json!({"type": "heartbeat"})
+        } else {
+            json!({"type": "runtime_control", "payload": {"logging_mode": "detailed"}})
+        });
+    }
+    let (mut bridge, snapshot, server) = connect_test_bridge_with_followups(followups).await;
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    renderer.set_test_readiness_pending_yields(3);
+    let logger = test_logger("readiness-ignored-flood-ready").await;
+    let mut runtime = OverlayRuntime::new(snapshot);
+    let mut submitter = RecordingSubmitter::default();
+
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        runtime.submit_initial_frame_message_aware(&renderer, &mut submitter, &mut bridge, &logger),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(submitter.calls, 1);
+    assert!(runtime.ready_sent());
+    assert!(runtime
+        .presentation_diagnostics()
+        .records()
+        .iter()
+        .any(|record| record.outcome == PresentationOutcome::Ready));
+    drop(bridge);
+    let _ = server.await.unwrap();
+}
+
+#[tokio::test]
+async fn continuous_ignored_messages_hit_owner_timeout_without_submission() {
+    let followups = (0..2_000)
+        .map(|index| {
+            if index % 2 == 0 {
+                json!({"type": "heartbeat"})
+            } else {
+                json!({"type": "runtime_control", "payload": {"logging_mode": "detailed"}})
+            }
+        })
+        .collect();
+    let (mut bridge, snapshot, server) = connect_test_bridge_with_followups(followups).await;
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    renderer.set_test_readiness_pending_yields(1_000_000);
+    let logger = test_logger("readiness-ignored-flood-timeout").await;
+    let mut runtime = OverlayRuntime::new(snapshot);
+    let mut submitter = RecordingSubmitter::default();
+    let started = std::time::Instant::now();
+
+    let failure = runtime
+        .submit_initial_frame_message_aware(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap_err();
+
+    assert_eq!(failure, RuntimeFailure::ReadinessTimedOut);
+    assert!(started.elapsed() < Duration::from_millis(200));
+    assert_eq!(submitter.calls, 0);
+    assert_eq!(
+        runtime
+            .presentation_diagnostics()
+            .records()
+            .back()
+            .unwrap()
+            .outcome,
+        PresentationOutcome::TimedOut
+    );
+    drop(bridge);
+    let _ = server.await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_after_ignored_flood_preempts_before_submission() {
+    let mut followups = (0..64)
+        .map(|_| json!({"type": "heartbeat"}))
+        .collect::<Vec<_>>();
+    followups.push(json!({"type": "shutdown"}));
+    let (mut bridge, snapshot, server) = connect_test_bridge_with_followups(followups).await;
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    renderer.set_test_readiness_pending_yields(1_000_000);
+    let logger = test_logger("readiness-ignored-flood-shutdown").await;
+    let mut runtime = OverlayRuntime::new(snapshot);
+    let mut submitter = RecordingSubmitter::default();
+
+    runtime
+        .submit_initial_frame_message_aware(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+
+    assert!(runtime.is_stopped());
+    assert_eq!(submitter.calls, 0);
+    assert!(!runtime.ready_sent());
+    drop(bridge);
+    let _ = server.await.unwrap();
+}
+
+#[tokio::test]
+async fn forced_readiness_terminal_failures_never_submit_and_are_typed() {
+    for (outcome, expected_failure, expected_diagnostic) in [
+        (
+            ReadinessOutcome::TimedOut,
+            RuntimeFailure::ReadinessTimedOut,
+            PresentationOutcome::TimedOut,
+        ),
+        (
+            ReadinessOutcome::Failed,
+            RuntimeFailure::ReadinessFailed,
+            PresentationOutcome::Failure,
+        ),
+    ] {
+        let renderer = CaptionRenderer::new_for_test().unwrap();
+        renderer.set_test_readiness_terminal_outcome(outcome);
+        let logger = test_logger("forced-readiness-terminal").await;
+        let (mut bridge, server) = connect_test_bridge().await;
+        let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
+        let mut submitter = RecordingSubmitter::default();
+
+        let failure = runtime
+            .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+            .await
+            .unwrap_err();
+
+        assert_eq!(failure, expected_failure);
+        assert_eq!(submitter.calls, 0);
+        let records = runtime.presentation_diagnostics().records();
+        assert_eq!(
+            records.back().unwrap().stage,
+            PresentationStage::ReadinessObserved
+        );
+        assert_eq!(records.back().unwrap().outcome, expected_diagnostic);
+        assert!(!records
+            .iter()
+            .any(|record| record.stage == PresentationStage::SubmissionAttempted));
+        drop(bridge);
+        let _ = server.await.unwrap();
+    }
 }
 
 #[test]
@@ -367,6 +727,17 @@ fn runtime_accepts_app_version_mismatch_when_contract_version_matches() {
     let result = validate_manifest(&manifest);
 
     assert!(result.is_ok());
+}
+
+#[test]
+fn readiness_failures_preserve_parent_failure_reason_compatibility() {
+    for failure in [
+        RuntimeFailure::ReadinessTimedOut,
+        RuntimeFailure::ReadinessCancelled,
+        RuntimeFailure::ReadinessFailed,
+    ] {
+        assert_eq!(failure.failure_reason(), "renderer_init_failed");
+    }
 }
 
 #[test]
@@ -560,8 +931,17 @@ async fn runtime_correlates_allowlisted_presentation_stages_without_payload_data
             PresentationStage::VisibilityObserved,
         ]
     );
-    assert_eq!(records[2].outcome, PresentationOutcome::LegacyNotObserved);
+    assert_eq!(records[2].outcome, PresentationOutcome::Ready);
     assert_eq!(records[4].outcome, PresentationOutcome::Success);
+    assert!(records
+        .iter()
+        .all(|record| record.strategy == PresentationStrategy::BoundedGpuCompletion));
+    assert!(records
+        .iter()
+        .all(|record| record.backend != PresentationBackend::D3d11Warp));
+    assert!(records
+        .iter()
+        .all(|record| record.renderer_adapter_identity != AdapterIdentity::NotObservedStageOne));
     assert_eq!(records[5].desired_visible, Some(true));
     assert_eq!(records[5].observed_runtime_visible, Some(true));
     assert!(records

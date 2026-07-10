@@ -1,4 +1,8 @@
 use std::collections::VecDeque;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use serde::Serialize;
 
@@ -24,12 +28,16 @@ pub enum PresentationOutcome {
     Failure,
     LegacyNotObserved,
     Attempted,
+    Ready,
+    TimedOut,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PresentationStrategy {
     LegacyDirectTextureSubmit,
+    BoundedGpuCompletion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -44,6 +52,40 @@ pub enum PresentationBackend {
 #[serde(rename_all = "snake_case")]
 pub enum AdapterIdentity {
     NotObservedStageOne,
+    Unavailable,
+    DxgiLuid { high: i32, low: u32 },
+    Test,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdapterMatch {
+    Match,
+    Mismatch,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadinessOutcome {
+    Ready,
+    TimedOut,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ReadinessCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ReadinessCancellation {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -64,6 +106,9 @@ pub struct PresentationDiagnosticRecord {
     pub strategy: PresentationStrategy,
     pub backend: PresentationBackend,
     pub adapter_identity: AdapterIdentity,
+    pub openvr_adapter_identity: AdapterIdentity,
+    pub renderer_adapter_identity: AdapterIdentity,
+    pub adapter_match: AdapterMatch,
     pub desired_visible: Option<bool>,
     pub observed_runtime_visible: Option<bool>,
     pub physical_hmd_visibility: PhysicalHmdVisibility,
@@ -94,6 +139,10 @@ pub struct PresentationDiagnostics {
     active_logical_revision: u64,
     stopped: bool,
     dropped_unacknowledged_records: u64,
+    strategy: PresentationStrategy,
+    openvr_adapter_identity: AdapterIdentity,
+    renderer_adapter_identity: AdapterIdentity,
+    adapter_match: AdapterMatch,
 }
 
 impl PresentationDiagnostics {
@@ -108,7 +157,23 @@ impl PresentationDiagnostics {
             active_logical_revision: 0,
             stopped: false,
             dropped_unacknowledged_records: 0,
+            strategy: PresentationStrategy::LegacyDirectTextureSubmit,
+            openvr_adapter_identity: AdapterIdentity::NotObservedStageOne,
+            renderer_adapter_identity: AdapterIdentity::NotObservedStageOne,
+            adapter_match: AdapterMatch::Unavailable,
         }
+    }
+
+    pub fn configure_adapter_handoff(
+        &mut self,
+        openvr_adapter_identity: AdapterIdentity,
+        renderer_adapter_identity: AdapterIdentity,
+        adapter_match: AdapterMatch,
+    ) {
+        self.strategy = PresentationStrategy::BoundedGpuCompletion;
+        self.openvr_adapter_identity = openvr_adapter_identity;
+        self.renderer_adapter_identity = renderer_adapter_identity;
+        self.adapter_match = adapter_match;
     }
 
     pub fn accept_logical_revision(&mut self, backend: PresentationBackend) {
@@ -162,15 +227,21 @@ impl PresentationDiagnostics {
         );
     }
 
-    pub fn record_legacy_readiness(
+    pub fn record_readiness(
         &mut self,
         correlation: PresentationCorrelation,
         backend: PresentationBackend,
+        outcome: ReadinessOutcome,
     ) {
         self.push_for_correlation(
             correlation,
             PresentationStage::ReadinessObserved,
-            PresentationOutcome::LegacyNotObserved,
+            match outcome {
+                ReadinessOutcome::Ready => PresentationOutcome::Ready,
+                ReadinessOutcome::TimedOut => PresentationOutcome::TimedOut,
+                ReadinessOutcome::Cancelled => PresentationOutcome::Cancelled,
+                ReadinessOutcome::Failed => PresentationOutcome::Failure,
+            },
             backend,
             None,
             None,
@@ -329,9 +400,12 @@ impl PresentationDiagnostics {
             submission_attempt,
             stage,
             outcome,
-            strategy: PresentationStrategy::LegacyDirectTextureSubmit,
+            strategy: self.strategy,
             backend,
-            adapter_identity: AdapterIdentity::NotObservedStageOne,
+            adapter_identity: self.renderer_adapter_identity,
+            openvr_adapter_identity: self.openvr_adapter_identity,
+            renderer_adapter_identity: self.renderer_adapter_identity,
+            adapter_match: self.adapter_match,
             desired_visible,
             observed_runtime_visible,
             physical_hmd_visibility: PhysicalHmdVisibility::NotObservable,
@@ -380,7 +454,11 @@ mod tests {
         diagnostics.accept_logical_revision(PresentationBackend::Test);
         let correlation = diagnostics.begin_presentation().unwrap();
         diagnostics.record_render_return(correlation, PresentationBackend::Test, true);
-        diagnostics.record_legacy_readiness(correlation, PresentationBackend::Test);
+        diagnostics.record_readiness(
+            correlation,
+            PresentationBackend::Test,
+            ReadinessOutcome::Ready,
+        );
         diagnostics.record_submission_attempt(correlation, PresentationBackend::Test);
         diagnostics.record_submission_return(correlation, PresentationBackend::Test, true);
         diagnostics.record_visibility(correlation, PresentationBackend::Test, true, true, true);
@@ -396,6 +474,9 @@ mod tests {
             "strategy",
             "backend",
             "adapter_identity",
+            "openvr_adapter_identity",
+            "renderer_adapter_identity",
+            "adapter_match",
             "desired_visible",
             "observed_runtime_visible",
             "physical_hmd_visibility",
@@ -441,5 +522,44 @@ mod tests {
                 .dropped_unacknowledged_records,
             1
         );
+    }
+
+    #[test]
+    fn adapter_handoff_and_readiness_failures_are_explicit_without_submission_success() {
+        let outcomes = [
+            (ReadinessOutcome::TimedOut, PresentationOutcome::TimedOut),
+            (ReadinessOutcome::Cancelled, PresentationOutcome::Cancelled),
+            (ReadinessOutcome::Failed, PresentationOutcome::Failure),
+        ];
+        for (readiness, expected) in outcomes {
+            let mut diagnostics = PresentationDiagnostics::new();
+            let openvr_adapter = AdapterIdentity::DxgiLuid { high: 7, low: 11 };
+            let renderer_adapter = AdapterIdentity::DxgiLuid { high: 7, low: 12 };
+            diagnostics.configure_adapter_handoff(
+                openvr_adapter,
+                renderer_adapter,
+                AdapterMatch::Mismatch,
+            );
+            diagnostics.accept_logical_revision(PresentationBackend::D3d11Hardware);
+            let correlation = diagnostics.begin_presentation().unwrap();
+            diagnostics.record_render_return(correlation, PresentationBackend::D3d11Hardware, true);
+            diagnostics.record_readiness(
+                correlation,
+                PresentationBackend::D3d11Hardware,
+                readiness,
+            );
+
+            let record = diagnostics.records().back().unwrap();
+            assert_eq!(record.stage, PresentationStage::ReadinessObserved);
+            assert_eq!(record.outcome, expected);
+            assert_eq!(record.strategy, PresentationStrategy::BoundedGpuCompletion);
+            assert_eq!(record.openvr_adapter_identity, openvr_adapter);
+            assert_eq!(record.renderer_adapter_identity, renderer_adapter);
+            assert_eq!(record.adapter_match, AdapterMatch::Mismatch);
+            assert!(!diagnostics
+                .records()
+                .iter()
+                .any(|record| record.stage == PresentationStage::SubmissionReturned));
+        }
     }
 }

@@ -13,13 +13,14 @@ pub use bridge::{
 pub use logging::{OverlayLogger, OverlayLoggingMode};
 pub use manifest::{load_manifest, validate_manifest, OverlayManifest, EXPECTED_CONTRACT_VERSION};
 pub use openvr::{
-    submit_texture, FakeOpenVr, OpenVrError, OpenVrOverlay, OverlayFrameSubmitter,
-    OverlayPlacementPolicy,
+    submit_texture, FakeOpenVr, OpenVrError, OpenVrOutputAdapter, OpenVrOverlay,
+    OverlayFrameSubmitter, OverlayPlacementPolicy,
 };
 pub use presentation::{
-    AdapterIdentity, PendingPresentationDiagnostics, PhysicalHmdVisibility, PresentationBackend,
-    PresentationCorrelation, PresentationDiagnosticRecord, PresentationDiagnostics,
-    PresentationOutcome, PresentationStage, PresentationStrategy,
+    AdapterIdentity, AdapterMatch, PendingPresentationDiagnostics, PhysicalHmdVisibility,
+    PresentationBackend, PresentationCorrelation, PresentationDiagnosticRecord,
+    PresentationDiagnostics, PresentationOutcome, PresentationStage, PresentationStrategy,
+    ReadinessCancellation, ReadinessOutcome,
 };
 #[cfg(windows)]
 pub use renderer::WindowsBundledFontCollection;

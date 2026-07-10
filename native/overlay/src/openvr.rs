@@ -4,7 +4,16 @@ use std::ffi::c_void;
 use std::ffi::{CStr, CString};
 
 use thiserror::Error;
+#[cfg(windows)]
+use windows::core::Interface;
+#[cfg(windows)]
+use windows::Win32::Foundation::LUID;
+#[cfg(windows)]
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory4, DXGI_ADAPTER_FLAG_SOFTWARE,
+};
 
+use crate::presentation::AdapterIdentity;
 use crate::renderer::RenderedFrame;
 use crate::state::OverlayCalibration;
 
@@ -101,6 +110,8 @@ impl OverlayPlacementPolicy {
 pub enum OpenVrError {
     #[error("openvr init failed: {0}")]
     Init(String),
+    #[error("openvr output adapter selection failed: {0}")]
+    AdapterSelection(String),
     #[error("openvr texture submission failed: {0}")]
     Submit(String),
 }
@@ -203,6 +214,29 @@ pub trait OverlayFrameSubmitter {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct OpenVrOutputAdapter {
+    identity: AdapterIdentity,
+    requested_identity: AdapterIdentity,
+    #[cfg(windows)]
+    adapter: Option<IDXGIAdapter>,
+}
+
+impl OpenVrOutputAdapter {
+    pub fn identity(&self) -> AdapterIdentity {
+        self.identity
+    }
+
+    pub fn requested_identity(&self) -> AdapterIdentity {
+        self.requested_identity
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn adapter(&self) -> Option<&IDXGIAdapter> {
+        self.adapter.as_ref()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameTimingSample {
     pub frame_index: u32,
@@ -258,6 +292,10 @@ impl OpenVrOverlay {
         Ok(Self {
             backend: OpenVrBackend::new(overlay_instance_id)?,
         })
+    }
+
+    pub fn output_adapter(&self) -> OpenVrOutputAdapter {
+        self.backend.output_adapter()
     }
 }
 
@@ -348,6 +386,18 @@ impl OpenVrBackend {
         }
     }
 
+    fn output_adapter(&self) -> OpenVrOutputAdapter {
+        match self {
+            #[cfg(windows)]
+            Self::Windows(openvr) => openvr.output_adapter.clone(),
+            #[cfg(not(windows))]
+            Self::Test(_) => OpenVrOutputAdapter {
+                identity: AdapterIdentity::Test,
+                requested_identity: AdapterIdentity::Test,
+            },
+        }
+    }
+
     fn submit_frame(&mut self, frame: &RenderedFrame) -> Result<(), OpenVrError> {
         match self {
             #[cfg(windows)]
@@ -415,6 +465,7 @@ struct WindowsOpenVrOverlay {
     placement_policy: OverlayPlacementPolicy,
     visible: bool,
     last_visibility_api_call_log: Option<String>,
+    output_adapter: OpenVrOutputAdapter,
 }
 
 #[cfg(windows)]
@@ -423,6 +474,15 @@ impl WindowsOpenVrOverlay {
         let overlay_api = initialize_overlay_api()?;
         let system_api = initialize_system_api()?;
         let compositor_api = initialize_compositor_api().ok();
+        let output_adapter = match identify_openvr_output_adapter(unsafe { &*system_api }) {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                unsafe {
+                    openvr_sys::VR_ShutdownInternal();
+                }
+                return Err(error);
+            }
+        };
         let overlay_handle = create_overlay_handle(overlay_api, overlay_instance_id)?;
 
         let instance = Self {
@@ -433,6 +493,7 @@ impl WindowsOpenVrOverlay {
             placement_policy: OverlayPlacementPolicy::default(),
             visible: false,
             last_visibility_api_call_log: None,
+            output_adapter,
         };
         instance.configure_overlay()?;
         Ok(instance)
@@ -576,6 +637,91 @@ impl WindowsOpenVrOverlay {
             post_submit_gpu_ms: timing.m_flPostSubmitGpuMs,
         })
     }
+}
+
+#[cfg(windows)]
+fn identify_openvr_output_adapter(
+    system_api: &openvr_sys::VR_IVRSystem_FnTable,
+) -> Result<OpenVrOutputAdapter, OpenVrError> {
+    let get_output_device = system_api
+        .GetOutputDevice
+        .ok_or_else(|| OpenVrError::AdapterSelection("output adapter method unavailable".into()))?;
+    let mut device = 0u64;
+    unsafe {
+        get_output_device(
+            &mut device,
+            openvr_sys::ETextureType_TextureType_DirectX,
+            std::ptr::null_mut(),
+        );
+    }
+    let requested_identity = requested_adapter_identity(device)?;
+    let AdapterIdentity::DxgiLuid { high, low } = requested_identity else {
+        unreachable!()
+    };
+    let luid = LUID {
+        LowPart: low,
+        HighPart: high,
+    };
+    let factory: IDXGIFactory4 = unsafe { CreateDXGIFactory1() }
+        .map_err(|_| OpenVrError::AdapterSelection("DXGI adapter factory unavailable".into()))?;
+    let adapter: IDXGIAdapter = unsafe { factory.EnumAdapterByLuid(luid) }
+        .map_err(|_| OpenVrError::AdapterSelection("DXGI adapter lookup failed".into()))?;
+    let description = unsafe { adapter.GetDesc() }
+        .map_err(|_| OpenVrError::AdapterSelection("output adapter identity unavailable".into()))?;
+    let resolved_identity = AdapterIdentity::DxgiLuid {
+        high: description.AdapterLuid.HighPart,
+        low: description.AdapterLuid.LowPart,
+    };
+    let adapter1: IDXGIAdapter1 = adapter
+        .cast()
+        .map_err(|_| OpenVrError::AdapterSelection("adapter classification unavailable".into()))?;
+    let description1 = unsafe { adapter1.GetDesc1() }
+        .map_err(|_| OpenVrError::AdapterSelection("adapter classification unavailable".into()))?;
+    validate_resolved_adapter(
+        requested_identity,
+        resolved_identity,
+        description1.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0,
+    )?;
+    Ok(OpenVrOutputAdapter {
+        identity: resolved_identity,
+        requested_identity,
+        adapter: Some(adapter),
+    })
+}
+
+#[cfg(any(windows, test))]
+fn split_output_device_luid(device: u64) -> (i32, u32) {
+    ((device >> 32) as i32, device as u32)
+}
+
+#[cfg(any(windows, test))]
+fn requested_adapter_identity(device: u64) -> Result<AdapterIdentity, OpenVrError> {
+    if device == 0 {
+        return Err(OpenVrError::AdapterSelection(
+            "OpenVR returned no output adapter".into(),
+        ));
+    }
+    let (high, low) = split_output_device_luid(device);
+    Ok(AdapterIdentity::DxgiLuid { high, low })
+}
+
+#[cfg(any(windows, test))]
+fn validate_resolved_adapter(
+    requested: AdapterIdentity,
+    resolved: AdapterIdentity,
+    software: bool,
+) -> Result<(), OpenVrError> {
+    if requested != resolved {
+        return Err(OpenVrError::AdapterSelection(
+            "resolved adapter LUID mismatch".into(),
+        ));
+    }
+    if software {
+        return Err(OpenVrError::AdapterSelection(
+            "software output adapter rejected".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -846,7 +992,8 @@ mod tests {
     use std::cell::Cell;
 
     use super::{
-        fn_table_interface_version, run_startup_preflight, FakeOpenVr, OpenVrBackgroundInitError,
+        fn_table_interface_version, requested_adapter_identity, run_startup_preflight,
+        split_output_device_luid, validate_resolved_adapter, FakeOpenVr, OpenVrBackgroundInitError,
         OpenVrPreflightApi, OpenVrStartupPreflightError, OverlayFrameSubmitter,
         OverlayPlacementPolicy,
     };
@@ -1000,6 +1147,30 @@ mod tests {
         let request = fn_table_interface_version(b"IVROverlay_028\0").expect("request");
 
         assert_eq!(request.to_bytes_with_nul(), b"FnTable:IVROverlay_028\0");
+    }
+
+    #[test]
+    fn openvr_output_device_value_is_split_as_a_dxgi_luid() {
+        assert_eq!(
+            split_output_device_luid(0xFFFF_FFFE_1234_5678),
+            (-2, 0x1234_5678)
+        );
+    }
+
+    #[test]
+    fn adapter_selection_rejects_zero_mismatch_and_software_routes() {
+        assert!(matches!(
+            requested_adapter_identity(0),
+            Err(super::OpenVrError::AdapterSelection(_))
+        ));
+        let requested = super::AdapterIdentity::DxgiLuid { high: 1, low: 2 };
+        let mismatch = super::AdapterIdentity::DxgiLuid { high: 1, low: 3 };
+        assert!(validate_resolved_adapter(requested, mismatch, false).is_err());
+        assert!(validate_resolved_adapter(requested, requested, true).is_err());
+        assert_eq!(
+            validate_resolved_adapter(requested, requested, false),
+            Ok(())
+        );
     }
 
     #[test]
