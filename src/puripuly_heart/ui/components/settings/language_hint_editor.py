@@ -50,6 +50,7 @@ class LanguageHintEditor(ft.Column):
         self._on_add = on_add
         self._on_remove = on_remove
         self._terms: list[str] = []
+        self._recent: list[str] = []
 
         self._chips_wrap = ft.Row(
             controls=[],
@@ -109,6 +110,10 @@ class LanguageHintEditor(ft.Column):
 
     def set_terms(self, terms: list[str]) -> None:
         self._terms = list(terms)
+        for code in self._terms:
+            if code not in self._recent:
+                self._recent.insert(0, code)
+        self._recent = self._recent[:6]
         chip_controls = [self._build_chip(code) for code in self._terms]
         self._chips_wrap.controls = chip_controls
         self._chips_wrap.visible = bool(chip_controls)
@@ -156,7 +161,8 @@ class LanguageHintEditor(ft.Column):
         if self._page is None:
             return
         languages = get_all_language_options()
-        recent = [code for code in self._terms if code in dict(languages)]
+        lang_codes = dict(languages)
+        recent = [code for code in self._recent if code in lang_codes]
         modal = LanguageModal(
             page=self._page,
             languages=languages,
@@ -165,6 +171,10 @@ class LanguageHintEditor(ft.Column):
         modal.open(current="", recent=recent)
 
     def _handle_select(self, code: str) -> None:
+        if code in self._recent:
+            self._recent.remove(code)
+        self._recent.insert(0, code)
+        self._recent = self._recent[:6]
         if self._on_add is not None:
             self._on_add(code)
 
