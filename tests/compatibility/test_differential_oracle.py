@@ -116,13 +116,50 @@ def _changed_production_files() -> tuple[str, ...]:
     return tuple(sorted(changed))
 
 
-def _binary_repair_patch(files: list[str]) -> bytes:
-    return subprocess.run(
-        ["git", "diff", "--binary", CURRENT_REPAIR_BASE, "--", *files],
+def _source_delta_digest(
+    records: list[tuple[str, bytes | None, bytes]],
+) -> str:
+    digest = hashlib.sha256()
+    for relative, base_bytes, current_bytes in sorted(records):
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        if base_bytes is None:
+            digest.update(b"base-absent\0")
+        else:
+            digest.update(b"base-present\0")
+            digest.update(base_bytes)
+            digest.update(b"\0")
+        digest.update(b"current-present\0")
+        digest.update(current_bytes)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _base_blob(relative: str) -> bytes | None:
+    result = subprocess.run(
+        ["git", "show", f"{CURRENT_REPAIR_BASE}:{relative}"],
         cwd=ROOT,
-        check=True,
+        check=False,
         capture_output=True,
-    ).stdout
+    )
+    if result.returncode == 0:
+        return result.stdout
+    if b"does not exist" in result.stderr or b"exists on disk, but not in" in result.stderr:
+        return None
+    raise RuntimeError(result.stderr.decode("utf-8", errors="replace"))
+
+
+def _manifest_source_delta_digest(files: list[str]) -> str:
+    return _source_delta_digest(
+        [(relative, _base_blob(relative), (ROOT / relative).read_bytes()) for relative in files]
+    )
+
+
+def test_source_delta_digest_distinguishes_base_absent_from_empty_blob() -> None:
+    absent = _source_delta_digest([("src/new.py", None, b"current")])
+    empty = _source_delta_digest([("src/new.py", b"", b"current")])
+    assert absent != empty
+    assert absent == _source_delta_digest([("src/new.py", None, b"current")])
 
 
 def _archive_fixed_source(
@@ -464,9 +501,11 @@ def test_dual_run_provenance_names_fixed_sources_and_reproduced_traces() -> None
         digest.update(b"\0")
         digest.update((ROOT / relative).read_bytes())
         digest.update(b"\0")
-    patch = _binary_repair_patch(repair_manifest["files"])
     assert digest.hexdigest() == repair_manifest["production_source_sha256"]
-    assert hashlib.sha256(patch).hexdigest() == repair_manifest["git_binary_patch_sha256"]
+    assert (
+        _manifest_source_delta_digest(repair_manifest["files"])
+        == repair_manifest["source_delta_sha256"]
+    )
     assert provenance["sha256"] == {
         "runner": hashlib.sha256(
             Path(__file__).with_name("differential_probe.py").read_bytes()

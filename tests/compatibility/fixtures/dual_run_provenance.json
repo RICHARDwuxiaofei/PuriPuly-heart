@@ -30,7 +30,7 @@
         "src/puripuly_heart/ui/controller.py"
       ],
       "production_source_sha256": "642afa2e238ae16ef33c0d3d410eec98639b4952fbdbe59308d99a81afb5735a",
-      "git_binary_patch_sha256": "e0b5e07c707413b97bcf8e3966719c680881096841f5ea92caa1afc972a4e5ed"
+      "source_delta_sha256": "2981a458f92b62530cd8bf0f6bb9eeba35c924dfbb10f32da1d29d6746f3914e"
     },
     "repair_base": "b4ace2631793aa1a1e384c0440b8ec7f315559ae"
   },
