@@ -599,6 +599,8 @@ class STTRuntimeIntent:
     soniox_endpoint: str = SONIOX_STT_DEFAULT_ENDPOINT
     soniox_keepalive_interval_s: float = SONIOX_STT_DEFAULT_KEEPALIVE_INTERVAL_S
     soniox_trailing_silence_ms: int = SONIOX_STT_DEFAULT_TRAILING_SILENCE_MS
+    soniox_enable_language_identification: bool = False
+    soniox_language_hints: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         channel = _normalize_allowed(
@@ -669,6 +671,19 @@ class STTRuntimeIntent:
             max(0, int(self.low_latency_spec_retry_max)),
         )
         object.__setattr__(self, "qwen_region", qwen_region)
+        object.__setattr__(
+            self,
+            "soniox_language_hints",
+            (
+                tuple(
+                    str(language).strip()
+                    for language in self.soniox_language_hints
+                    if str(language).strip()
+                )
+                if self.soniox_language_hints is not None
+                else None
+            ),
+        )
         object.__setattr__(
             self,
             "custom_terms",
@@ -1057,6 +1072,16 @@ def resolve_stt_config(intent: STTRuntimeIntent) -> ResolvedSTTConfig:
             "keepalive_interval_s": intent.soniox_keepalive_interval_s,
             "trailing_silence_ms": intent.soniox_trailing_silence_ms,
         }
+        if intent.soniox_enable_language_identification:
+            provider_options = {
+                **provider_options,
+                "enable_language_identification": True,
+            }
+        if intent.soniox_language_hints is not None:
+            provider_options = {
+                **provider_options,
+                "language_hints": intent.soniox_language_hints,
+            }
 
     return ResolvedSTTConfig(
         channel=cast(str, intent.channel),

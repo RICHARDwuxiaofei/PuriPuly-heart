@@ -92,6 +92,8 @@ def test_vnext_schema_represents_current_intent_and_state_leaves() -> None:
         "intent.telemetry.consent",
         "intent.languages.peer_source_language",
         "intent.languages.peer_target_language",
+        "intent.languages.peer_source_mode",
+        "intent.languages.peer_expected_languages",
         "intent.languages.recent_source_languages",
         "intent.languages.recent_target_languages",
         "intent.languages.source_language",
@@ -185,6 +187,15 @@ def test_vnext_schema_represents_current_intent_and_state_leaves() -> None:
         "state.provider_verification.openrouter.status",
         "state.provider_verification.soniox.status",
     } <= leaf_paths
+
+
+def test_vnext_peer_auto_detection_defaults_to_manual_without_expected_languages() -> None:
+    schema = _load_schema_module()
+
+    languages = schema.AppSettingsVNext().intent.languages
+
+    assert languages.peer_source_mode == "manual"
+    assert languages.peer_expected_languages == []
 
 
 def test_vnext_schema_excludes_runtime_only_legacy_ui_state() -> None:

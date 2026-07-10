@@ -28,12 +28,14 @@ from puripuly_heart.app.wiring_stt_factory import (
     ResolvedPeerSTTConfig,
     build_custom_vocabulary_runtime_config,
     build_peer_stt_provider_signature,
+    build_peer_stt_provider_signature_from_vnext,
     create_peer_stt_backend,
     create_peer_stt_backend_from_resolved_config,
     create_stt_backend,
     create_stt_backend_from_resolved_config,
     resolve_peer_stt_config,
     resolve_peer_stt_runtime_config,
+    resolve_peer_stt_runtime_config_from_vnext,
 )
 from puripuly_heart.config.runtime_resolution import resolve_llm_config
 from puripuly_heart.core.openrouter_credentials import load_managed_openrouter_user_identifier
@@ -78,6 +80,7 @@ __all__ = (
     "MANAGED_OPENROUTER_RELEASE_SERVICE_REQUIRED_ERROR",
     "ResolvedPeerSTTConfig",
     "build_peer_stt_provider_signature",
+    "build_peer_stt_provider_signature_from_vnext",
     "create_llm_provider",
     "create_llm_provider_from_resolved_config",
     "create_peer_stt_backend",
@@ -92,6 +95,7 @@ __all__ = (
     "resolve_overlay_config",
     "resolve_peer_stt_config",
     "resolve_peer_stt_runtime_config",
+    "resolve_peer_stt_runtime_config_from_vnext",
     "DiscordManagedBrokerClientAdapter",
     "DiscordOAuthAuthAdapter",
     "ManagedIdentityPreflightAdapter",

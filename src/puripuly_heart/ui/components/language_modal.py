@@ -37,6 +37,7 @@ class LanguageModal:
         page: ft.Page,
         languages: Sequence[tuple[str, str]],
         on_select: Callable[[str], None],
+        label_for_code: Callable[[str], str] | None = None,
     ):
         """Initialize language modal.
 
@@ -48,6 +49,7 @@ class LanguageModal:
         self._page = page
         self._languages = languages
         self._on_select = on_select
+        self._label_for_code = label_for_code or language_name
         self._dialog: ft.AlertDialog | None = None
 
     def open(
@@ -148,7 +150,7 @@ class LanguageModal:
 
             chip = ft.Container(
                 content=ft.Text(
-                    language_name(lang_code),
+                    self._label_for_code(lang_code),
                     size=16,  # Larger text for VR
                     weight=font_weight,
                     color=text_color,
@@ -200,7 +202,7 @@ class LanguageModal:
 
             item = ft.Container(
                 content=ft.Text(
-                    language_name(code),
+                    self._label_for_code(code),
                     size=20,  # Much Larger text for VR
                     color=text_color,
                     weight=font_weight,

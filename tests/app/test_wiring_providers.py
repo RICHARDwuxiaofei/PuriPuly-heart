@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from puripuly_heart.app import wiring as wiring_module
@@ -9,11 +11,17 @@ from puripuly_heart.app.wiring import (
     _LazyFactoryLLMProvider,
     build_openrouter_release_runtime_config,
     build_peer_stt_provider_signature,
+    build_peer_stt_provider_signature_from_vnext,
     create_llm_provider,
     create_llm_provider_from_resolved_config,
     create_peer_stt_backend,
     create_stt_backend,
     resolve_peer_stt_config,
+    resolve_peer_stt_runtime_config_from_vnext,
+)
+from puripuly_heart.app.wiring_stt_factory import (
+    _self_stt_runtime_intent_from_compatibility_settings,
+    resolve_peer_stt_runtime_config,
 )
 from puripuly_heart.config.resolved import (
     CREDENTIAL_SOURCE_NONE,
@@ -24,6 +32,7 @@ from puripuly_heart.config.resolved import (
     ResolvedLLMTarget,
     ResolvedSTTConfig,
 )
+from puripuly_heart.config.runtime_resolution import resolve_stt_config
 from puripuly_heart.config.settings import (
     AppSettings,
     CerebrasLLMModel,
@@ -55,6 +64,7 @@ from puripuly_heart.config.settings import (
     TranslationModel,
     TranslationSettings,
 )
+from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core.language import (
     get_deepgram_language,
     get_qwen_asr_language,
@@ -1875,6 +1885,110 @@ def test_build_peer_stt_provider_signature_includes_backend_affecting_values() -
     assert "zh-CN" in signature
     assert "stt-rt-v4" in signature
     assert 350 in signature
+
+
+def test_peer_soniox_auto_detection_resolves_identification_and_optional_hints_only() -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.SONIOX
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    settings.languages.peer_source_mode = "soniox_auto"
+    settings.languages.peer_expected_languages = ["ja", "zh-TW"]
+
+    peer = resolve_peer_stt_runtime_config(settings)
+    self_config = resolve_stt_config(_self_stt_runtime_intent_from_compatibility_settings(settings))
+
+    assert peer.provider_options["enable_language_identification"] is True
+    assert peer.provider_options["language_hints"] == ("ja", "zh")
+    assert "enable_language_identification" not in self_config.provider_options
+    assert "language_hints" not in self_config.provider_options
+
+
+def test_peer_auto_detection_falls_back_to_manual_configuration_for_other_providers() -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.DEEPGRAM
+    settings.languages.peer_source_mode = "soniox_auto"
+    settings.languages.peer_expected_languages = ["ja"]
+
+    peer = resolve_peer_stt_runtime_config(settings)
+
+    assert peer.source_language == settings.languages.effective_peer_source
+    assert peer.provider_options == {}
+
+
+def test_vnext_peer_runtime_resolution_and_signature_use_canonical_auto_intent() -> None:
+    settings = AppSettingsVNext()
+    settings = replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            peer_stt=replace(settings.intent.peer_stt, provider="soniox"),
+            languages=replace(
+                settings.intent.languages,
+                peer_source_mode="soniox_auto",
+                peer_expected_languages=["ja", "zh-TW"],
+            ),
+        ),
+    )
+
+    automatic = resolve_peer_stt_runtime_config_from_vnext(settings)
+    automatic_signature = build_peer_stt_provider_signature_from_vnext(settings)
+    manual_settings = replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            languages=replace(settings.intent.languages, peer_source_mode="manual"),
+        ),
+    )
+
+    manual = resolve_peer_stt_runtime_config_from_vnext(manual_settings)
+
+    assert automatic.provider_options["enable_language_identification"] is True
+    assert automatic.provider_options["language_hints"] == ("ja", "zh")
+    assert automatic_signature != build_peer_stt_provider_signature_from_vnext(manual_settings)
+    assert "enable_language_identification" not in manual.provider_options
+    assert "language_hints" not in manual.provider_options
+
+
+def test_vnext_peer_runtime_keeps_self_and_non_soniox_paths_manual() -> None:
+    settings = AppSettingsVNext()
+    settings = replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            stt=replace(settings.intent.stt, provider="soniox"),
+            peer_stt=replace(settings.intent.peer_stt, provider="deepgram"),
+            languages=replace(
+                settings.intent.languages,
+                peer_source_mode="soniox_auto",
+                peer_expected_languages=["ja"],
+            ),
+        ),
+    )
+
+    peer = resolve_peer_stt_runtime_config_from_vnext(settings)
+    self_config = resolve_stt_config(
+        _self_stt_runtime_intent_from_compatibility_settings(AppSettings())
+    )
+
+    assert peer.provider == "deepgram"
+    assert peer.provider_options == {}
+    assert self_config.provider_options.get("enable_language_identification") is None
+
+
+def test_manual_peer_and_self_soniox_backends_receive_no_language_hints() -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.SONIOX
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    secrets = InMemorySecretStore()
+    secrets.set("soniox_api_key", "soniox-key")
+
+    self_backend = create_stt_backend(settings, secrets=secrets)
+    peer_backend = create_peer_stt_backend(settings, secrets=secrets)
+
+    assert isinstance(self_backend, SonioxRealtimeSTTBackend)
+    assert isinstance(peer_backend, SonioxRealtimeSTTBackend)
+    assert self_backend.language_hints == []
+    assert peer_backend.language_hints == []
 
 
 def test_build_peer_stt_provider_signature_uses_fixed_16khz_runtime_contract() -> None:

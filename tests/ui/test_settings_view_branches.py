@@ -4141,6 +4141,24 @@ def test_on_peer_stt_selected_refreshes_api_visibility_and_redraws_immediately(
     assert api_key_updates == ["peer_stt_text", "qwen_region_btn", "api_keys_column"]
 
 
+def test_peer_auto_detection_languages_card_is_visible_only_for_peer_soniox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    view, _ = _make_settings_view(monkeypatch)
+    view._settings = settings
+
+    view._update_api_visibility()
+    assert view._peer_auto_languages_card.visible is False
+
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    settings.languages.peer_expected_languages = ["ja"]
+    view._update_api_visibility()
+
+    assert view._peer_auto_languages_card.visible is True
+    assert view._peer_auto_languages_editor._terms == ["ja"]
+
+
 def test_peer_provider_labels_are_backed_by_i18n(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = AppSettings()
     view, _ = _make_settings_view(monkeypatch)

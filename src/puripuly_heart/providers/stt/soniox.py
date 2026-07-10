@@ -47,6 +47,7 @@ class SonioxRealtimeSTTBackend(STTBackend):
     sample_rate_hz: int = 16000
     keepalive_interval_s: float = 10.0
     trailing_silence_ms: int = 100
+    enable_language_identification: bool = False
     connect_timeout_s: float = 5.0
 
     async def open_session(self) -> STTBackendSession:
@@ -72,6 +73,7 @@ class SonioxRealtimeSTTBackend(STTBackend):
             context_terms=list(self.context_terms),
             keepalive_interval_s=self.keepalive_interval_s,
             trailing_silence_ms=self.trailing_silence_ms,
+            enable_language_identification=self.enable_language_identification,
             connect_timeout_s=self.connect_timeout_s,
         )
         await session.start()
@@ -126,6 +128,7 @@ class _SonioxSession(STTBackendSession):
     context_terms: list[str]
     keepalive_interval_s: float
     trailing_silence_ms: int
+    enable_language_identification: bool
     connect_timeout_s: float
 
     _events: asyncio.Queue[STTBackendTranscriptEvent | BaseException | None] = field(
@@ -157,6 +160,7 @@ class _SonioxSession(STTBackendSession):
             "sample_rate": self.sample_rate_hz,
             "num_channels": 1,
             "enable_endpoint_detection": False,
+            "enable_language_identification": self.enable_language_identification,
         }
         if self.language_hints:
             config["language_hints"] = self.language_hints

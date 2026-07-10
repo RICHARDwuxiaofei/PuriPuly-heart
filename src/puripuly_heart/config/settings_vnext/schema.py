@@ -408,8 +408,33 @@ class LanguageIntent:
     target_language: str = "en"
     peer_source_language: str = "en"
     peer_target_language: str = "ko"
+    peer_source_mode: str = "manual"
+    peer_expected_languages: list[str] = field(default_factory=list)
     recent_source_languages: list[str] = field(default_factory=lambda: ["en", "zh-CN", "ja"])
     recent_target_languages: list[str] = field(default_factory=lambda: ["en", "zh-CN", "ja"])
+
+    def __post_init__(self) -> None:
+        mode = self.peer_source_mode if isinstance(self.peer_source_mode, str) else "manual"
+        mode = mode.strip()
+        object.__setattr__(
+            self,
+            "peer_source_mode",
+            mode if mode in {"manual", "soniox_auto"} else "manual",
+        )
+        languages = self.peer_expected_languages
+        if not isinstance(languages, list):
+            languages = []
+        object.__setattr__(
+            self,
+            "peer_expected_languages",
+            list(
+                dict.fromkeys(
+                    language.strip()
+                    for language in languages
+                    if isinstance(language, str) and language.strip()
+                )
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
