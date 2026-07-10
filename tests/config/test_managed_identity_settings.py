@@ -171,6 +171,10 @@ def test_load_settings_backfills_managed_identity_defaults(tmp_path) -> None:
         "founder_letter_seen_credential_ref": None,
         "referral_id": None,
         "local_managed_claim_sources": [],
+        "pending_delivery_ack_source": None,
+        "pending_delivery_ack_delivery_id": None,
+        "pending_delivery_ack_managed_credential_ref": None,
+        "pending_delivery_ack_expires_at": None,
     }
 
 

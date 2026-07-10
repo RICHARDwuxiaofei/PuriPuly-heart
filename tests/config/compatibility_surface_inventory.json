@@ -386,6 +386,8 @@
       "exports": [
         {"name": "from_dict", "kind": "attribute"},
         {"name": "from_legacy_app_settings", "kind": "attribute"},
+        {"name": "is_legacy_shape_dict", "kind": "attribute"},
+        {"name": "is_vnext_shape_dict", "kind": "attribute"},
         {"name": "is_vnext_settings_dict", "kind": "attribute"},
         {"name": "to_legacy_dict", "kind": "attribute"}
       ]
@@ -981,15 +983,24 @@
       "rationale": "These modules are schema values, resolved DTOs, and runtime-resolution contracts used inside the vNext architecture. They are not legacy implementation owners and are not external compatibility facades."
     },
     {
-      "surface": "core lifecycle, observability, error-message, and metadata contract modules",
+      "surface": "core lifecycle, observability, error-message, telemetry, and metadata contract modules",
       "classification": "internal_core_contract_modules",
       "modules": [
         "puripuly_heart.core.error_messages",
         "puripuly_heart.core.lifecycle",
         "puripuly_heart.core.observability",
-        "puripuly_heart.core.openrouter_metadata"
+        "puripuly_heart.core.openrouter_metadata",
+        "puripuly_heart.core.telemetry"
       ],
-      "rationale": "These modules expose internal core contracts for lifecycle, diagnostics, safe error/message shaping, and OpenRouter metadata. They are not external public compatibility facades."
+      "rationale": "These modules expose internal core contracts for lifecycle, diagnostics, safe error/message shaping, telemetry ports/services, and OpenRouter metadata. They are not external public compatibility facades."
+    },
+    {
+      "surface": "provider LLM internal error-detail helpers",
+      "classification": "internal_provider_implementation_modules",
+      "modules": [
+        "puripuly_heart.providers.llm.error_details"
+      ],
+      "rationale": "Provider error-detail helpers redact and extract safe diagnostic fragments for LLM adapters. They are internal implementation contracts, not external public compatibility facades."
     },
     {
       "surface": "puripuly_heart.core.output implementation and port modules",
