@@ -18,6 +18,13 @@ ProcessCaptureUnavailableReason = Literal[
     "ineligible",
 ]
 
+
+class ProcessCaptureTargetUnavailableError(RuntimeError):
+    def __init__(self, reason: ProcessCaptureUnavailableReason) -> None:
+        self.reason = reason
+        super().__init__("process capture target is unavailable")
+
+
 _DISCORD_CHANNEL_BY_BASENAME = {
     "discord.exe": "stable",
     "discordptb.exe": "ptb",

@@ -42,6 +42,7 @@ from puripuly_heart.app.services.managed_connection_auth import (
     ManagedConnectionAuthRequest,
     ManagedConnectionAuthService,
 )
+from puripuly_heart.app.services.peer_capture_target import PeerCaptureTargetResolutionService
 from puripuly_heart.app.services.provider_runtime_apply import (
     _ControllerNoopRuntimeApply,
     _ControllerOverlayOscOutputRuntimeApply,
@@ -111,8 +112,12 @@ from puripuly_heart.config.llm_profiles import (
     profile_for_alias,
 )
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
+from puripuly_heart.config.process_capture_resolution import (
+    ProcessCaptureResolver,
+    ProcessCaptureTargetUnavailableError,
+)
 from puripuly_heart.config.profile_bootstrap import import_stable_settings_if_missing
-from puripuly_heart.config.resolved import ResolvedOverlayConfig
+from puripuly_heart.config.resolved import ResolvedDesktopAudioCaptureTarget, ResolvedOverlayConfig
 from puripuly_heart.config.settings import (
     DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA,
     DESKTOP_FLET_DEFAULT_TEXT_SCALE,
@@ -137,11 +142,17 @@ from puripuly_heart.config.settings import (
     normalize_owned_referral_id,
     save_settings,
 )
+from puripuly_heart.config.settings_vnext.schema import ProcessCaptureTargetIntent
 from puripuly_heart.config.vad_defaults import DEFAULT_STABLE_VAD_HANGOVER_MS
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
 from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
 from puripuly_heart.core.audio.diagnostics import compute_audio_frame_metrics
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
+from puripuly_heart.core.audio.process_identity import (
+    PsutilCurrentUserProcessSnapshots,
+    PsutilProcessIdentityWatcher,
+)
+from puripuly_heart.core.audio.process_source import ProcessAudioCaptureSource
 from puripuly_heart.core.audio.source import (
     AudioSource,
     MicrophoneTestRouteObservation,
@@ -223,7 +234,11 @@ from puripuly_heart.core.runtime.logging import RuntimeLoggingService
 from puripuly_heart.core.runtime.mic_test import MicTestRuntime
 from puripuly_heart.core.runtime.oauth import OAuthRuntime
 from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
-from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
+from puripuly_heart.core.runtime.peer_channel import (
+    PeerChannelRuntime,
+    PeerRuntimeConfig,
+    PeerRuntimeDiagnostic,
+)
 from puripuly_heart.core.runtime.provider_rebuild import ProviderRuntimeRebuildService
 from puripuly_heart.core.runtime.receiver import VrcMicReceiverRuntime
 from puripuly_heart.core.runtime.self_audio import SelfAudioRuntime
@@ -768,6 +783,11 @@ class GuiController:
     _provider_rebuild_runtime: ProviderRuntimeRebuildService = field(
         init=False,
         default_factory=ProviderRuntimeRebuildService,
+        repr=False,
+    )
+    _peer_capture_target_resolution: PeerCaptureTargetResolutionService = field(
+        init=False,
+        default_factory=PeerCaptureTargetResolutionService,
         repr=False,
     )
     _peer_runtime: PeerChannelRuntime | None = None
@@ -3640,6 +3660,7 @@ class GuiController:
     def _build_peer_runtime_config(self, settings: AppSettings) -> PeerRuntimeConfig:
         backend = resolve_peer_stt_runtime_config(settings)
         provider_signature = build_peer_stt_provider_signature(settings)
+        capture_target = self._resolve_peer_capture_target(settings)
         return PeerRuntimeConfig(
             backend=backend,
             output_device=settings.desktop_audio.output_device,
@@ -3650,11 +3671,25 @@ class GuiController:
             runtime_signature=(
                 backend.source_language,
                 settings.desktop_audio.output_device,
+                capture_target,
                 settings.desktop_audio.vad_speech_threshold,
                 settings.desktop_audio.vad_hangover_ms,
                 settings.desktop_audio.vad_pre_roll_ms,
                 provider_signature,
             ),
+            capture_target=capture_target,
+        )
+
+    def _resolve_peer_capture_target(
+        self,
+        settings: AppSettings,
+    ) -> ResolvedDesktopAudioCaptureTarget:
+        persisted_capture_target = getattr(settings.desktop_audio, "runtime_capture_target", None)
+        if not isinstance(persisted_capture_target, ResolvedDesktopAudioCaptureTarget):
+            persisted_capture_target = None
+        return self._peer_capture_target_resolution.resolve(
+            legacy_output_device=settings.desktop_audio.output_device,
+            persisted_capture_target=persisted_capture_target,
         )
 
     async def _close_peer_runtime_for_release(self, failures: list[Exception]) -> None:
@@ -3824,6 +3859,21 @@ class GuiController:
         if enabled:
             self._enqueue_peer_translation_disclosure()
         self._refresh_overlay_peer_consumers()
+
+    async def retry_peer_process_capture(self) -> bool:
+        if (
+            self.settings is None
+            or self._peer_runtime is None
+            or not self._peer_runtime_should_be_active(self.settings)
+        ):
+            return False
+        if not await self._ensure_peer_local_stt_ready():
+            return False
+        config = self._build_peer_runtime_config(self.settings)
+        retried = await self._peer_runtime.retry_process_capture(config=config)
+        self._sync_effective_hub_flags(self.settings)
+        self._refresh_overlay_peer_consumers()
+        return retried
 
     def _enqueue_peer_translation_disclosure(self) -> None:
         hub = self.hub
@@ -6731,11 +6781,23 @@ class GuiController:
             ),
         )
 
+    def _on_peer_runtime_diagnostic(self, diagnostic: PeerRuntimeDiagnostic) -> None:
+        self.log_detailed(
+            "[PeerRuntime] "
+            f"reason={diagnostic.reason.value} "
+            f"capture_kind={diagnostic.capture_kind} "
+            f"unavailable_reason={diagnostic.process_unavailable_reason}"
+        )
+
     def _create_peer_audio_source_from_runtime_config(self, config: PeerRuntimeConfig):
-        raw_source = DesktopLoopbackAudioSource(device_name=config.output_device)
+        if config.capture_target.kind == "process":
+            return self._create_process_peer_audio_source(config)
+
+        device_name = config.capture_target.device_name or config.output_device
+        raw_source = DesktopLoopbackAudioSource(device_name=device_name)
         self.log_detailed(
             "[AudioDiag][Loopback][peer] "
-            f"requested_device={config.output_device!r} "
+            f"requested_device={device_name!r} "
             f"resolved_device_name={getattr(raw_source, 'resolved_device_name', None)!r} "
             f"resolved_device_index={getattr(raw_source, 'resolved_device_index', None)} "
             f"resolved_channels={getattr(raw_source, 'resolved_channels', None)} "
@@ -6749,6 +6811,43 @@ class GuiController:
             is_detailed_enabled=self._detailed_audio_diag_enabled,
             log_detailed=lambda message: self.log_detailed(message),
         )
+
+    def _create_process_peer_audio_source(self, config: PeerRuntimeConfig) -> DesktopPeerPipeline:
+        process_target = self._process_target_from_runtime_config(config)
+        resolution = ProcessCaptureResolver(
+            snapshots=PsutilCurrentUserProcessSnapshots()
+        ).resolve_for_start(process_target)
+        if resolution.identity is None:
+            assert resolution.unavailable_reason is not None
+            raise ProcessCaptureTargetUnavailableError(resolution.unavailable_reason)
+        raw_source = ProcessAudioCaptureSource(
+            identity=resolution.identity,
+            watcher=PsutilProcessIdentityWatcher(),
+        )
+        self.log_detailed(
+            "[AudioDiag][ProcessCapture][peer] "
+            f"target_kind={config.capture_target.process_kind} capture=process"
+        )
+        wrapped_source = self._wrap_diagnostic_audio_source(raw_source, channel_label="peer")
+        return DesktopPeerPipeline(
+            source=wrapped_source,
+            target_sample_rate_hz=config.backend.sample_rate_hz,
+            is_detailed_enabled=self._detailed_audio_diag_enabled,
+            log_detailed=lambda message: self.log_detailed(message),
+        )
+
+    @staticmethod
+    def _process_target_from_runtime_config(
+        config: PeerRuntimeConfig,
+    ) -> ProcessCaptureTargetIntent:
+        target = config.capture_target
+        if target.kind != "process" or target.process_kind is None:
+            raise ValueError("process peer source requires a process capture target")
+        if target.process_kind == "discord":
+            return ProcessCaptureTargetIntent.discord(target.discord_channel or "")
+        if target.process_kind == "vrchat":
+            return ProcessCaptureTargetIntent.vrchat(target.executable_identity or "")
+        return ProcessCaptureTargetIntent.generic_executable(target.executable_identity or "")
 
     @property
     def debug_capture_fault_profile(self) -> str:
@@ -7102,6 +7201,7 @@ class GuiController:
             vad_factory=self._create_peer_vad_from_runtime_config,
             vad_model_resolver=ensure_silero_vad_onnx,
             run_audio_loop=self._run_peer_audio_vad_loop,
+            diagnostic_sink=self._on_peer_runtime_diagnostic,
         )
         self._last_peer_translation_enabled = self.settings.ui.peer_translation_enabled
         await self._configure_vrc_mic_receiver(enabled=self.settings.osc.vrc_mic_intercept)

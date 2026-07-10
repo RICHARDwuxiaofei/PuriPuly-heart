@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from puripuly_heart.config.capture_target_resolution import resolve_desktop_audio_capture_target
 from puripuly_heart.config.settings_vnext import compat as vnext_compat
 from puripuly_heart.config.settings_vnext import migration as vnext_migration
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
@@ -46,6 +47,9 @@ def load_settings_with_result(
         legacy_settings_module = _legacy_settings_module()
         legacy_settings = legacy_settings_module.from_dict(
             vnext_migration.to_legacy_dict(result.settings)
+        )
+        legacy_settings.desktop_audio.runtime_capture_target = resolve_desktop_audio_capture_target(
+            result.settings.intent.desktop_audio.capture_target
         )
     except Exception as exc:
         status = vnext_compat.SettingsPersistenceStatus.MIGRATION_FAILED

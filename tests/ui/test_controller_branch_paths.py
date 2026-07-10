@@ -25,6 +25,7 @@ from puripuly_heart.config.audio_host_api import (
     WINDOWS_WASAPI_HOST_API,
 )
 from puripuly_heart.config.prompts import load_prompt_for_provider
+from puripuly_heart.config.resolved import ResolvedDesktopAudioCaptureTarget
 from puripuly_heart.config.settings import (
     DESKTOP_FLET_SIZE_PRESETS,
     OVERLAY_TARGET_DESKTOP,
@@ -414,6 +415,17 @@ class DummyPeerRuntime:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class RetryPeerRuntime(DummyPeerRuntime):
+    def __init__(self, result: bool) -> None:
+        super().__init__()
+        self.result = result
+        self.retry_configs: list[PeerRuntimeConfig] = []
+
+    async def retry_process_capture(self, *, config: PeerRuntimeConfig) -> bool:
+        self.retry_configs.append(config)
+        return self.result
 
 
 class DummyGate:
@@ -3853,11 +3865,44 @@ def test_build_peer_runtime_config_includes_provider_signature_and_desktop_setti
     assert config.runtime_signature == (
         config.backend.source_language,
         config.output_device,
+        config.capture_target,
         config.vad_threshold,
         config.vad_hangover_ms,
         config.vad_pre_roll_ms,
         config.provider_signature,
     )
+
+
+@pytest.mark.asyncio
+async def test_retry_peer_process_capture_requires_current_gui_policy_and_uses_explicit_runtime_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    runtime = RetryPeerRuntime(result=True)
+    controller._peer_runtime = runtime  # type: ignore[assignment]
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
+    controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
+    monkeypatch.setattr(
+        GuiController, "_peer_runtime_should_be_active", lambda self, settings: True
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_ensure_peer_local_stt_ready",
+        lambda self: asyncio.sleep(0, result=True),
+    )
+
+    retried = await controller.retry_peer_process_capture()
+
+    assert retried is True
+    assert len(runtime.retry_configs) == 1
+
+    monkeypatch.setattr(
+        GuiController, "_peer_runtime_should_be_active", lambda self, settings: False
+    )
+    assert await controller.retry_peer_process_capture() is False
+    assert len(runtime.retry_configs) == 1
 
 
 @pytest.mark.asyncio
@@ -4793,6 +4838,58 @@ async def test_create_peer_audio_source_from_runtime_config_uses_desktop_loopbac
 
     assert isinstance(source, FakePeerSource)
     assert opened == [{"device_name": config.output_device}]
+
+
+def test_create_peer_audio_source_from_runtime_config_routes_process_to_strict_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    target = ResolvedDesktopAudioCaptureTarget(
+        kind="process",
+        process_kind="generic_executable",
+        executable_identity=r"c:\apps\game\game.exe",
+    )
+    config = PeerRuntimeConfig(
+        backend=SimpleNamespace(sample_rate_hz=16000),
+        output_device="",
+        vad_threshold=0.6,
+        vad_hangover_ms=900,
+        vad_pre_roll_ms=500,
+        provider_signature=(),
+        runtime_signature=(target,),
+        capture_target=target,
+    )
+    created: dict[str, object] = {}
+    identity = object()
+
+    class FakeResolver:
+        def __init__(self, *, snapshots: object) -> None:
+            created["snapshots"] = snapshots
+
+        def resolve_for_start(self, process_target: object) -> SimpleNamespace:
+            created["target"] = process_target
+            return SimpleNamespace(identity=identity, unavailable_reason=None)
+
+    def fake_process_source(*, identity: object, watcher: object) -> object:
+        created["identity"] = identity
+        created["watcher"] = watcher
+        return object()
+
+    monkeypatch.setattr(controller_module, "ProcessCaptureResolver", FakeResolver)
+    monkeypatch.setattr(controller_module, "ProcessAudioCaptureSource", fake_process_source)
+    monkeypatch.setattr(
+        controller_module,
+        "DesktopLoopbackAudioSource",
+        lambda **kwargs: pytest.fail(f"device fallback attempted: {kwargs}"),
+    )
+    monkeypatch.setattr(controller_module, "DesktopPeerPipeline", lambda **kwargs: kwargs)
+
+    source = controller._create_peer_audio_source_from_runtime_config(config)
+
+    assert created["identity"] is identity
+    assert "watcher" in created
+    assert created["target"].kind == "generic_executable"
+    assert getattr(source["source"], "source", None) is not None
 
 
 def test_create_peer_audio_source_logs_loopback_resolution(monkeypatch) -> None:

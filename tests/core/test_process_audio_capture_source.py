@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
@@ -10,6 +13,7 @@ import pytest
 
 from puripuly_heart.config.process_capture_platform import ProcessCapturePlatformAvailability
 from puripuly_heart.config.settings_vnext.schema import ProcessCaptureTargetIntent
+from puripuly_heart.core.audio.process_identity import PsutilProcessIdentityWatcher
 from puripuly_heart.core.audio.process_source import (
     PROCESS_CAPTURE_CHANNELS,
     PROCESS_CAPTURE_SAMPLE_RATE_HZ,
@@ -371,3 +375,55 @@ async def test_silence_does_not_signal_terminal_state() -> None:
     assert source.terminal_reason is None
     assert factory.captures[0][1].closed is False
     await source.close()
+
+
+def _spawn_live_process_identity() -> (
+    tuple[subprocess.Popen[bytes], ResolvedProcessCaptureIdentity]
+):
+    psutil = pytest.importorskip("psutil")
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        process = psutil.Process(child.pid)
+        identity = ResolvedProcessCaptureIdentity(
+            pid=child.pid,
+            target=ProcessCaptureTargetIntent.generic_executable(r"C:\Apps\Game\Game.exe"),
+            instance_id=f"{child.pid}:{process.create_time()}",
+        )
+    except Exception:
+        child.terminate()
+        child.wait(timeout=5)
+        raise
+    return child, identity
+
+
+@pytest.mark.asyncio
+async def test_process_source_close_stops_real_identity_watch_thread_while_target_alive() -> None:
+    child, identity = _spawn_live_process_identity()
+    factory = FakeFactory()
+    try:
+        source = ProcessAudioCaptureSource(
+            identity=identity,
+            watcher=PsutilProcessIdentityWatcher(),
+            capture_factory=factory,
+            platform_availability=_supported,
+        )
+        watch = source._watch
+        assert watch is not None
+        assert watch.watch_thread_alive is True
+
+        started = time.monotonic()
+        await source.close()
+        elapsed = time.monotonic() - started
+
+        assert watch.watch_thread_alive is False
+        assert elapsed < 1.0
+        assert child.poll() is None
+        assert factory.captures[0][1].closed is True
+        assert source.terminal_reason == "closed"
+    finally:
+        child.terminate()
+        child.wait(timeout=5)

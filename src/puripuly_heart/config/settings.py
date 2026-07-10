@@ -561,6 +561,7 @@ class DesktopAudioSettings:
     vad_speech_threshold: float = 0.6
     vad_hangover_ms: int = DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS
     vad_pre_roll_ms: int = 500
+    runtime_capture_target: object | None = field(default=None, repr=False, compare=False)
 
     def validate(self) -> None:
         if self.output_device is None:
