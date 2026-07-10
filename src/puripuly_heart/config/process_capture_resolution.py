@@ -31,6 +31,7 @@ class ProcessSnapshot:
     parent_pid: int | None
     is_current_user: bool
     executable_path: str | None
+    instance_id: str | None
 
 
 class CurrentUserProcessSnapshotPort(Protocol):
@@ -45,13 +46,30 @@ class ProcessCaptureCandidate:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedProcessCaptureIdentity:
+    pid: int
+    target: ProcessCaptureTargetIntent
+    instance_id: str
+
+    def __post_init__(self) -> None:
+        if self.pid <= 0:
+            raise ValueError("resolved process PID must be positive")
+        if not self.instance_id:
+            raise ValueError("resolved process instance identity must be non-empty")
+
+
+@dataclass(frozen=True, slots=True)
 class ProcessCaptureResolution:
-    pid: int | None
+    identity: ResolvedProcessCaptureIdentity | None
     unavailable_reason: ProcessCaptureUnavailableReason | None
 
     @property
     def available(self) -> bool:
-        return self.pid is not None
+        return self.identity is not None
+
+    @property
+    def pid(self) -> int | None:
+        return self.identity.pid if self.identity is not None else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,16 +100,26 @@ class ProcessCaptureResolver:
 
     def _resolve(self, target: ProcessCaptureTargetIntent) -> ProcessCaptureResolution:
         if not self.platform_availability().available:
-            return ProcessCaptureResolution(pid=None, unavailable_reason="unsupported_platform")
+            return ProcessCaptureResolution(
+                identity=None, unavailable_reason="unsupported_platform"
+            )
         inventory = _inventory(self.snapshots.snapshots())
         roots = inventory.eligible_roots.get(target, ())
         if len(roots) > 1:
-            return ProcessCaptureResolution(pid=None, unavailable_reason="ambiguous")
+            return ProcessCaptureResolution(identity=None, unavailable_reason="ambiguous")
         if len(roots) == 1:
-            return ProcessCaptureResolution(pid=roots[0].pid, unavailable_reason=None)
+            root = roots[0]
+            return ProcessCaptureResolution(
+                identity=ResolvedProcessCaptureIdentity(
+                    pid=root.pid,
+                    target=target,
+                    instance_id=root.instance_id or "",
+                ),
+                unavailable_reason=None,
+            )
         if target in inventory.ineligible_targets:
-            return ProcessCaptureResolution(pid=None, unavailable_reason="ineligible")
-        return ProcessCaptureResolution(pid=None, unavailable_reason="no_process")
+            return ProcessCaptureResolution(identity=None, unavailable_reason="ineligible")
+        return ProcessCaptureResolution(identity=None, unavailable_reason="no_process")
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +139,11 @@ def _inventory(snapshots: Iterable[ProcessSnapshot]) -> _Inventory:
         target = identities[snapshot.pid]
         if target is None:
             continue
-        if not snapshot.is_current_user or _is_excluded(snapshot.executable_path):
+        if (
+            not snapshot.is_current_user
+            or not snapshot.instance_id
+            or _is_excluded(snapshot.executable_path)
+        ):
             ineligible_targets.add(target)
             continue
         if _same_identity_ancestor(snapshot, target, by_pid, identities):

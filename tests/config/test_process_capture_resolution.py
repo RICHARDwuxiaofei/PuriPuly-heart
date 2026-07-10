@@ -33,12 +33,14 @@ def _snapshot(
     *,
     parent_pid: int | None = None,
     current_user: bool = True,
+    instance_id: str | None = None,
 ) -> ProcessSnapshot:
     return ProcessSnapshot(
         pid=pid,
         parent_pid=parent_pid,
         is_current_user=current_user,
         executable_path=path,
+        instance_id=instance_id or f"instance-{pid}",
     )
 
 
@@ -204,7 +206,11 @@ def test_start_and_retry_resolve_a_fresh_pid_without_retaining_prior_resolution(
     retry = resolver.resolve_for_retry(target)
 
     assert first.pid == 40
+    assert first.identity is not None
+    assert first.identity.instance_id == "instance-40"
     assert retry.pid == 41
+    assert retry.identity is not None
+    assert retry.identity.instance_id == "instance-41"
     assert snapshots.calls == 2
 
 
