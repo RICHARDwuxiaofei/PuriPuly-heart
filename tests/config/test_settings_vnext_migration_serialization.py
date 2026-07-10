@@ -449,6 +449,19 @@ def test_current_vnext_missing_fallback_alias_still_infers_compatibility_fields(
     )
 
 
+def test_maximal_v24_fixture_preserves_telemetry_consent_and_identifier() -> None:
+    migration = _migration()
+    serialization = _serialization()
+
+    serialized = serialization.to_dict(migration.from_dict(maximal_v24_settings_fixture()))
+
+    assert serialized["intent"]["telemetry"] == {"consent": "allow"}
+    assert serialized["state"]["telemetry"] == {
+        "anonymous_id": "fixture-telemetry-anonymous-id",
+        "sent_translation_success_dates_utc": ("2026-07-01", "2026-07-02"),
+    }
+
+
 def test_existing_settings_default_to_unknown_telemetry_without_identifier() -> None:
     migration = _migration()
     serialization = _serialization()
