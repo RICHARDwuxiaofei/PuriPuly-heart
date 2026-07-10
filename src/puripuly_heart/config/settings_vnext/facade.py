@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -85,6 +87,7 @@ def save_settings_with_result(
             settings,
             preserve_provider_verification=True,
         )
+        vnext_settings = _preserve_existing_process_capture_target(path, settings, vnext_settings)
     return vnext_compat.save_vnext_settings(path, vnext_settings)
 
 
@@ -103,6 +106,35 @@ def _legacy_settings_module() -> Any:
     from puripuly_heart.config import settings as legacy_settings
 
     return legacy_settings
+
+
+def _preserve_existing_process_capture_target(
+    path: Path,
+    legacy_settings: AppSettings,
+    next_settings: AppSettingsVNext,
+) -> AppSettingsVNext:
+    if legacy_settings.desktop_audio.output_device:
+        return next_settings
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, Mapping) or not vnext_migration.is_vnext_settings_dict(raw):
+            return next_settings
+        existing = vnext_migration.from_dict(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        return next_settings
+    capture_target = existing.intent.desktop_audio.capture_target
+    if capture_target.kind != "process":
+        return next_settings
+    return replace(
+        next_settings,
+        intent=replace(
+            next_settings.intent,
+            desktop_audio=replace(
+                next_settings.intent.desktop_audio,
+                capture_target=capture_target,
+            ),
+        ),
+    )
 
 
 __all__ = [

@@ -1093,6 +1093,73 @@ def test_capture_target_legacy_facade_projection(
     assert legacy["desktop_audio"]["output_device"] == legacy_output_device
 
 
+@pytest.mark.parametrize(
+    ("target", "legacy_output_device"),
+    [
+        (CaptureTargetIntent.default_output_device(), ""),
+        (CaptureTargetIntent.named_output_device("Fixture Speakers"), "Fixture Speakers"),
+        (
+            CaptureTargetIntent.process_target(
+                ProcessCaptureTargetIntent.generic_executable(r"C:\Apps\Game\Game.exe")
+            ),
+            "",
+        ),
+    ],
+)
+def test_legacy_facade_save_preserves_existing_canonical_process_target(
+    tmp_path: Path,
+    target: CaptureTargetIntent,
+    legacy_output_device: str,
+) -> None:
+    facade = _facade()
+    path = tmp_path / "settings.json"
+    settings = AppSettingsVNext(
+        intent=replace(
+            AppSettingsVNext().intent,
+            desktop_audio=replace(AppSettingsVNext().intent.desktop_audio, capture_target=target),
+        )
+    )
+    facade.save_vnext_settings(path, settings)
+
+    legacy = facade.load_settings(path)
+    facade.save_settings(path, legacy)
+    reloaded = facade.load_vnext_settings(path)
+
+    assert legacy.desktop_audio.output_device == legacy_output_device
+    assert reloaded.settings is not None
+    assert reloaded.settings.intent.desktop_audio.capture_target == target
+
+
+def test_legacy_facade_device_change_replaces_process_projection_with_named_device(
+    tmp_path: Path,
+) -> None:
+    facade = _facade()
+    path = tmp_path / "settings.json"
+    process_target = CaptureTargetIntent.process_target(
+        ProcessCaptureTargetIntent.generic_executable(r"C:\Apps\Game\Game.exe")
+    )
+    settings = AppSettingsVNext(
+        intent=replace(
+            AppSettingsVNext().intent,
+            desktop_audio=replace(
+                AppSettingsVNext().intent.desktop_audio,
+                capture_target=process_target,
+            ),
+        )
+    )
+    facade.save_vnext_settings(path, settings)
+
+    legacy = facade.load_settings(path)
+    legacy.desktop_audio.output_device = "Replacement Speakers"
+    facade.save_settings(path, legacy)
+    reloaded = facade.load_vnext_settings(path)
+
+    assert reloaded.settings is not None
+    assert reloaded.settings.intent.desktop_audio.capture_target == (
+        CaptureTargetIntent.named_output_device("Replacement Speakers")
+    )
+
+
 def test_capture_target_resolution_excludes_pids_and_runtime_state() -> None:
     from puripuly_heart.config.capture_target_resolution import resolve_desktop_audio_capture_target
 
