@@ -38,3 +38,13 @@ python scripts/release/windows-application-loopback-ab.py `
 The external source, NuGet restore, build products, WAV files, and emitters remain in isolated
 temporary paths. Only provenance, hashes, topology, timings, and numeric A/B results are checked
 in.
+
+## Windows process-distribution closure
+
+`windows-process-distribution-host.json` reports technical packaging independently from client
+execution. `technical_status: passed` means packaged, installed, and reinstalled strict ProcTap
+runtime checks passed. `manual_matrix_status: waived` means acceptance authority waived VRChat and
+Discord Stable execution because no credential-free automatic client-audio action was available
+and the user declined assisted manual execution. Those cells remain `waived` with result
+`not_tested`; they are never counted as successful runs. PTB and Canary remain unavailable, and
+the multilevel ancestry risk remains attached to every client cell.

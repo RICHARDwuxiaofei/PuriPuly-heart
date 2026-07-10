@@ -564,7 +564,7 @@
       "MyAppName": "PuriPuly <3",
       "MyAppDirName": "PuriPulyHeart",
       "MyAppGroupName": "PuriPulyHeart",
-      "MyAppVersion": "2.1.2",
+      "MyAppVersion": "2.2.2",
       "MyAppPublisher": "salee",
       "MyAppURL": "https://github.com/kapitalismho/PuriPuly-heart",
       "MyAppExeName": "PuriPulyHeart.exe",
@@ -583,7 +583,7 @@
       "UsePreviousGroup=yes"
     ],
     "production_installer_build": "Invoke-ExternalProcess -FilePath $isccPath -ArgumentList @(\"installer.iss\") -WorkingDirectory $PWD",
-    "smoke_alternate_app_id": "{{A9E6D735-6E7A-4B1A-9D74-6D9F0A6E7A55}",
+    "smoke_alternate_app_id": "{{C2E4A7B1-59F3-4C89-9D21-7E6B5A4032F8}",
     "smoke_guard_lines": [
       "$InstallerSmokeDir = Join-Path $env:LOCALAPPDATA \"Programs\\PuriPulyHeart-LocalSTT-Test\"",
       "$InstallerSmokeAppDataRoot = Join-Path $env:TEMP \"PuriPulyHeart-LocalSTT-Test-AppData\"",

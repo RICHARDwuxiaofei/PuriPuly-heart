@@ -715,3 +715,9 @@ def test_settings_config_path_marks_custom_config_as_explicit(tmp_path) -> None:
 
     assert path == custom_path
     assert explicit is True
+
+
+def test_main_dispatches_process_capture_runtime_check(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "run_process_capture_runtime_check", lambda: 0)
+
+    assert main_module.main(["process-capture-runtime-check"]) == 0

@@ -278,6 +278,55 @@ function Invoke-SoxrRuntimeSmokeCheck {
     Assert-SoxrRuntimeReport -ReportPath $ReportPath -ExpectedExtensionPath $ExpectedExtensionPath -ExpectedSoxrDllPath $ExpectedSoxrDllPath -Label $Label
 }
 
+function Invoke-ProcessCaptureRuntimeSmokeCheck {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ExePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ReportPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    $previousReportPath = $env:PURIPULY_HEART_PROCESS_CAPTURE_RUNTIME_REPORT_PATH
+    $env:PURIPULY_HEART_PROCESS_CAPTURE_RUNTIME_REPORT_PATH = $ReportPath
+    try {
+        $smokeTest = Start-Process -FilePath $ExePath -ArgumentList @("process-capture-runtime-check") -Wait -PassThru
+    } finally {
+        if ($null -eq $previousReportPath) {
+            Remove-Item Env:PURIPULY_HEART_PROCESS_CAPTURE_RUNTIME_REPORT_PATH -ErrorAction SilentlyContinue
+        } else {
+            $env:PURIPULY_HEART_PROCESS_CAPTURE_RUNTIME_REPORT_PATH = $previousReportPath
+        }
+    }
+
+    if ($smokeTest.ExitCode -ne 0) {
+        throw "$Label process-capture runtime smoke test failed with exit code $($smokeTest.ExitCode)"
+    }
+    if (-not (Test-Path $ReportPath)) {
+        throw "$Label process-capture runtime report not found: $ReportPath"
+    }
+    $report = Get-Content -Path $ReportPath -Raw -Encoding utf8 | ConvertFrom-Json
+    if ($report.status -ne "passed" -or
+        $report.proctap_version -ne "1.0.3" -or
+        $report.native_process_specific -ne $true -or
+        $report.capture_started -ne $true -or
+        $report.device_fallback_used -ne $false -or
+        $report.credentials_used -ne $false -or
+        $report.network_used -ne $false) {
+        throw "$Label process-capture runtime report failed strict validation"
+    }
+    if (-not (Test-Path ([string]$report.native_module))) {
+        throw "$Label packaged ProcTap native module not found: $($report.native_module)"
+    }
+    $nativeHash = Get-FileSha256 -Path ([string]$report.native_module)
+    if ($nativeHash -ne ([string]$report.native_sha256)) {
+        throw "$Label packaged ProcTap native module hash mismatch"
+    }
+}
+
 $projectEnvironmentScripts = Resolve-ProjectEnvironmentScriptsPath
 $projectEnvironmentPath = Resolve-ProjectEnvironmentPath
 if (Test-Path $projectEnvironmentScripts) {
@@ -307,7 +356,11 @@ if (-not [string]::IsNullOrWhiteSpace($cmakeCommandDirectory)) {
 $env:CMAKE = $cmakeCommand
 
 $overlayManifestPath = Join-Path $PWD "native/overlay/Cargo.toml"
-$overlayTargetDir = Join-Path $PWD "target"
+$releaseBuildRoot = $env:PURIPULY_HEART_RELEASE_BUILD_ROOT
+if ([string]::IsNullOrWhiteSpace($releaseBuildRoot)) {
+    $releaseBuildRoot = Join-Path $env:TEMP "PuriPulyHeart-ReleaseBuild-$AppVersion"
+}
+$overlayTargetDir = Join-Path $releaseBuildRoot "overlay-target"
 $overlayBuildDir = Join-Path $PWD "build/overlay"
 $overlayReleasePath = Join-Path $overlayTargetDir "release/PuriPulyHeartOverlay.exe"
 $overlayStagedPath = Join-Path $overlayBuildDir "PuriPulyHeartOverlay.exe"
@@ -328,6 +381,10 @@ $packagedSoxrDllPath = Join-Path $packagedSoxrRuntimeDir "soxr.dll"
 $packagedSoxrRuntimeReportPath = Join-Path $soxrRuntimeReportDir "packaged-soxr-runtime-check.json"
 $installedSoxrRuntimeReportPath = Join-Path $soxrRuntimeReportDir "installed-soxr-runtime-check.json"
 $reinstalledSoxrRuntimeReportPath = Join-Path $soxrRuntimeReportDir "reinstalled-soxr-runtime-check.json"
+$processCaptureRuntimeReportDir = Join-Path $PWD "build/process-capture-runtime-smoke"
+$packagedProcessCaptureRuntimeReportPath = Join-Path $processCaptureRuntimeReportDir "packaged-process-capture-runtime-check.json"
+$installedProcessCaptureRuntimeReportPath = Join-Path $processCaptureRuntimeReportDir "installed-process-capture-runtime-check.json"
+$reinstalledProcessCaptureRuntimeReportPath = Join-Path $processCaptureRuntimeReportDir "reinstalled-process-capture-runtime-check.json"
 $packagedSoxrComplianceDir = Join-Path $distDir "third_party\soxr"
 $packagedSoxrLicensePath = Join-Path $packagedSoxrComplianceDir "COPYING.LGPL-2.1.txt"
 $packagedSoxrSourceBundlePath = $null
@@ -365,6 +422,12 @@ Invoke-External -FilePath $cargoCommand -ArgumentList @(
 if (-not (Test-Path $overlayReleasePath)) {
     throw "Rust overlay executable not found: $overlayReleasePath"
 }
+$overlayVersion = (& $overlayReleasePath --version | Out-String).Trim()
+if ($overlayVersion -ne $AppVersion) {
+    throw "Rust overlay version mismatch: expected $AppVersion, found $overlayVersion"
+}
+$overlayReleaseSha256 = Get-FileSha256 -Path $overlayReleasePath
+Write-Host "Built Rust overlay version=$overlayVersion sha256=$overlayReleaseSha256"
 
 New-Item -ItemType Directory -Force -Path $overlayBuildDir | Out-Null
 Copy-Item -Path $overlayReleasePath -Destination $overlayStagedPath -Force
@@ -406,6 +469,10 @@ $packagedOnnxRuntimeProvidersSharedDllPath = Join-Path $packagedLocalQwenRuntime
 $numpyCoreExtensions = @(Get-ChildItem -Path $distDir -Filter "_multiarray_umath*.pyd" -Recurse -File -ErrorAction SilentlyContinue)
 if ($numpyCoreExtensions.Count -eq 0) {
     throw "Packaged executable is missing numpy._core._multiarray_umath in $distDir"
+}
+$packagedProcTapNativeExtensions = @(Get-ChildItem -Path (Join-Path $distDir "proctap") -Filter "_native*.pyd" -File -ErrorAction SilentlyContinue)
+if ($packagedProcTapNativeExtensions.Count -ne 1) {
+    throw "Packaged ProcTap runtime must contain exactly one proctap/_native extension; found $($packagedProcTapNativeExtensions.Count)"
 }
 if (-not (Test-Path $packagedOnnxRuntimeDllPath)) {
     throw "Packaged Local Qwen runtime DLL not found: $packagedOnnxRuntimeDllPath"
@@ -517,6 +584,8 @@ Assert-FileSha256Equals -Path $packagedOverlayDllPath -ExpectedSha256 $PinnedOpe
 
 Remove-Item -Recurse -Force $soxrRuntimeReportDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $soxrRuntimeReportDir | Out-Null
+Remove-Item -Recurse -Force $processCaptureRuntimeReportDir -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $processCaptureRuntimeReportDir | Out-Null
 
 Write-Host "Smoke-testing packaged executable..."
 $versionSmokeTest = Start-Process -FilePath $exePath -ArgumentList @("--version") -Wait -PassThru
@@ -530,6 +599,7 @@ if ($localQwenRuntimeSmokeTest.ExitCode -ne 0) {
 }
 
 Invoke-SoxrRuntimeSmokeCheck -ExePath $exePath -ReportPath $packagedSoxrRuntimeReportPath -ExpectedExtensionPath $packagedSoxrExtensionPath -ExpectedSoxrDllPath $packagedSoxrDllPath -Label "Packaged"
+Invoke-ProcessCaptureRuntimeSmokeCheck -ExePath $exePath -ReportPath $packagedProcessCaptureRuntimeReportPath -Label "Packaged"
 
 Write-Host "Smoke-testing packaged overlay executable..."
 Invoke-External -FilePath $packagedOverlayPath -ArgumentList @("--check-startup-contract")
@@ -567,7 +637,7 @@ if ($currentInnoVersion -ne $InnoSetupVersion) {
 
 $installerPath = Join-Path $PWD "installer_output/PuriPulyHeart-Setup-$AppVersion.exe"
 $installerHashPath = "$installerPath.sha256"
-$InstallerTestAppId = "{{A9E6D735-6E7A-4B1A-9D74-6D9F0A6E7A55}"
+$InstallerTestAppId = "{{C2E4A7B1-59F3-4C89-9D21-7E6B5A4032F8}"
 $InstallerSmokeBuildDir = Join-Path $env:TEMP "PuriPulyHeart-Installer-Smoke"
 $InstallerSmokeDir = Join-Path $env:LOCALAPPDATA "Programs\PuriPulyHeart-LocalSTT-Test"
 $InstallerSmokeAppDataRoot = Join-Path $env:TEMP "PuriPulyHeart-LocalSTT-Test-AppData"
@@ -628,6 +698,7 @@ if (-not (Test-Path $packagedOverlayPath)) {
 Write-Host "Building smoke-test installer with alternate AppId..."
 Invoke-ExternalProcess -FilePath $isccPath -ArgumentList @(
     "/DMyAppId=$InstallerTestAppId",
+    "/DSkipLocalSttProvisioning=1",
     "/O$InstallerSmokeBuildDir",
     "installer.iss"
 ) -WorkingDirectory $PWD
@@ -664,8 +735,11 @@ $installerSmokeLog = Get-Content -Path $InstallerSmokeLogPath -Raw
 if ($installerSmokeLog -match "Local STT provisioning failed" -or $installerSmokeLog -match "Failed to launch local STT provisioning script") {
     throw "Installer smoke test did not complete local STT provisioning successfully"
 }
-if ($installerSmokeLog -notmatch [regex]::Escape("Local STT provisioning completed successfully.")) {
-    throw "Installer smoke log is missing local STT provisioning success marker"
+if ($installerSmokeLog -notmatch [regex]::Escape("Local STT provisioning skipped for isolated installer smoke.")) {
+    throw "Installer smoke log is missing isolated no-network provisioning skip marker"
+}
+if ($installerSmokeLog -match [regex]::Escape("Local STT provisioning completed successfully.")) {
+    throw "Installer smoke unexpectedly performed Local STT network provisioning"
 }
 if (-not (Test-Path $installedExePath)) {
     throw "Installed app executable not found after installer smoke: $installedExePath"
@@ -697,6 +771,7 @@ if (-not (Test-Path $installedSoxrSourceBundlePath)) {
 }
 
 Invoke-SoxrRuntimeSmokeCheck -ExePath $installedExePath -ReportPath $installedSoxrRuntimeReportPath -ExpectedExtensionPath $installedSoxrExtensionPath -ExpectedSoxrDllPath $installedSoxrDllPath -Label "Installed"
+Invoke-ProcessCaptureRuntimeSmokeCheck -ExePath $installedExePath -ReportPath $installedProcessCaptureRuntimeReportPath -Label "Installed"
 
 $expectedInstalledSoxrDllHash = (Get-FileHash -Path $packagedSoxrDllPath -Algorithm SHA256).Hash
 $expectedInstalledSoxrLicenseHash = (Get-FileHash -Path $packagedSoxrLicensePath -Algorithm SHA256).Hash
@@ -766,8 +841,8 @@ $installerReinstallSmokeLog = Get-Content -Path $InstallerReinstallSmokeLogPath 
 if ($installerReinstallSmokeLog -match "Local STT provisioning failed" -or $installerReinstallSmokeLog -match "Failed to launch local STT provisioning script") {
     throw "Installer reinstall smoke test did not complete local STT provisioning successfully"
 }
-if ($installerReinstallSmokeLog -notmatch [regex]::Escape("Local STT provisioning completed successfully.")) {
-    throw "Installer reinstall smoke log is missing local STT provisioning success marker"
+if ($installerReinstallSmokeLog -notmatch [regex]::Escape("Local STT provisioning skipped for isolated installer smoke.")) {
+    throw "Installer reinstall smoke log is missing isolated no-network provisioning skip marker"
 }
 
 $reinstalledOpenVrDllHash = Get-FileSha256 -Path $installedOpenVrDllPath
@@ -801,6 +876,7 @@ if (Test-Path $legacyRootLevelSoxrDllPath) {
 }
 
 Invoke-SoxrRuntimeSmokeCheck -ExePath $installedExePath -ReportPath $reinstalledSoxrRuntimeReportPath -ExpectedExtensionPath $installedSoxrExtensionPath -ExpectedSoxrDllPath $installedSoxrDllPath -Label "Reinstalled"
+Invoke-ProcessCaptureRuntimeSmokeCheck -ExePath $installedExePath -ReportPath $reinstalledProcessCaptureRuntimeReportPath -Label "Reinstalled"
 
 Write-Host "Generating SHA256..."
 $hash = (Get-FileHash -Path $installerPath -Algorithm SHA256).Hash

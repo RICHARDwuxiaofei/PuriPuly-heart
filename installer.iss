@@ -505,6 +505,11 @@ end;
 
 function RunLocalSttModelInstall(): Boolean;
 begin
+#ifdef SkipLocalSttProvisioning
+  Log('Local STT provisioning skipped for isolated installer smoke.');
+  Result := True;
+  exit;
+#endif
   Result := False;
   if (not GetLocalSttReinstallEnabled()) and ValidateLocalSttInstall(GetLocalSttInstallDir()) then begin
     Log('Local STT model is already installed and valid.');

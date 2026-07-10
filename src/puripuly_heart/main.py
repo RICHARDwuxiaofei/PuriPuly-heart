@@ -54,6 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
         "soxr-runtime-check",
         help="Verify the packaged soxr runtime contract and smoke resample",
     )
+    sub.add_parser(
+        "process-capture-runtime-check",
+        help="Verify the packaged strict ProcTap process-capture runtime",
+    )
 
     run_gui = sub.add_parser("run-gui", help="Run the Graphical User Interface (Flet)")
     run_gui.add_argument(
@@ -74,6 +78,14 @@ def run_local_qwen_runtime_check() -> int:
 
 def run_soxr_runtime_check() -> int:
     from puripuly_heart.app.soxr_runtime_check import run_soxr_runtime_check as run
+
+    return run()
+
+
+def run_process_capture_runtime_check() -> int:
+    from puripuly_heart.app.process_capture_runtime_check import (
+        run_process_capture_runtime_check as run,
+    )
 
     return run()
 
@@ -272,6 +284,9 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "soxr-runtime-check":
             return run_soxr_runtime_check()
+
+        if args.command == "process-capture-runtime-check":
+            return run_process_capture_runtime_check()
 
         # Default: run GUI when no command specified (e.g., double-clicking EXE)
         if args.command is None:

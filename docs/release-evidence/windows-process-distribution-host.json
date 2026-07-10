@@ -1,0 +1,110 @@
+{
+  "classification": "technical_distribution_passed_client_execution_waived",
+  "commands": [
+    "PURIPULY_HEART_RELEASE_BUILD_ROOT=<approved-short-temp> pwsh scripts/ci/build-release-artifacts.ps1 -AppVersion 2.2.2 -InnoSetupVersion 6.6.1",
+    "python -m PyInstaller --clean --noconfirm build.spec",
+    "PuriPulyHeart.exe process-capture-runtime-check",
+    "ISCC.exe /DMyAppId={{C2E4A7B1-59F3-4C89-9D21-7E6B5A4032F8} /DSkipLocalSttProvisioning=1 /O<isolated-output> installer.iss",
+    "PuriPulyHeart-Setup-2.2.2.exe /CURRENTUSER /VERYSILENT /SUPPRESSMSGBOXES /DIR=<isolated-install> /LOG=<isolated-log>",
+    "<isolated-install>/PuriPulyHeart.exe process-capture-runtime-check"
+  ],
+  "installed": {
+    "executable_sha256": "a8040599c6aae8203bacea905948eb692ddb62acff0f00c1f49ca66e44f0b1fe",
+    "native_module_relative_path": "proctap/_native.cp312-win_amd64.pyd",
+    "native_sha256": "acede1f9debe93a9decac375b8c5b2bba84d45d2d475db0070459fc195576437",
+    "report_sha256": "0b3a36f36b293d5ba9552ceedbdb50e3b52862875737cf666ea7c5bdfd663530",
+    "runtime_report": {
+      "capture_started": true,
+      "credentials_used": false,
+      "device_fallback_used": false,
+      "native_process_specific": true,
+      "network_used": false,
+      "proctap_version": "1.0.3",
+      "status": "passed"
+    }
+  },
+  "installer_isolation": {
+    "alternate_app_id": "{C2E4A7B1-59F3-4C89-9D21-7E6B5A4032F8}",
+    "cleanup": "uninstaller_exit_0_and_install_directory_removed",
+    "install_dir": "C:/Users/salee/AppData/Local/Programs/PuriPulyHeart-LocalSTT-Test",
+    "installer_log_sha256": "94c94aa64b4516d15f1766da92d4f5f255fc54daec3579b6969033e36d7967b8",
+    "installer_sha256": "08903c06ec5a76610279c5338875e28beea831e1cec7da62e37b8c6a7d123e74",
+    "local_stt_provisioning": "compile_time_skipped_for_isolated_no_network_smoke",
+    "production_app_id_used": false,
+    "production_install_path_used": false
+  },
+  "manual_matrix": {
+    "discord_canary": {
+      "availability": "not_installed",
+      "multilevel_ancestry_risk": true,
+      "result": null,
+      "status": "unavailable"
+    },
+    "discord_ptb": {
+      "availability": "not_installed",
+      "multilevel_ancestry_risk": true,
+      "result": null,
+      "status": "unavailable"
+    },
+    "discord_stable": {
+      "availability": "installed_and_running",
+      "multilevel_ancestry_risk": true,
+      "result": "not_tested",
+      "status": "waived",
+      "waiver_authority": "acceptance_authority",
+      "waiver_reason": "No credential-free automatic client audio action was available, and the user declined assisted manual execution."
+    },
+    "vrchat": {
+      "availability": "installed_not_running",
+      "multilevel_ancestry_risk": true,
+      "result": "not_tested",
+      "status": "waived",
+      "waiver_authority": "acceptance_authority",
+      "waiver_reason": "No credential-free automatic client audio action was available, and the user declined assisted manual execution."
+    }
+  },
+  "manual_matrix_complete": false,
+  "manual_matrix_status": "waived",
+  "overlay": {
+    "app_version_command": "PuriPulyHeartOverlay.exe --version",
+    "app_version_result": "2.2.2",
+    "cargo_package_version": "2.2.2",
+    "sha256": "ace03e9f452182f56792e4a238b2a3c75bb7db0692e1030fdc22a0ddd89f0167",
+    "source_changed": false
+  },
+  "packaged": {
+    "executable_sha256": "a8040599c6aae8203bacea905948eb692ddb62acff0f00c1f49ca66e44f0b1fe",
+    "native_module_relative_path": "proctap/_native.cp312-win_amd64.pyd",
+    "native_sha256": "acede1f9debe93a9decac375b8c5b2bba84d45d2d475db0070459fc195576437",
+    "pyinstaller_version": "6.21.0",
+    "report_sha256": "ebf37c00387afdef91a4a46f17698665eeb07b32bfd8bbde7d610a7af292ade5",
+    "runtime_report": {
+      "capture_started": true,
+      "credentials_used": false,
+      "device_fallback_used": false,
+      "native_process_specific": true,
+      "network_used": false,
+      "proctap_version": "1.0.3",
+      "status": "passed"
+    }
+  },
+  "schema": "puripuly-heart/windows-process-distribution/v1",
+  "status": "closed_with_waiver",
+  "supported_target": {
+    "implementation": "CPython",
+    "machine": "AMD64",
+    "minimum_windows_build": 20348,
+    "python": "3.12",
+    "system": "Windows"
+  },
+  "technical_status": "passed",
+  "workflow": {
+    "full_release_exit": 0,
+    "inno_setup_version": "6.6.1",
+    "installer_reinstall_smoke": "passed",
+    "overlay_build_root": "C:/Users/salee/AppData/Local/Temp/opencode/puripuly-release-2.2.2",
+    "packaged_process_runtime_smoke": "passed",
+    "pyinstaller_version": "6.21.0",
+    "reinstalled_process_runtime_smoke": "passed"
+  }
+}
