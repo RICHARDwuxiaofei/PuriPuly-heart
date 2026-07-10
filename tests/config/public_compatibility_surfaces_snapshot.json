@@ -668,6 +668,7 @@
       "default.txt"
     ],
     "llm_provider_prompt_keys": [
+      "cerebras",
       "deepseek",
       "gemini",
       "local_llm",

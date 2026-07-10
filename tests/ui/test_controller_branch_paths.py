@@ -314,6 +314,15 @@ class DummyHub:
     def clear_context(self) -> None:
         self.clear_context_calls += 1
 
+    async def drain_self_stt_for_toggle_off(self) -> None:
+        if self.stt is None:
+            return
+        stop_for_toggle_off = getattr(self.stt, "stop_for_toggle_off", None)
+        if callable(stop_for_toggle_off):
+            await stop_for_toggle_off()
+            return
+        await self.stt.close()
+
     def mark_promo_eligible(self) -> None:
         self.promo_calls += 1
 
@@ -1705,6 +1714,7 @@ async def test_verify_api_key_google_checks_selected_gemini_model(
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.DEEPGRAM
     calls: list[tuple[str, str]] = []
 
     async def fake_verify(key: str, *, model: str) -> bool:
@@ -11109,9 +11119,101 @@ async def test_start_mic_loop_registers_named_self_audio_runtime_owner(
     )
     assert controller._mic_task is owner.loop_task
     assert controller._audio_source is owner.audio_source
-    assert "toggle-off drains STT separately" in snapshot["toggle_off_policy"]
+    assert "toggle-off immediately closes STT" in snapshot["toggle_off_policy"]
 
     await controller._stop_mic_loop()
+
+
+@pytest.mark.asyncio
+async def test_toggle_off_closes_stt_without_drain_or_finalization() -> None:
+    calls: list[str] = []
+
+    class FakeStt:
+        async def close(self) -> None:
+            calls.append("close")
+
+    class FakeHub:
+        stt = FakeStt()
+
+        async def drain_self_stt_for_toggle_off(self) -> None:
+            calls.append("toggle_off")
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.hub = FakeHub()
+
+    await controller._drain_self_stt_for_toggle_off()
+
+    assert calls == ["toggle_off"]
+
+
+@pytest.mark.asyncio
+async def test_toggle_off_pending_utterance_has_no_late_result_and_restarts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminal = {"final": 0, "translation": 0, "output": 0}
+    release = asyncio.Event()
+    lifecycle: list[str] = []
+
+    async def pending_utterance() -> None:
+        await release.wait()
+        terminal["final"] += 1
+        terminal["translation"] += 1
+        terminal["output"] += 1
+
+    class FakeStt:
+        def __init__(self) -> None:
+            self.pending = asyncio.create_task(pending_utterance())
+
+        async def stop_for_toggle_off(self) -> None:
+            lifecycle.append("close_started")
+            self.pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.pending
+            lifecycle.append("close_finished")
+
+        async def warmup(self) -> None:
+            lifecycle.append("warmup")
+
+    class FakeHub:
+        def __init__(self) -> None:
+            self.stt = FakeStt()
+            self.drain_calls = 0
+
+        async def drain_self_stt_for_toggle_off(self) -> None:
+            self.drain_calls += 1
+            await self.stt.stop_for_toggle_off()
+
+    async def fake_stop_mic_loop(_self: GuiController) -> None:
+        lifecycle.append("mic_stopped")
+
+    async def fake_start_mic_loop(_self: GuiController) -> None:
+        lifecycle.append("mic_started")
+
+    async def fake_ensure_local_stt_ready(_self: GuiController) -> bool:
+        return True
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.DEEPGRAM
+    hub = FakeHub()
+    controller.hub = hub
+    controller._stt_desired = False
+    monkeypatch.setattr(GuiController, "_stop_mic_loop", fake_stop_mic_loop)
+    monkeypatch.setattr(GuiController, "_start_mic_loop", fake_start_mic_loop)
+    monkeypatch.setattr(GuiController, "_ensure_local_stt_ready", fake_ensure_local_stt_ready)
+
+    await controller._run_stt_switch()
+    release.set()
+    await asyncio.sleep(0)
+
+    assert lifecycle[:3] == ["mic_stopped", "close_started", "close_finished"]
+    assert hub.drain_calls == 1
+    assert terminal == {"final": 0, "translation": 0, "output": 0}
+
+    controller._stt_desired = True
+    await controller._run_stt_switch()
+
+    assert lifecycle[-2:] == ["mic_started", "warmup"]
 
 
 @pytest.mark.asyncio

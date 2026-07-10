@@ -1,6 +1,6 @@
 # ADR: OpenRouter Fallback Source Lock And Managed-Key Contract
 
-- Status: Accepted
+- Status: Partially superseded by the approved compatibility classification
 - Date: 2026-04-13
 - Work ref: `openrouter-managed-fallback-defaults`
 
@@ -44,3 +44,7 @@ Gemma 4 is no longer a selectable fallback option.
 - `src/puripuly_heart/config/llm_profiles.py`
 - `src/puripuly_heart/config/settings.py`
 - `src/puripuly_heart/ui/views/settings.py`
+
+## Supersession
+
+The approved `compatibility-evidence-foundation-c1` classification supersedes this ADR where it conflicts with fixed-to-current evidence. Qwen and Gemini fallback choices are removed, with legacy Gemini values normalizing to no fallback. OpenRouter Gemma 4 and Cerebras Gemma picker availability is preserved because both the fixed release and current target expose those choices. The ADR remains authority for historical migration context only and must not override the approved classification artifact.

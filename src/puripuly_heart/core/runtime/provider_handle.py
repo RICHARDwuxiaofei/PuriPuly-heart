@@ -15,9 +15,8 @@ class ProviderRuntimeHandle:
 
     resource_fields = ("provider", "event_task", "generation")
     toggle_off_policy = (
-        "STT toggle-off drains final transcript by awaiting provider.close() before "
-        "keeping provider event ingress active for later toggle-on; app shutdown/replacement "
-        "uses backend close."
+        "STT toggle-off immediately awaits provider.close() without finalizing a pending "
+        "utterance; app shutdown and replacement retain bounded awaited close behavior."
     )
     shutdown_policy = (
         "stop ingress, cancel the provider event task, await provider.close(), then close "
@@ -135,7 +134,13 @@ class ProviderRuntimeHandle:
         async with self._lock:
             provider = self._provider
             if provider is not None:
-                await _call_async_method(provider, "close")
+                stop_for_toggle_off = getattr(provider, "stop_for_toggle_off", None)
+                if callable(stop_for_toggle_off):
+                    result = stop_for_toggle_off()
+                    if inspect.isawaitable(result):
+                        await result
+                else:
+                    await _call_async_method(provider, "close")
             self._start_event_loop_if_needed()
 
     async def stop_ingress(self) -> None:

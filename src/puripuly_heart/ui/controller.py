@@ -1123,16 +1123,9 @@ class GuiController:
     async def _drain_self_stt_for_toggle_off(self, *, force_immediate: bool = False) -> None:
         if self.hub is None:
             return
-        if not force_immediate:
-            drain = getattr(self.hub, "drain_self_stt_for_toggle_off", None)
-            if callable(drain):
-                await drain()
-                return
-        else:
+        if force_immediate:
             self.log_detailed("[STT] Force immediate toggle-off requested")
-        stt = getattr(self.hub, "stt", None)
-        if stt is not None:
-            await stt.close()
+        await self.hub.drain_self_stt_for_toggle_off()
 
     async def _refresh_overlay_runtime_dependencies(self) -> None:
         if self.settings is None or self.hub is None:

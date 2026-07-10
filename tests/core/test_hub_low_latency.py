@@ -315,7 +315,10 @@ async def test_hub_exposes_named_provider_runtime_handles_and_shutdown_policies(
         "event_task",
         "generation",
     )
-    assert "STT toggle-off drains" in handles["self_stt"].toggle_off_policy
+    assert (
+        "STT toggle-off immediately awaits provider.close()"
+        in handles["self_stt"].toggle_off_policy
+    )
     assert "await provider.close" in handles["llm"].shutdown_policy
 
     await hub.start(auto_flush_osc=False)

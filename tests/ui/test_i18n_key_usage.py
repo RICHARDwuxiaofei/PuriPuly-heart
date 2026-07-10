@@ -549,3 +549,12 @@ def test_temporarily_allowed_seed_keys_are_exactly_allowlisted() -> None:
     )
 
     assert unused_keys == []
+
+
+def test_zh_cn_approved_labels_and_preserved_provider_copy_are_exact() -> None:
+    zh_cn = _load_bundles()["zh-CN"]
+
+    assert zh_cn["dashboard.peer_label"] == "PEER"
+    assert zh_cn["dashboard.overlay_label"] == "Subtitles"
+    assert zh_cn["provider.soniox.description"] == "语音识别性能最好(中文除外)"
+    assert zh_cn["provider.local_qwen.description"] == "由电脑的 CPU 直接运行模型，不占用显存"

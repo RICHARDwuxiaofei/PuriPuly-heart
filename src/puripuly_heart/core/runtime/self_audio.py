@@ -34,7 +34,7 @@ class SelfAudioRuntime:
         "_last_close_exception",
     )
     stop_ingress = "stop microphone audio producer and invalidate VAD generation"
-    toggle_off_policy = "toggle-off drains STT separately, then cancels/closes the mic loop"
+    toggle_off_policy = "toggle-off immediately closes STT, then cancels/closes the mic loop"
     shutdown_policy = "app shutdown cancels mic loop and closes microphone source without STT drain"
     late_callback_rule = "generation guard rejects late self VAD callbacks"
 

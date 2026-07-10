@@ -1,0 +1,48 @@
+{
+  "baseline": {
+    "identity": "v2.2.2@e2df705",
+    "commit": "957731aa87fdc96681004764626a90901a9a670b",
+    "trace": "baseline_normalized_golden.json"
+  },
+  "current": {
+    "identity": "work/iw-vnext-architecture-completion",
+    "commit": "b4ace2631793aa1a1e384c0440b8ec7f315559ae",
+    "trace": "current_normalized_trace.json",
+    "working_tree_repairs": ["P-003", "P-012", "P-017", "P-020", "P-034", "P-035"],
+    "repair_manifest": {
+      "files": [
+        "src/puripuly_heart/config/prompts.py",
+        "src/puripuly_heart/core/runtime/provider_handle.py",
+        "src/puripuly_heart/core/runtime/self_audio.py",
+        "src/puripuly_heart/core/stt/controller.py",
+        "src/puripuly_heart/ui/controller.py",
+        "src/puripuly_heart/data/i18n/zh-CN.json"
+      ],
+      "production_source_sha256": "be4a818a0d060d7b6199b815ea2ca1ae055d21c11b59ef9c960bd106f2c8f944",
+      "git_binary_patch_sha256": "a76a06a2e670b9ed6eddfe7e4db48c46f888abc727f34f842bf54cacb2586a4a"
+    },
+    "repair_base": "b4ace2631793aa1a1e384c0440b8ec7f315559ae"
+  },
+  "runner": "tests/compatibility/differential_probe.py",
+  "sha256": {
+    "runner": "5f9252d28e091d21dd7f506ec2d384c2e7ab9993add235a182001dea156c7961",
+    "baseline_trace": "fdb3e1f58b13b83445967733ca737f17823e385efb1f5f85442161cb4224b78e",
+    "current_trace": "cc952ad1a8294cae0df0be5c303be698eeb7d672b71252c6f14800c68922f6c5",
+    "difference_rules": "48b2c253511110aa0d7984d402bf6163206d9f729bb867a2989db977605fbe0b"
+  },
+  "scenario_sha256": {
+    "runner": "429a77a2d4b223517a1e7cbdf1dcb8f77593660d977549ecb37abbbc9a3498cc",
+    "structured_runner": "8c6bf8cd57899730972be31f0096ea8ce4349d43fe7b37695b87756fb4b3e071",
+    "traces": "cf0d20c9437a5fe28d192ff93c29187cc3798aa749ae86c3b83e2845abfdae44",
+    "baseline_nodes": "a346ee8bea5c9e10240926e50c0bfa4079926299e189e2d1f9f4e9cef508da9c",
+    "current_nodes": "92767adfa173c0fe41947d09f395aee65ec4f68de4b961eafc8f8752c7604e4a",
+    "field_node_indexes": "07e0619746ac60eb6ab2f7eb14aa13d66092a5b459fefd62ccb9ebf2b8d054f0"
+  },
+  "execution": "Independent subprocesses with each source tree first on sys.path; fixed sources use GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM=1, and git -c core.autocrlf=false -c core.eol=lf archive so user Git configuration cannot alter bytes; current repair inventory and binary patch are always compared directly with base b4ace2631793aa1a1e384c0440b8ec7f315559ae so unstaged, staged, and committed states have identical provenance; prompt state is temporary, providers are deterministic fakes, and no secrets or network are used.",
+  "normalization": [
+    "Identity is retained for provenance and excluded from behavior comparison.",
+    "Missing current legacy fallback alias and fixed enum none both normalize to none."
+  ],
+  "approved_difference_rules": "approved_difference_rules.json",
+  "result": "reproduced"
+}
