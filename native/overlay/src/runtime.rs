@@ -6,6 +6,7 @@ use futures_util::FutureExt;
 use serde_json::json;
 use thiserror::Error;
 use tokio::io::{self, AsyncWriteExt};
+use tokio::sync::mpsc;
 use tokio::time::{sleep_until, Instant};
 
 use crate::bridge::{BridgeClient, BridgeError, BridgeIncoming, OverlayBridgeEvent};
@@ -123,7 +124,7 @@ impl RuntimeFailure {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct OverlayRuntime {
+pub struct PresentationRuntime {
     ready: bool,
     first_texture_submitted: bool,
     overlay_visible: bool,
@@ -217,7 +218,9 @@ struct FrameStageDurations {
     receive_to_submit_us: Option<u128>,
 }
 
-impl OverlayRuntime {
+pub type OverlayRuntime = PresentationRuntime;
+
+impl PresentationRuntime {
     pub fn new(snapshot: OverlayPresentationSnapshot) -> Self {
         let seeded_peer_ids = peer_overlay_first_emit_block_ids_from_snapshot(&snapshot);
         let seen_peer_overlay_ids = seeded_peer_ids.iter().cloned().collect::<HashSet<_>>();
@@ -331,6 +334,14 @@ impl OverlayRuntime {
 
     pub fn clear_redraw_flag(&mut self) {
         self.redraw_requested = false;
+    }
+
+    pub fn request_native_presentation_retry(&mut self) -> bool {
+        if self.stopped {
+            return false;
+        }
+        self.redraw_requested = true;
+        true
     }
 
     fn apply_runtime_logging_mode(
@@ -497,25 +508,31 @@ impl OverlayRuntime {
     pub async fn handle_event(&mut self, event: OverlayBridgeEvent) -> Result<(), RuntimeFailure> {
         match event {
             OverlayBridgeEvent::Shutdown => {
-                self.stopped = true;
-                self.presentation_diagnostics.shutdown();
-                self.last_presentation_correlation = None;
-                self.last_presentation_backend = None;
+                self.shutdown_presentation();
                 Ok(())
             }
         }
     }
 
     pub async fn handle_bridge_loss_for_test(&mut self) -> Result<(), RuntimeFailure> {
-        self.stopped = true;
-        self.presentation_diagnostics.shutdown();
-        self.last_presentation_correlation = None;
-        self.last_presentation_backend = None;
-        if self.ready {
+        let was_ready = self.ready;
+        self.shutdown_presentation();
+        if was_ready {
             Err(RuntimeFailure::RuntimeDisconnected)
         } else {
             Ok(())
         }
+    }
+
+    fn shutdown_presentation(&mut self) {
+        self.stopped = true;
+        self.redraw_requested = false;
+        self.hide_deadline = None;
+        self.overlay_visible = false;
+        self.first_texture_submitted = false;
+        self.presentation_diagnostics.shutdown();
+        self.last_presentation_correlation = None;
+        self.last_presentation_backend = None;
     }
 
     pub async fn emit_ready(
@@ -1125,6 +1142,150 @@ impl OverlayRuntime {
 
     pub fn presentation_diagnostics(&self) -> &PresentationDiagnostics {
         &self.presentation_diagnostics
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NativePresentationRetryHandle {
+    sender: mpsc::Sender<()>,
+}
+
+impl NativePresentationRetryHandle {
+    pub fn request(&self) -> bool {
+        match self.sender.try_send(()) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(())) => true,
+            Err(mpsc::error::TrySendError::Closed(())) => false,
+        }
+    }
+}
+
+pub struct NativePresentationOwner<S: OverlayFrameSubmitter> {
+    runtime: PresentationRuntime,
+    renderer: Option<CaptionRenderer>,
+    openvr: Option<S>,
+    retry_sender: Option<mpsc::Sender<()>>,
+    retry_receiver: mpsc::Receiver<()>,
+}
+
+impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
+    pub fn new(
+        snapshot: OverlayPresentationSnapshot,
+        renderer: CaptionRenderer,
+        openvr: S,
+    ) -> Self {
+        let (retry_sender, retry_receiver) = mpsc::channel(1);
+        Self {
+            runtime: PresentationRuntime::new(snapshot),
+            renderer: Some(renderer),
+            openvr: Some(openvr),
+            retry_sender: Some(retry_sender),
+            retry_receiver,
+        }
+    }
+
+    pub fn runtime(&self) -> &PresentationRuntime {
+        &self.runtime
+    }
+
+    pub fn retry_handle(&self) -> NativePresentationRetryHandle {
+        NativePresentationRetryHandle {
+            sender: self
+                .retry_sender
+                .as_ref()
+                .expect("active native presentation owner")
+                .clone(),
+        }
+    }
+
+    pub fn resources_released(&self) -> bool {
+        self.renderer.is_none() && self.openvr.is_none() && self.retry_sender.is_none()
+    }
+
+    pub async fn run(
+        &mut self,
+        bridge: &mut BridgeClient,
+        logger: &OverlayLogger,
+    ) -> Result<(), RuntimeFailure> {
+        let initial_result = {
+            let renderer = self.renderer.as_ref().expect("active renderer");
+            let openvr = self.openvr.as_mut().expect("active OpenVR session");
+            self.runtime
+                .submit_initial_frame_message_aware(renderer, openvr, bridge, logger)
+                .await
+        };
+        if let Err(error) = initial_result {
+            self.teardown();
+            return Err(error);
+        }
+        if self.runtime.is_stopped() {
+            self.teardown();
+            return Ok(());
+        }
+
+        let result = self.run_owned_event_loop(bridge, logger).await;
+        self.teardown();
+        result
+    }
+
+    async fn run_owned_event_loop(
+        &mut self,
+        bridge: &mut BridgeClient,
+        logger: &OverlayLogger,
+    ) -> Result<(), RuntimeFailure> {
+        let mut pending_message = None;
+        loop {
+            let hide_deadline = self.runtime.hide_deadline;
+            let message = if let Some(message) = pending_message.take() {
+                Some(message)
+            } else {
+                tokio::select! {
+                    biased;
+                    retry = self.retry_receiver.recv() => {
+                        if retry.is_none() {
+                            return Ok(());
+                        }
+                        self.runtime.request_native_presentation_retry();
+                        let renderer = self.renderer.as_ref().expect("active renderer");
+                        let openvr = self.openvr.as_mut().expect("active OpenVR session");
+                        pending_message = self.runtime
+                            .submit_frame_if_needed_with_timing(
+                                renderer, openvr, bridge, logger, None, None, true,
+                            )
+                            .await?;
+                        None
+                    }
+                    _ = sleep_until(hide_deadline.unwrap_or_else(Instant::now)), if hide_deadline.is_some() => {
+                        let openvr = self.openvr.as_mut().expect("active OpenVR session");
+                        self.runtime.handle_hide_deadline(openvr, logger).await?;
+                        None
+                    }
+                    message = bridge.next_message() => Some(message)
+                }
+            };
+            if let Some(message) = message {
+                let renderer = self.renderer.as_ref().expect("active renderer");
+                let openvr = self.openvr.as_mut().expect("active OpenVR session");
+                let (continue_running, preempted_message) = self
+                    .runtime
+                    .handle_bridge_message(message, renderer, openvr, bridge, logger)
+                    .await?;
+                if !continue_running {
+                    return Ok(());
+                }
+                pending_message = preempted_message;
+            }
+        }
+    }
+
+    fn teardown(&mut self) {
+        self.retry_sender = None;
+        self.retry_receiver.close();
+        self.runtime.shutdown_presentation();
+        if let Some(openvr) = self.openvr.as_mut() {
+            let _ = openvr.set_overlay_visible(false);
+        }
+        self.openvr = None;
+        self.renderer = None;
     }
 }
 
@@ -1777,7 +1938,7 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
         return startup_error.exit_code();
     }
 
-    let (renderer, mut openvr) = match initialize_runtime_resources(&manifest, &logger).await {
+    let (renderer, openvr) = match initialize_runtime_resources(&manifest, &logger).await {
         Ok(resources) => resources,
         Err(error) => {
             let _ = bridge.close().await;
@@ -1786,41 +1947,35 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
         }
     };
 
-    let mut runtime = OverlayRuntime::new(snapshot);
+    let mut owner = NativePresentationOwner::new(snapshot, renderer, openvr);
     let initial_outcome = SnapshotApplyOutcome::Applied {
-        incoming_revision: runtime.state().snapshot().revision,
-        current_revision: runtime.state().snapshot().revision,
-        visual_changed: runtime.redraw_requested(),
-        redraw_requested: runtime.redraw_requested(),
+        incoming_revision: owner.runtime().state().snapshot().revision,
+        current_revision: owner.runtime().state().snapshot().revision,
+        visual_changed: owner.runtime().redraw_requested(),
+        redraw_requested: owner.runtime().redraw_requested(),
     };
     let _ = logger
         .info(format_state_snapshot_log(
             &initial_outcome,
-            runtime.state(),
-            runtime.redraw_requested(),
+            owner.runtime().state(),
+            owner.runtime().redraw_requested(),
         ))
         .await;
-    let _ = runtime
+    let _ = owner
+        .runtime
         .emit_snapshot_slot_correlation_if_changed(&logger)
         .await;
-    if let Err(error) = runtime
-        .submit_initial_frame_message_aware(&renderer, &mut openvr, &mut bridge, &logger)
-        .await
-    {
-        let startup_error = startup_error_from_runtime_failure(error);
-        let _ = bridge.close().await;
-        emit_startup_failure(&logger, &startup_error).await;
-        return startup_error.exit_code();
-    }
-    if runtime.is_stopped() {
-        let _ = bridge.close().await;
-        return 0;
-    }
-
-    let runtime_result = runtime
-        .run_event_loop(&mut bridge, &renderer, &mut openvr, &logger)
-        .await;
+    let runtime_result = owner.run(&mut bridge, &logger).await;
+    let reached_ready = owner.runtime().ready_sent();
     let _ = bridge.close().await;
+
+    if let Err(error) = runtime_result.as_ref() {
+        if !reached_ready {
+            let startup_error = startup_error_from_runtime_failure(error.clone());
+            emit_startup_failure(&logger, &startup_error).await;
+            return startup_error.exit_code();
+        }
+    }
 
     match runtime_result {
         Ok(()) => 0,
@@ -1949,7 +2104,7 @@ fn create_runtime_renderer(
     }
 }
 
-impl OverlayRuntime {
+impl PresentationRuntime {
     pub fn caption_blocks(&self) -> Vec<CaptionBlock> {
         self.caption_blocks_for_render(false)
     }

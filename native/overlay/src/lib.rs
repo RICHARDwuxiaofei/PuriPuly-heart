@@ -32,7 +32,10 @@ pub use renderer::{
     FontWeight, RenderedFrame, ResolvedFontStyle, StyleBucketSourceCount, TextFamilyKey,
     TextLocaleKey, TextStyleDescriptor, TextStyleKey, VisibleCaptionBlock,
 };
-pub use runtime::{run_cli, run_with_manifest, OverlayRuntime, RuntimeFailure, StartupError};
+pub use runtime::{
+    run_cli, run_with_manifest, NativePresentationOwner, OverlayRuntime, RuntimeFailure,
+    StartupError,
+};
 pub use state::{
     OverlayCalibration, OverlayPresentationBlock, OverlayPresentationBlockVariant,
     OverlayPresentationCalibration, OverlayPresentationSnapshot, OverlayScene, OverlaySlot,

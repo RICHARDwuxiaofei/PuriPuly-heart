@@ -1,7 +1,10 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
@@ -10,12 +13,12 @@ use puripuly_heart_overlay::logging::OverlayLogger;
 use puripuly_heart_overlay::runtime::SnapshotApplyOutcome;
 use puripuly_heart_overlay::{
     run_with_manifest, submit_texture, validate_manifest, AdapterIdentity, BridgeClient,
-    CaptionBlock, CaptionChannel, CaptionRenderer, FakeOpenVr, OpenVrError, OverlayBridgeEvent,
-    OverlayFrameSubmitter, OverlayLoggingMode, OverlayManifest, OverlayPresentationBlock,
-    OverlayPresentationBlockVariant, OverlayPresentationCalibration, OverlayPresentationSnapshot,
-    OverlayRuntime, PresentationBackend, PresentationOutcome, PresentationStage,
-    PresentationStrategy, ReadinessOutcome, RenderedFrame, RuntimeFailure, StartupError,
-    EXPECTED_CONTRACT_VERSION,
+    CaptionBlock, CaptionChannel, CaptionRenderer, FakeOpenVr, NativePresentationOwner,
+    OpenVrError, OverlayBridgeEvent, OverlayFrameSubmitter, OverlayLoggingMode, OverlayManifest,
+    OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
+    OverlayPresentationSnapshot, OverlayRuntime, PresentationBackend, PresentationOutcome,
+    PresentationStage, PresentationStrategy, ReadinessOutcome, RenderedFrame, RuntimeFailure,
+    StartupError, EXPECTED_CONTRACT_VERSION,
 };
 
 fn test_manifest() -> OverlayManifest {
@@ -299,6 +302,50 @@ impl OverlayFrameSubmitter for RecordingSubmitter {
     }
 }
 
+#[derive(Default)]
+struct OwnedSubmitterState {
+    operations: Mutex<Vec<&'static str>>,
+    drops: AtomicUsize,
+}
+
+struct OwnedSubmitterProbe {
+    state: Arc<OwnedSubmitterState>,
+    fail_submit: bool,
+}
+
+impl OverlayFrameSubmitter for OwnedSubmitterProbe {
+    fn submit_frame(&mut self, frame: &RenderedFrame) -> Result<(), OpenVrError> {
+        self.state
+            .operations
+            .lock()
+            .unwrap()
+            .push(if frame.layout().visible_blocks.is_empty() {
+                "submit:empty"
+            } else {
+                "submit:text"
+            });
+        if self.fail_submit {
+            return Err(OpenVrError::Submit("owned submit failed".into()));
+        }
+        Ok(())
+    }
+
+    fn set_overlay_visible(&mut self, visible: bool) -> Result<(), OpenVrError> {
+        self.state
+            .operations
+            .lock()
+            .unwrap()
+            .push(if visible { "show" } else { "hide" });
+        Ok(())
+    }
+}
+
+impl Drop for OwnedSubmitterProbe {
+    fn drop(&mut self) {
+        self.state.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 async fn connect_test_bridge() -> (
     BridgeClient,
     tokio::task::JoinHandle<Vec<serde_json::Value>>,
@@ -448,6 +495,7 @@ async fn event_loop_cancels_stale_readiness_submits_latest_then_handles_shutdown
         ))
         .await
         .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
         tokio::time::sleep(Duration::from_millis(20)).await;
     });
     let mut manifest = test_manifest();
@@ -1651,6 +1699,178 @@ async fn runtime_self_refresh_keeps_logical_identity_and_fresh_render_cadence() 
         .map(|record| (record.logical_revision, record.render_generation))
         .collect::<Vec<_>>();
     assert_eq!(submissions, vec![(1, Some(1)), (2, Some(2)), (2, Some(3))]);
+    drop(bridge);
+    let _ = server.await.unwrap();
+}
+
+#[tokio::test]
+async fn native_owner_retries_unchanged_caption_with_new_generation() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let logger = test_logger("native-owner-retry-generation").await;
+    let (mut bridge, server) = connect_test_bridge().await;
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![block("self:retry", "self", "stable", "", true)],
+    });
+    let mut submitter = RecordingSubmitter::default();
+
+    runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+    assert!(runtime.request_native_presentation_retry());
+    assert!(runtime.request_native_presentation_retry());
+    runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+
+    let submissions = runtime
+        .presentation_diagnostics()
+        .records()
+        .iter()
+        .filter(|record| record.stage == PresentationStage::SubmissionReturned)
+        .map(|record| (record.logical_revision, record.render_generation))
+        .collect::<Vec<_>>();
+    assert_eq!(submissions, vec![(1, Some(1)), (1, Some(2))]);
+    assert_eq!(submitter.calls, 2);
+
+    runtime
+        .handle_event(OverlayBridgeEvent::Shutdown)
+        .await
+        .unwrap();
+    assert!(!runtime.request_native_presentation_retry());
+    assert!(!runtime.redraw_requested());
+    drop(bridge);
+    let _ = server.await.unwrap();
+}
+
+#[test]
+fn native_owner_coalesces_to_latest_snapshot_and_rejects_stale_overwrite() {
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
+    for revision in 1..=32 {
+        let outcome = runtime.apply_snapshot(OverlayPresentationSnapshot {
+            revision,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![block(
+                "self:rapid",
+                "self",
+                &format!("synthetic-{revision}"),
+                "",
+                true,
+            )],
+        });
+        assert!(matches!(outcome, SnapshotApplyOutcome::Applied { .. }));
+    }
+    let stale = runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 12,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![block("self:rapid", "self", "stale", "", true)],
+    });
+
+    assert!(matches!(stale, SnapshotApplyOutcome::Ignored { .. }));
+    assert_eq!(runtime.state().snapshot().revision, 32);
+    assert_eq!(
+        runtime.state().snapshot().blocks[0].primary_text,
+        "synthetic-32"
+    );
+}
+
+#[tokio::test]
+async fn production_owner_coalesces_retry_and_releases_resources_on_shutdown() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 1,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": [block("self:owner", "self", "stable", "", true)]
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        ws.send(Message::Text(
+            json!({"type": "shutdown"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let state = Arc::new(OwnedSubmitterState::default());
+    let submitter = OwnedSubmitterProbe {
+        state: state.clone(),
+        fail_submit: false,
+    };
+    let mut owner = NativePresentationOwner::new(
+        snapshot,
+        CaptionRenderer::new_for_test().unwrap(),
+        submitter,
+    );
+    let retry = owner.retry_handle();
+    assert!(retry.request());
+    assert!(retry.request());
+
+    owner
+        .run(&mut bridge, &test_logger("production-owner-shutdown").await)
+        .await
+        .unwrap();
+
+    assert!(owner.resources_released());
+    assert!(!retry.request());
+    assert_eq!(state.drops.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        state
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|operation| operation.starts_with("submit"))
+            .count(),
+        2
+    );
+    assert_eq!(state.operations.lock().unwrap().last(), Some(&"hide"));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn production_owner_releases_resources_on_terminal_submission_failure() {
+    let (mut bridge, server) = connect_test_bridge().await;
+    let state = Arc::new(OwnedSubmitterState::default());
+    let submitter = OwnedSubmitterProbe {
+        state: state.clone(),
+        fail_submit: true,
+    };
+    let mut owner = NativePresentationOwner::new(
+        OverlayPresentationSnapshot::default(),
+        CaptionRenderer::new_for_test().unwrap(),
+        submitter,
+    );
+    let retry = owner.retry_handle();
+
+    let failure = owner
+        .run(&mut bridge, &test_logger("production-owner-failure").await)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(failure, RuntimeFailure::OpenVr(_)));
+    assert!(owner.resources_released());
+    assert!(!retry.request());
+    assert_eq!(state.drops.load(Ordering::SeqCst), 1);
+    assert_eq!(state.operations.lock().unwrap().last(), Some(&"hide"));
     drop(bridge);
     let _ = server.await.unwrap();
 }
