@@ -138,8 +138,16 @@ class FakeLanguageModal:
     opened: list[tuple[str, list[str]]] = []
     languages: list[tuple[str, str]] = []
 
-    def __init__(self, page, languages, on_select, label_for_code=None):
-        _ = (page, label_for_code)
+    def __init__(
+        self,
+        page,
+        languages,
+        on_select,
+        label_for_code=None,
+        description_for_code=None,
+        disabled_codes=None,
+    ):
+        _ = (page, label_for_code, description_for_code, disabled_codes)
         self.__class__.languages = list(languages)
         self.on_select = on_select
 

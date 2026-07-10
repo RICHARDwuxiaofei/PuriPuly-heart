@@ -2894,6 +2894,16 @@ class GuiController:
                 "peer_target_language",
                 merged.languages.peer_target_language,
             )
+        if (
+            merged.provider.peer_stt != STTProviderName.SONIOX
+            and merged.languages.peer_source_mode == "soniox_auto"
+        ):
+            merged.languages.peer_source_mode = "manual"
+            recent_source = merged.languages.recent_source_languages
+            if recent_source:
+                merged.languages.peer_source_language = recent_source[0]
+            else:
+                merged.languages.peer_source_language = merged.languages.source_language
         return merged
 
     def _peer_runtime_should_be_active(self, settings: AppSettings) -> bool:
@@ -6248,29 +6258,30 @@ class GuiController:
 
         await self._preserve_github_star_prompt_observation_before_settings_replace(next_settings)
 
-        if settings is not None and not force_rebuild_llm:
-            routed = (
-                await self._apply_order21_order22_order24_provider_settings_via_mutation_services(
+        try:
+            if settings is not None and not force_rebuild_llm:
+                routed = await self._apply_order21_order22_order24_provider_settings_via_mutation_services(
                     next_settings,
                 )
-            )
-            if routed:
-                return
-            routed = await self._apply_translation_provider_settings_via_mutation_service(
-                next_settings,
-            )
-            if routed:
-                return
-            routed = await self._apply_ui_prompt_clipboard_state_settings_via_mutation_service(
-                next_settings,
-            )
-            if routed:
-                return
+                if routed:
+                    return
+                routed = await self._apply_translation_provider_settings_via_mutation_service(
+                    next_settings,
+                )
+                if routed:
+                    return
+                routed = await self._apply_ui_prompt_clipboard_state_settings_via_mutation_service(
+                    next_settings,
+                )
+                if routed:
+                    return
 
-        await self._apply_providers_direct(
-            next_settings,
-            force_rebuild_llm=force_rebuild_llm,
-        )
+            await self._apply_providers_direct(
+                next_settings,
+                force_rebuild_llm=force_rebuild_llm,
+            )
+        finally:
+            self._sync_ui_from_settings()
 
     def _build_provider_runtime_apply_plan(
         self,
@@ -8752,6 +8763,9 @@ class GuiController:
                 settings.languages.recent_target_languages,
             )
             dash.on_recent_languages_change = self._on_recent_languages_change
+            dash.set_peer_auto_detect_available(
+                settings.provider.peer_stt == STTProviderName.SONIOX
+            )
 
         with contextlib.suppress(Exception):
             view_settings = getattr(self.app, "view_settings", None)

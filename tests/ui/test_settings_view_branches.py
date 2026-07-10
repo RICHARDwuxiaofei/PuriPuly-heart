@@ -4138,7 +4138,10 @@ def test_on_peer_stt_selected_refreshes_api_visibility_and_redraws_immediately(
     assert pending is not None
     assert pending.provider.peer_stt == STTProviderName.SONIOX
     assert view._peer_stt_text.content.value == t("provider.soniox")
-    assert api_key_updates == ["peer_stt_text", "qwen_region_btn", "api_keys_column"]
+    assert "peer_stt_text" in api_key_updates
+    assert "qwen_region_btn" in api_key_updates
+    assert "api_keys_column" in api_key_updates
+    assert view._peer_auto_languages_card.visible is True
 
 
 def test_peer_auto_detection_languages_card_is_visible_only_for_peer_soniox(
@@ -5401,7 +5404,7 @@ def test_api_tab_places_independent_managed_key_card_above_api_keys(
     view, _ = _make_settings_view(monkeypatch)
     api_controls = _subtab_controls(view, "api")
 
-    assert len(api_controls) == 5
+    assert len(api_controls) == 6
     assert _row_card_titles(api_controls[0]) == [
         t("settings.section.stt"),
         t("settings.section.peer_stt"),
@@ -5416,8 +5419,9 @@ def test_api_tab_places_independent_managed_key_card_above_api_keys(
     assert api_controls[2] is view._local_llm_connection_card
     assert api_controls[3] is view._managed_key_card
     assert _row_card_titles(api_controls[3]) == [t("settings.managed_key.title")]
-    assert api_controls[4] is not view._api_keys_column
-    assert _row_card_titles(api_controls[4]) == [t("settings.section.api_keys")]
+    assert api_controls[4] is view._peer_auto_languages_card
+    assert api_controls[5] is not view._api_keys_column
+    assert _row_card_titles(api_controls[5]) == [t("settings.section.api_keys")]
 
 
 def test_api_tab_primary_value_typography_is_consistent_across_rows(

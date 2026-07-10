@@ -66,6 +66,7 @@ class DashboardView(ft.Column):
         self._peer_source_lang_code = "en"
         self._peer_target_lang_code = "ko"
         self._peer_source_mode = "manual"
+        self._peer_auto_detect_available = True
         self._message_input_focused = False
 
         # Recent languages (max 3 each)
@@ -330,6 +331,14 @@ class DashboardView(ft.Column):
                 if code == PEER_SOURCE_MODE_SONIOX_AUTO
                 else language_name(code)
             ),
+            description_for_code=lambda code: (
+                t("dashboard.peer_source.automatic_soniox.description")
+                if code == PEER_SOURCE_MODE_SONIOX_AUTO
+                else ""
+            ),
+            disabled_codes=(
+                set() if self._peer_auto_detect_available else {PEER_SOURCE_MODE_SONIOX_AUTO}
+            ),
         )
         modal.open(
             current=(
@@ -337,11 +346,7 @@ class DashboardView(ft.Column):
                 if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO
                 else self._effective_peer_source_lang_code()
             ),
-            recent=(
-                []
-                if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO
-                else self._recent_source_langs
-            ),
+            recent=self._recent_source_langs,
         )
 
     def _open_peer_target_dialog(self):
@@ -482,6 +487,9 @@ class DashboardView(ft.Column):
         self._peer_source_mode = peer_source_mode
         self._update_input_font()
         self._refresh_language_card()
+
+    def set_peer_auto_detect_available(self, available: bool) -> None:
+        self._peer_auto_detect_available = bool(available)
 
     def set_translation_enabled(self, enabled: bool) -> None:
         self.is_translation_on = bool(enabled)

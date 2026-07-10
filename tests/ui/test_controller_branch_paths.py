@@ -173,6 +173,9 @@ class DummyDashboard:
     def set_recent_languages(self, source: list[str], target: list[str]) -> None:
         self.recent_languages = (source, target)
 
+    def set_peer_auto_detect_available(self, available: bool) -> None:
+        pass
+
     def set_managed_trial_state(self, **state: object) -> None:
         self.managed_trial_calls.append(dict(state))
         self.managed_trial_state = dict(state)

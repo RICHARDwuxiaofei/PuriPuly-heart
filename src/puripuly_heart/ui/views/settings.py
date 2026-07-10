@@ -55,6 +55,7 @@ from puripuly_heart.ui.components.settings import (
     ApiKeyField,
     AudioSettings,
     CustomVocabularyTagEditor,
+    LanguageHintEditor,
     OptionItem,
     PromptEditor,
     SettingsModal,
@@ -900,9 +901,9 @@ class SettingsView(ft.Column):
             size=16,
             color=COLOR_NEUTRAL,
         )
-        self._peer_auto_languages_editor = CustomVocabularyTagEditor(
-            on_add_terms=self._on_peer_auto_languages_add,
-            on_remove_term=self._on_peer_auto_languages_remove,
+        self._peer_auto_languages_editor = LanguageHintEditor(
+            on_add=self._on_peer_auto_languages_add,
+            on_remove=self._on_peer_auto_languages_remove,
         )
         self._peer_auto_languages_card = self._wrap_card(
             ft.Column(
@@ -1074,7 +1075,6 @@ class SettingsView(ft.Column):
                 # self._qwen_region_row removed
                 self._deepgram_key,
                 self._soniox_key,
-                self._peer_auto_languages_card,
                 self._google_key,
                 self._deepseek_key,
                 self._cerebras_key,
@@ -2060,6 +2060,7 @@ class SettingsView(ft.Column):
                     self._translation_connection_row,
                     self._local_llm_connection_card,
                     self._managed_key_card,
+                    self._peer_auto_languages_card,
                     api_keys_row,
                 ],
                 "general": [
@@ -2313,6 +2314,11 @@ class SettingsView(ft.Column):
             peer_auto_languages_title.value = t("settings.peer_auto_languages.title")
         if peer_auto_languages_description is not None:
             peer_auto_languages_description.value = t("settings.peer_auto_languages.description")
+        peer_auto_languages_editor = getattr(self, "_peer_auto_languages_editor", None)
+        if peer_auto_languages_editor is not None and hasattr(
+            peer_auto_languages_editor, "apply_locale"
+        ):
+            peer_auto_languages_editor.apply_locale()
         if self.page:
             for control in (
                 self._prompt_for_text,
@@ -2339,10 +2345,11 @@ class SettingsView(ft.Column):
     def _sync_peer_auto_languages_editor(self, settings: AppSettings | None = None) -> None:
         if not hasattr(self, "_peer_auto_languages_editor"):
             return
+        if self.page is not None and hasattr(self._peer_auto_languages_editor, "set_page"):
+            self._peer_auto_languages_editor.set_page(self.page)
         settings = settings or self._settings
         languages = [] if settings is None else settings.languages.peer_expected_languages
         self._peer_auto_languages_editor.set_terms(list(languages))
-        self._peer_auto_languages_editor.clear_input()
 
     def _set_peer_auto_languages(self, languages: list[str]) -> None:
         if self._settings is None:
@@ -2356,12 +2363,10 @@ class SettingsView(ft.Column):
         self._sync_peer_auto_languages_editor()
         self._emit_settings_changed()
 
-    def _on_peer_auto_languages_add(self, languages: list[str]) -> None:
+    def _on_peer_auto_languages_add(self, language: str) -> None:
         if self._settings is None:
             return
-        self._set_peer_auto_languages(
-            [*self._settings.languages.peer_expected_languages, *languages]
-        )
+        self._set_peer_auto_languages([*self._settings.languages.peer_expected_languages, language])
 
     def _on_peer_auto_languages_remove(self, language: str) -> None:
         if self._settings is None:
@@ -3130,6 +3135,11 @@ class SettingsView(ft.Column):
         if peer_auto_languages_card is not None:
             peer_auto_languages_card.visible = peer_stt == STTProviderName.SONIOX
             self._sync_peer_auto_languages_editor(settings)
+            if self.page:
+                try:
+                    peer_auto_languages_card.update()
+                except Exception:
+                    pass
 
         self._google_key.visible = llm == LLMProviderName.GEMINI
         self._sync_managed_key_card(settings)
