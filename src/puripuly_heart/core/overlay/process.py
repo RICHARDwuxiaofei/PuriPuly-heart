@@ -479,6 +479,7 @@ class OverlayProcessManager:
     _executable_path: Path | None = field(init=False, default=None)
     _executable_mtime: float | None = field(init=False, default=None)
     _failure_dumped: bool = field(init=False, default=False)
+    _shutdown_requested: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         self.logging_mode = normalize_overlay_logging_mode(self.logging_mode)
@@ -505,6 +506,7 @@ class OverlayProcessManager:
         self._last_transition = "spawn"
         self._last_exit_code = None
         self._failure_dumped = False
+        self._shutdown_requested = False
         self.restart_scheduled = False
         self.failure_reason = None
 
@@ -556,6 +558,11 @@ class OverlayProcessManager:
         self._cleanup_manifest()
         self.state = "off"
         self._current_phase = "off"
+        self._shutdown_requested = False
+
+    def mark_shutdown_requested(self) -> None:
+        self._shutdown_requested = True
+        self._record_process("shutdown_requested", phase=self._current_phase)
 
     def _build_manifest(self) -> OverlayLaunchManifest:
         return OverlayLaunchManifest(
@@ -733,7 +740,13 @@ class OverlayProcessManager:
                     self._last_exit_code = exit_code
                     self._record_process("process_exit", phase="connected", exit_code=exit_code)
                     if self.state == "connected" and exit_code is not None:
-                        await self._fail("runtime_crashed", terminate_process=False)
+                        if self._shutdown_requested and exit_code == 0:
+                            self._process = None
+                            self._cleanup_manifest()
+                            self.state = "stopping"
+                            self._current_phase = "expected_shutdown"
+                        else:
+                            await self._fail("runtime_crashed", terminate_process=False)
                     return
         finally:
             for task in (event_task, bridge_task, exit_task):

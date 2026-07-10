@@ -63,6 +63,11 @@ class FakeManager:
     def __init__(self, events: list[str]) -> None:
         self.events = events
         self.stop_calls = 0
+        self.mark_shutdown_requested_calls = 0
+
+    def mark_shutdown_requested(self) -> None:
+        self.mark_shutdown_requested_calls += 1
+        self.events.append("manager.mark_shutdown_requested")
 
     async def stop(self) -> None:
         self.stop_calls += 1
@@ -288,6 +293,7 @@ async def test_overlay_runtime_handle_close_controls_tasks_and_resources() -> No
     assert monitor_task.done()
     assert renderer_task.done()
     assert events == [
+        "manager.mark_shutdown_requested",
         "presenter.broadcast_shutdown",
         "start.cancelled",
         "monitor.cancelled",
@@ -303,6 +309,7 @@ async def test_overlay_runtime_handle_close_controls_tasks_and_resources() -> No
     assert presenter.detach_bridge_calls == 1
     assert presenter.reset_scene_calls == 1
     assert manager.stop_calls == 1
+    assert manager.mark_shutdown_requested_calls == 1
     assert bridge.stop_calls == 1
     assert hub.overlay_sink is None
     assert hub.overlay_diagnostics is None
@@ -340,6 +347,34 @@ async def test_overlay_runtime_handle_close_detaches_hub_ingress_before_shutdown
     assert hub.overlay_sink is None
     assert hub.overlay_diagnostics is None
     assert hub.reset_overlay_preview_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_overlay_runtime_marks_shutdown_before_broadcast_grace_exit_and_stop() -> None:
+    events: list[str] = []
+
+    class ExitingPresenter(FakePresenter):
+        async def broadcast_shutdown(self) -> None:
+            self.broadcast_shutdown_calls += 1
+            self.events.append("presenter.broadcast_shutdown")
+            await asyncio.sleep(0)
+            self.events.append("native.exit:0")
+
+    presenter = ExitingPresenter(events)
+    manager = FakeManager(events)
+    handle = OverlayRuntimeHandle(shutdown_grace_s=0.001)
+    handle.attach_presenter(presenter)
+    handle.attach_process_manager(manager)
+
+    await handle.close(preserve_presenter_state=True, hub=None)
+
+    assert events == [
+        "manager.mark_shutdown_requested",
+        "presenter.broadcast_shutdown",
+        "native.exit:0",
+        "presenter.detach_bridge",
+        "manager.stop",
+    ]
 
 
 @pytest.mark.asyncio
@@ -393,6 +428,7 @@ async def test_overlay_runtime_handle_close_surfaces_owned_task_cleanup_failures
 
     assert task.done()
     assert events == [
+        "manager.mark_shutdown_requested",
         "presenter.broadcast_shutdown",
         expected_failure_event,
         "presenter.clear_for_runtime_detach",

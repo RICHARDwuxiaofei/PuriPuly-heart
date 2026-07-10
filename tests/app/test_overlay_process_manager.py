@@ -463,6 +463,59 @@ async def test_overlay_process_manager_maps_post_ready_exit_to_runtime_crashed_w
 
 
 @pytest.mark.asyncio
+async def test_overlay_process_manager_treats_expected_connected_zero_exit_as_graceful(
+    tmp_path: Path,
+) -> None:
+    runner = FakeProcessRunner(ready_event_delay_ms=0)
+    manager = OverlayProcessManager(
+        process_runner=runner,
+        diagnostics_dir=tmp_path,
+    )
+
+    await manager.start()
+    assert manager.state == "connected"
+    manager.mark_shutdown_requested()
+    assert runner.last_process is not None
+    runner.last_process._exit_future.set_result(0)
+    assert manager._monitor_task is not None
+    await manager._monitor_task
+
+    assert manager.state == "stopping"
+    assert manager.failure_reason is None
+    assert manager._failure_dumped is False
+    assert manager._process is None
+    assert manager._manifest_path is None
+
+    await manager.stop()
+
+    assert manager.state == "off"
+
+
+@pytest.mark.asyncio
+async def test_overlay_process_manager_treats_unexpected_connected_zero_exit_as_crash(
+    tmp_path: Path,
+) -> None:
+    runner = FakeProcessRunner(ready_event_delay_ms=0)
+    manager = OverlayProcessManager(
+        process_runner=runner,
+        diagnostics_dir=tmp_path,
+    )
+
+    await manager.start()
+    assert manager.state == "connected"
+    assert runner.last_process is not None
+    runner.last_process._exit_future.set_result(0)
+    assert manager._monitor_task is not None
+    await manager._monitor_task
+
+    assert manager.state == "failed"
+    assert manager.failure_reason == "runtime_crashed"
+    assert manager._failure_dumped is True
+    assert manager._process is None
+    assert manager._manifest_path is None
+
+
+@pytest.mark.asyncio
 async def test_overlay_process_manager_terminates_child_on_startup_timeout() -> None:
     runner = FakeProcessRunner()
     manager = OverlayProcessManager(process_runner=runner, startup_timeout_ms=10)
