@@ -5,11 +5,20 @@ import inspect
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from puripuly_heart.config.paths import default_settings_path
-from puripuly_heart.core.runtime_logging import configure_main_logging
-
 if TYPE_CHECKING:
     from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
+
+
+def configure_main_logging():
+    from puripuly_heart.core.runtime_logging import configure_main_logging as configure
+
+    return configure()
+
+
+def default_settings_path() -> Path:
+    from puripuly_heart.config.paths import default_settings_path as resolve
+
+    return resolve()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +54,18 @@ def build_parser() -> argparse.ArgumentParser:
         "run-desktop-overlay-preview",
         help="Run the desktop Flet overlay preview",
     )
+    desktop_repro = sub.add_parser(
+        "run-desktop-overlay-repro",
+        help="Run Desktop overlay diagnostic repro",
+    )
+    desktop_repro.add_argument("--cycles", type=int, default=100)
+    desktop_repro.add_argument("--dwell-ms", type=int, default=150)
+    desktop_repro.add_argument("--output-dir", type=Path, required=True)
+    verify_desktop_repro = sub.add_parser(
+        "verify-desktop-overlay-repro",
+        help="Verify Desktop overlay repro artifacts",
+    )
+    verify_desktop_repro.add_argument("--output-dir", type=Path, required=True)
 
     sub.add_parser(
         "local-qwen-runtime-check",
@@ -115,6 +136,18 @@ def _run_desktop_overlay_preview() -> int:
     from puripuly_heart.ui.desktop_overlay import main as desktop_overlay_main
 
     return desktop_overlay_main(["--preview"])
+
+
+def _run_desktop_overlay_repro(*, cycles: int, dwell_ms: int, output_dir: Path) -> int:
+    from puripuly_heart.ui.desktop_overlay_repro import run_desktop_overlay_repro
+
+    return run_desktop_overlay_repro(cycles=cycles, dwell_ms=dwell_ms, output_dir=output_dir)
+
+
+def _verify_desktop_overlay_repro(*, output_dir: Path) -> int:
+    from puripuly_heart.core.desktop_overlay_repro_artifacts import verify_desktop_overlay_repro
+
+    return verify_desktop_overlay_repro(output_dir=output_dir)
 
 
 def _load_settings_or_default(
@@ -240,10 +273,19 @@ def _call_load_settings_or_default(
 
 
 def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "run-desktop-overlay-repro":
+        return _run_desktop_overlay_repro(
+            cycles=args.cycles,
+            dwell_ms=args.dwell_ms,
+            output_dir=args.output_dir,
+        )
+    if args.command == "verify-desktop-overlay-repro":
+        return _verify_desktop_overlay_repro(output_dir=args.output_dir)
+
     logging_sinks = configure_main_logging()
     try:
-        parser = build_parser()
-        args = parser.parse_args(argv)
         settings_config_path, explicit_settings_config = _settings_config_path(args)
         if args.command != "run-desktop-overlay":
             args.config = settings_config_path
