@@ -17,6 +17,7 @@
         "src/puripuly_heart/app/ports/application_runtime.py",
         "src/puripuly_heart/app/ports/canonical_settings_persistence.py",
         "src/puripuly_heart/app/ports/canonical_state_repository.py",
+        "src/puripuly_heart/app/ports/post_commit_runtime.py",
         "src/puripuly_heart/app/ports/runtime_apply.py",
         "src/puripuly_heart/app/ports/runtime_resource_factory.py",
         "src/puripuly_heart/app/ports/runtime_resources.py",
@@ -25,6 +26,7 @@
         "src/puripuly_heart/app/services/canonical_state_repositories.py",
         "src/puripuly_heart/app/services/managed_connection_auth.py",
         "src/puripuly_heart/app/services/openrouter_pkce_handoff.py",
+        "src/puripuly_heart/app/services/post_commit_runtime.py",
         "src/puripuly_heart/app/services/resolved_runtime_adapter.py",
         "src/puripuly_heart/app/services/runtime_activation.py",
         "src/puripuly_heart/app/services/secret_settings_transaction.py",
@@ -46,8 +48,8 @@
         "src/puripuly_heart/ui/app.py",
         "src/puripuly_heart/ui/controller.py"
       ],
-      "production_source_sha256": "cd72a3680bd3b6da1ad3d35268c98cf5c6632f88f28db20256f293fd73360674",
-      "source_delta_sha256": "df865a1233b5a59c9ba4576ce3f49d4bbb3e9f46bf65499e60757cf350b564f0"
+      "production_source_sha256": "096e8d40fbe805068211413a4f3e1d7fe53a278d8489b36f6a88fbef0cd6c26d",
+      "source_delta_sha256": "78981b5d34f5ca0bd307d3b1e264b92f4c8d92e7d3ac080dbf3bc130e6d147f7"
     },
     "repair_base": "b4ace2631793aa1a1e384c0440b8ec7f315559ae"
   },
