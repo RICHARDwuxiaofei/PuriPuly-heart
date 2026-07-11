@@ -7,11 +7,12 @@ selected_input:
   sha256: eda96ce61e97c63af60145e39c8f967ebac4b5a8157b8b68e2c84d78c78a6527
 
 current:
-  gate_id: coalesced-presentation
-  cluster_id: coalesced-presentation-c2
+  gate_id: capability-and-target-contract
+  cluster_id: capability-and-target-contract-c1
   work_refs:
-    - verify-phase-one-coalescing-equivalence
-  next_action: blocked
+    - negotiate-native-retry-ownership
+    - scope-retry-intent-to-visible-target
+  next_action: continue
 
 gate_plans:
   - gate_id: evidence-foundation
@@ -36,7 +37,7 @@ gate_plans:
       - id: coalesced-presentation-c2
         work_refs:
           - verify-phase-one-coalescing-equivalence
-        status: blocked
+        status: passed
   - gate_id: capability-and-target-contract
     shape: split
     clusters:
@@ -44,7 +45,7 @@ gate_plans:
         work_refs:
           - negotiate-native-retry-ownership
           - scope-retry-intent-to-visible-target
-        status: pending
+        status: in_progress
       - id: capability-and-target-contract-c2
         work_refs:
           - verify-capability-target-integration
@@ -98,10 +99,15 @@ checkpoints:
     verification: skipped
     review: blocked
     summary: Phase 1 holds because affected-HMD checkpoint-versus-candidate equivalence and DD-002 physical-work input are unavailable; automated success cannot substitute.
+  - id: coalesced-presentation-c2-live-advance
+    gate_id: coalesced-presentation
+    cluster_id: coalesced-presentation-c2
+    decision: pass
+    verification: passed
+    review: pass
+    summary: Same affected-HMD P20 A/B evidence preserved final-state behavior while reducing full, simultaneous, mixed, and alternating physical submissions with zero sampled dropped frames.
 
 open_items:
-  - type: blocker
-    text: Obtain build- and environment-identified affected-HMD checkpoint/candidate Phase-1 equivalence evidence before Phase 2.
   - type: watchpoint
     text: Phase 1 must preserve the two-second envelope and checkpoint identity.
   - type: watchpoint
@@ -110,3 +116,4 @@ open_items:
 notes:
   - Derived from preserved branch work/iw-vr-overlay-adaptive-presentation-hardening at the recorded base commit; that worktree and its ledger are read-only for this run.
   - Source PRD C:/Users/salee/Documents/dev/puripuly_heart/.agents/specs/prd/vr-overlay-coalesced-retry-optimization.md validated at bd23681724a419131f4475d109e2089e91c7f591a1bd4716b854fbb0f9642b7b.
+  - Phase-1 live evidence is recorded at .agents/evidence/vr-overlay-coalesced-retry-phase1.yaml; SteamVR Home-only limits and no shorter-profile selection remain explicit.

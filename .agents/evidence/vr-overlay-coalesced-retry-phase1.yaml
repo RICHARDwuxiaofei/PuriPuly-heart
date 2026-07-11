@@ -1,0 +1,108 @@
+version: 1
+evidence_ref: vr-overlay-coalesced-retry-phase1
+recorded_at: 2026-07-11
+source:
+  bundle_sha256: eda96ce61e97c63af60145e39c8f967ebac4b5a8157b8b68e2c84d78c78a6527
+  prd_sha256: bd23681724a419131f4475d109e2089e91c7f591a1bd4716b854fbb0f9642b7b
+profile:
+  id: P20
+  cadence_ms: 100
+  scheduling_wall_ms: 2000
+environment:
+  platform: Windows
+  runtime: SteamVR Home
+  vr_application_load: not_run
+  hmd_identity: same historically affected local HMD used to reproduce the rapid-final stale/N-1 symptom
+  hmd_model: not_recorded
+  openvr_adapter_luid:
+    high: 0
+    low: 65045
+  renderer_adapter_luid:
+    high: 0
+    low: 65045
+  adapter_match: match
+builds:
+  checkpoint:
+    commit: 92eff4229021189b7e9a82288cfc4eb6d260e838
+    executable_sha256: 50208f603761ba5142e5952cb35bad4a09cfc764714ce9236385e319e37deee0
+  candidate:
+    commit: 29af01f0c5f72ce12eb1c1f116002d7a0dc5bbc9
+    code_commit: da1747ddab0356a302d85e739455a9935577058f
+    executable_sha256: 811ccda4249c4a414fd85bb67492391ef3cdbe7523a1f7cbcc6efb454253c8f0
+runs:
+  - id: full-p20
+    scenarios: [self_stt_sparse, self_translation, peer_stream, peer_final, mixed_simultaneous, mixed_staggered, rapid_final, hide, restore, shutdown]
+    checkpoint:
+      physical_submits: 183
+      logical_retry_completions: 169
+      dropped_frames: 0
+      submit_duration_us_mean: 984.333
+      compositor_total_render_gpu_ms_mean: 1.82647
+      log: C:/Users/salee/AppData/Local/Temp/opencode/iw-cro-baseline-p20.log
+      log_sha256: fd1c434327ca369213a6b224635dcdffd69877d600dd7a8eff3eb9ebbf10f473
+    candidate:
+      physical_submits: 165
+      logical_retry_completions: 169
+      dropped_frames: 0
+      submit_duration_us_mean: 1097.67
+      compositor_total_render_gpu_ms_mean: 1.86176
+      log: C:/Users/salee/AppData/Local/Temp/opencode/iw-cro-candidate-p20.log
+      log_sha256: a6e1672097ed7a12d91bca1f2172f03e1e8205c1925a9f5f8233a0ad04b842a4
+  - id: mixed-p20-rerun
+    scenarios: [simultaneous_repeat, mixed_rapid, staggered, mixed_final, hide, shutdown]
+    checkpoint:
+      physical_submits: 199
+      dropped_frames: 0
+      simultaneous_attempt_submits: 37
+      simultaneous_self_completions: 18
+      simultaneous_peer_completions: 18
+      log: C:/Users/salee/AppData/Local/Temp/opencode/iw-cro-baseline-p20-mixed-rerun.log
+      log_sha256: 57441781d9481c1764b8a9c8a271651acd4abf6c0acfe9e4c943e2adea336922
+    candidate:
+      physical_submits: 123
+      dropped_frames: 0
+      simultaneous_attempt_submits: 19
+      simultaneous_self_completions: 18
+      simultaneous_peer_completions: 18
+      coalesced_causes_observed: [self, peer]
+      log: C:/Users/salee/AppData/Local/Temp/opencode/iw-cro-candidate-p20-mixed-rerun.log
+      log_sha256: 94d752fef9903c3cc8bd7b8b3177a9cbe444f653bcbc38465332d01be3905837
+  - id: alternating-100ms-p20
+    scenarios: [self_peer_alternating_100ms, final_hold, hide, shutdown]
+    checkpoint:
+      physical_submits: 53
+      dropped_frames: 0
+      log: C:/Users/salee/AppData/Local/Temp/opencode/iw-cro-baseline-p20-alternating-100ms.log
+      log_sha256: c3fa7d0e1a08925d926c5f1828e395bc3c93c17da5ef023bbb48a2a823ddd6fc
+    candidate:
+      physical_submits: 32
+      dropped_frames: 0
+      coalesced_causes_observed: [self, peer]
+      log: C:/Users/salee/AppData/Local/Temp/opencode/iw-cro-candidate-p20-alternating-100ms.log
+      log_sha256: 2d735ad08747c2c41e4f6074b1965c381659eb494395abb83bbcb4f75a1d0ae6
+manual_hmd_observation:
+  observer: user
+  checkpoint_full: no stale/N-1, missing final, flicker, visibility, hide, or final-persistence regression observed
+  candidate_full: no stale/N-1, missing final, flicker, visibility, hide, or final-persistence regression observed
+  mixed_rerun: no visible difference or regression observed
+  alternating_100ms: no visible difference or regression observed
+  claim_boundary: manual observations apply only to these builds, this local affected HMD, SteamVR Home, and the recorded synthetic scenarios
+comparison:
+  physical_work_result: candidate reduced full-run submits from 183 to 165, repeated simultaneous submits from 37 to 19, mixed-rerun total submits from 199 to 123, and alternating submits from 53 to 32
+  causal_result: candidate records SELF and PEER causes on one physical attempt while retaining both logical outcomes
+  regression_result: no accepted Phase-1 final-state, stale/N-1, flicker, visibility, hide, dropped-frame, or shutdown regression observed
+  gpu_claim: compositor-wide timing remained near baseline but is not overlay-attributable GPU evidence
+dd_002_input:
+  stream_observation: rapid 150 ms updates received immediate normal submissions and bounded replacement; intermediate generations completed at most one retry before replacement in the recorded runs
+  final_observation: settled P20 final targets completed 18 attempts within the unchanged two-second wall on this environment
+  design_input: use one pending intent per channel, suppress parallel work during replacement, preserve immediate normal submission, and reserve a bounded final-state opportunity; exact Phase-2 stream and final budgets still require an explicit design decision before quiet-tail implementation
+route:
+  decision: advance
+  accepted_state: Phase-1 coalesced candidate under unchanged P20 envelope
+  preserved_checkpoint: 92eff4229021189b7e9a82288cfc4eb6d260e838
+  next_action: resume coalesced-presentation integration review, then capability-and-target-contract only if review passes
+limitations:
+  - SteamVR Home only; no VRChat or other VR-application load was run.
+  - HMD model was not recorded.
+  - OpenVR submission return and compositor timing are not physical-HMD acknowledgement.
+  - P05, P10, and P15 were not tested or selected.
