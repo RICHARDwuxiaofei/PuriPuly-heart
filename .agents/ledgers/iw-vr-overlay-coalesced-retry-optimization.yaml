@@ -11,7 +11,7 @@ current:
   cluster_id: terminal-verification-c1
   work_refs:
     - verify-coalesced-retry-optimization-terminal
-  next_action: integration_authorization
+  next_action: done
 
 gate_plans:
   - gate_id: evidence-foundation
@@ -155,6 +155,14 @@ checkpoints:
     verification: passed
     review: pass
     summary: User-approved bounded active P05 replaces same-episode quiet postponement; full automation, deterministic generation-transfer preemption, affected-HMD 50 ms stream visibility, and independent terminal review pass.
+  - id: vnext-integration
+    gate_id: terminal-verification
+    cluster_id: terminal-verification-c1
+    decision: pass
+    commit: 5cc501f03ed317f44c732a62ed6473a00243f8d7
+    verification: passed
+    review: skipped
+    summary: Authorized candidate and pinned vnext head are both reachable from the merge; overlay Python and Rust checks pass while the full Python suite retains the same three pre-existing vnext architecture-guard failures.
 
 open_items:
   - type: watchpoint
@@ -176,3 +184,4 @@ notes:
   - After terminal closure, the user explicitly approved replacing pure quiet-tail postponement with bounded active retry and required direct orchestrator implementation plus review-agent review; prior terminal pass is superseded pending new evidence.
   - The bounded active P05 implementation, automated verification, 50 ms affected-HMD run, build identity, and manual observation are recorded at .agents/evidence/vr-overlay-bounded-active-retry-adjustment.yaml.
   - Independent terminal review held once for generation-transfer preemption and evidence capture, then passed after commit 0cba2fa added strict due transfer, deterministic synchronization, partial-budget coverage, corrected evidence, and final affected-HMD confirmation.
+  - User authorized DD-004 integration; candidate 9273ec3 was merged into pinned vnext 64e57e5 as 5cc501f, post-merge verification passed, and the worktree is intentionally retained.
