@@ -7205,8 +7205,12 @@ class GuiController:
         return t("settings.default_option")
 
     def list_loopback_capture_options(self) -> list[OptionItem]:
+        options = self.list_loopback_process_options()
+        options.extend(self.list_loopback_device_options())
+        return options
+
+    def list_loopback_process_options(self) -> list[OptionItem]:
         process_section = t("settings.desktop_audio.section.process")
-        device_section = t("settings.desktop_audio.section.device")
         options: list[OptionItem] = []
         seen_process_values: set[str] = set()
         for candidate in ProcessCaptureResolver(
@@ -7237,7 +7241,11 @@ class GuiController:
                         section=process_section,
                     ),
                 )
-        options.append(
+        return options
+
+    def list_loopback_device_options(self) -> list[OptionItem]:
+        device_section = t("settings.desktop_audio.section.device")
+        options: list[OptionItem] = [
             OptionItem(
                 value="device:",
                 label=t("settings.default_option"),
@@ -7245,7 +7253,7 @@ class GuiController:
                 disabled=False,
                 section=device_section,
             )
-        )
+        ]
         for device in self._enumerate_loopback_device_names():
             options.append(
                 OptionItem(

@@ -224,15 +224,6 @@ class DashboardView(ft.Column):
 
     def _toggle_peer_translation(self) -> None:
         contract = self._overlay_peer_contract
-        if (
-            contract is not None
-            and contract.peer.intent_enabled
-            and contract.peer.state == "warning"
-            and is_process_capture_warning_reason(contract.peer.warning_reason)
-        ):
-            if self.on_retry_peer_process_capture:
-                self.on_retry_peer_process_capture()
-            return
         enabled = True
         if contract is not None:
             enabled = not contract.peer.intent_enabled

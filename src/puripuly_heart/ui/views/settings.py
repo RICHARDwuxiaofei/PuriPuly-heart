@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import copy
 import json
@@ -307,6 +308,8 @@ class SettingsView(ft.Column):
         self.on_start_microphone_test: Callable[[], None] | None = None
         self.on_telemetry_consent_change: Callable[[str], None] | None = None
         self.on_list_loopback_capture_options: Callable[[], object] | None = None
+        self.on_list_loopback_process_options: Callable[[], object] | None = None
+        self.on_list_loopback_device_options: Callable[[], object] | None = None
         self.on_current_loopback_capture_option: Callable[[], str] | None = None
         self.on_apply_loopback_capture_option: Callable[[str], None] | None = None
         self.on_loopback_capture_summary: Callable[[], str] | None = None
@@ -3804,25 +3807,62 @@ class SettingsView(ft.Column):
     def _on_loopback_audio_click(self, e) -> None:
         if not self.page:
             return
+        list_process_options = getattr(self, "on_list_loopback_process_options", None)
+        list_device_options = getattr(self, "on_list_loopback_device_options", None)
         list_options = getattr(self, "on_list_loopback_capture_options", None)
         if callable(list_options):
-            options = list_options()
             current = (
                 self.on_current_loopback_capture_option()
                 if callable(getattr(self, "on_current_loopback_capture_option", None))
                 else "device:"
             )
+            if callable(list_device_options) and callable(list_process_options):
+                device_options = list_device_options()
+                process_section = t("settings.desktop_audio.section.process")
+                initial_options: list[OptionItem] = [
+                    OptionItem(value="", label="", section=process_section),
+                    *device_options,
+                ]
+                modal = SettingsModal(
+                    self.page,
+                    t("settings.section.loopback_audio"),
+                    initial_options,
+                    self._on_loopback_audio_selected,
+                    show_description=False,
+                )
+                modal.open(current, loading_section=process_section)
+                self.page.run_task(self._load_process_capture_options, modal, current)
+            else:
+                options = list_options()
+                modal = SettingsModal(
+                    self.page,
+                    t("settings.section.loopback_audio"),
+                    options,
+                    self._on_loopback_audio_selected,
+                    show_description=False,
+                )
+                modal.open(current)
         else:
             options = self._audio_settings._get_desktop_output_options()
             current = self._audio_settings.desktop_output_device
-        modal = SettingsModal(
-            self.page,
-            t("settings.section.loopback_audio"),
-            options,
-            self._on_loopback_audio_selected,
-            show_description=False,
-        )
-        modal.open(current)
+            modal = SettingsModal(
+                self.page,
+                t("settings.section.loopback_audio"),
+                options,
+                self._on_loopback_audio_selected,
+                show_description=False,
+            )
+            modal.open(current)
+
+    async def _load_process_capture_options(self, modal: SettingsModal, current: str) -> None:
+        list_process_options = getattr(self, "on_list_loopback_process_options", None)
+        list_device_options = getattr(self, "on_list_loopback_device_options", None)
+        if not callable(list_process_options) or not callable(list_device_options):
+            return
+        process_options = await asyncio.to_thread(list_process_options)
+        device_options = await asyncio.to_thread(list_device_options)
+        full_options: list[OptionItem] = [*process_options, *device_options]
+        modal.replace_options(full_options)
 
     def _on_loopback_audio_selected(self, value: str) -> None:
         apply_option = getattr(self, "on_apply_loopback_capture_option", None)

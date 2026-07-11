@@ -119,11 +119,10 @@ def test_process_warning_helper_text_is_localized_and_retry_classified() -> None
     )
     assert contract.peer.state == "warning"
     assert is_process_capture_warning_reason(contract.peer.warning_reason)
-    assert "PEER" in contract.peer.helper_text
     assert contract.peer.helper_text == t("settings.peer_translation.warning.process_target_exited")
 
 
-def test_dashboard_process_warning_click_retries_instead_of_toggling_off() -> None:
+def test_dashboard_process_warning_click_toggles_off_instead_of_retrying() -> None:
     view = DashboardView.__new__(DashboardView)
     view._overlay_peer_contract = build_overlay_peer_consumer_contract(
         overlay_intent_enabled=True,
@@ -138,8 +137,8 @@ def test_dashboard_process_warning_click_retries_instead_of_toggling_off() -> No
     view.on_retry_peer_process_capture = lambda: retries.append(True)
     view.on_toggle_peer_translation = lambda enabled: toggles.append(enabled)
     view._toggle_peer_translation()
-    assert retries == [True]
-    assert toggles == []
+    assert retries == []
+    assert toggles == [False]
 
 
 def test_dashboard_normal_peer_toggle_still_inverts_intent() -> None:

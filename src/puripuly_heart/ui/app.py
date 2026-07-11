@@ -178,6 +178,12 @@ class TranslatorApp:
         self.view_settings.on_list_loopback_capture_options = (
             lambda: self.controller.list_loopback_capture_options()
         )
+        self.view_settings.on_list_loopback_process_options = (
+            lambda: self.controller.list_loopback_process_options()
+        )
+        self.view_settings.on_list_loopback_device_options = (
+            lambda: self.controller.list_loopback_device_options()
+        )
         self.view_settings.on_current_loopback_capture_option = (
             lambda: self.controller.current_loopback_capture_option_value()
         )

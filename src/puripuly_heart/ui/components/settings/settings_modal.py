@@ -67,13 +67,20 @@ class SettingsModal:
         self._on_select = on_select
         self._show_description = show_description
         self._dialog: ft.AlertDialog | None = None
+        self._option_list: ft.ListView | None = None
+        self._current: str = ""
+        self._loading_section: str = ""
 
-    def open(self, current: str) -> None:
+    def open(self, current: str, *, loading_section: str = "") -> None:
         """Open the settings selection dialog.
 
         Args:
             current: Currently selected option value.
+            loading_section: Section label to show as loading placeholder.
+                When set, a spinner is shown for that section instead of options.
         """
+        self._current = current
+        self._loading_section = loading_section
         # Build option list
         option_list = self._build_option_list(current)
 
@@ -115,9 +122,36 @@ class SettingsModal:
 
         self._page.open(self._dialog)
 
+    def replace_options(self, options: Sequence[OptionItem]) -> None:
+        """Replace the option list after the modal is open.
+
+        Args:
+            options: New list of OptionItem objects.
+        """
+        self._options = options
+        self._loading_section = ""
+        if self._option_list is None:
+            return
+        self._option_list.controls = self._build_option_items(self._current)
+        try:
+            self._option_list.update()
+        except Exception:
+            pass
+
     def _build_option_list(self, current: str) -> ft.ListView:
         """Build scrollable list of options."""
-        items = []
+        items = self._build_option_items(current)
+        self._option_list = ft.ListView(
+            controls=items,
+            expand=True,
+            spacing=12,
+            padding=ft.padding.only(right=8, bottom=12),
+        )
+        return self._option_list
+
+    def _build_option_items(self, current: str) -> list[ft.Control]:
+        """Build list of option item controls."""
+        items: list[ft.Control] = []
         previous_section: str | None = None
         is_first_section = True
         for option in self._options:
@@ -125,14 +159,19 @@ class SettingsModal:
                 items.append(self._build_section_header(option.section, is_first_section))
                 previous_section = option.section
                 is_first_section = False
+                if option.section == self._loading_section:
+                    items.append(self._build_loading_placeholder())
+                    continue
+            if option.section == self._loading_section:
+                continue
             is_selected = option.value == current and not option.disabled
 
             # Colors
             if option.disabled:
-                bg_color = COLOR_SURFACE
-                text_color = COLOR_NEUTRAL
-                desc_color = COLOR_ON_BACKGROUND
-                border = ft.border.all(1, ft.Colors.with_opacity(0.2, COLOR_PRIMARY))
+                bg_color = COLOR_BACKGROUND
+                text_color = ft.Colors.with_opacity(0.35, COLOR_NEUTRAL_DARK)
+                desc_color = ft.Colors.with_opacity(0.35, COLOR_NEUTRAL_DARK)
+                border = None
             else:
                 bg_color = COLOR_PRIMARY if is_selected else COLOR_BACKGROUND
                 text_color = ft.Colors.WHITE if is_selected else COLOR_ON_BACKGROUND
@@ -199,11 +238,21 @@ class SettingsModal:
             )
             items.append(item)
 
-        return ft.ListView(
-            controls=items,
-            expand=True,
-            spacing=12,
-            padding=ft.padding.only(right=8, bottom=12),
+        return items
+
+    def _build_loading_placeholder(self) -> ft.Control:
+        """Build a loading placeholder with a spinner."""
+        return ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.ProgressRing(width=32, height=32, stroke_width=3),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            bgcolor=COLOR_BACKGROUND,
+            border_radius=16,
+            padding=ft.padding.all(24),
+            height=110,
         )
 
     def _build_section_header(self, label: str, is_first: bool) -> ft.Control:
