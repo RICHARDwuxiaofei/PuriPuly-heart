@@ -68,6 +68,7 @@ from puripuly_heart.core.runtime.output import (
     OutputRuntime,
 )
 from puripuly_heart.core.runtime.provider_handle import ProviderRuntimeHandle
+from puripuly_heart.core.runtime.provider_state import ProviderStateCell, ProviderStateSnapshot
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadEvent
 from puripuly_heart.domain.events import (
     STTErrorEvent,
@@ -238,6 +239,7 @@ class ClientHub:
     _self_stt_provider_runtime: ProviderRuntimeHandle = field(init=False)
     _peer_stt_provider_runtime: ProviderRuntimeHandle = field(init=False)
     _llm_provider_runtime: ProviderRuntimeHandle = field(init=False)
+    _provider_state: ProviderStateCell = field(init=False)
 
     def __post_init__(self) -> None:
         self.output_runtime = OutputRuntime(chatbox=self.osc, clock=self.clock)
@@ -265,6 +267,11 @@ class ClientHub:
             on_parent_closed=self._on_peer_final_run_parent_closed,
             on_parent_rejected=self._on_peer_final_run_parent_rejected,
         )
+        self._provider_state = ProviderStateCell(
+            llm=self.llm,
+            self_stt=self.stt,
+            peer_stt=self.peer_stt,
+        )
         self._self_stt_provider_runtime = ProviderRuntimeHandle(
             name="self_stt",
             provider=self.stt,
@@ -274,6 +281,8 @@ class ClientHub:
                 channel="self",
             ),
             state_changed=self._sync_provider_runtime_aliases,
+            state_cell=self._provider_state,
+            slot="self_stt",
         )
         self._peer_stt_provider_runtime = ProviderRuntimeHandle(
             name="peer_stt",
@@ -284,11 +293,15 @@ class ClientHub:
                 channel="peer",
             ),
             state_changed=self._sync_provider_runtime_aliases,
+            state_cell=self._provider_state,
+            slot="peer_stt",
         )
         self._llm_provider_runtime = ProviderRuntimeHandle(
             name="llm",
             provider=self.llm,
             state_changed=self._sync_provider_runtime_aliases,
+            state_cell=self._provider_state,
+            slot="llm",
         )
         object.__setattr__(self, "stt", None)
         object.__setattr__(self, "peer_stt", None)
@@ -402,6 +415,9 @@ class ClientHub:
             "peer_stt": self._peer_stt_provider_runtime,
             "llm": self._llm_provider_runtime,
         }
+
+    def provider_state_snapshot(self) -> ProviderStateSnapshot:
+        return self._provider_state.snapshot()
 
     def _sync_provider_runtime_aliases(self, _handle: ProviderRuntimeHandle | None = None) -> None:
         return

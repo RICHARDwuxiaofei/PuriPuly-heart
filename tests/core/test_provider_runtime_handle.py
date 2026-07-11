@@ -181,3 +181,26 @@ async def test_failed_event_task_exception_is_retrieved_by_owner_done_callback()
     assert handled_exceptions == [failure]
     assert handle.event_task is None
     assert owner_exception_requests == 1
+
+
+@pytest.mark.asyncio
+async def test_readopted_retired_provider_is_only_closed_as_current_on_shutdown() -> None:
+    original = RetriableCloseProvider(close_failures=1, label="original")
+    replacement = RetriableCloseProvider(close_failures=0, label="replacement")
+    handle = ProviderRuntimeHandle(name="llm", provider=original)
+
+    with pytest.raises(RuntimeError, match="original"):
+        await handle.replace_provider(replacement, start=False)
+
+    assert original.close_calls == 1
+    assert handle.provider is replacement
+
+    await handle.replace_provider(original, start=False)
+    assert replacement.close_calls == 1
+    assert handle.provider is original
+    assert handle._retired_providers == []
+
+    await handle.close()
+
+    assert original.close_calls == 2
+    assert handle._retired_providers == []

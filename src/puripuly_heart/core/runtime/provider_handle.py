@@ -5,6 +5,8 @@ import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from puripuly_heart.core.runtime.provider_state import ProviderSlot, ProviderStateCell
+
 ProviderEventHandler = Callable[[object], Awaitable[None]]
 ProviderExceptionHandler = Callable[[Exception], Awaitable[None] | None]
 ProviderStateChanged = Callable[["ProviderRuntimeHandle"], None]
@@ -32,14 +34,22 @@ class ProviderRuntimeHandle:
         event_handler: ProviderEventHandler | None = None,
         exception_handler: ProviderExceptionHandler | None = None,
         state_changed: ProviderStateChanged | None = None,
+        state_cell: ProviderStateCell | None = None,
+        slot: ProviderSlot | None = None,
     ) -> None:
         self._name = name
-        self._provider = provider
+        self._slot: ProviderSlot = slot or _slot_for_name(name)
+        if state_cell is not None:
+            selected_provider = state_cell.snapshot().slot(self._slot).provider
+            if selected_provider is not provider:
+                raise ValueError("provider must exactly match the selected state-cell slot")
+            self._state_cell = state_cell
+        else:
+            self._state_cell = ProviderStateCell(**{self._slot: provider})
         self._event_handler = event_handler
         self._exception_handler = exception_handler
         self._state_changed = state_changed
         self._event_task: asyncio.Task[None] | None = None
-        self._generation = 0
         self._running = False
         self._closed = False
         self._retired_providers: list[object] = []
@@ -51,7 +61,7 @@ class ProviderRuntimeHandle:
 
     @property
     def provider(self) -> object | None:
-        return self._provider
+        return self._state_cell.snapshot().slot(self._slot).provider
 
     @property
     def event_task(self) -> asyncio.Task[None] | None:
@@ -59,12 +69,12 @@ class ProviderRuntimeHandle:
 
     @property
     def generation(self) -> int:
-        return self._generation
+        return self._state_cell.snapshot().slot(self._slot).generation
 
     @property
     def has_resources(self) -> bool:
         return (
-            self._provider is not None
+            self.provider is not None
             or self._event_task is not None
             or bool(self._retired_providers)
         )
@@ -72,12 +82,14 @@ class ProviderRuntimeHandle:
     def current_provider_generation(self) -> tuple[object | None, int]:
         """Capture the current provider identity and generation for an in-flight call."""
 
-        return self._provider, self._generation
+        state = self._state_cell.snapshot().slot(self._slot)
+        return state.provider, state.generation
 
     def is_current_provider_generation(self, *, provider: object, generation: int) -> bool:
         """Return whether a captured provider/generation is still current."""
 
-        return generation == self._generation and provider is self._provider and not self._closed
+        state = self._state_cell.snapshot().slot(self._slot)
+        return generation == state.generation and provider is state.provider and not self._closed
 
     def lifecycle_owner_snapshot(self) -> dict[str, object]:
         return {
@@ -97,7 +109,7 @@ class ProviderRuntimeHandle:
 
     async def start_if_provider(self, expected_provider: object) -> bool:
         async with self._lock:
-            if self._provider is not expected_provider:
+            if self.provider is not expected_provider:
                 return False
             self._running = True
             self._closed = False
@@ -106,10 +118,10 @@ class ProviderRuntimeHandle:
 
     async def replace_provider(self, provider: object | None, *, start: bool) -> object | None:
         async with self._lock:
-            old_provider = self._provider
-            self._generation += 1
+            old_provider = self.provider
             await self._cancel_event_task()
-            self._provider = provider
+            self._state_cell.replace(self._slot, provider)
+            self._remove_retired_provider(provider)
             self._closed = False
             self._notify_state_changed()
             if start:
@@ -125,7 +137,7 @@ class ProviderRuntimeHandle:
 
     async def drain_for_toggle_off(self) -> None:
         async with self._lock:
-            provider = self._provider
+            provider = self.provider
             if provider is not None:
                 stop_for_toggle_off = getattr(provider, "stop_for_toggle_off", None)
                 if callable(stop_for_toggle_off):
@@ -139,7 +151,6 @@ class ProviderRuntimeHandle:
     async def stop_ingress(self) -> None:
         async with self._lock:
             self._running = False
-            self._generation += 1
             await self._cancel_event_task()
 
     async def close(self) -> None:
@@ -148,31 +159,30 @@ class ProviderRuntimeHandle:
                 return
             self._closed = True
             self._running = False
-            self._generation += 1
             await self._cancel_event_task()
             failures: list[Exception] = []
-            provider = self._provider
+            provider = self.provider
             if provider is not None:
                 try:
                     await self._close_provider_for_shutdown(provider)
                 except Exception as exc:
                     failures.append(exc)
                 else:
-                    if self._provider is provider:
-                        self._provider = None
+                    if self.provider is provider:
+                        self._state_cell.replace(self._slot, None)
                         self._notify_state_changed()
             failures.extend(await self._close_retired_providers())
             _raise_close_failures(failures, f"{self.owner_name} provider close failed")
 
     def _start_event_loop_if_needed(self) -> None:
-        if not self._running or self._event_handler is None or self._provider is None:
+        if not self._running or self._event_handler is None or self.provider is None:
             self._notify_state_changed()
             return
         if self._event_task is not None and not self._event_task.done():
             self._notify_state_changed()
             return
-        generation = self._generation
-        provider = self._provider
+        provider, generation = self.current_provider_generation()
+        assert provider is not None
         self._event_task = asyncio.create_task(
             self._run_event_loop(provider=provider, generation=generation),
             name=f"{self.owner_name}:events",
@@ -237,11 +247,20 @@ class ProviderRuntimeHandle:
         await _call_async_method(provider, "close")
 
     def _retain_retired_provider(self, provider: object) -> None:
-        if provider is self._provider:
+        if provider is self.provider:
             return
         if any(retired_provider is provider for retired_provider in self._retired_providers):
             return
         self._retired_providers.append(provider)
+
+    def _remove_retired_provider(self, provider: object | None) -> None:
+        if provider is None:
+            return
+        self._retired_providers = [
+            retired_provider
+            for retired_provider in self._retired_providers
+            if retired_provider is not provider
+        ]
 
     async def _close_retired_providers(self) -> list[Exception]:
         failures: list[Exception] = []
@@ -278,3 +297,9 @@ def _raise_close_failures(failures: list[Exception], message: str) -> None:
 
 
 __all__ = ["ProviderRuntimeHandle"]
+
+
+def _slot_for_name(name: str) -> ProviderSlot:
+    if name in {"llm", "self_stt", "peer_stt"}:
+        return name
+    return "llm"

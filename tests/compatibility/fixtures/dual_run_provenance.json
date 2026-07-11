@@ -36,6 +36,7 @@
         "src/puripuly_heart/core/orchestrator/channel_runtime.py",
         "src/puripuly_heart/core/orchestrator/hub.py",
         "src/puripuly_heart/core/runtime/provider_handle.py",
+        "src/puripuly_heart/core/runtime/provider_state.py",
         "src/puripuly_heart/core/runtime/self_audio.py",
         "src/puripuly_heart/core/stt/controller.py",
         "src/puripuly_heart/core/telemetry.py",
@@ -43,8 +44,8 @@
         "src/puripuly_heart/ui/app.py",
         "src/puripuly_heart/ui/controller.py"
       ],
-      "production_source_sha256": "bf6a5f6236d13f5a94f0e788e9e4a8bd002269bf6200bad9f3930fa6a529ff93",
-      "source_delta_sha256": "ab084257567a7c1e48ef06dd445e6cbf54a70b33ea46fdeb1fdf76a38e46a88d"
+      "production_source_sha256": "9ecfc2ee447ecd7aec2d0c3c68519e56123ec01e4c69ff7e3af6ccc543df44ed",
+      "source_delta_sha256": "12233b33bda42b457dea83334e0b8a987d4a98b9fa65b3fff91f6bc8b3166ad3"
     },
     "repair_base": "b4ace2631793aa1a1e384c0440b8ec7f315559ae"
   },
