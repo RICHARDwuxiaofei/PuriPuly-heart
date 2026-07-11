@@ -564,15 +564,29 @@ class OverlayPresenter(OverlaySink):
             self._native_fresh_render_generations = NativeFreshRenderGenerations()
             self._native_fresh_render_targets = NativeFreshRenderTargets()
             return
-        if confirmed == self.native_retry_trigger_emission:
-            return
         if confirmed:
+            if (
+                self.native_retry_trigger_emission
+                and not self.peer_presentation_refresh_burst
+                and not self.self_presentation_refresh_burst
+            ):
+                return
             active_targets = self._active_python_retry_targets()
+            if not active_targets:
+                active_targets = self._active_native_retry_targets()
             await self.update_peer_presentation_refresh_burst(False)
             await self.update_self_presentation_refresh_burst(False)
             self.native_retry_trigger_emission = True
             self._synchronize_native_retry_targets(active_targets)
             await self._publish_if_changed(force_protocol_publish=True)
+            return
+        if (
+            not self.native_retry_trigger_emission
+            and self.peer_presentation_refresh_burst
+            and self.self_presentation_refresh_burst
+            and self.snapshot().native_fresh_render_generations is None
+            and self.snapshot().native_fresh_render_targets is None
+        ):
             return
         active_targets = self._active_native_retry_targets()
         self.native_retry_trigger_emission = False

@@ -4080,6 +4080,8 @@ class GuiController:
                 presenter.runtime_log_detailed = self.log_detailed
             presenter = cast(OverlayPresenter, runtime.adopt_presenter(presenter))
             presenter.runtime_log_detailed = self.log_detailed
+            if overlay_target != OVERLAY_TARGET_DESKTOP:
+                await presenter.update_native_retry_ownership(False)
             await presenter.update_calibration(self.overlay_calibration.copy())
             await presenter.update_display_preferences(
                 show_translation=resolved_overlay_config.show_translation,

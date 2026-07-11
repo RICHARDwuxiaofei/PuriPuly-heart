@@ -520,7 +520,7 @@ class OverlayProcessManager:
         self._shutdown_requested = False
         self.restart_scheduled = False
         self.failure_reason = None
-        await self._set_native_retry_owner_confirmed(False)
+        await self._set_native_retry_owner_confirmed(False, force_notify=True)
 
         manifest = self._build_manifest()
         try:
@@ -850,9 +850,14 @@ class OverlayProcessManager:
         ownership = capability.get("ownership")
         return type(version) is int and version == 1 and ownership == "exclusive"
 
-    async def _set_native_retry_owner_confirmed(self, confirmed: bool) -> None:
+    async def _set_native_retry_owner_confirmed(
+        self,
+        confirmed: bool,
+        *,
+        force_notify: bool = False,
+    ) -> None:
         confirmed = bool(confirmed)
-        if confirmed == self.native_retry_owner_confirmed:
+        if confirmed == self.native_retry_owner_confirmed and not force_notify:
             return
         self.native_retry_owner_confirmed = confirmed
         if self.retry_ownership_changed is not None:

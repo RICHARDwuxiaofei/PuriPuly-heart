@@ -1609,3 +1609,23 @@ async def test_retry_fallback_waits_for_process_termination(operation: str) -> N
     assert manager.native_retry_owner_confirmed is False
     assert ownership_changes == [False]
     assert manager._process is None
+
+
+@pytest.mark.asyncio
+async def test_start_force_notifies_new_listener_when_manager_state_is_already_false() -> None:
+    changes: list[bool] = []
+
+    async def ownership_changed(confirmed: bool) -> None:
+        changes.append(confirmed)
+
+    runner = FakeProcessRunner(ready_event_delay_ms=0)
+    manager = OverlayProcessManager(
+        process_runner=runner,
+        retry_ownership_changed=ownership_changed,
+        startup_timeout_ms=100,
+    )
+    assert manager.native_retry_owner_confirmed is False
+    await manager.start()
+    assert changes[0] is False
+    assert manager.state == "connected"
+    await manager.stop()

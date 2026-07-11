@@ -7736,6 +7736,12 @@ async def test_native_ownership_transition_serializes_concurrent_target_replacem
     assert snapshot.native_fresh_render_targets.peer == f"peer:{second}"
     assert snapshot.native_fresh_render_generations.peer is not None
     assert presenter._peer_presentation_refresh_burst_task is None
+    presenter.peer_presentation_refresh_burst = True
+    presenter.self_presentation_refresh_burst = True
+    await presenter.update_native_retry_ownership(True)
+    assert presenter.native_retry_trigger_emission is True
+    assert presenter.peer_presentation_refresh_burst is False
+    assert presenter.self_presentation_refresh_burst is False
     await presenter.update_native_retry_ownership(False)
     assert presenter.snapshot().native_fresh_render_generations is None
     assert presenter._presentation_state.peer_presentation_refresh_target_key == ("peer", second)
