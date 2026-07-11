@@ -11,7 +11,7 @@ current:
   cluster_id: coalesced-presentation-c2
   work_refs:
     - verify-phase-one-coalescing-equivalence
-  next_action: review
+  next_action: blocked
 
 gate_plans:
   - gate_id: evidence-foundation
@@ -36,7 +36,7 @@ gate_plans:
       - id: coalesced-presentation-c2
         work_refs:
           - verify-phase-one-coalescing-equivalence
-        status: in_progress
+        status: blocked
   - gate_id: capability-and-target-contract
     shape: split
     clusters:
@@ -83,8 +83,25 @@ checkpoints:
     verification: passed
     review: pass
     summary: Behavior-neutral bounded diagnostics establish causal physical-attempt evidence under the unchanged P20 envelope; HMD and environment observations remain explicitly unrecorded.
+  - id: coalesced-presentation-c1
+    gate_id: coalesced-presentation
+    cluster_id: coalesced-presentation-c1
+    decision: pass
+    commit: da1747ddab0356a302d85e739455a9935577058f
+    verification: passed
+    review: pass
+    summary: One native coordinator coalesces causally compatible SELF and PEER work with exact scene and runtime-only target identity under the unchanged P20 envelope.
+  - id: coalesced-presentation-c2
+    gate_id: coalesced-presentation
+    cluster_id: coalesced-presentation-c2
+    decision: blocked
+    verification: skipped
+    review: blocked
+    summary: Phase 1 holds because affected-HMD checkpoint-versus-candidate equivalence and DD-002 physical-work input are unavailable; automated success cannot substitute.
 
 open_items:
+  - type: blocker
+    text: Obtain build- and environment-identified affected-HMD checkpoint/candidate Phase-1 equivalence evidence before Phase 2.
   - type: watchpoint
     text: Phase 1 must preserve the two-second envelope and checkpoint identity.
   - type: watchpoint
