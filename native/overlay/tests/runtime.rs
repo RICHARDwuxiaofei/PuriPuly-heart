@@ -2618,35 +2618,13 @@ async fn production_owner_replaces_channel_token_and_empty_snapshot_cancels_sche
         .enumerate()
         .filter(|(_, fact)| fact.0 == "self" && fact.1 == u64::MAX && fact.2 == "scheduled")
         .collect::<Vec<_>>();
-    assert_eq!(scheduled.len(), 2);
-    let replacement_scheduled_at = scheduled[1].1 .4;
-    let replaced_index = audit
+    assert_eq!(scheduled.len(), 1);
+    assert!(!audit
         .iter()
-        .position(|fact| fact.0 == "self" && fact.1 == u64::MAX && fact.2 == "replaced")
-        .unwrap();
-    let replacement_scheduled_index = audit
-        .iter()
-        .enumerate()
-        .filter(|(_, fact)| fact.0 == "self" && fact.1 == u64::MAX && fact.2 == "scheduled")
-        .nth(1)
-        .unwrap()
-        .0;
-    assert_eq!(replacement_scheduled_index, replaced_index + 1);
-    assert!(!audit.iter().any(|fact| {
-        fact.0 == "self"
-            && fact.1 == u64::MAX
-            && fact.2 == "completed"
-            && fact.4 > replacement_scheduled_at
-    }));
+        .any(|fact| fact.0 == "self" && fact.1 == u64::MAX && fact.2 == "replaced"));
     assert!(audit
         .iter()
         .any(|fact| fact.0 == "self" && fact.1 == u64::MAX && fact.2 == "cancelled"));
-    assert!(!audit.iter().any(|fact| {
-        fact.0 == "self"
-            && fact.1 == u64::MAX
-            && fact.2 == "completed"
-            && fact.4 > replacement_scheduled_at
-    }));
     assert_eq!(submit_count, 3);
     server.await.unwrap();
 }

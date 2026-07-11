@@ -8,10 +8,9 @@ selected_input:
 
 current:
   gate_id: capability-and-target-contract
-  cluster_id: capability-and-target-contract-c1
+  cluster_id: capability-and-target-contract-c2
   work_refs:
-    - negotiate-native-retry-ownership
-    - scope-retry-intent-to-visible-target
+    - verify-capability-target-integration
   next_action: continue
 
 gate_plans:
@@ -45,11 +44,11 @@ gate_plans:
         work_refs:
           - negotiate-native-retry-ownership
           - scope-retry-intent-to-visible-target
-        status: in_progress
+        status: passed
       - id: capability-and-target-contract-c2
         work_refs:
           - verify-capability-target-integration
-        status: pending
+        status: in_progress
   - gate_id: quiet-tail-profile-selection
     shape: split
     clusters:
@@ -106,6 +105,13 @@ checkpoints:
     verification: passed
     review: pass
     summary: Same affected-HMD P20 A/B evidence preserved final-state behavior while reducing full, simultaneous, mixed, and alternating physical submissions with zero sampled dropped frames.
+  - id: capability-and-target-contract-c1
+    gate_id: capability-and-target-contract
+    cluster_id: capability-and-target-contract-c1
+    decision: pass
+    verification: passed
+    review: pass
+    summary: Strict current-process capability negotiation keeps exactly one retry owner while optional target facts bind Native work to the exact visible SELF or PEER target across replacement and teardown.
 
 open_items:
   - type: watchpoint

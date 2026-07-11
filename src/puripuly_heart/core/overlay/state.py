@@ -8,6 +8,7 @@ from uuid import UUID
 
 from puripuly_heart.core.overlay.protocol import (
     NativeFreshRenderGenerations,
+    NativeFreshRenderTargets,
     OverlayPresentationBlock,
     OverlayPresentationCalibration,
     OverlayPresentationSnapshot,
@@ -1099,12 +1100,14 @@ class OverlayPresentationState:
         calibration: OverlayPresentationCalibration,
         rendered_entries: list[tuple[OverlayEntryKey, OverlayPresentationBlock]],
         native_fresh_render_generations: NativeFreshRenderGenerations | None = None,
+        native_fresh_render_targets: NativeFreshRenderTargets | None = None,
     ) -> OverlayPresentationSnapshot:
         snapshot = OverlayPresentationSnapshot(
             revision=revision,
             calibration=calibration,
             blocks=[block for _, block in rendered_entries],
             native_fresh_render_generations=native_fresh_render_generations,
+            native_fresh_render_targets=native_fresh_render_targets,
         )
         self._snapshot = snapshot
         return snapshot

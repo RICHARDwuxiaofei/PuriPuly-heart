@@ -592,12 +592,21 @@ impl PresentationRuntime {
         bridge: &mut BridgeClient,
         logger: &OverlayLogger,
     ) -> Result<(), RuntimeFailure> {
+        let ready_event = json!({
+            "type": "overlay_ready",
+            "capabilities": {
+                "native_presentation_retry": {
+                    "version": 1,
+                    "ownership": "exclusive"
+                }
+            }
+        });
         bridge
-            .send_json(json!({"type": "overlay_ready"}))
+            .send_json(ready_event.clone())
             .await
             .map_err(|error| RuntimeFailure::Bridge(error.to_string()))?;
         logger
-            .emit_stdout_event(&json!({"type": "overlay_ready"}))
+            .emit_stdout_event(&ready_event)
             .await
             .map_err(|error| RuntimeFailure::Bridge(error.to_string()))?;
         logger
@@ -1513,22 +1522,44 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
     }
 
     fn channel_target_identity(&self, channel: FreshRetryChannel) -> Option<String> {
-        let mut occupant_keys = self
-            .runtime
+        let generations = self.runtime.state().native_fresh_render_generations()?;
+        let selected = match channel {
+            FreshRetryChannel::SelfChannel => generations.self_target.as_ref(),
+            FreshRetryChannel::Peer => generations.peer_target.as_ref(),
+        };
+        let fallback;
+        let selected = if let Some(selected) = selected {
+            selected
+        } else {
+            let candidates = self
+                .runtime
+                .state()
+                .blocks()
+                .iter()
+                .filter(|block| {
+                    block.channel == channel.name()
+                        && block.block_variant == OverlayPresentationBlockVariant::Finalized
+                        && !block.primary_text.trim().is_empty()
+                })
+                .map(|block| block.id.as_str())
+                .collect::<Vec<_>>();
+            if candidates.len() != 1 {
+                return None;
+            }
+            fallback = candidates[0].to_string();
+            &fallback
+        };
+        self.runtime
             .state()
             .blocks()
             .iter()
-            .filter(|block| {
+            .any(|block| {
                 block.channel == channel.name()
+                    && block.id == *selected
                     && block.block_variant == OverlayPresentationBlockVariant::Finalized
                     && !block.primary_text.trim().is_empty()
             })
-            .map(|block| block.occupant_key.as_str())
-            .collect::<Vec<_>>();
-        occupant_keys.sort_unstable();
-        (!occupant_keys.is_empty()).then(|| {
-            serde_json::to_string(&occupant_keys).expect("runtime target identity serializes")
-        })
+            .then(|| selected.clone())
     }
 
     async fn reconcile_fresh_schedules(
@@ -1546,11 +1577,10 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
                 FreshRetryChannel::SelfChannel => &mut self.observed_self_generation,
                 FreshRetryChannel::Peer => &mut self.observed_peer_generation,
             };
-            let changed = generation.is_some()
-                && (generation != *observed
-                    || current_schedule.is_some_and(|schedule| {
-                        target_identity.as_ref() != Some(&schedule.target_identity)
-                    }));
+            let generation_changed = generation.is_some() && generation != *observed;
+            let target_changed = current_schedule.is_some_and(|schedule| {
+                target_identity.as_ref() != Some(&schedule.target_identity)
+            });
             *observed = generation;
             let schedule = match channel {
                 FreshRetryChannel::SelfChannel => &mut self.self_schedule,
@@ -1563,7 +1593,14 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
                 }
                 continue;
             }
-            if changed {
+            if target_changed && !generation_changed {
+                if let Some(cancelled) = schedule.take() {
+                    self.record_fresh_retry(logger, cancelled, "cancelled")
+                        .await?;
+                }
+                continue;
+            }
+            if generation_changed {
                 let now = Instant::now();
                 let next = NativeFreshSchedule {
                     channel,

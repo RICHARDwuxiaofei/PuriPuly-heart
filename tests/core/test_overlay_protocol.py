@@ -7,6 +7,7 @@ import pytest
 from puripuly_heart.core.overlay.protocol import (
     U64_MAX,
     NativeFreshRenderGenerations,
+    NativeFreshRenderTargets,
     OverlayPresentationBlock,
     OverlayPresentationCalibration,
     OverlayPresentationSnapshot,
@@ -30,6 +31,20 @@ def test_native_fresh_render_generations_are_optional_and_round_trip_independent
     )
     maximum = NativeFreshRenderGenerations(self=U64_MAX, peer=0)
     assert NativeFreshRenderGenerations.from_dict(maximum.to_dict()) == maximum
+
+
+def test_native_fresh_render_targets_are_optional_and_backward_compatible() -> None:
+    legacy = OverlayPresentationSnapshot.from_dict({"revision": 1, "blocks": []})
+    assert legacy.native_fresh_render_targets is None
+    snapshot = OverlayPresentationSnapshot(
+        native_fresh_render_targets=NativeFreshRenderTargets(
+            self="self:synthetic-a",
+            peer="peer:synthetic-b",
+        )
+    )
+    assert OverlayPresentationSnapshot.from_dict(snapshot.to_dict()) == snapshot
+    with pytest.raises(ValueError):
+        NativeFreshRenderTargets.from_dict({"self": " "})
 
 
 @pytest.mark.parametrize(

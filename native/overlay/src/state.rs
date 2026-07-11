@@ -79,18 +79,89 @@ pub struct NativeFreshRenderGenerations {
     pub self_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer: Option<u64>,
+    #[serde(skip)]
+    pub self_target: Option<String>,
+    #[serde(skip)]
+    pub peer_target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct OverlayPresentationSnapshot {
-    #[serde(default)]
-    pub revision: u64,
-    #[serde(default)]
-    pub calibration: OverlayPresentationCalibration,
-    #[serde(default)]
-    pub blocks: Vec<OverlayPresentationBlock>,
+pub struct NativeFreshRenderTargets {
+    #[serde(default, rename = "self", skip_serializing_if = "Option::is_none")]
+    pub self_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct OverlayPresentationSnapshot {
+    pub revision: u64,
+    pub calibration: OverlayPresentationCalibration,
+    pub blocks: Vec<OverlayPresentationBlock>,
     pub native_fresh_render_generations: Option<NativeFreshRenderGenerations>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct OverlayPresentationSnapshotWire {
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    calibration: OverlayPresentationCalibration,
+    #[serde(default)]
+    blocks: Vec<OverlayPresentationBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_fresh_render_generations: Option<NativeFreshRenderGenerations>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_fresh_render_targets: Option<NativeFreshRenderTargets>,
+}
+
+impl Serialize for OverlayPresentationSnapshot {
+    fn serialize<T>(&self, serializer: T) -> Result<T::Ok, T::Error>
+    where
+        T: serde::Serializer,
+    {
+        let targets = self
+            .native_fresh_render_generations
+            .as_ref()
+            .and_then(|generations| {
+                (generations.self_target.is_some() || generations.peer_target.is_some()).then(
+                    || NativeFreshRenderTargets {
+                        self_target: generations.self_target.clone(),
+                        peer: generations.peer_target.clone(),
+                    },
+                )
+            });
+        OverlayPresentationSnapshotWire {
+            revision: self.revision,
+            calibration: self.calibration.clone(),
+            blocks: self.blocks.clone(),
+            native_fresh_render_generations: self.native_fresh_render_generations.clone(),
+            native_fresh_render_targets: targets,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OverlayPresentationSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = OverlayPresentationSnapshotWire::deserialize(deserializer)?;
+        let mut generations = wire.native_fresh_render_generations;
+        if let (Some(generations), Some(targets)) =
+            (&mut generations, wire.native_fresh_render_targets)
+        {
+            generations.self_target = targets.self_target;
+            generations.peer_target = targets.peer;
+        }
+        Ok(Self {
+            revision: wire.revision,
+            calibration: wire.calibration,
+            blocks: wire.blocks,
+            native_fresh_render_generations: generations,
+        })
+    }
 }
 
 pub type OverlayCalibration = OverlayPresentationCalibration;
@@ -367,11 +438,30 @@ mod tests {
             Some(NativeFreshRenderGenerations {
                 self_generation: Some(2),
                 peer: Some(7),
+                self_target: None,
+                peer_target: None,
             })
         );
         assert_eq!(
             serde_json::to_value(snapshot).unwrap()["native_fresh_render_generations"],
             json!({"self": 2, "peer": 7})
+        );
+    }
+
+    #[test]
+    fn native_fresh_render_targets_are_optional_and_bound_to_generations() {
+        let snapshot: OverlayPresentationSnapshot = serde_json::from_value(json!({
+            "native_fresh_render_generations": {"self": 3, "peer": 4},
+            "native_fresh_render_targets": {"self": "self:synthetic-a", "peer": "peer:synthetic-b"}
+        }))
+        .unwrap();
+        let generations = snapshot.native_fresh_render_generations.as_ref().unwrap();
+        assert_eq!(generations.self_target.as_deref(), Some("self:synthetic-a"));
+        assert_eq!(generations.peer_target.as_deref(), Some("peer:synthetic-b"));
+        let value = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(
+            value["native_fresh_render_targets"],
+            json!({"self": "self:synthetic-a", "peer": "peer:synthetic-b"})
         );
     }
 

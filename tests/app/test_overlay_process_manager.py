@@ -1061,7 +1061,7 @@ async def test_overlay_process_manager_maps_post_ready_runtime_error_to_failure_
 
 
 @pytest.mark.asyncio
-async def test_overlay_process_manager_accepts_overlay_ready_from_bridge_messages() -> None:
+async def test_overlay_process_manager_does_not_accept_overlay_ready_from_bridge_messages() -> None:
     bridge_messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
     manager = OverlayProcessManager(
         process_runner=FakeProcessRunner(),
@@ -1076,8 +1076,9 @@ async def test_overlay_process_manager_accepts_overlay_ready_from_bridge_message
     publisher = asyncio.create_task(publish_ready())
     try:
         await manager.start()
-        assert manager.state == "connected"
-        assert manager.failure_reason is None
+        assert manager.state == "failed"
+        assert manager.failure_reason == "startup_timeout"
+        assert manager.native_retry_owner_confirmed is False
     finally:
         publisher.cancel()
         await asyncio.gather(publisher, return_exceptions=True)
@@ -1470,3 +1471,83 @@ async def test_overlay_process_manager_dump_marks_startup_phase_for_pre_ready_ex
     assert summary["phase"] == "startup"
     assert summary["exit_code"] == 21
     assert summary["failure_reason"] == "renderer_init_failed"
+
+
+@pytest.mark.asyncio
+async def test_retry_ownership_capability_is_conservative_and_renegotiable() -> None:
+    changes: list[bool] = []
+
+    async def ownership_changed(confirmed: bool) -> None:
+        changes.append(confirmed)
+
+    manager = OverlayProcessManager(retry_ownership_changed=ownership_changed)
+    supported = {
+        "type": "overlay_ready",
+        "capabilities": {"native_presentation_retry": {"version": 1, "ownership": "exclusive"}},
+    }
+    assert await manager._handle_lifecycle_event(supported, allow_ready=True) == "ready"
+    assert manager.native_retry_owner_confirmed is True
+    assert await manager._handle_lifecycle_event(supported, allow_ready=False) == "ignored"
+    assert changes == [True]
+    assert manager.native_retry_owner_confirmed is True
+
+    for payload in (
+        {"type": "overlay_ready"},
+        {"type": "overlay_ready", "capabilities": []},
+        {
+            "type": "overlay_ready",
+            "capabilities": {"native_presentation_retry": {"version": 2, "ownership": "exclusive"}},
+        },
+        {
+            "type": "overlay_ready",
+            "capabilities": {
+                "native_presentation_retry": {"version": True, "ownership": "exclusive"}
+            },
+        },
+        {
+            "type": "overlay_ready",
+            "capabilities": {
+                "native_presentation_retry": {"version": 1.0, "ownership": "exclusive"}
+            },
+        },
+    ):
+        await manager._handle_lifecycle_event(payload, allow_ready=True)
+        assert manager.native_retry_owner_confirmed is False
+
+    await manager._handle_lifecycle_event(supported, allow_ready=True)
+    assert manager.native_retry_owner_confirmed is True
+    await manager._fail("runtime_crashed", terminate_process=False)
+    assert manager.native_retry_owner_confirmed is False
+    assert changes == [True, False, True, False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["stop", "fail"])
+async def test_retry_fallback_waits_for_process_termination(operation: str) -> None:
+    termination_started = asyncio.Event()
+    release_termination = asyncio.Event()
+    ownership_changes: list[bool] = []
+
+    class BlockingProcess:
+        async def terminate(self) -> None:
+            termination_started.set()
+            await release_termination.wait()
+
+    async def ownership_changed(confirmed: bool) -> None:
+        ownership_changes.append(confirmed)
+
+    manager = OverlayProcessManager(retry_ownership_changed=ownership_changed)
+    manager._process = BlockingProcess()  # type: ignore[assignment]
+    manager.native_retry_owner_confirmed = True
+    manager.state = "connected"
+    task = asyncio.create_task(
+        manager.stop() if operation == "stop" else manager._fail("runtime_crashed")
+    )
+    await termination_started.wait()
+    assert manager.native_retry_owner_confirmed is True
+    assert ownership_changes == []
+    release_termination.set()
+    await task
+    assert manager.native_retry_owner_confirmed is False
+    assert ownership_changes == [False]
+    assert manager._process is None

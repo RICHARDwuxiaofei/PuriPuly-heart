@@ -4018,6 +4018,18 @@ class GuiController:
             self._notify_overlay_state()
             runtime.create_start_task(self._run_overlay_start(runtime))
 
+    async def _apply_overlay_retry_ownership(
+        self,
+        runtime: OverlayRuntimeHandle,
+        presenter: OverlayPresenter,
+        manager: OverlayProcessManager,
+        *,
+        confirmed: bool,
+    ) -> None:
+        if not self._overlay_runtime_is_current(runtime) or runtime.process_manager is not manager:
+            return
+        await presenter.update_native_retry_ownership(confirmed)
+
     async def _run_overlay_start(self, runtime: OverlayRuntimeHandle | None = None) -> None:
         if runtime is None:
             runtime = self._overlay_runtime
@@ -4041,8 +4053,8 @@ class GuiController:
                 resolved_overlay_config.target
             )
             self._active_overlay_target = overlay_target
-            peer_presentation_refresh_burst = False
-            self_presentation_refresh_burst = False
+            peer_presentation_refresh_burst = overlay_target != OVERLAY_TARGET_DESKTOP
+            self_presentation_refresh_burst = overlay_target != OVERLAY_TARGET_DESKTOP
             self.log_detailed(
                 "[Overlay][Start] "
                 f"target={overlay_target} "
@@ -4147,6 +4159,16 @@ class GuiController:
                 logging_mode=self.runtime_logging_mode,
                 diagnostics=diagnostics,
                 task_factory=runtime.create_child_task,
+                retry_ownership_changed=(
+                    None
+                    if overlay_target == OVERLAY_TARGET_DESKTOP
+                    else lambda confirmed: self._apply_overlay_retry_ownership(
+                        runtime,
+                        presenter,
+                        manager,
+                        confirmed=confirmed,
+                    )
+                ),
             )
             runtime.attach_process_manager(manager)
             await manager.start()

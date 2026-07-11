@@ -155,6 +155,29 @@ class NativeFreshRenderGenerations:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeFreshRenderTargets:
+    self: str | None = None
+    peer: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {}
+        if self.self is not None:
+            payload["self"] = self.self
+        if self.peer is not None:
+            payload["peer"] = self.peer
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> "NativeFreshRenderTargets":
+        if not isinstance(data, dict):
+            raise ValueError("native fresh render targets must be an object")
+        return cls(
+            self=_optional_non_empty_string_field(data, "self"),
+            peer=_optional_non_empty_string_field(data, "peer"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class OverlayPresentationSnapshot:
     revision: int = 0
     calibration: OverlayPresentationCalibration = field(
@@ -162,11 +185,15 @@ class OverlayPresentationSnapshot:
     )
     blocks: list[OverlayPresentationBlock] = field(default_factory=list)
     native_fresh_render_generations: NativeFreshRenderGenerations | None = None
+    native_fresh_render_targets: NativeFreshRenderTargets | None = None
 
     def __post_init__(self) -> None:
         generations = self.native_fresh_render_generations
         if generations is not None and generations.self is None and generations.peer is None:
             object.__setattr__(self, "native_fresh_render_generations", None)
+        targets = self.native_fresh_render_targets
+        if targets is not None and targets.self is None and targets.peer is None:
+            object.__setattr__(self, "native_fresh_render_targets", None)
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -178,6 +205,8 @@ class OverlayPresentationSnapshot:
             payload["native_fresh_render_generations"] = (
                 self.native_fresh_render_generations.to_dict()
             )
+        if self.native_fresh_render_targets is not None:
+            payload["native_fresh_render_targets"] = self.native_fresh_render_targets.to_dict()
         return payload
 
     @classmethod
@@ -201,6 +230,9 @@ class OverlayPresentationSnapshot:
         raw_generations = data.get("native_fresh_render_generations")
         if raw_generations is not None and not isinstance(raw_generations, dict):
             raise ValueError("native fresh render generations must be an object")
+        raw_targets = data.get("native_fresh_render_targets")
+        if raw_targets is not None and not isinstance(raw_targets, dict):
+            raise ValueError("native fresh render targets must be an object")
         return cls(
             revision=int(data.get("revision", 0)),
             calibration=OverlayPresentationCalibration.from_dict(calibration),
@@ -209,6 +241,9 @@ class OverlayPresentationSnapshot:
                 NativeFreshRenderGenerations.from_dict(raw_generations)
                 if raw_generations is not None
                 else None
+            ),
+            native_fresh_render_targets=(
+                NativeFreshRenderTargets.from_dict(raw_targets) if raw_targets is not None else None
             ),
         )
 
@@ -242,6 +277,13 @@ def _optional_string_field(data: dict[str, object], key: str) -> str | None:
         return None
     if not isinstance(value, str):
         raise ValueError(f"{key} must be a string")
+    return value
+
+
+def _optional_non_empty_string_field(data: dict[str, object], key: str) -> str | None:
+    value = _optional_string_field(data, key)
+    if value is not None and not value.strip():
+        raise ValueError(f"{key} must be a non-empty string")
     return value
 
 

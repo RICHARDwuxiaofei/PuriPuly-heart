@@ -711,7 +711,8 @@ async def test_presenter_hidden_translation_final_without_visible_change_is_not_
 
         assert presenter.snapshot() == previous_snapshot
         assert len(bridge.snapshots) == snapshot_count_before_translation
-        assert presenter.snapshot().native_fresh_render_generations.self == 1
+        assert presenter.snapshot().native_fresh_render_generations is None
+        assert presenter.snapshot().native_fresh_render_targets is None
         assert (
             presenter._self_presentation_refresh_request_key_for_event(
                 translation_event,
@@ -5623,6 +5624,7 @@ async def test_presenter_hidden_self_translation_metadata_update_does_not_bump_r
         bridge=bridge,
         calibration=OverlayCalibration(),
         self_presentation_refresh_burst=False,
+        native_retry_trigger_emission=True,
     )
     adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
     turn_id = uuid4()
@@ -7360,6 +7362,7 @@ async def test_presenter_native_fresh_render_peer_event_matrix_uses_exact_visibl
         calibration=OverlayCalibration(),
         peer_presentation_refresh_burst=False,
         self_presentation_refresh_burst=False,
+        native_retry_trigger_emission=True,
     )
     adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
     visible = uuid4()
@@ -7459,6 +7462,7 @@ async def test_presenter_native_fresh_render_generations_preserve_channels_and_e
         clock=clock,
         peer_presentation_refresh_burst=False,
         self_presentation_refresh_burst=False,
+        native_retry_trigger_emission=True,
     )
     adapter = OverlayEventAdapter(clock=clock)
     self_turn = uuid4()
@@ -7571,6 +7575,7 @@ async def test_presenter_native_fresh_render_same_text_new_turn_and_terminal_exc
         calibration=OverlayCalibration(),
         peer_presentation_refresh_burst=False,
         self_presentation_refresh_burst=False,
+        native_retry_trigger_emission=True,
     )
     adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
     first_self = uuid4()
@@ -7625,3 +7630,72 @@ async def test_presenter_native_fresh_render_same_text_new_turn_and_terminal_exc
     assert presenter.snapshot().native_fresh_render_generations == generations
     await presenter.emit(adapter.utterance_closed(utterance_id=peer_turn, channel="peer"))
     assert presenter.snapshot().native_fresh_render_generations == generations
+
+
+@pytest.mark.asyncio
+async def test_native_ownership_transition_serializes_concurrent_target_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    presenter = OverlayPresenter(calibration=OverlayCalibration())
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    first = uuid4()
+    second = uuid4()
+
+    async def publish_peer(turn_id, text: str) -> None:
+        await presenter.emit(
+            adapter.transcript_final(
+                Transcript(
+                    utterance_id=turn_id,
+                    channel="peer",
+                    text=f"source {text}",
+                    is_final=True,
+                    created_at=10.0,
+                ),
+                source_language="en",
+                target_language="ko",
+            )
+        )
+        await presenter.emit(
+            adapter.translation_final(
+                utterance_id=turn_id,
+                channel="peer",
+                text=text,
+                source_language="en",
+                target_language="ko",
+                applied_context_mode=None,
+            )
+        )
+
+    await publish_peer(first, "first")
+    transition_blocked = asyncio.Event()
+    release_transition = asyncio.Event()
+    original = OverlayPresenter.update_peer_presentation_refresh_burst
+
+    async def blocked_update(self, enabled: bool) -> None:
+        if self is presenter and not enabled:
+            transition_blocked.set()
+            await release_transition.wait()
+        await original(self, enabled)
+
+    monkeypatch.setattr(OverlayPresenter, "update_peer_presentation_refresh_burst", blocked_update)
+    transition = asyncio.create_task(presenter.update_native_retry_ownership(True))
+    await transition_blocked.wait()
+    replacement = asyncio.create_task(publish_peer(second, "second"))
+    await asyncio.sleep(0)
+    assert not replacement.done()
+    release_transition.set()
+    await transition
+    await replacement
+
+    snapshot = presenter.snapshot()
+    assert snapshot.native_fresh_render_targets.peer == f"peer:{second}"
+    assert snapshot.native_fresh_render_generations.peer is not None
+    assert presenter._peer_presentation_refresh_burst_task is None
+    await presenter.update_native_retry_ownership(False)
+    assert presenter.snapshot().native_fresh_render_generations is None
+    assert presenter._presentation_state.peer_presentation_refresh_target_key == ("peer", second)
+    assert presenter._peer_presentation_refresh_burst_task is not None
+    await presenter.close()
+    await presenter.update_native_retry_ownership(False)
+    assert presenter._peer_presentation_refresh_burst_task is None
+    assert presenter._self_presentation_refresh_burst_task is None
