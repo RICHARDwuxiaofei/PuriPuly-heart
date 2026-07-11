@@ -7,10 +7,10 @@ selected_input:
   sha256: eda96ce61e97c63af60145e39c8f967ebac4b5a8157b8b68e2c84d78c78a6527
 
 current:
-  gate_id: quiet-tail-profile-selection
-  cluster_id: quiet-tail-profile-selection-c2
+  gate_id: terminal-verification
+  cluster_id: terminal-verification-c1
   work_refs:
-    - verify-affected-hmd-profile-selection
+    - verify-coalesced-retry-optimization-terminal
   next_action: continue
 
 gate_plans:
@@ -59,14 +59,14 @@ gate_plans:
       - id: quiet-tail-profile-selection-c2
         work_refs:
           - verify-affected-hmd-profile-selection
-        status: in_progress
+        status: passed
   - gate_id: terminal-verification
     shape: whole_gate
     clusters:
       - id: terminal-verification-c1
         work_refs:
           - verify-coalesced-retry-optimization-terminal
-        status: pending
+        status: in_progress
 
 worktree:
   path: .worktrees/iw-vr-overlay-coalesced-retry-optimization
@@ -127,6 +127,14 @@ checkpoints:
     verification: passed
     review: pass
     summary: Native quiet-tail scheduling implements fixed 100 ms cadence, non-replenishing four-opportunity stream episodes, independent profile-bounded final episodes, causal due consumption, lifecycle tombstones, and runtime-only comparison controls.
+  - id: quiet-tail-profile-selection-c2
+    gate_id: quiet-tail-profile-selection
+    cluster_id: quiet-tail-profile-selection-c2
+    decision: pass
+    commit: e6dc26e505832693ee5b952e3268811948c6af47
+    verification: passed
+    review: pass
+    summary: Exact affected-HMD P05/P10/P15/P20 evidence and preserved-old-Native fallback select P05 as the shortest accepted profile; the bounded default change is verified and DD-004 remains unresolved.
 
 open_items:
   - type: watchpoint
@@ -141,3 +149,4 @@ notes:
   - Source PRD C:/Users/salee/Documents/dev/puripuly_heart/.agents/specs/prd/vr-overlay-coalesced-retry-optimization.md validated at bd23681724a419131f4475d109e2089e91c7f591a1bd4716b854fbb0f9642b7b.
   - Phase-1 live evidence is recorded at .agents/evidence/vr-overlay-coalesced-retry-phase1.yaml; SteamVR Home-only limits and no shorter-profile selection remain explicit.
   - Capability/target integration and the accepted DD-002 design are recorded at .agents/evidence/vr-overlay-capability-target-integration.yaml.
+  - Affected-HMD profile comparison, fallback correction history, P05 selection, and selected-default build identity are recorded at .agents/evidence/vr-overlay-quiet-tail-profile-selection.yaml.
