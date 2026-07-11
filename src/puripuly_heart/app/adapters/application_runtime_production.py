@@ -1,0 +1,638 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from pathlib import Path
+
+from puripuly_heart.app.adapters.resolved_runtime_resource_factory import (
+    ResolvedRuntimeResourceFactory,
+)
+from puripuly_heart.app.ports.application_runtime import ResolvedRuntimeActivationRequest
+from puripuly_heart.app.ports.post_commit_runtime import (
+    RuntimeMutationProvenance,
+    RuntimeOperationalSnapshot,
+)
+from puripuly_heart.app.ports.runtime_resources import RuntimeResourceReplacementPlan
+from puripuly_heart.app.ports.settings_repository import SettingsCommitReceipt
+from puripuly_heart.app.services.application_runtime_host import (
+    ApplicationRuntimeHost,
+    ApplicationRuntimeParts,
+)
+from puripuly_heart.app.services.canonical_runtime_resolution import CanonicalRuntimeConfigResolver
+from puripuly_heart.app.services.resolved_runtime_adapter import ResolvedRuntimeResourceAdapter
+from puripuly_heart.config.audio_host_api import normalize_input_host_api
+from puripuly_heart.config.resolved import ResolvedSTTConfig
+from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
+from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
+from puripuly_heart.core.audio.diagnostics import AudioFaultProfile, DiagnosticAudioSource
+from puripuly_heart.core.audio.source import (
+    SoundDeviceAudioSource,
+    determine_self_mic_capture_channels,
+    resolve_sounddevice_input_device,
+)
+from puripuly_heart.core.messages import (
+    CONTENT_POLICY_METADATA_ONLY,
+    DIAGNOSTIC_CATEGORY_LIFECYCLE,
+    DIAGNOSTIC_VISIBILITY_BASIC,
+    RUNTIME_APPLY_STATUS_APPLIED,
+    RUNTIME_APPLY_STATUS_FAILED,
+    ErrorDiagnostics,
+    RuntimeApplyResult,
+)
+from puripuly_heart.core.orchestrator.hub import ClientHub
+from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
+from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
+from puripuly_heart.core.runtime.audio_vad_loop import run_audio_vad_loop
+from puripuly_heart.core.runtime.logging import RuntimeLoggingService
+from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
+from puripuly_heart.core.runtime.self_audio import SelfChannelConfig, SelfSTTChannelOwner
+from puripuly_heart.core.stt.controller import ManagedSTTProvider
+from puripuly_heart.core.vad.bundled import ensure_silero_vad_onnx
+from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
+from puripuly_heart.core.vad.silero import SileroVadOnnx
+
+
+@dataclass(slots=True)
+class PersistedCanonicalReceiptSource:
+    persistence: object
+    path: Path
+
+    async def load_receipt(self) -> SettingsCommitReceipt:
+        return await asyncio.to_thread(
+            self.persistence.load_receipt,
+            self.path,
+            reason="production_runtime",
+            correlation_id=None,
+        )
+
+
+@dataclass(slots=True)
+class RuntimeDiagnosticsAdapter:
+    runtime_logging: object
+
+    def detailed_enabled(self) -> bool:
+        mode = getattr(self.runtime_logging, "mode", None)
+        return getattr(mode, "value", mode) == "detailed"
+
+    def record_cleanup_failure(self, *, slot: str, exception_class: str) -> None:
+        callback = getattr(self.runtime_logging, "log_detailed", None)
+        if callable(callback):
+            callback(f"runtime_resource_cleanup_failed slot={slot} exception={exception_class}")
+
+
+@dataclass(slots=True)
+class ProductionAudioRuntimeHooks:
+    capture_fault: str = AudioFaultProfile.NONE.value
+    stt_fault: str = AudioFaultProfile.NONE.value
+    final_suppressed_callback: object | None = None
+
+    def capture_fault_profile(self) -> str:
+        return self.capture_fault
+
+    def stt_fault_profile(self) -> str:
+        return self.stt_fault
+
+    def final_suppressed(self, notification: object) -> None:
+        callback = self.final_suppressed_callback
+        if callable(callback):
+            callback(notification)
+
+
+class ResolvedLLMBuilderAdapter:
+    def build_llm(self, config, **kwargs):  # noqa: ANN001, ANN003, ANN201
+        from puripuly_heart.app.wiring import create_llm_provider_from_resolved_config
+
+        kwargs.pop("managed_delegate", None)
+        return create_llm_provider_from_resolved_config(config, **kwargs)
+
+
+@dataclass(slots=True)
+class ResolvedSTTBuilderAdapter:
+    hooks: object | None = None
+
+    def build_stt(self, config, **kwargs):  # noqa: ANN001, ANN003, ANN201
+        from puripuly_heart.app.wiring import create_stt_backend_from_resolved_config
+
+        backend = create_stt_backend_from_resolved_config(
+            config,
+            secrets=kwargs["secrets"],
+            diagnostics_enabled=kwargs["diagnostics"].detailed_enabled,
+        )
+        notification = None if self.hooks is None else self.hooks.final_suppressed
+        fault_profile = None if self.hooks is None else self.hooks.stt_fault_profile
+        return ManagedSTTProvider(
+            backend=backend,
+            sample_rate_hz=config.sample_rate_hz,
+            stt_provider_name=config.provider,
+            channel=config.channel,
+            clock=kwargs["clock"],
+            reset_deadline_s=300.0,
+            drain_timeout_s=config.drain_timeout_s,
+            bridging_ms=config.ring_buffer_ms,
+            runtime_logging=kwargs.get("runtime_logging"),
+            on_final_transcript_suppressed=notification,
+            stt_input_fault_profile_provider=fault_profile,
+        )
+
+
+@dataclass(slots=True)
+class RuntimePolicyEpoch:
+    self_intent_generation: int = 0
+    peer_intent_generation: int = 0
+
+
+@dataclass(slots=True)
+class SelectiveProviderActivationAdapter:
+    runtime: ResolvedRuntimeResourceAdapter
+    self_owner: SelfSTTChannelOwner
+    peer_owner: PeerChannelRuntime
+    epoch: RuntimePolicyEpoch
+
+    async def activate_providers(self, request, directive) -> RuntimeApplyResult:  # noqa: ANN001
+        self.epoch.self_intent_generation = self.self_owner.snapshot().intent_generation
+        self.epoch.peer_intent_generation = self.peer_owner.policy_snapshot().intent_generation
+        plan = RuntimeResourceReplacementPlan(
+            directive.llm,
+            directive.self_stt,
+            directive.peer_stt,
+        )
+        try:
+            await self.runtime.replace_runtime_with_plan(request, plan)
+        except Exception:
+            return RuntimeApplyResult(
+                RUNTIME_APPLY_STATUS_FAILED,
+                None,
+                ErrorDiagnostics(
+                    component="provider_activation",
+                    operation="activate_provider_set",
+                    code="provider_set_activation_failed",
+                    category=DIAGNOSTIC_CATEGORY_LIFECYCLE,
+                    visibility=DIAGNOSTIC_VISIBILITY_BASIC,
+                    content_policy=CONTENT_POLICY_METADATA_ONLY,
+                    status_code=None,
+                    retry_after_ms=None,
+                    fields={
+                        "llm": directive.llm,
+                        "self_stt": directive.self_stt,
+                        "peer_stt": directive.peer_stt,
+                    },
+                ),
+            )
+        return RuntimeApplyResult(RUNTIME_APPLY_STATUS_APPLIED, None, None)
+
+
+@dataclass(slots=True)
+class HubSelfVadIngress:
+    hub: ClientHub
+
+    async def handle_self_vad_event(self, event: object, provider: object) -> None:
+        await self.hub.handle_vad_event(event, stt_provider=provider)
+
+
+@dataclass(slots=True)
+class ChannelAwareRuntimeResourceHost:
+    hub: ClientHub
+    peer: PeerChannelRuntime
+    self_owner: SelfSTTChannelOwner
+    epoch: RuntimePolicyEpoch
+
+    async def current_runtime_state(self):  # noqa: ANN201
+        return await self.hub.current_runtime_state()
+
+    async def install_runtime_resources(self, staged):  # noqa: ANN001, ANN201
+        if staged.plan.self_stt != "retain":
+            await self.self_owner.freeze_for_provider_replacement()
+        action = staged.plan.peer_stt
+        resume = None
+        if action != "retain":
+            resume = await self.peer.freeze_for_provider_replacement()
+            await self.hub.peer_final_runs.cancel_pending()
+        try:
+            return await self.hub.install_runtime_resources(staged)
+        finally:
+            if resume is not None:
+                await self.peer.resume_after_provider_replacement(resume)
+
+
+@dataclass(slots=True)
+class ProductionAudioFactories:
+    detailed_enabled: object
+    safe_log: object
+    hooks: object
+    audio_gate: object | None = None
+    source_type: object = SoundDeviceAudioSource
+    device_resolver: object = resolve_sounddevice_input_device
+
+    def self_source(self, config: SelfChannelConfig):  # noqa: ANN201
+        backend = self._backend(config)
+        profile = normalize_input_host_api(backend.input_host_api)
+        attempts = (
+            (
+                profile.actual_host_api,
+                backend.input_device,
+                profile.wasapi_auto_convert,
+                profile.wasapi_exclusive,
+            ),
+            ("", backend.input_device, False, False),
+            ("", "", False, False),
+        )
+        last_error = None
+        attempted: set[tuple[object, ...]] = set()
+        for host_api, device_name, auto_convert, exclusive in attempts:
+            try:
+                device = (
+                    None
+                    if not host_api and not device_name
+                    else self.device_resolver(host_api=host_api, device=device_name)
+                )
+                key = (device, auto_convert, exclusive)
+                if key in attempted:
+                    continue
+                attempted.add(key)
+                decision = determine_self_mic_capture_channels(
+                    device_idx=device,
+                    internal_channels=backend.channels,
+                )
+                source = self._open_with_channel_fallback(
+                    backend,
+                    device,
+                    decision.preferred_capture_channels,
+                    auto_convert,
+                    exclusive,
+                )
+                return DiagnosticAudioSource(
+                    source=source,
+                    channel_label="self",
+                    is_detailed_enabled=self.detailed_enabled,
+                    log_detailed=self.safe_log,
+                    fault_profile_provider=self.hooks.capture_fault_profile,
+                    extra_fields_provider=lambda: self._capture_metadata(source),
+                )
+            except Exception as exc:
+                last_error = exc
+        raise RuntimeError("all microphone capture attempts failed") from last_error
+
+    def _open_with_channel_fallback(
+        self, backend, device, channels, auto_convert, exclusive  # noqa: ANN001
+    ):
+        try:
+            return self.source_type(
+                sample_rate_hz=None,
+                channels=channels,
+                device=device,
+                wasapi_auto_convert=auto_convert,
+                wasapi_exclusive=exclusive,
+            )
+        except Exception:
+            if channels <= backend.channels:
+                raise
+            return self.source_type(
+                sample_rate_hz=None,
+                channels=backend.channels,
+                device=device,
+                wasapi_auto_convert=auto_convert,
+                wasapi_exclusive=exclusive,
+            )
+
+    @staticmethod
+    def _capture_metadata(source: object) -> dict[str, object]:
+        return {
+            "queue_drops": getattr(source, "queue_drop_count", 0),
+            "callback_statuses": getattr(source, "callback_status_count", 0),
+            "last_callback_status": getattr(source, "last_callback_status", None),
+            "resolved_device_name": getattr(source, "resolved_device_name", None),
+            "resolved_device_index": getattr(source, "resolved_device_index", None),
+            "resolved_channels": getattr(source, "opened_channels", None),
+            "actual_sample_rate_hz": getattr(source, "actual_sample_rate_hz", None),
+            "used_default_fallback": getattr(source, "device", None) is None,
+        }
+
+    def self_vad(self, config: SelfChannelConfig):  # noqa: ANN201
+        backend = self._backend(config)
+        return VadGating(
+            engine=SileroVadOnnx(model_path=ensure_silero_vad_onnx()),
+            sample_rate_hz=backend.sample_rate_hz,
+            ring_buffer_ms=backend.ring_buffer_ms,
+            speech_threshold=backend.vad_speech_threshold,
+            hangover_ms=backend.vad_hangover_ms,
+            diagnostic_event_callback=self.safe_log,
+            diagnostics_enabled=self.detailed_enabled,
+            diagnostic_label="self",
+        )
+
+    def peer_source(self, config: PeerRuntimeConfig):  # noqa: ANN201
+        return DesktopPeerPipeline(
+            source=DesktopLoopbackAudioSource(device_name=config.output_device),
+            target_sample_rate_hz=config.backend.sample_rate_hz,
+            is_detailed_enabled=self.detailed_enabled,
+            log_detailed=self.safe_log,
+        )
+
+    def peer_vad(self, config: PeerRuntimeConfig, model_path: Path):  # noqa: ANN201
+        return create_peer_vad_gating(
+            engine=SileroVadOnnx(model_path=model_path),
+            sample_rate_hz=config.backend.sample_rate_hz,
+            ring_buffer_ms=config.vad_pre_roll_ms,
+            speech_threshold=config.vad_threshold,
+            hangover_ms=config.vad_hangover_ms,
+            diagnostic_event_callback=self.safe_log,
+            diagnostics_enabled=self.detailed_enabled,
+            diagnostic_label="peer",
+        )
+
+    async def self_loop(self, **kwargs) -> None:  # noqa: ANN003
+        await run_audio_vad_loop(
+            **kwargs,
+            channel_label="self",
+            is_detailed_enabled=self.detailed_enabled,
+            log_detailed=self.safe_log,
+            audio_gate=self.audio_gate,
+        )
+
+    async def peer_loop(self, **kwargs) -> None:  # noqa: ANN003
+        await run_audio_vad_loop(
+            **kwargs,
+            channel_label="peer",
+            is_detailed_enabled=self.detailed_enabled,
+            log_detailed=self.safe_log,
+        )
+
+    @staticmethod
+    def _backend(config: SelfChannelConfig) -> ResolvedSTTConfig:
+        if config.backend is None:
+            raise RuntimeError("resolved self STT config is required")
+        return config.backend
+
+
+@dataclass(slots=True)
+class ProductionRuntimeSynchronization:
+    hub: ClientHub
+    self_owner: SelfSTTChannelOwner
+    peer_owner: PeerChannelRuntime
+    epoch: RuntimePolicyEpoch
+
+    async def synchronize_runtime(
+        self, request, directive, *, before, after, operational  # noqa: ANN001
+    ) -> RuntimeApplyResult:
+        _ = (before, after)
+        operation = directive.operation
+        if operation == "language_runtime_clear":
+            self.hub.source_language = directive.source_language
+            self.hub.target_language = directive.target_language
+            self.hub.peer_source_language = directive.peer_source_language
+            self.hub.peer_target_language = directive.peer_target_language
+            self.hub.clear_context()
+        elif operation == "audio_vad":
+            resolved = request.config.self_stt
+            self.hub.low_latency_mode = resolved.low_latency_enabled
+            self.hub.low_latency_merge_gap_ms = resolved.low_latency_merge_gap_ms
+            self.hub.low_latency_spec_retry_max = resolved.low_latency_spec_retry_max
+            self.hub.hangover_s = resolved.vad_hangover_ms / 1000.0
+            self.hub.peer_hangover_s = request.config.peer_stt.vad_hangover_ms / 1000.0
+            await self._synchronize_channels(request, operational)
+        elif operation == "prompt_clipboard":
+            self.hub.system_prompt = directive.system_prompt
+            self.hub.clipboard_auto_translate_enabled = directive.clipboard_auto_translate_enabled
+        elif operation == "overlay_osc":
+            self.hub.chatbox_include_source = directive.chatbox_include_source
+            self.hub.runtime_overlay_directive = directive
+        elif operation == "locale_ui_projection":
+            self.hub.runtime_locale = directive.locale
+        elif operation == "dashboard_retry_facts":
+            self.hub.runtime_dashboard_facts = directive
+        return RuntimeApplyResult(RUNTIME_APPLY_STATUS_APPLIED, None, None)
+
+    async def _synchronize_channels(self, request, operational) -> None:  # noqa: ANN001
+        self_config = request.config.self_stt
+        self_snapshot = self.self_owner.snapshot()
+        self_enabled = (
+            self_snapshot.intent_enabled
+            if self_snapshot.intent_generation != self.epoch.self_intent_generation
+            else operational.self_stt_enabled
+        )
+        if self_enabled:
+            await self.self_owner.execute(
+                __import__(
+                    "puripuly_heart.core.runtime.self_audio", fromlist=["SetSelfSTTEnabled"]
+                ).SetSelfSTTEnabled(
+                    True,
+                    SelfChannelConfig(
+                        self_config.sample_rate_hz,
+                        (self_config,),
+                        self_config.provider == "local_qwen",
+                        self_config,
+                    ),
+                    record_intent=False,
+                )
+            )
+        else:
+            await self.self_owner.freeze_for_provider_replacement()
+        peer = request.config.peer_stt
+        peer_snapshot = self.peer_owner.policy_snapshot()
+        peer_enabled = (
+            peer_snapshot.intent_desired_active
+            if peer_snapshot.intent_generation != self.epoch.peer_intent_generation
+            else operational.peer_stt_enabled
+        )
+        await self.peer_owner.apply_policy(
+            config=PeerRuntimeConfig(
+                backend=peer,
+                output_device=peer.output_device or "",
+                vad_threshold=peer.vad_speech_threshold,
+                vad_hangover_ms=peer.vad_hangover_ms,
+                vad_pre_roll_ms=peer.vad_pre_roll_ms,
+                provider_signature=(peer.provider, peer.credential, peer.provider_options),
+                runtime_signature=(peer,),
+            ),
+            desired_active=peer_enabled,
+            record_intent=False,
+        )
+
+    async def synchronize_peer(self, request, *, desired_active: bool) -> None:  # noqa: ANN001
+        peer = request.config.peer_stt
+        await self.peer_owner.apply_policy(
+            config=PeerRuntimeConfig(
+                backend=peer,
+                output_device=peer.output_device or "",
+                vad_threshold=peer.vad_speech_threshold,
+                vad_hangover_ms=peer.vad_hangover_ms,
+                vad_pre_roll_ms=peer.vad_pre_roll_ms,
+                provider_signature=(peer.provider, peer.credential, peer.provider_options),
+                runtime_signature=(peer,),
+            ),
+            desired_active=desired_active,
+            record_intent=False,
+        )
+
+
+@dataclass(slots=True)
+class ProductionRuntimeComposition:
+    resolved_adapter: ResolvedRuntimeResourceAdapter
+    surface_transactions: object
+    plan_builder: object
+    synchronization: ProductionRuntimeSynchronization
+    resolver: CanonicalRuntimeConfigResolver
+
+    async def synchronize_startup(
+        self, receipt: SettingsCommitReceipt, operational: RuntimeOperationalSnapshot
+    ) -> RuntimeApplyResult:
+        directives = {}
+        for surface in (
+            "stt_language_audio",
+            "overlay_osc_output",
+            "ui_prompt_clipboard_state",
+        ):
+            plan = self.plan_builder.build(
+                before=None,
+                after=receipt,
+                provenance=RuntimeMutationProvenance(
+                    surface,
+                    "settings_surface",
+                    receipt.reason,
+                    receipt.correlation_id,
+                ),
+                operational=operational,
+            )
+            directives.update(
+                (directive.operation, directive) for directive in plan.synchronization
+            )
+        request = ResolvedRuntimeActivationRequest(
+            self.resolver.resolve(receipt),
+            receipt.revision,
+            receipt.reason,
+            receipt.correlation_id,
+        )
+        for operation in (
+            "language_runtime_clear",
+            "overlay_osc",
+            "locale_ui_projection",
+            "prompt_clipboard",
+            "dashboard_retry_facts",
+            "audio_vad",
+        ):
+            result = await self.synchronization.synchronize_runtime(
+                request,
+                directives[operation],
+                before=None,
+                after=receipt,
+                operational=operational,
+            )
+            if result.status != RUNTIME_APPLY_STATUS_APPLIED:
+                return result
+        return RuntimeApplyResult(RUNTIME_APPLY_STATUS_APPLIED, None, None)
+
+    async def resume_peer_stt(self, receipt: SettingsCommitReceipt) -> RuntimeApplyResult:
+        request = ResolvedRuntimeActivationRequest(
+            self.resolver.resolve(receipt),
+            receipt.revision,
+            receipt.reason,
+            receipt.correlation_id,
+        )
+        await self.synchronization.synchronize_peer(request, desired_active=True)
+        return RuntimeApplyResult(RUNTIME_APPLY_STATUS_APPLIED, None, None)
+
+
+def create_production_application_runtime(
+    *,
+    state_path: Path,
+    initial_settings,
+    persistence,
+    secrets,
+    clock,
+    runtime_logging: object | None = None,
+    audio_gate: object | None = None,
+):  # noqa: ANN001, ANN201
+    from puripuly_heart.app.services.post_commit_runtime import (
+        PostCommitRuntimePlanBuilder,
+        PostCommitRuntimeTransactionOwner,
+    )
+    from puripuly_heart.app.services.surface_runtime_transactions import (
+        SelectiveSurfaceRuntimeTransactionPort,
+    )
+
+    logging = runtime_logging or RuntimeLoggingService()
+    legacy = persistence.legacy_projection(initial_settings)
+    sender = VrchatOscUdpSender(
+        host=legacy.osc.host,
+        port=legacy.osc.port,
+        chatbox_address=legacy.osc.chatbox_address,
+        chatbox_send=legacy.osc.chatbox_send,
+        chatbox_clear=legacy.osc.chatbox_clear,
+    )
+    osc = ChatboxPaginator(
+        sender=sender,
+        clock=clock,
+        max_chars=legacy.osc.chatbox_max_chars,
+        runtime_logging=logging,
+    )
+    hub = ClientHub(
+        stt=None, peer_stt=None, llm=None, osc=osc, clock=clock, runtime_logging=logging
+    )
+    hooks = ProductionAudioRuntimeHooks()
+    factories = ProductionAudioFactories(
+        detailed_enabled=lambda: getattr(logging.mode, "value", logging.mode) == "detailed",
+        safe_log=lambda message: logging.log_detailed(message),
+        hooks=hooks,
+        audio_gate=audio_gate,
+    )
+    self_owner = SelfSTTChannelOwner(
+        provider_read_port=hub,
+        provider_host=hub,
+        ingress=HubSelfVadIngress(hub),
+        source_factory=factories.self_source,
+        vad_factory=factories.self_vad,
+        run_audio_loop=factories.self_loop,
+        audio_gate=audio_gate,
+    )
+    peer_owner = PeerChannelRuntime(
+        hub=hub,
+        clock=clock,
+        provider_read_port=hub,
+        source_factory=factories.peer_source,
+        vad_factory=factories.peer_vad,
+        vad_model_resolver=ensure_silero_vad_onnx,
+        run_audio_loop=factories.peer_loop,
+    )
+    resolver = CanonicalRuntimeConfigResolver()
+    resource_factory = ResolvedRuntimeResourceFactory(
+        secrets=secrets,
+        clock=clock,
+        diagnostics=RuntimeDiagnosticsAdapter(logging),
+        llm_builder=ResolvedLLMBuilderAdapter(),
+        stt_builder=ResolvedSTTBuilderAdapter(hooks),
+        runtime_logging=logging,
+    )
+    epoch = RuntimePolicyEpoch()
+    resolved = ResolvedRuntimeResourceAdapter(
+        factory=resource_factory,
+        host=ChannelAwareRuntimeResourceHost(hub, peer_owner, self_owner, epoch),
+    )
+    provider_activation = SelectiveProviderActivationAdapter(
+        resolved, self_owner, peer_owner, epoch
+    )
+    synchronization = ProductionRuntimeSynchronization(hub, self_owner, peer_owner, epoch)
+    coordinator = PostCommitRuntimeTransactionOwner(provider_activation, synchronization)
+    transactions = SelectiveSurfaceRuntimeTransactionPort(
+        PostCommitRuntimePlanBuilder(resolver),
+        coordinator,
+        frozenset({"stt_language_audio"}),
+    )
+    composition = ProductionRuntimeComposition(
+        resolved,
+        transactions,
+        PostCommitRuntimePlanBuilder(resolver),
+        synchronization,
+        resolver,
+    )
+    receipt_source = PersistedCanonicalReceiptSource(persistence, state_path)
+    return ApplicationRuntimeHost(
+        parts=ApplicationRuntimeParts(sender, osc, hub, peer_owner, self_owner),
+        runtime_composition=composition,
+        committed_settings=receipt_source,
+        resolver=resolver,
+        runtime_logging=logging,
+        audio_hooks=hooks,
+    )
+
+
+__all__ = ["create_production_application_runtime"]

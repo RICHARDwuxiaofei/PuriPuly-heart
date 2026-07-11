@@ -223,6 +223,10 @@ class ClientHub:
     translation_enabled: bool = True
     peer_translation_enabled: bool = False
     integrated_context_enabled: bool = False
+    clipboard_auto_translate_enabled: bool = False
+    runtime_locale: str = "en"
+    runtime_overlay_directive: object | None = None
+    runtime_dashboard_facts: object | None = None
     hangover_s: float = (
         DEFAULT_STABLE_VAD_HANGOVER_MS / 1000.0
     )  # Self VAD hangover in seconds for user-facing E2E latency.
@@ -466,6 +470,11 @@ class ClientHub:
 
     def provider_state_snapshot(self) -> ProviderStateSnapshot:
         return self._provider_state.snapshot()
+
+    def lease_stt_provider(self, slot):  # noqa: ANN001, ANN201
+        if slot not in {"self_stt", "peer_stt"}:
+            raise ValueError("STT provider lease requires an STT slot")
+        return self._provider_state.lease(slot)
 
     def _sync_provider_runtime_aliases(self, _handle: ProviderRuntimeHandle | None = None) -> None:
         return
@@ -1300,6 +1309,34 @@ class ClientHub:
             await self._self_stt_provider_runtime.drain_for_toggle_off()
             self._sync_provider_runtime_aliases()
 
+    async def clear_self_stt_for_toggle_off(self):  # noqa: ANN201
+        from puripuly_heart.app.ports.runtime_resources import (
+            ClearSelfSTTResult,
+            RuntimeInstallFailure,
+            RuntimeResourceReplacementPlan,
+            StagedRuntimeResources,
+        )
+
+        result = await self.install_runtime_resources(
+            StagedRuntimeResources(
+                plan=RuntimeResourceReplacementPlan("retain", "clear", "retain"),
+                candidates={},
+            )
+        )
+        if isinstance(result, RuntimeInstallFailure):
+            raise RuntimeError(result.cause_code)
+        displaced = next(
+            (ref for ref in result.displaced if ref.resource is not None),
+            None,
+        )
+        if displaced is not None:
+            await self._self_stt_provider_runtime.close_displaced_for_toggle_off(displaced.resource)
+        return ClearSelfSTTResult(
+            active=result.active,
+            cleared=displaced is not None,
+            displaced_identity=None if displaced is None else displaced.identity,
+        )
+
     def _provider_runtime_handles_have_resources(self) -> bool:
         return any(handle.has_resources for handle in self.provider_runtime_handles.values())
 
@@ -1395,7 +1432,9 @@ class ClientHub:
             len(context),
         )
 
-    async def handle_vad_event(self, event: VadEvent) -> None:
+    async def handle_vad_event(
+        self, event: VadEvent, *, stt_provider: STTProvider | None = None
+    ) -> None:
         resume_overlay_resync_buffer: _MergeBuffer | None = None
 
         if isinstance(event, SpeechStart):
@@ -1424,8 +1463,9 @@ class ClientHub:
                 self._maybe_start_finalize_wait(event.utterance_id)
                 await self._maybe_clear_resume_on_end(event)
 
-        if self.stt is not None:
-            await self.stt.handle_vad_event(event)
+        provider = stt_provider if stt_provider is not None else self.stt
+        if provider is not None:
+            await provider.handle_vad_event(event)
 
         if (
             resume_overlay_resync_buffer is not None
@@ -1433,7 +1473,9 @@ class ClientHub:
         ):
             await self._sync_overlay_active_self(resume_overlay_resync_buffer)
 
-    async def handle_peer_vad_event(self, event: VadEvent) -> None:
+    async def handle_peer_vad_event(
+        self, event: VadEvent, *, stt_provider: STTProvider | None = None
+    ) -> None:
         if isinstance(event, SpeechEnd) and not self.peer_final_runs.is_parent_closed(
             event.utterance_id
         ):
@@ -1456,8 +1498,9 @@ class ClientHub:
                 )
             if event.utterance_id in self._peer_parent_turn_ids:
                 self._maybe_clear_completed_peer_parent(event.utterance_id)
-        if self.peer_stt is not None:
-            await self.peer_stt.handle_vad_event(event)
+        provider = self.peer_stt if stt_provider is None else stt_provider
+        if provider is not None:
+            await provider.handle_vad_event(event)
 
     async def submit_text(self, text: str, *, source: str = "You") -> UUID:
         text = text.strip()

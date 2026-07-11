@@ -111,6 +111,7 @@ def _run_gui(
         resolve_overlay_lifecycle_configuration,
     )
     from puripuly_heart.app.wiring_composition import (
+        create_application_runtime_host,
         create_overlay_production_composition,
     )
     from puripuly_heart.ui.app import main_gui
@@ -123,6 +124,11 @@ def _run_gui(
     async def _target(page: ft.Page):
         composition = create_overlay_production_composition(
             configuration=resolve_overlay_lifecycle_configuration(initial_settings)
+        )
+        application_runtime_host = create_application_runtime_host(
+            config_path,
+            initial_settings,
+            audio_gate=composition.audio_gate,
         )
         kwargs = {
             "config_path": config_path,
@@ -142,6 +148,8 @@ def _run_gui(
             kwargs["overlay_ui_projection"] = composition.ui_projection
         if "vrc_audio_gate" in parameters or accepts_kwargs:
             kwargs["vrc_audio_gate"] = composition.audio_gate
+        if "application_runtime_host" in parameters or accepts_kwargs:
+            kwargs["application_runtime_host"] = application_runtime_host
         if "allow_stable_settings_import" in parameters or any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         ):

@@ -44,6 +44,25 @@ class Provider:
 
 
 @pytest.mark.asyncio
+async def test_clear_self_stt_is_atomic_preserves_other_slots_and_awaits_close() -> None:
+    llm, self_stt, peer = (Provider() for _ in range(3))
+    hub = ClientHub(stt=self_stt, peer_stt=peer, llm=llm, osc=Osc())
+    prior = hub.provider_state_snapshot()
+
+    result = await hub.clear_self_stt_for_toggle_off()
+    current = hub.provider_state_snapshot()
+
+    assert result.cleared is True
+    assert result.displaced_identity == prior.self_stt.identity
+    assert current.self_stt.provider is None
+    assert current.self_stt.generation == prior.self_stt.generation + 1
+    assert current.llm == prior.llm
+    assert current.peer_stt == prior.peer_stt
+    assert self_stt.close_calls == 1
+    assert llm.close_calls == peer.close_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_real_hub_mixed_retain_replace_clear_reports_only_adopted_candidate() -> None:
     retained, replaced, cleared, candidate = (Provider() for _ in range(4))
     hub = ClientHub(stt=replaced, peer_stt=cleared, llm=retained, osc=Osc())

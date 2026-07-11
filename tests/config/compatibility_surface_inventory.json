@@ -673,7 +673,18 @@
       "source_of_truth_refs": ["src/puripuly_heart/core/runtime/self_audio.py"],
       "runtime_all_matches_exports": true,
       "facade_contract": null,
-      "exports": [{"name": "SelfAudioRuntime", "kind": "attribute"}]
+      "exports": [
+        {"name": "SelfAudioRuntime", "kind": "attribute"},
+        {"name": "SelfChannelCommandResult", "kind": "attribute"},
+        {"name": "SelfChannelConfig", "kind": "attribute"},
+        {"name": "SelfChannelSnapshot", "kind": "attribute"},
+        {"name": "SelfChannelState", "kind": "attribute"},
+        {"name": "SelfSTTChannelOwner", "kind": "attribute"},
+        {"name": "SelfSTTCommandPort", "kind": "attribute"},
+        {"name": "SelfSTTProviderApplicationPort", "kind": "attribute"},
+        {"name": "SelfSTTStatePort", "kind": "attribute"},
+        {"name": "SetSelfSTTEnabled", "kind": "attribute"}
+      ]
     },
     {
       "module": "puripuly_heart.core.output",
@@ -942,6 +953,7 @@
       "classification": "internal_adapter_implementation_contract",
       "modules": [
         "puripuly_heart.app.adapters.provider_verifier",
+        "puripuly_heart.app.adapters.application_runtime_production",
         "puripuly_heart.app.adapters.post_commit_provider_activation",
         "puripuly_heart.app.adapters.resolved_runtime_resource_factory"
       ],

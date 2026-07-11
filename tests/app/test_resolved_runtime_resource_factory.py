@@ -9,15 +9,18 @@ import pytest
 from puripuly_heart.app.adapters.resolved_runtime_resource_factory import (
     ResolvedRuntimeResourceFactory,
 )
+from puripuly_heart.app.ports.application_runtime import ResolvedRuntimeActivationRequest
 from puripuly_heart.app.ports.runtime_resources import RuntimeResourceReplacementPlan
 from puripuly_heart.app.ports.settings_repository import SettingsCommitReceipt
 from puripuly_heart.app.services.canonical_runtime_resolution import CanonicalRuntimeConfigResolver
+from puripuly_heart.app.services.resolved_runtime_adapter import ResolvedRuntimeResourceAdapter
 from puripuly_heart.config.resolved import (
     ResolvedCredentialRequirement,
     ResolvedLLMFallbackPlan,
 )
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core.clock import FakeClock
+from puripuly_heart.core.orchestrator.hub import ClientHub
 
 
 class Secrets:
@@ -274,6 +277,42 @@ async def test_partial_failure_closes_owned_candidates_once_and_preserves_primar
     assert diagnostics.cleanup_failures == [("llm", "RuntimeError")]
     assert "secret" not in repr(diagnostics.cleanup_failures).lower()
     assert managed.close_calls == delegate.close_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_atomic_set_build_failure_after_llm_success_retains_complete_prior_host_state() -> (
+    None
+):
+    candidate = Resource("candidate-llm")
+    factory, _secrets, _managed, _delegate = _factory(
+        llm_builder=LLMBuilder(candidate),
+        stt_builder=STTBuilder(fail_channel="self"),
+    )
+    prior_llm, prior_self, prior_peer = (
+        Resource("prior-llm"),
+        Resource("prior-self"),
+        Resource("prior-peer"),
+    )
+    hub = ClientHub(
+        llm=prior_llm,
+        stt=prior_self,
+        peer_stt=prior_peer,
+        osc=object(),
+    )
+    adapter = ResolvedRuntimeResourceAdapter(factory=factory, host=hub)
+    config = _config()
+
+    with pytest.raises(RuntimeError, match="self build failed"):
+        await adapter.replace_runtime_with_plan(
+            ResolvedRuntimeActivationRequest(config, "2", "atomic", "c2"),
+            RuntimeResourceReplacementPlan("replace", "replace", "replace"),
+        )
+
+    assert hub.llm is prior_llm
+    assert hub.stt is prior_self
+    assert hub.peer_stt is prior_peer
+    assert candidate.close_calls == 1
+    assert prior_llm.close_calls == prior_self.close_calls == prior_peer.close_calls == 0
 
 
 @pytest.mark.asyncio

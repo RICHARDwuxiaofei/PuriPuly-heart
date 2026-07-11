@@ -102,6 +102,25 @@ def test_atomic_transition_preserves_retained_slot_identity_and_generation() -> 
     assert after.self_stt is before.self_stt
 
 
+def test_stt_lease_is_read_only_and_rejects_replaced_generation() -> None:
+    provider = object()
+    cell = ProviderStateCell(self_stt=provider)
+    lease = cell.lease("self_stt")
+
+    assert lease is not None
+    assert lease.current is provider
+    assert lease.is_current
+
+    replacement = object()
+    cell.replace("self_stt", replacement)
+
+    assert lease.current is None
+    assert not lease.is_current
+    current = cell.lease("self_stt")
+    assert current is not None
+    assert current.current is replacement
+
+
 @pytest.mark.asyncio
 async def test_all_handles_share_cell_staleness_and_task_lifecycle_does_not_change_epoch() -> None:
     providers = {slot: object() for slot in ("llm", "self_stt", "peer_stt")}

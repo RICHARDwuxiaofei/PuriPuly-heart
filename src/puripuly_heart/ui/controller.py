@@ -123,7 +123,6 @@ from puripuly_heart.app.wiring import (
     create_peer_stt_backend_from_resolved_config,
     create_provider_verifier,
     create_secret_store,
-    create_stt_backend,
     resolve_peer_stt_runtime_config_from_vnext,
 )
 from puripuly_heart.app.wiring_composition import create_canonical_state_repositories
@@ -230,7 +229,15 @@ from puripuly_heart.core.runtime.mic_test import MicTestRuntime
 from puripuly_heart.core.runtime.oauth import OAuthRuntime
 from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
 from puripuly_heart.core.runtime.provider_rebuild import ProviderRuntimeRebuildService
-from puripuly_heart.core.runtime.self_audio import SelfAudioRuntime
+from puripuly_heart.core.runtime.self_audio import (
+    SelfAudioRuntime,
+    SelfChannelConfig,
+    SelfChannelSnapshot,
+    SelfSTTCommandPort,
+    SelfSTTProviderApplicationPort,
+    SelfSTTStatePort,
+    SetSelfSTTEnabled,
+)
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.controller import (
     FinalTranscriptSuppressedNotification,
@@ -823,6 +830,34 @@ class _UnavailableOverlayOscRuntimeApply:
 
 
 @dataclass(slots=True)
+class _ApplicationHostSurfaceRuntimeApply:
+    controller: GuiController
+    repository: _ControllerSettingsPatchRepository
+    surface: str
+
+    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
+        before = self.repository.last_loaded_receipt
+        if before is None:
+            raise RuntimeError("runtime apply requires the authoritative prior receipt")
+        execution = await self.controller.application_runtime_host.apply_committed_runtime(
+            before=before,
+            after=request.receipt,
+            surface=self.surface,
+            operational=self.controller.runtime_operational_snapshot(),
+        )
+        return RuntimeApplyResult(
+            (
+                RUNTIME_APPLY_STATUS_APPLIED
+                if execution.transaction.status
+                == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+                else RUNTIME_APPLY_STATUS_FAILED
+            ),
+            execution.transaction.message,
+            execution.transaction.diagnostics,
+        )
+
+
+@dataclass(slots=True)
 class _ControllerSecretStorePortAdapter:
     """Adapts a sync ``SecretStore`` to the async ``SecretStorePort`` protocol.
 
@@ -973,6 +1008,10 @@ class GuiController:
     overlay_application_state: OverlayApplicationStatePort | None = None
     provider_verifier: _ControllerProviderVerifier | None = None
     telemetry_client: TranslationSuccessTelemetryClientPort | None = None
+    application_runtime_host: object | None = None
+    self_stt_commands: SelfSTTCommandPort | None = None
+    self_stt_state: SelfSTTStatePort | None = None
+    self_stt_provider_application: SelfSTTProviderApplicationPort | None = None
     canonical_settings_persistence: CanonicalSettingsPersistencePort[
         AppSettings, AppSettingsVNext
     ] = field(
@@ -1186,6 +1225,14 @@ class GuiController:
             self._settings_commit_lock = asyncio.Lock()
         return self._settings_commit_lock
 
+    def current_legacy_settings(self) -> AppSettings | None:
+        return self.settings
+
+    def current_stt_fault_profile(self) -> str:
+        if self._debug_audio_fault_allowed():
+            return self._debug_stt_fault_profile
+        return "none"
+
     @property
     def effective_peer_translation_enabled(self) -> bool:
         if self.settings is None:
@@ -1277,7 +1324,7 @@ class GuiController:
             return
         if force_immediate:
             self.log_detailed("[STT] Force immediate toggle-off requested")
-        await self.hub.drain_self_stt_for_toggle_off()
+        await self.hub.clear_self_stt_for_toggle_off()
 
     async def _refresh_overlay_runtime_dependencies(self) -> None:
         if self.settings is None or self.hub is None:
@@ -1326,6 +1373,12 @@ class GuiController:
                 self.overlay_application_state.subscribe(self._on_overlay_application_state)
             await self.overlay_commands.startup()
 
+        owned_parts = getattr(self.application_runtime_host, "parts", None)
+        if owned_parts is not None and owned_parts.hub is self.hub:
+            await self.application_runtime_host.start(auto_flush_osc=True)
+        else:
+            await self.hub.start(auto_flush_osc=True)
+
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
             # Set needs_key flags based on saved verification status & key existence
@@ -1365,8 +1418,6 @@ class GuiController:
             dash.set_stt_enabled(False)
             self.hub.translation_enabled = False
             await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=False)
-
-        await self.hub.start(auto_flush_osc=True)
 
         bridge = self._create_ui_event_bridge(runtime_logging=runtime_logging)
         self._start_ui_event_bridge_task(bridge)
@@ -3711,6 +3762,9 @@ class GuiController:
         peer_runtime = self._peer_runtime
         if peer_runtime is None:
             return
+        owned_parts = getattr(self.application_runtime_host, "parts", None)
+        if owned_parts is not None and owned_parts.peer_runtime is peer_runtime:
+            return
         try:
             await peer_runtime.close()
         except Exception as exc:
@@ -3724,7 +3778,11 @@ class GuiController:
         if hub is None:
             return
         try:
-            await hub.stop()
+            owned_parts = getattr(self.application_runtime_host, "parts", None)
+            if owned_parts is not None and owned_parts.hub is hub:
+                await self.application_runtime_host.shutdown()
+            else:
+                await hub.stop()
         except Exception as exc:
             failures.append(exc)
             return
@@ -4076,7 +4134,29 @@ class GuiController:
         if enabled and self.hub is not None:
             self.hub.mark_promo_eligible()
 
-        await self._ensure_stt_switch()
+        if self.self_stt_commands is None:
+            await self._ensure_stt_switch()
+            return
+        config = None
+        if enabled and self.settings is not None:
+            config = SelfChannelConfig(
+                target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                runtime_signature=self._build_self_stt_runtime_signature(self.settings),
+                local_qwen=self.settings.provider.stt == STTProviderName.LOCAL_QWEN,
+            )
+        result = await self.self_stt_commands.execute(
+            SetSelfSTTEnabled(enabled, config, force_immediate)
+        )
+        self._render_self_stt_snapshot(result.snapshot)
+
+    def _render_self_stt_snapshot(self, snapshot: SelfChannelSnapshot) -> None:
+        self._stt_desired = snapshot.desired_enabled
+        dash = getattr(self.app, "view_dashboard", None)
+        if dash is not None:
+            dash.set_stt_enabled(snapshot.desired_enabled)
+            dash.set_stt_needs_key(
+                self._dashboard_stt_needs_key(stt_available=snapshot.provider_available)
+            )
 
     def _show_short_stt_message(self, message_key: str) -> None:
         self._show_short_message(message_key)
@@ -4333,16 +4413,13 @@ class GuiController:
 
         if should_resume_self_local_stt:
             self._reset_local_stt_pending_enable_after_install()
-            await self._rebuild_stt_provider()
-            self._stt_desired = True
-            dash = getattr(self.app, "view_dashboard", None)
-            if dash is not None:
-                dash.set_stt_enabled(True)
-            await self._ensure_stt_switch()
+            await self.set_stt_enabled(True)
 
         if should_resume_peer_local_stt:
             self._reset_local_stt_pending_peer_enable_after_install()
-            await self._refresh_overlay_runtime_dependencies()
+            result = await self.application_runtime_host.resume_peer_stt()
+            if result.status != RUNTIME_APPLY_STATUS_APPLIED:
+                self._log_error("Peer STT runtime resume failed")
 
     async def _handle_local_stt_download_status(
         self,
@@ -4502,12 +4579,19 @@ class GuiController:
             "[STT] Replacing runtime provider detail: "
             f"desired={self._stt_desired} mic_task_active={self._mic_task is not None}"
         )
-        if self._mic_task is not None:
-            await self._stop_mic_loop()
-        self._stt_restart_requested = False
+        desired = self._stt_desired
+        if desired and self.self_stt_commands is not None:
+            result = await self.self_stt_commands.execute(SetSelfSTTEnabled(False))
+            self._render_self_stt_snapshot(result.snapshot)
         await self._rebuild_stt_provider()
-        if self._stt_desired:
-            await self._ensure_stt_switch()
+        if desired and self.self_stt_commands is not None and self.settings is not None:
+            config = SelfChannelConfig(
+                self.settings.audio.internal_sample_rate_hz,
+                self._build_self_stt_runtime_signature(self.settings),
+                self.settings.provider.stt == STTProviderName.LOCAL_QWEN,
+            )
+            result = await self.self_stt_commands.execute(SetSelfSTTEnabled(True, config))
+            self._render_self_stt_snapshot(result.snapshot)
 
     async def _run_stt_switch(self) -> None:
         if self._stt_switch_lock is None:
@@ -6067,14 +6151,6 @@ class GuiController:
         has_out_of_scope_draft = _settings_snapshot_values(
             committed_settings
         ) != _settings_snapshot_values(next_settings)
-        plan = self._build_provider_runtime_apply_plan(
-            committed_settings,
-            force_rebuild_llm=False,
-            canonical_settings=self._canonical_vnext_after_legacy_delta(
-                base_settings,
-                committed_settings,
-            ),
-        )
         repository = _ControllerSettingsPatchRepository(
             controller=self,
             base_settings=base_settings,
@@ -6084,12 +6160,10 @@ class GuiController:
         runtime_apply = (
             _ControllerNoopRuntimeApply()
             if has_out_of_scope_draft
-            else _ControllerProviderRuntimeApply(
+            else _ApplicationHostSurfaceRuntimeApply(
                 controller=self,
-                settings=committed_settings,
-                plan=plan,
+                repository=repository,
                 surface="stt_language_audio",
-                operation="apply_stt_language_audio_provider_runtime",
             )
         )
         command = SttLanguageAudioSettingsMutation(values=patch_values)
@@ -6112,59 +6186,38 @@ class GuiController:
             return True
 
         if has_out_of_scope_draft:
-            fallback_plan = self._build_provider_runtime_apply_plan(
-                next_settings,
-                force_rebuild_llm=False,
-                canonical_settings=self._canonical_vnext_after_legacy_delta(
-                    committed_settings,
-                    next_settings,
-                ),
-            )
             try:
-                await self._apply_providers_direct(
-                    next_settings,
-                    force_rebuild_llm=False,
-                    plan=fallback_plan,
-                    route_order22=False,
-                    strict_persistence_errors=True,
-                )
-            except _StrictSettingsSaveFailed:
-                await self._resync_committed_order22_provider_runtime_after_strict_save_failure(
-                    base_settings=base_settings,
-                    committed_settings=committed_settings,
-                    plan=plan,
-                )
+                self.settings = next_settings
+                self._persist_settings_at_controller_boundary(next_settings)
+                self._remember_canonical_legacy_projection(next_settings)
+                self._sync_memory_runtime_fields_from_settings(next_settings)
+            except Exception:
+                self._sync_memory_runtime_fields_from_settings(committed_settings)
                 self.last_settings_mutation_result = (
                     _stt_language_audio_save_failed_transaction_result(
                         operation="apply_stt_language_audio_provider_full_draft_save"
                     )
                 )
-            except Exception:
-                self.last_settings_mutation_result = _runtime_apply_result_as_degraded_transaction(
-                    _runtime_apply_failed_result(
-                        operation="apply_stt_language_audio_provider_runtime",
-                        code="provider_runtime_apply_exception",
-                        surface="stt_language_audio",
-                    )
-                )
-            else:
-                unavailable_result = _provider_runtime_apply_unavailable_result(
-                    controller=self,
-                    settings=next_settings,
-                    plan=fallback_plan,
-                    operation="apply_stt_language_audio_provider_runtime",
-                    surface="stt_language_audio",
-                )
-                if unavailable_result is not None:
-                    self.last_settings_mutation_result = (
-                        _runtime_apply_result_as_degraded_transaction(unavailable_result)
-                    )
         else:
             self.settings = committed_settings
+            self._render_committed_provider_state(committed_settings)
             if result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
                 self._sync_signature_caches(committed_settings)
         self._remember_settings_view_order22_baseline(self.settings)
         return True
+
+    def _render_committed_provider_state(self, settings: AppSettings) -> None:
+        self._clear_local_stt_pending_enable_if_provider_switched_away()
+        self._sync_local_stt_notice()
+        if (
+            settings.provider.llm != LLMProviderName.OPENROUTER
+            or settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED
+        ):
+            self._set_managed_trial_pending_auth(False)
+        else:
+            self._sync_managed_auth_dashboard_notice()
+        self._sync_effective_hub_flags(settings)
+        self._refresh_overlay_peer_consumers()
 
     async def _apply_providers_direct(
         self,
@@ -6563,37 +6616,9 @@ class GuiController:
         self.log_basic("[Settings] LLM provider rebuilt successfully")
 
     async def _rebuild_stt_provider(self) -> None:
-        """Rebuild only the STT provider so later enable uses current settings."""
-        if self.hub is None or self.settings is None:
+        if self.settings is None or self.self_stt_provider_application is None:
             return
-
-        def create_provider() -> object | None:
-            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-            backend = create_stt_backend(
-                self.settings,
-                secrets=secrets,
-                diagnostics_enabled=self._detailed_audio_diag_enabled,
-            )
-            return ManagedSTTProvider(
-                backend=backend,
-                sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-                stt_provider_name=self.settings.provider.stt,
-                clock=self.clock,
-                reset_deadline_s=STT_RESET_DEADLINE_S,
-                drain_timeout_s=self.settings.stt.drain_timeout_s,
-                bridging_ms=self.settings.audio.ring_buffer_ms,
-                on_final_transcript_suppressed=self._on_final_transcript_suppressed,
-                runtime_logging=self.runtime_logging,
-                stt_input_fault_profile_provider=lambda: (
-                    self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
-                ),
-            )
-
-        outcome = await self._provider_rebuild_runtime.rebuild_stt_provider(
-            replace_provider=self.hub.replace_stt_provider,
-            create_provider=create_provider,
-        )
-        stt = outcome.provider
+        stt = await self.self_stt_provider_application.rebuild()
         self._sync_effective_hub_flags(self.settings)
 
         dash = getattr(self.app, "view_dashboard", None)
@@ -6603,7 +6628,6 @@ class GuiController:
                 dash.set_stt_enabled(False)
 
         if stt is None:
-            assert outcome.error is not None
             self._log_error("STT backend not available")
             return
 
@@ -6731,6 +6755,7 @@ class GuiController:
         current = AudioFaultProfile(self._debug_capture_fault_profile)
         next_profile = profiles[(profiles.index(current) + 1) % len(profiles)]
         self._debug_capture_fault_profile = next_profile.value
+        self._sync_application_audio_fault_hooks()
         self.log_detailed(
             "[AudioDiag][DebugFault] "
             f"capture_profile={next_profile.value} "
@@ -6752,6 +6777,7 @@ class GuiController:
         current = AudioFaultProfile(self._debug_stt_fault_profile)
         next_profile = profiles[(profiles.index(current) + 1) % len(profiles)]
         self._debug_stt_fault_profile = next_profile.value
+        self._sync_application_audio_fault_hooks()
         self.log_detailed(
             "[AudioDiag][DebugFault] "
             f"stt_profile={next_profile.value} "
@@ -6763,7 +6789,22 @@ class GuiController:
     def clear_debug_audio_fault_profiles(self) -> None:
         self._debug_capture_fault_profile = "none"
         self._debug_stt_fault_profile = "none"
+        self._sync_application_audio_fault_hooks()
         self.log_detailed("[AudioDiag][DebugFault] capture_profile=none stt_profile=none")
+
+    def _sync_application_audio_fault_hooks(self) -> None:
+        setter = getattr(self.application_runtime_host, "set_debug_audio_faults", None)
+        if callable(setter):
+            setter(
+                capture=(
+                    self._debug_capture_fault_profile
+                    if self._debug_audio_fault_allowed()
+                    else "none"
+                ),
+                stt=(
+                    self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
+                ),
+            )
 
     def _wrap_diagnostic_audio_source(
         self,
@@ -6906,95 +6947,21 @@ class GuiController:
         )
         await self._replace_managed_openrouter_release_service(new_managed_release_service)
 
-        llm = None
-        with contextlib.suppress(Exception):
-            llm = create_llm_provider(
-                self.settings,
-                secrets=secrets,
-                managed_release_service=self._managed_openrouter_release_service,
-                managed_delegate_ready=self._on_managed_trial_delegate_ready,
-                runtime_logging=self.runtime_logging,
-            )
-
-        stt = None
-        try:
-            backend = create_stt_backend(
-                self.settings,
-                secrets=secrets,
-                diagnostics_enabled=self._detailed_audio_diag_enabled,
-            )
-            stt = ManagedSTTProvider(
-                backend=backend,
-                sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-                stt_provider_name=self.settings.provider.stt,
-                clock=self.clock,
-                reset_deadline_s=STT_RESET_DEADLINE_S,
-                drain_timeout_s=self.settings.stt.drain_timeout_s,
-                bridging_ms=self.settings.audio.ring_buffer_ms,
-                on_final_transcript_suppressed=self._on_final_transcript_suppressed,
-                runtime_logging=self.runtime_logging,
-                stt_input_fault_profile_provider=lambda: (
-                    self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
-                ),
-            )
-        except Exception:
-            self._log_error("STT backend not available")
-
-        sender = VrchatOscUdpSender(
-            host=self.settings.osc.host,
-            port=self.settings.osc.port,
-            chatbox_address=self.settings.osc.chatbox_address,
-            chatbox_send=self.settings.osc.chatbox_send,
-            chatbox_clear=self.settings.osc.chatbox_clear,
-        )
-        osc = ChatboxPaginator(
-            sender=sender,
-            clock=self.clock,
-            max_chars=self.settings.osc.chatbox_max_chars,
-            runtime_logging=self.runtime_logging,
-        )
-
-        hub = ClientHub(
-            stt=stt,
-            llm=llm,
-            osc=osc,
-            peer_stt=None,
-            clock=self.clock,
-            runtime_logging=self.runtime_logging,
-            source_language=self.settings.languages.source_language,
-            target_language=self.settings.languages.target_language,
-            peer_source_language=self.settings.languages.peer_source_language,
-            peer_target_language=self.settings.languages.peer_target_language,
-            system_prompt=self.settings.system_prompt,
-            chatbox_include_source=self.settings.osc.chatbox_include_source,
-            fallback_transcript_only=True,
-            translation_enabled=True,
-            peer_translation_enabled=False,
-            integrated_context_enabled=False,
-            low_latency_mode=self.settings.stt.low_latency_mode,
-            low_latency_merge_gap_ms=self.settings.stt.low_latency_merge_gap_ms,
-            low_latency_spec_retry_max=self.settings.stt.low_latency_spec_retry_max,
-            hangover_s=(
-                self.settings.stt.low_latency_vad_hangover_ms / 1000.0
-                if self.settings.stt.low_latency_mode
-                else DEFAULT_STABLE_VAD_HANGOVER_MS / 1000.0
-            ),
-            peer_hangover_s=self.settings.desktop_audio.vad_hangover_ms / 1000.0,
-        )
-
-        self.sender = sender
-        self.osc = osc
-        self.hub = hub
-
-        self._peer_runtime = PeerChannelRuntime(
-            hub=hub,
-            clock=self.clock,
-            stt_factory=self._create_peer_stt_provider_from_runtime_config,
-            source_factory=self._create_peer_audio_source_from_runtime_config,
-            vad_factory=self._create_peer_vad_from_runtime_config,
-            vad_model_resolver=ensure_silero_vad_onnx,
-            run_audio_loop=self._run_peer_audio_vad_loop,
-        )
+        if self.application_runtime_host is None:
+            raise RuntimeError("application runtime host is required")
+        parts = self.application_runtime_host.parts
+        if parts is None:
+            raise RuntimeError("application runtime host is closed")
+        self.sender = parts.sender
+        self.osc = parts.osc
+        self.hub = parts.hub
+        self._peer_runtime = parts.peer_runtime
+        self.self_stt_commands = self.application_runtime_host.commands
+        self.self_stt_state = self.application_runtime_host.state
+        self.self_stt_provider_application = self.application_runtime_host
+        bind_suppressed = getattr(self.application_runtime_host, "bind_final_suppressed", None)
+        if callable(bind_suppressed):
+            bind_suppressed(self._on_final_transcript_suppressed)
         self._last_peer_translation_enabled = self.settings.ui.peer_translation_enabled
 
     async def _replace_managed_openrouter_release_service(

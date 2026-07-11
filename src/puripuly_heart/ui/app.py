@@ -127,6 +127,7 @@ class TranslatorApp:
         overlay_application_state: OverlayApplicationStatePort | None = None,
         overlay_ui_projection: object | None = None,
         vrc_audio_gate: AudioCaptureGatePort | None = None,
+        application_runtime_host: object | None = None,
     ):
         self.page = page
         controller_kwargs = {
@@ -155,6 +156,8 @@ class TranslatorApp:
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         ):
             controller_kwargs["allow_stable_settings_import"] = allow_stable_settings_import
+        if application_runtime_host is not None:
+            controller_kwargs["application_runtime_host"] = application_runtime_host
         self.controller = GuiController(**controller_kwargs)
         self.overlay_commands = overlay_commands
         self.overlay_state = "off"
@@ -1834,6 +1837,7 @@ async def main_gui(
     overlay_ui_projection: object | None = None,
     vrc_audio_gate: AudioCaptureGatePort | None = None,
     surface_runtime_transactions: SurfaceRuntimeTransactionPort | None = None,
+    application_runtime_host: object | None = None,
 ):
     parameters = inspect.signature(TranslatorApp).parameters
     accepts_kwargs = any(
@@ -1847,6 +1851,7 @@ async def main_gui(
         "overlay_ui_projection": overlay_ui_projection,
         "surface_runtime_transactions": surface_runtime_transactions,
         "vrc_audio_gate": vrc_audio_gate,
+        "application_runtime_host": application_runtime_host,
     }
     app_kwargs = {
         name: value for name, value in candidates.items() if name in parameters or accepts_kwargs

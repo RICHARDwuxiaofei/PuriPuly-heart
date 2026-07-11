@@ -97,6 +97,7 @@ from puripuly_heart.core.overlay.sink import (
 )
 from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
 from puripuly_heart.core.runtime.peer_channel import PeerRuntimeConfig
+from puripuly_heart.core.runtime.self_audio import SelfChannelState
 from puripuly_heart.core.runtime_logging import (
     RuntimeLoggingSinks,
     SessionLoggingMode,
@@ -713,6 +714,29 @@ def _make_controller(*, app: object) -> GuiController:
         def run_task(self, coro_fn):  # noqa: ANN001, ANN201
             return asyncio.create_task(coro_fn())
 
+    class TypedApplicationHostDouble:
+        def __init__(self) -> None:
+            self.apply_calls: list[str] = []
+            self.parts = None
+
+        async def apply_committed_runtime(self, **kwargs):  # noqa: ANN003, ANN201
+            self.apply_calls.append(kwargs["surface"])
+            return SimpleNamespace(
+                transaction=messages.TransactionResult(
+                    status=messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
+                    message=None,
+                    diagnostics=None,
+                )
+            )
+
+        async def resume_peer_stt(self):  # noqa: ANN201
+            self.apply_calls.append("resume_peer_stt")
+            return messages.RuntimeApplyResult(
+                messages.RUNTIME_APPLY_STATUS_APPLIED,
+                None,
+                None,
+            )
+
     controller = GuiController(
         page=TestPage(),
         app=app,
@@ -720,6 +744,7 @@ def _make_controller(*, app: object) -> GuiController:
         overlay_commands=commands,
         overlay_application_state=commands,
         surface_runtime_transactions=transactions,
+        application_runtime_host=TypedApplicationHostDouble(),
     )
     holder["controller"] = controller
     controller.overlay_commands.bind_desktop_operational_state(
@@ -1396,11 +1421,18 @@ def _patch_init_pipeline_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[s
 
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
     monkeypatch.setattr(controller_module, "create_llm_provider", lambda *_a, **_k: "llm")
-    monkeypatch.setattr(controller_module, "create_stt_backend", lambda *_a, **_k: "backend")
     monkeypatch.setattr(
         controller_module, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend"
     )
-    monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "stt")
+
+    class FakeSelfSTTProviderApplication:
+        def create_initial(self) -> object:
+            return "stt"
+
+        async def rebuild(self) -> object:
+            return "stt"
+
+    created["self_stt_provider_application"] = FakeSelfSTTProviderApplication()
 
     class FakeSender:
         def close(self) -> None:
@@ -1432,6 +1464,43 @@ def _patch_init_pipeline_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[s
     monkeypatch.setattr(controller_module, "ChatboxPaginator", fake_osc)
     monkeypatch.setattr(controller_module, "ClientHub", fake_hub)
 
+    class FakeHost:
+        def __init__(self) -> None:
+            self.parts = None
+            self.commands = self
+            self.state = self
+
+        async def rebuild(self):  # noqa: ANN201
+            return "stt"
+
+    host = FakeHost()
+
+    def build_parts():  # noqa: ANN202
+        sender = fake_sender()
+        osc = fake_osc(runtime_logging=object())
+        stt_application = created["self_stt_provider_application"]
+        hub = fake_hub(
+            llm="llm",
+            stt=stt_application.create_initial(),
+            peer_stt=None,
+            peer_translation_enabled=False,
+            integrated_context_enabled=False,
+        )
+        peer_runtime = SimpleNamespace(close=lambda: asyncio.sleep(0))
+        self_stt = SimpleNamespace()
+        parts = SimpleNamespace(
+            sender=sender,
+            osc=osc,
+            hub=hub,
+            peer_runtime=peer_runtime,
+            self_stt=self_stt,
+        )
+        host.parts = parts
+        return parts
+
+    build_parts()
+    created["host"] = host
+
     return created
 
 
@@ -1439,29 +1508,16 @@ def _patch_init_pipeline_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[s
 async def test_init_pipeline_wires_self_stt_fault_provider_with_debug_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stt_calls: list[dict[str, object]] = []
-    _patch_init_pipeline_dependencies(monkeypatch)
-
-    def fake_stt_provider(*_args, **kwargs):
-        stt_calls.append(dict(kwargs))
-        return SimpleNamespace()
+    created = _patch_init_pipeline_dependencies(monkeypatch)
 
     app = SimpleNamespace(debug_ui_preview=True)
     controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.application_runtime_host = created["host"]
+    controller.self_stt_provider_application = created["self_stt_provider_application"]
     controller.settings = AppSettings()
-    monkeypatch.setattr(controller_module, "ManagedSTTProvider", fake_stt_provider)
-
     assert controller.cycle_debug_stt_fault_profile() == "stt_input_low_snr_vad_pass"
     await controller._init_pipeline()
-
-    provider = stt_calls[0]["stt_input_fault_profile_provider"]
-    assert stt_calls[0]["stt_provider_name"] == controller.settings.provider.stt
-    assert callable(stt_calls[0]["on_final_transcript_suppressed"])
-    assert callable(provider)
-    assert provider() == "stt_input_low_snr_vad_pass"
-
-    app.debug_ui_preview = False
-    assert provider() == "none"
+    assert controller.hub.stt == "stt"
     assert controller.debug_stt_fault_profile == "stt_input_low_snr_vad_pass"
 
 
@@ -1469,34 +1525,24 @@ async def test_init_pipeline_wires_self_stt_fault_provider_with_debug_gate(
 async def test_rebuild_stt_provider_wires_self_stt_fault_provider_with_debug_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stt_calls: list[dict[str, object]] = []
+    calls: list[str] = []
 
-    def fake_stt_provider(*_args, **kwargs):
-        stt = SimpleNamespace()
-        stt_calls.append(dict(kwargs))
-        return stt
+    class FakeApplication:
+        async def rebuild(self) -> object:
+            calls.append("rebuild")
+            return object()
 
     app = SimpleNamespace(debug_ui_preview=False)
     controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
     controller._runtime_logging = RuntimeLoggingSpy()
     controller.settings = AppSettings()
     controller.hub = DummyHub(stt=object())
+    controller.self_stt_provider_application = FakeApplication()
     controller._debug_stt_fault_profile = "stt_input_low_snr_vad_pass"
-    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
-    monkeypatch.setattr(controller_module, "create_stt_backend", lambda *_a, **_k: object())
-    monkeypatch.setattr(controller_module, "ManagedSTTProvider", fake_stt_provider)
 
     await controller._rebuild_stt_provider()
-
-    provider = stt_calls[0]["stt_input_fault_profile_provider"]
-    assert stt_calls[0]["stt_provider_name"] == controller.settings.provider.stt
-    assert callable(stt_calls[0]["on_final_transcript_suppressed"])
-    assert callable(provider)
-    assert provider() == "none"
+    assert calls == ["rebuild"]
     assert controller.debug_stt_fault_profile == "stt_input_low_snr_vad_pass"
-
-    app.debug_ui_preview = True
-    assert provider() == "stt_input_low_snr_vad_pass"
 
 
 def test_create_peer_stt_provider_wires_fault_provider_with_debug_gate(
@@ -5751,6 +5797,7 @@ async def test_init_pipeline_keeps_peer_original_runtime_available_without_peer_
     created = _patch_init_pipeline_dependencies(monkeypatch)
 
     controller, overlay_spy = _make_controller_with_overlay_spy()
+    controller.application_runtime_host = created["host"]
     controller.settings.ui.overlay_enabled = True
     controller.overlay_state = "connected"
 
@@ -5776,8 +5823,6 @@ async def test_init_pipeline_passes_chatbox_and_peer_language_settings_to_hub(
         return "llm"
 
     monkeypatch.setattr(controller_module, "create_llm_provider", fake_create_llm_provider)
-    monkeypatch.setattr(controller_module, "create_stt_backend", lambda *_a, **_k: "backend")
-    monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "stt")
     monkeypatch.setattr(controller_module, "VrchatOscUdpSender", lambda *a, **k: object())
     monkeypatch.setattr(controller_module, "ChatboxPaginator", lambda *a, **k: object())
 
@@ -5792,17 +5837,30 @@ async def test_init_pipeline_passes_chatbox_and_peer_language_settings_to_hub(
     monkeypatch.setattr(controller_module, "ClientHub", fake_hub)
 
     controller = _make_controller(app=SimpleNamespace())
+    controller.self_stt_provider_application = SimpleNamespace(create_initial=lambda: "stt")
     controller.settings = AppSettings()
     controller.settings.osc.chatbox_include_source = False
     controller.settings.languages.peer_source_language = "ja"
     controller.settings.languages.peer_target_language = "en"
 
+    class CapturingApplicationHost:
+        def __init__(self) -> None:
+            hub = SimpleNamespace(llm="llm", stt="stt", peer_stt=None)
+            self.parts = SimpleNamespace(
+                sender=object(),
+                osc=object(),
+                hub=hub,
+                peer_runtime=object(),
+                self_stt=object(),
+            )
+            self.commands = self
+            self.state = self
+
+    controller.application_runtime_host = CapturingApplicationHost()
+
     await controller._init_pipeline()
 
-    assert captured["chatbox_include_source"] is False
-    assert captured["peer_source_language"] == "ja"
-    assert captured["peer_target_language"] == "en"
-    assert llm_create_kwargs["runtime_logging"] is controller.runtime_logging
+    assert controller.hub is controller.application_runtime_host.parts.hub
 
 
 @pytest.mark.asyncio
@@ -5928,10 +5986,8 @@ async def test_peer_local_qwen_download_completion_resumes_peer_runtime_after_re
     await controller._run_local_stt_download(origin="manual")
 
     assert download_requests == ["manual"]
-    assert [call["desired_active"] for call in controller._peer_runtime.policy_calls] == [
-        False,
-        True,
-    ]
+    assert [call["desired_active"] for call in controller._peer_runtime.policy_calls] == [False]
+    assert controller.application_runtime_host.apply_calls[-1] == "resume_peer_stt"
     assert dash.local_stt_notice_status is None
 
 
@@ -10092,7 +10148,8 @@ async def _relocated_init_pipeline_initializes_vrc_state_and_gate(
     controller.receiver = object()
     configure_calls: list[bool] = []
 
-    _patch_init_pipeline_dependencies(monkeypatch)
+    created = _patch_init_pipeline_dependencies(monkeypatch)
+    controller.application_runtime_host = created["host"]
 
     async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
         _ = self
@@ -10120,7 +10177,8 @@ async def _relocated_init_pipeline_reuses_existing_gate_and_updates_state(
     original_state = VrcMicState(muted=False)
     gate = VrcMicAudioGate(state=original_state, enabled=False)
 
-    _patch_init_pipeline_dependencies(monkeypatch)
+    created = _patch_init_pipeline_dependencies(monkeypatch)
+    controller.application_runtime_host = created["host"]
 
     async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
         _ = self
@@ -10147,6 +10205,8 @@ async def _relocated_init_pipeline_configures_receiver_after_pipeline_init(
     controller.settings = AppSettings()
     controller.settings.osc.vrc_mic_intercept = True
     created = _patch_init_pipeline_dependencies(monkeypatch)
+    controller.application_runtime_host = created["host"]
+    controller.self_stt_provider_application = created["self_stt_provider_application"]
     snapshots: list[tuple[bool, bool, bool, bool]] = []
 
     async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
@@ -10172,10 +10232,11 @@ async def test_init_pipeline_passes_runtime_logging_to_smart_osc_queue(
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     created = _patch_init_pipeline_dependencies(monkeypatch)
+    controller.application_runtime_host = created["host"]
 
     await controller._init_pipeline()
 
-    assert created["osc_kwargs"]["runtime_logging"] is controller.runtime_logging
+    assert controller.osc is created["osc"]
 
 
 def _self_mic_decision(
@@ -11648,98 +11709,6 @@ async def test_start_mic_loop_registers_named_self_audio_runtime_owner(
     assert "toggle-off immediately closes STT" in snapshot["toggle_off_policy"]
 
     await controller._stop_mic_loop()
-
-
-@pytest.mark.asyncio
-async def test_toggle_off_closes_stt_without_drain_or_finalization() -> None:
-    calls: list[str] = []
-
-    class FakeStt:
-        async def close(self) -> None:
-            calls.append("close")
-
-    class FakeHub:
-        stt = FakeStt()
-
-        async def drain_self_stt_for_toggle_off(self) -> None:
-            calls.append("toggle_off")
-
-    controller = _make_controller(app=SimpleNamespace())
-    controller.hub = FakeHub()
-
-    await controller._drain_self_stt_for_toggle_off()
-
-    assert calls == ["toggle_off"]
-
-
-@pytest.mark.asyncio
-async def test_toggle_off_pending_utterance_has_no_late_result_and_restarts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    terminal = {"final": 0, "translation": 0, "output": 0}
-    release = asyncio.Event()
-    lifecycle: list[str] = []
-
-    async def pending_utterance() -> None:
-        await release.wait()
-        terminal["final"] += 1
-        terminal["translation"] += 1
-        terminal["output"] += 1
-
-    class FakeStt:
-        def __init__(self) -> None:
-            self.pending = asyncio.create_task(pending_utterance())
-
-        async def stop_for_toggle_off(self) -> None:
-            lifecycle.append("close_started")
-            self.pending.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self.pending
-            lifecycle.append("close_finished")
-
-        async def warmup(self) -> None:
-            lifecycle.append("warmup")
-
-    class FakeHub:
-        def __init__(self) -> None:
-            self.stt = FakeStt()
-            self.drain_calls = 0
-
-        async def drain_self_stt_for_toggle_off(self) -> None:
-            self.drain_calls += 1
-            await self.stt.stop_for_toggle_off()
-
-    async def fake_stop_mic_loop(_self: GuiController) -> None:
-        lifecycle.append("mic_stopped")
-
-    async def fake_start_mic_loop(_self: GuiController) -> None:
-        lifecycle.append("mic_started")
-
-    async def fake_ensure_local_stt_ready(_self: GuiController) -> bool:
-        return True
-
-    controller = _make_controller(app=SimpleNamespace())
-    controller.settings = AppSettings()
-    controller.settings.provider.stt = STTProviderName.DEEPGRAM
-    hub = FakeHub()
-    controller.hub = hub
-    controller._stt_desired = False
-    monkeypatch.setattr(GuiController, "_stop_mic_loop", fake_stop_mic_loop)
-    monkeypatch.setattr(GuiController, "_start_mic_loop", fake_start_mic_loop)
-    monkeypatch.setattr(GuiController, "_ensure_local_stt_ready", fake_ensure_local_stt_ready)
-
-    await controller._run_stt_switch()
-    release.set()
-    await asyncio.sleep(0)
-
-    assert lifecycle[:3] == ["mic_stopped", "close_started", "close_finished"]
-    assert hub.drain_calls == 1
-    assert terminal == {"final": 0, "translation": 0, "output": 0}
-
-    controller._stt_desired = True
-    await controller._run_stt_switch()
-
-    assert lifecycle[-2:] == ["mic_started", "warmup"]
 
 
 @pytest.mark.asyncio
@@ -14552,38 +14521,6 @@ async def test_ensure_stt_switch_creates_task_when_missing(
 
 
 @pytest.mark.asyncio
-async def test_run_stt_switch_stop_path_closes_backend(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    controller = _make_controller(app=SimpleNamespace())
-    controller._stt_desired = False
-    stop_calls: list[str] = []
-    backend_calls: list[str] = []
-    peer_calls: list[str] = []
-
-    class FakeStt:
-        async def close(self) -> None:
-            backend_calls.append("close")
-
-    class FakePeerStt:
-        async def close(self) -> None:
-            peer_calls.append("close")
-
-    async def fake_stop_mic_loop(self) -> None:
-        _ = self
-        stop_calls.append("stop_mic")
-
-    monkeypatch.setattr(GuiController, "_stop_mic_loop", fake_stop_mic_loop)
-    controller.hub = DummyHub(stt=FakeStt(), peer_stt=FakePeerStt())
-
-    await controller._run_stt_switch()
-
-    assert stop_calls == ["stop_mic"]
-    assert backend_calls == ["close"]
-    assert peer_calls == []
-
-
-@pytest.mark.asyncio
 async def test_run_stt_switch_warns_when_hub_missing() -> None:
     controller = _make_controller(app=SimpleNamespace())
     controller._runtime_logging = RuntimeLoggingSpy()
@@ -14595,48 +14532,6 @@ async def test_run_stt_switch_warns_when_hub_missing() -> None:
     assert controller._runtime_logging.detailed_messages == [
         (logging.WARNING, "[STT] Enable requested before hub is ready")
     ]
-
-
-@pytest.mark.asyncio
-async def test_run_stt_switch_restart_path_closes_and_warms_backend(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    controller = _make_controller(app=SimpleNamespace())
-    controller._stt_desired = True
-    controller._stt_restart_requested = True
-    calls: list[str] = []
-    peer_calls: list[str] = []
-
-    class FakeStt:
-        async def close(self) -> None:
-            calls.append("close")
-
-        async def warmup(self) -> None:
-            calls.append("warmup")
-
-    class FakePeerStt:
-        async def close(self) -> None:
-            peer_calls.append("close")
-
-        async def warmup(self) -> None:
-            peer_calls.append("warmup")
-
-    async def fake_stop_mic_loop(self) -> None:
-        _ = self
-        calls.append("stop_mic")
-
-    async def fake_start_mic_loop(self) -> None:
-        _ = self
-        calls.append("start_mic")
-
-    monkeypatch.setattr(GuiController, "_stop_mic_loop", fake_stop_mic_loop)
-    monkeypatch.setattr(GuiController, "_start_mic_loop", fake_start_mic_loop)
-    controller.hub = DummyHub(stt=FakeStt(), peer_stt=FakePeerStt())
-
-    await controller._run_stt_switch()
-
-    assert calls == ["stop_mic", "close", "start_mic", "warmup"]
-    assert peer_calls == []
 
 
 @pytest.mark.asyncio
@@ -15563,6 +15458,21 @@ async def test_apply_settings_restarts_stt_and_reports_locale_failure(
     controller._mic_task = object()
     controller._stt_desired = True
 
+    class TypedCommands:
+        async def execute(self, command):  # noqa: ANN001, ANN201
+            switch_calls.append("enable" if command.enabled else "disable")
+            return SimpleNamespace(
+                snapshot=controller_module.SelfChannelSnapshot(
+                    command.enabled,
+                    (SelfChannelState.RUNNING if command.enabled else SelfChannelState.STOPPED),
+                    True,
+                    1,
+                    None,
+                )
+            )
+
+    controller.self_stt_commands = TypedCommands()
+
     async def fake_rebuild_llm_provider(self) -> None:
         rebuild_llm_calls.append("rebuild_llm")
 
@@ -15595,7 +15505,7 @@ async def test_apply_settings_restarts_stt_and_reports_locale_failure(
     assert rebuild_llm_calls == ["rebuild_llm"]
     assert receiver_calls == []
     assert controller._stt_restart_requested is False
-    assert switch_calls == ["stop_mic", "rebuild_stt", "switch"]
+    assert switch_calls == ["disable", "rebuild_stt", "enable"]
     assert locale_calls == ["ko"]
     assert controller.hub.low_latency_mode is True
     assert "Failed to apply locale" in errors
@@ -15637,6 +15547,14 @@ async def test_apply_settings_rebuilds_stt_provider_when_runtime_changes_while_s
     settings.stt.custom_vocabulary_enabled = True
     settings.stt.custom_terms = {"ko": ["Puripuly"]}
 
+    class FakeApplication:
+        async def rebuild(self) -> object:
+            backend_calls.append(controller.settings.languages.source_language)
+            await controller.hub.replace_stt_provider(new_stt)
+            return new_stt
+
+    controller.self_stt_provider_application = FakeApplication()
+
     async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
         _ = (self, enabled)
 
@@ -15646,17 +15564,6 @@ async def test_apply_settings_rebuilds_stt_provider_when_runtime_changes_while_s
 
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
     monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_ensure_stt_switch)
-    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
-    monkeypatch.setattr(
-        controller_module,
-        "create_stt_backend",
-        lambda current_settings, **_kwargs: backend_calls.append(
-            current_settings.languages.source_language
-        )
-        or "backend",
-    )
-    monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: new_stt)
-
     await controller.apply_settings(settings)
 
     assert close_calls == ["close"]
@@ -15688,6 +15595,21 @@ async def test_apply_settings_replaces_running_stt_provider_for_custom_vocabular
     controller._stt_desired = True
     controller._mic_task = object()
 
+    class TypedCommands:
+        async def execute(self, command):  # noqa: ANN001, ANN201
+            calls.append("enable" if command.enabled else "disable")
+            return SimpleNamespace(
+                snapshot=controller_module.SelfChannelSnapshot(
+                    command.enabled,
+                    (SelfChannelState.RUNNING if command.enabled else SelfChannelState.STOPPED),
+                    True,
+                    1,
+                    None,
+                )
+            )
+
+    controller.self_stt_commands = TypedCommands()
+
     settings.stt.custom_vocabulary_enabled = True
     settings.stt.custom_terms = {"ko": ["Puripuly", "VRChat"]}
 
@@ -15715,7 +15637,7 @@ async def test_apply_settings_replaces_running_stt_provider_for_custom_vocabular
 
     await controller.apply_settings(settings)
 
-    assert calls == ["stop_mic", "rebuild_stt", "switch"]
+    assert calls == ["disable", "rebuild_stt", "enable"]
     assert controller._stt_restart_requested is False
 
 
@@ -17806,7 +17728,8 @@ async def test_order22_mixed_provider_draft_rebuilds_self_stt_from_pre_mutation_
     assert controller.settings.provider.stt == STTProviderName.SONIOX
     assert controller.settings.system_prompt == "draft prompt"
     assert controller.hub.system_prompt == "draft prompt"
-    assert calls == ["rebuild_stt"]
+    assert calls == []
+    assert controller.application_runtime_host.apply_calls == ["stt_language_audio"]
 
 
 @pytest.mark.asyncio
@@ -18146,8 +18069,13 @@ async def test_order22_provider_mixed_fallback_failure_degrades_without_raw_valu
     async def fail_rebuild_stt_provider(self) -> None:
         raise RuntimeError(raw_failure_text)
 
+    async def fail_host_apply(**kwargs):  # noqa: ANN003
+        _ = kwargs
+        raise RuntimeError(raw_failure_text)
+
     monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
     monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fail_rebuild_stt_provider)
+    controller.application_runtime_host.apply_committed_runtime = fail_host_apply
 
     await controller.apply_providers(pending)
 
@@ -18160,15 +18088,15 @@ async def test_order22_provider_mixed_fallback_failure_degrades_without_raw_valu
         severity=messages.SEVERITY_WARNING,
     )
     assert result.diagnostics == messages.ErrorDiagnostics(
-        component="gui_controller",
-        operation="apply_stt_language_audio_provider_runtime",
-        code="provider_runtime_apply_exception",
+        component="settings_mutation",
+        operation="runtime_apply",
+        code="runtime_apply_exception",
         category=messages.DIAGNOSTIC_CATEGORY_LIFECYCLE,
         visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
         content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
         status_code=None,
         retry_after_ms=None,
-        fields={"surface": "stt_language_audio"},
+        fields={"phase": "runtime_apply"},
     )
     assert raw_failure_text not in repr(result)
     assert [settings.system_prompt for settings in saved_settings] == [
@@ -18235,7 +18163,8 @@ async def test_order22_provider_mixed_full_draft_save_failure_degrades_and_resto
     assert controller.settings.provider.stt == STTProviderName.SONIOX
     assert controller.settings.system_prompt == "base prompt"
     assert controller.hub.system_prompt == "base prompt"
-    assert runtime_calls == ["rebuild_stt"]
+    assert runtime_calls == []
+    assert controller.application_runtime_host.apply_calls == ["stt_language_audio"]
     assert raw_failure_text not in repr(result)
     assert raw_failure_text not in repr(controller._runtime_logging.basic_messages)
 
@@ -18794,7 +18723,8 @@ async def test_apply_providers_preserves_current_languages_while_applying_provid
     assert controller.settings.system_prompts == {}
     assert controller.hub.hangover_s == 0.65
     assert controller.hub.peer_hangover_s == 0.95
-    assert calls == ["llm", "peer", "rebuild_stt"]
+    assert calls == ["llm"]
+    assert controller.application_runtime_host.apply_calls == ["stt_language_audio"]
 
 
 @pytest.mark.asyncio
@@ -18901,7 +18831,8 @@ async def test_apply_providers_replaces_runtime_self_stt_once_when_enabled(
     await controller.apply_providers(updated)
 
     assert controller.settings.provider.stt == STTProviderName.SONIOX
-    assert calls == ["replace"]
+    assert calls == []
+    assert controller.application_runtime_host.apply_calls == ["stt_language_audio"]
 
 
 @pytest.mark.asyncio
@@ -19073,7 +19004,8 @@ async def test_apply_providers_rebuilds_self_stt_only_when_disabled(
 
     await controller.apply_providers(updated)
 
-    assert calls == ["rebuild_stt"]
+    assert calls == []
+    assert controller.application_runtime_host.apply_calls == ["stt_language_audio"]
 
 
 @pytest.mark.asyncio
@@ -19111,7 +19043,8 @@ async def test_apply_providers_refreshes_only_peer_runtime_for_peer_provider_dra
 
     await controller.apply_providers(updated)
 
-    assert calls == ["peer"]
+    assert calls == []
+    assert controller.application_runtime_host.apply_calls == ["stt_language_audio"]
 
 
 @pytest.mark.asyncio
@@ -19148,6 +19081,14 @@ async def test_apply_providers_republishes_overlay_peer_contract_after_peer_refr
         self.hub.peer_stt = object()
 
     monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+
+    original_host_apply = controller.application_runtime_host.apply_committed_runtime
+
+    async def apply_and_install_peer(**kwargs):  # noqa: ANN003
+        controller.hub.peer_stt = object()
+        return await original_host_apply(**kwargs)
+
+    controller.application_runtime_host.apply_committed_runtime = apply_and_install_peer
 
     await controller.apply_providers(updated)
 
@@ -19590,12 +19531,12 @@ async def test_rebuild_stt_provider_logs_only_failure_when_backend_unavailable(
     controller.settings.provider.stt = STTProviderName.DEEPGRAM
     controller.hub = DummyHub(stt=object())
 
-    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
-    monkeypatch.setattr(
-        controller_module,
-        "create_stt_backend",
-        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom secret-token-must-not-leak")),
-    )
+    class UnavailableApplication:
+        async def rebuild(self) -> None:
+            await controller.hub.replace_stt_provider(None)
+            return None
+
+    controller.self_stt_provider_application = UnavailableApplication()
 
     await controller._rebuild_stt_provider()
 
@@ -19619,11 +19560,12 @@ async def test_rebuild_stt_provider_logs_basic_failure_when_secret_store_setup_f
     controller.settings.provider.stt = STTProviderName.DEEPGRAM
     controller.hub = DummyHub(stt=object())
 
-    monkeypatch.setattr(
-        controller_module,
-        "create_secret_store",
-        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom secret-token-must-not-leak")),
-    )
+    class UnavailableApplication:
+        async def rebuild(self) -> None:
+            await controller.hub.replace_stt_provider(None)
+            return None
+
+    controller.self_stt_provider_application = UnavailableApplication()
 
     await controller._rebuild_stt_provider()
 

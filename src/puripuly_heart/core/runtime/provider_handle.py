@@ -152,6 +152,20 @@ class ProviderRuntimeHandle:
                     await _call_async_method(provider, "close")
             self._start_event_loop_if_needed()
 
+    async def close_displaced_for_toggle_off(self, provider: object) -> None:
+        async with self._lock:
+            try:
+                stop_for_toggle_off = getattr(provider, "stop_for_toggle_off", None)
+                if callable(stop_for_toggle_off):
+                    result = stop_for_toggle_off()
+                    if inspect.isawaitable(result):
+                        await result
+                else:
+                    await _call_async_method(provider, "close")
+            except Exception:
+                self._retain_retired_provider(provider)
+                raise
+
     async def stop_ingress(self) -> None:
         async with self._lock:
             self._running = False

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from puripuly_heart.app.ports.post_commit_runtime import (
     CommittedRuntimeSynchronizationPort,
@@ -140,6 +141,96 @@ class OverlayProductionComposition:
     logging: object
     vrc: object
     audio_gate: object
+
+
+@dataclass(frozen=True, slots=True)
+class SelfSTTProductionComposition:
+    commands: object
+    state: object
+
+
+@dataclass(slots=True)
+class _DeferredSelfSTTHost:
+    supplier: Callable[[], object | None]
+
+    def lease_stt_provider(self, slot):  # noqa: ANN001, ANN201
+        host = self.supplier()
+        return None if host is None else host.lease_stt_provider(slot)
+
+    async def clear_self_stt_for_toggle_off(self):  # noqa: ANN201
+        host = self.supplier()
+        if host is None:
+            return None
+        return await host.clear_self_stt_for_toggle_off()
+
+
+def create_application_runtime_host(
+    state_path: Path,
+    initial_settings,
+    *,
+    runtime_logging=None,  # noqa: ANN001
+    audio_gate=None,  # noqa: ANN001
+):  # noqa: ANN201
+    from puripuly_heart.app.adapters.application_runtime_production import (
+        create_production_application_runtime,
+    )
+    from puripuly_heart.app.services.canonical_settings_persistence import (
+        compose_canonical_settings_persistence,
+    )
+    from puripuly_heart.app.wiring import create_secret_store
+    from puripuly_heart.core.clock import SystemClock
+
+    persistence = compose_canonical_settings_persistence()
+    legacy = persistence.legacy_projection(initial_settings)
+    secrets = create_secret_store(legacy.secrets, config_path=state_path)
+    return create_production_application_runtime(
+        state_path=state_path,
+        initial_settings=initial_settings,
+        persistence=persistence,
+        secrets=secrets,
+        clock=SystemClock(),
+        runtime_logging=runtime_logging,
+        audio_gate=audio_gate,
+    )
+
+
+def create_self_stt_production_composition(
+    *, host_supplier: Callable[[], object | None], audio_lifecycle, ingress
+):  # noqa: ANN001, ANN201
+    async def unused_audio_loop(**kwargs):  # noqa: ANN003, ANN202
+        _ = kwargs
+
+    owner = create_self_stt_channel_composition(
+        host=_DeferredSelfSTTHost(host_supplier),
+        ingress=ingress,
+        source_factory=lambda config: None,
+        vad_factory=lambda config: None,
+        run_audio_loop=unused_audio_loop,
+        audio_lifecycle=audio_lifecycle,
+    )
+    return SelfSTTProductionComposition(owner, owner)
+
+
+def create_self_stt_channel_composition(
+    *,
+    host,
+    ingress,
+    source_factory,
+    vad_factory,
+    run_audio_loop,
+    audio_lifecycle=None,
+):  # noqa: ANN001, ANN201
+    from puripuly_heart.core.runtime.self_audio import SelfSTTChannelOwner
+
+    return SelfSTTChannelOwner(
+        provider_read_port=host,
+        provider_host=host,
+        ingress=ingress,
+        source_factory=source_factory,
+        vad_factory=vad_factory,
+        run_audio_loop=run_audio_loop,
+        audio_lifecycle=audio_lifecycle,
+    )
 
 
 def create_overlay_production_composition(

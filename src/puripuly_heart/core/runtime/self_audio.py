@@ -1,11 +1,316 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from enum import Enum
+from typing import Literal, Protocol
+
+from puripuly_heart.app.ports.runtime_resources import (
+    ClearSelfSTTResult,
+    STTProviderReadPort,
+)
+from puripuly_heart.config.resolved import ResolvedSTTConfig
+from puripuly_heart.core.lifecycle import LifecycleScope, start_lifecycle_task
 
 SelfAudioStateChanged = Callable[["SelfAudioRuntime"], None]
 SelfAudioErrorHandler = Callable[[Exception], None]
+
+
+class SelfChannelState(str, Enum):
+    STOPPED = "stopped"
+    STARTING = "starting"
+    RUNNING = "running"
+    FAULTED = "faulted"
+
+
+@dataclass(frozen=True, slots=True)
+class SelfChannelConfig:
+    target_sample_rate_hz: int
+    runtime_signature: tuple[object, ...]
+    local_qwen: bool = False
+    backend: ResolvedSTTConfig | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SetSelfSTTEnabled:
+    enabled: bool
+    config: SelfChannelConfig | None = None
+    force_immediate: bool = False
+    record_intent: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class SelfChannelSnapshot:
+    desired_enabled: bool
+    state: SelfChannelState
+    provider_available: bool
+    generation: int
+    runtime_signature: tuple[object, ...] | None
+    intent_generation: int = 0
+    intent_enabled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SelfChannelCommandResult:
+    status: Literal["applied", "provider_missing", "preparation_failed"]
+    snapshot: SelfChannelSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class SelfIngressResume:
+    config: SelfChannelConfig | None
+    desired_enabled: bool
+
+
+class SelfSTTCommandPort(Protocol):
+    async def execute(self, command: SetSelfSTTEnabled) -> SelfChannelCommandResult: ...
+
+
+class SelfSTTStatePort(Protocol):
+    def snapshot(self) -> SelfChannelSnapshot: ...
+
+
+class SelfSTTProviderApplicationPort(Protocol):
+    async def rebuild(self) -> object | None: ...
+
+
+class SelfProviderHostPort(Protocol):
+    async def clear_self_stt_for_toggle_off(self) -> ClearSelfSTTResult: ...
+
+
+class SelfVadIngressPort(Protocol):
+    async def handle_self_vad_event(self, event: object, provider: object) -> None: ...
+
+
+class SelfAudioLifecyclePort(Protocol):
+    async def start_self_audio(self, config: SelfChannelConfig) -> None: ...
+
+    async def stop_self_audio(self) -> None: ...
+
+
+@dataclass(slots=True)
+class _SelfVadSink:
+    owner: "SelfSTTChannelOwner"
+    generation: int
+
+    async def handle_vad_event(self, event: object) -> None:
+        await self.owner._handle_vad_event(event, self.generation)
+
+
+class SelfSTTChannelOwner:
+    def __init__(
+        self,
+        *,
+        provider_read_port: STTProviderReadPort,
+        provider_host: SelfProviderHostPort,
+        ingress: SelfVadIngressPort,
+        source_factory: Callable[[SelfChannelConfig], object],
+        vad_factory: Callable[[SelfChannelConfig], object],
+        run_audio_loop: Callable[..., Awaitable[None]],
+        audio_lifecycle: SelfAudioLifecyclePort | None = None,
+        audio_gate: object | None = None,
+    ) -> None:
+        self._provider_read_port = provider_read_port
+        self._provider_host = provider_host
+        self._ingress = ingress
+        self._source_factory = source_factory
+        self._vad_factory = vad_factory
+        self._run_audio_loop = run_audio_loop
+        self._audio_lifecycle = audio_lifecycle
+        self._audio_gate = audio_gate
+        self._source: object | None = None
+        self._vad: object | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._generation = 0
+        self._intent_generation = 0
+        self._intent_enabled = False
+        self._desired = False
+        self._state = SelfChannelState.STOPPED
+        self._signature: tuple[object, ...] | None = None
+        self._config: SelfChannelConfig | None = None
+        self._lease = None
+        self._lock = asyncio.Lock()
+        self._scope = LifecycleScope("SelfSTTChannelOwner")
+
+    def snapshot(self) -> SelfChannelSnapshot:
+        lease = self._provider_read_port.lease_stt_provider("self_stt")
+        return SelfChannelSnapshot(
+            self._desired,
+            self._state,
+            lease is not None and lease.current is not None,
+            self._generation,
+            self._signature,
+            self._intent_generation,
+            self._intent_enabled,
+        )
+
+    def record_intent(self, enabled: bool) -> int:
+        if enabled != self._intent_enabled:
+            self._intent_generation += 1
+            self._intent_enabled = enabled
+        return self._intent_generation
+
+    async def execute(self, command: SetSelfSTTEnabled) -> SelfChannelCommandResult:
+        if command.record_intent:
+            self.record_intent(command.enabled)
+        if command.enabled and command.config is None:
+            raise ValueError("self STT enable requires resolved channel config")
+        if not command.enabled:
+            await self._disable(clear_provider=True)
+            return SelfChannelCommandResult("applied", self.snapshot())
+        assert command.config is not None
+        async with self._lock:
+            lease = self._provider_read_port.lease_stt_provider("self_stt")
+            if lease is None or lease.current is None:
+                self._desired = False
+                self._state = SelfChannelState.FAULTED
+                return SelfChannelCommandResult("provider_missing", self.snapshot())
+            if (
+                self._desired
+                and self._state is SelfChannelState.RUNNING
+                and self._signature == command.config.runtime_signature
+            ):
+                return SelfChannelCommandResult("applied", self.snapshot())
+            self._generation += 1
+            generation = self._generation
+            self._state = SelfChannelState.STARTING
+            self._reset_audio_gate()
+            if self._audio_lifecycle is not None:
+                try:
+                    await self._audio_lifecycle.stop_self_audio()
+                    await self._audio_lifecycle.start_self_audio(command.config)
+                except Exception:
+                    self._desired = False
+                    self._state = SelfChannelState.FAULTED
+                    return SelfChannelCommandResult("preparation_failed", self.snapshot())
+                self._lease = lease
+                self._desired = True
+                self._signature = command.config.runtime_signature
+                self._config = command.config
+                self._state = SelfChannelState.RUNNING
+                source = None
+                vad = None
+            else:
+                source = None
+                try:
+                    source = self._source_factory(command.config)
+                    vad = self._vad_factory(command.config)
+                except Exception:
+                    await self._close_source(source)
+                    self._desired = False
+                    self._state = SelfChannelState.FAULTED
+                    return SelfChannelCommandResult("preparation_failed", self.snapshot())
+            if lease.current is None:
+                await self._close_source(source)
+                self._desired = False
+                self._state = SelfChannelState.FAULTED
+                return SelfChannelCommandResult("provider_missing", self.snapshot())
+            if self._audio_lifecycle is None:
+                await self._stop_ingress_locked()
+                self._source = source
+                self._vad = vad
+                self._lease = lease
+                self._desired = True
+                self._signature = command.config.runtime_signature
+                self._config = command.config
+                self._task = start_lifecycle_task(
+                    self._scope,
+                    self._run_guarded(command.config, generation),
+                    name="audio-loop",
+                )
+                self._state = SelfChannelState.RUNNING
+        provider = lease.current
+        warmup = getattr(provider, "warmup", None)
+        if not command.config.local_qwen and callable(warmup):
+            result = warmup()
+            if inspect.isawaitable(result):
+                await result
+        return SelfChannelCommandResult("applied", self.snapshot())
+
+    async def close(self) -> None:
+        await self._disable(clear_provider=False)
+        await self._scope.close()
+
+    async def freeze_for_provider_replacement(self) -> SelfIngressResume:
+        async with self._lock:
+            resume = SelfIngressResume(self._config, self._desired)
+            self._generation += 1
+            self._desired = False
+            self._reset_audio_gate()
+            await self._stop_ingress_locked()
+            self._state = SelfChannelState.STOPPED
+            self._lease = None
+        return resume
+
+    async def _disable(self, *, clear_provider: bool) -> None:
+        async with self._lock:
+            self._generation += 1
+            self._desired = False
+            self._reset_audio_gate()
+            if self._audio_lifecycle is None:
+                await self._stop_ingress_locked()
+            else:
+                await self._audio_lifecycle.stop_self_audio()
+            if clear_provider:
+                await self._provider_host.clear_self_stt_for_toggle_off()
+            self._state = SelfChannelState.STOPPED
+            self._signature = None
+            self._config = None
+            self._lease = None
+
+    async def _stop_ingress_locked(self) -> None:
+        task = self._task
+        self._task = None
+        source = self._source
+        self._source = None
+        self._vad = None
+        if task is not None and task is not asyncio.current_task():
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await self._close_source(source)
+
+    async def _run_guarded(self, config: SelfChannelConfig, generation: int) -> None:
+        try:
+            await self._run_audio_loop(
+                source=self._source,
+                vad=self._vad,
+                sink=_SelfVadSink(self, generation),
+                target_sample_rate_hz=config.target_sample_rate_hz,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            async with self._lock:
+                if generation == self._generation:
+                    self._state = SelfChannelState.FAULTED
+                    self._desired = False
+
+    async def _handle_vad_event(self, event: object, generation: int) -> None:
+        if generation != self._generation or not self._desired:
+            return
+        lease = self._lease
+        provider = None if lease is None else lease.current
+        if provider is None:
+            return
+        await self._ingress.handle_self_vad_event(event, provider)
+        if generation != self._generation or lease.current is None:
+            return
+
+    @staticmethod
+    async def _close_source(source: object | None) -> None:
+        close = getattr(source, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+    def _reset_audio_gate(self) -> None:
+        reset = getattr(self._audio_gate, "reset", None)
+        if callable(reset):
+            reset()
 
 
 @dataclass(slots=True)
@@ -192,4 +497,15 @@ class SelfAudioRuntime:
             self._state_changed(self)
 
 
-__all__ = ["SelfAudioRuntime"]
+__all__ = [
+    "SelfAudioRuntime",
+    "SelfChannelCommandResult",
+    "SelfChannelConfig",
+    "SelfChannelSnapshot",
+    "SelfChannelState",
+    "SelfSTTChannelOwner",
+    "SelfSTTCommandPort",
+    "SelfSTTProviderApplicationPort",
+    "SelfSTTStatePort",
+    "SetSelfSTTEnabled",
+]

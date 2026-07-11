@@ -42,6 +42,25 @@ class ProviderStateSnapshot:
         return getattr(self, slot)
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderLease:
+    _cell: "ProviderStateCell"
+    slot: ProviderSlot
+    identity: str
+    generation: int
+
+    @property
+    def current(self) -> object | None:
+        state = self._cell.snapshot().slot(self.slot)
+        if state.generation != self.generation or state.identity != self.identity:
+            return None
+        return state.provider
+
+    @property
+    def is_current(self) -> bool:
+        return self.current is not None
+
+
 class ProviderStateCell:
     def __init__(
         self,
@@ -59,6 +78,12 @@ class ProviderStateCell:
 
     def snapshot(self) -> ProviderStateSnapshot:
         return self._snapshot
+
+    def lease(self, slot: ProviderSlot) -> ProviderLease | None:
+        state = self._snapshot.slot(slot)
+        if state.identity is None:
+            return None
+        return ProviderLease(self, slot, state.identity, state.generation)
 
     def replace(self, slot: ProviderSlot, provider: object | None) -> ProviderStateSnapshot:
         ref = provider if isinstance(provider, ResourceRef) else _new_ref(provider)
@@ -92,6 +117,7 @@ def _initial_slot(provider: object | ResourceRef | None) -> ProviderSlotState:
 
 __all__ = [
     "ProviderSlot",
+    "ProviderLease",
     "ResourceRef",
     "ProviderSlotState",
     "ProviderStateCell",

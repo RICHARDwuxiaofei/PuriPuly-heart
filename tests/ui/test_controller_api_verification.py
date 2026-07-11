@@ -99,6 +99,25 @@ def _local_stt_download_task(controller: GuiController) -> asyncio.Task[object] 
     return runtime.download_task if runtime is not None else None
 
 
+def _typed_self_commands(calls: list[bool]):
+    from puripuly_heart.core.runtime.self_audio import SelfChannelState
+
+    class TypedSelfCommands:
+        async def execute(self, command):  # noqa: ANN001, ANN201
+            calls.append(command.enabled)
+            return SimpleNamespace(
+                snapshot=controller_module.SelfChannelSnapshot(
+                    command.enabled,
+                    (SelfChannelState.RUNNING if command.enabled else SelfChannelState.STOPPED),
+                    True,
+                    len(calls),
+                    None,
+                )
+            )
+
+    return TypedSelfCommands()
+
+
 async def _start_controller_with_inspected_stt_state(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -964,6 +983,7 @@ async def test_local_qwen_successful_runtime_install_retries_enable_once(
     monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_switch)
 
     controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.self_stt_commands = _typed_self_commands(switch_calls)
     controller.settings = settings
     controller.hub = DummyWarmupHub()
     controller._local_stt_install_state = LocalSTTInstallState(status="missing")
@@ -973,7 +993,7 @@ async def test_local_qwen_successful_runtime_install_retries_enable_once(
     assert download_task is not None
     await download_task
 
-    assert rebuild_calls == ["rebuild"]
+    assert rebuild_calls == []
     assert switch_calls == [True]
     assert dashboard.local_stt_notice_status is None
     assert controller_module.t("local_stt.download_success") not in status_messages
@@ -1139,6 +1159,7 @@ async def test_local_qwen_reenable_during_runtime_install_rearms_pending_auto_en
     monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_switch)
 
     controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.self_stt_commands = _typed_self_commands(switch_calls)
     controller.settings = settings
     controller.hub = DummyWarmupHub()
     controller._local_stt_install_state = LocalSTTInstallState(status="missing")
@@ -1157,7 +1178,7 @@ async def test_local_qwen_reenable_during_runtime_install_rearms_pending_auto_en
     assert download_task is not None
     await download_task
 
-    assert rebuild_calls == ["rebuild"]
+    assert rebuild_calls == []
     assert switch_calls == [False, True]
     assert dashboard.stt_enabled is True
 

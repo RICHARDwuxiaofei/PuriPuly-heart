@@ -9,8 +9,9 @@
     "commit": "b4ace2631793aa1a1e384c0440b8ec7f315559ae",
     "trace": "current_normalized_trace.json",
     "working_tree_repairs": ["P-003", "P-012", "P-017", "P-020", "P-034", "P-035"],
-    "repair_manifest": {
-      "files": [
+      "repair_manifest": {
+        "files": [
+          "src/puripuly_heart/app/adapters/application_runtime_production.py",
         "src/puripuly_heart/app/adapters/canonical_state_repository.py",
         "src/puripuly_heart/app/adapters/overlay_lifecycle_production.py",
         "src/puripuly_heart/app/adapters/overlay_osc_runtime.py",
@@ -27,7 +28,8 @@
         "src/puripuly_heart/app/ports/runtime_apply.py",
         "src/puripuly_heart/app/ports/runtime_resource_factory.py",
         "src/puripuly_heart/app/ports/runtime_resources.py",
-        "src/puripuly_heart/app/ports/settings_repository.py",
+          "src/puripuly_heart/app/ports/settings_repository.py",
+          "src/puripuly_heart/app/services/application_runtime_host.py",
         "src/puripuly_heart/app/services/canonical_runtime_resolution.py",
         "src/puripuly_heart/app/services/canonical_state_repositories.py",
         "src/puripuly_heart/app/services/managed_connection_auth.py",
@@ -48,7 +50,8 @@
         "src/puripuly_heart/core/orchestrator/channel_runtime.py",
         "src/puripuly_heart/core/orchestrator/hub.py",
         "src/puripuly_heart/core/overlay/process.py",
-        "src/puripuly_heart/core/runtime/overlay.py",
+          "src/puripuly_heart/core/runtime/overlay.py",
+          "src/puripuly_heart/core/runtime/peer_channel.py",
         "src/puripuly_heart/core/runtime/provider_handle.py",
         "src/puripuly_heart/core/runtime/provider_state.py",
         "src/puripuly_heart/core/runtime/self_audio.py",
@@ -59,8 +62,8 @@
         "src/puripuly_heart/ui/app.py",
         "src/puripuly_heart/ui/controller.py"
       ],
-      "production_source_sha256": "f35fa39d2bb282fca1282ee6aa815ed7a9658a54a6d4cb4268372619fe1b3833",
-      "source_delta_sha256": "4737a70c98d58f96cf0bb78eb3d34f253e14e0f9b10e61f5da1552d036e07614"
+        "production_source_sha256": "7e11d1fb1f3d383a9b07a0654a101d76f9d3f8c0095bf21d0f7db5d3cdb1bed0",
+        "source_delta_sha256": "7d98ca35011d7a62d3c652dd7e327e0d73ded1f1edc12dcf8a895625e7941cbd"
     },
     "repair_base": "b4ace2631793aa1a1e384c0440b8ec7f315559ae"
   },
@@ -68,7 +71,7 @@
   "sha256": {
     "runner": "5f9252d28e091d21dd7f506ec2d384c2e7ab9993add235a182001dea156c7961",
     "baseline_trace": "fdb3e1f58b13b83445967733ca737f17823e385efb1f5f85442161cb4224b78e",
-    "current_trace": "7a1193b04f0f3e498497ec2da006c84d4b1a949842bc27cdaa616e8e7ba0eaa7",
+    "current_trace": "1d3cf5165a8cee712ab7d82736474b69414f13bac5bcb48cb4298909b2b73a91",
     "difference_rules": "48b2c253511110aa0d7984d402bf6163206d9f729bb867a2989db977605fbe0b"
   },
   "scenario_sha256": {

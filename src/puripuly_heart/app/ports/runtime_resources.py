@@ -192,6 +192,35 @@ class RuntimeHostInstallPort(Protocol):
     async def current_runtime_state(self) -> InstalledRuntimeState: ...
 
 
+@dataclass(frozen=True, slots=True)
+class ClearSelfSTTResult:
+    active: InstalledRuntimeState
+    cleared: bool
+    displaced_identity: str | None
+
+
+class SelfSTTHostCommandPort(Protocol):
+    async def clear_self_stt_for_toggle_off(self) -> ClearSelfSTTResult: ...
+
+
+class STTProviderLease(Protocol):
+    slot: RuntimeResourceSlot
+    identity: str
+    generation: int
+
+    @property
+    def current(self) -> object | None: ...
+
+    @property
+    def is_current(self) -> bool: ...
+
+
+class STTProviderReadPort(Protocol):
+    def lease_stt_provider(
+        self, slot: Literal["self_stt", "peer_stt"]
+    ) -> STTProviderLease | None: ...
+
+
 class RuntimeResourcePlannerPort(Protocol):
     def plan(
         self,
