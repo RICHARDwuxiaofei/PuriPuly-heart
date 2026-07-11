@@ -3495,12 +3495,10 @@ async def test_on_language_change_updates_settings_and_shows_warning(monkeypatch
         languages=SimpleNamespace(source_language="ko", target_language="en"),
         provider=SimpleNamespace(stt=SimpleNamespace(value="deepgram")),
     )
-    seen: list[tuple[str, str, str, str]] = []
+    seen = []
 
-    async def fake_on_dashboard_language_change(
-        *, source_code: str, target_code: str, peer_source_code: str, peer_target_code: str
-    ) -> None:
-        seen.append((source_code, target_code, peer_source_code, peer_target_code))
+    async def fake_on_dashboard_language_change(change) -> None:
+        seen.append(change)
 
     warning = SimpleNamespace(key="dashboard.warn_stt_key", language_code="ko")
     monkeypatch.setattr(
@@ -3511,18 +3509,27 @@ async def test_on_language_change_updates_settings_and_shows_warning(monkeypatch
         on_dashboard_language_change=fake_on_dashboard_language_change,
     )
 
-    app._on_language_change("ja", "fr", "", "it")
+    change = app_module.LanguageSelectionChange(
+        source_code="ja",
+        target_code="fr",
+        peer_source_code="",
+        peer_target_code="it",
+        peer_source_mode="manual",
+        recent_source_codes=("ja",),
+        recent_target_codes=("fr",),
+    )
+    app._on_language_change(change)
 
     assert settings.languages.source_language == "ko"
     assert settings.languages.target_language == "en"
     assert len(app.page.opened) == 1
     assert len(app.page.tasks) == 1
     await app.page.tasks[0]()
-    assert seen == [("ja", "fr", "", "it")]
+    assert seen == [change]
 
 
 @pytest.mark.asyncio
-async def test_on_language_change_auto_mode_does_not_call_legacy_controller_callback(
+async def test_on_language_change_forwards_automatic_peer_mode(
     monkeypatch,
 ) -> None:
     app = TranslatorApp.__new__(TranslatorApp)
@@ -3531,22 +3538,27 @@ async def test_on_language_change_auto_mode_does_not_call_legacy_controller_call
         languages=SimpleNamespace(source_language="ko", target_language="en"),
         provider=SimpleNamespace(stt=SimpleNamespace(value="deepgram")),
     )
-    seen: list[tuple[str, str, str, str]] = []
+    seen = []
 
-    async def legacy_callback(
-        *, source_code: str, target_code: str, peer_source_code: str, peer_target_code: str
-    ) -> None:
-        seen.append((source_code, target_code, peer_source_code, peer_target_code))
+    async def callback(change) -> None:
+        seen.append(change)
 
     monkeypatch.setattr(app_module, "get_stt_compatibility_warning", lambda *_args: None)
-    app.controller = SimpleNamespace(
-        settings=settings, on_dashboard_language_change=legacy_callback
-    )
+    app.controller = SimpleNamespace(settings=settings, on_dashboard_language_change=callback)
 
-    app._on_language_change("ko", "en", "ja", "fr", "soniox_auto")
+    change = app_module.LanguageSelectionChange(
+        source_code="ko",
+        target_code="en",
+        peer_source_code="ja",
+        peer_target_code="fr",
+        peer_source_mode="soniox_auto",
+        recent_source_codes=(),
+        recent_target_codes=(),
+    )
+    app._on_language_change(change)
     await app.page.tasks[0]()
 
-    assert seen == []
+    assert seen == [change]
 
 
 @pytest.mark.asyncio

@@ -52,6 +52,12 @@ ADR_RESOLVED_CURRENT_DESTINATIONS = {
 }
 DECISION_PENDING_CURRENT_DESTINATIONS: dict[str, str] = {}
 VNEXT_NATIVE_PERSISTED_LEAF_PATHS = frozenset(
+    {
+        "intent.desktop_audio.capture_target.kind",
+        "intent.desktop_audio.capture_target.device_name",
+        "intent.desktop_audio.capture_target.process",
+    }
+) | frozenset(
     f"state.provider_verification.{provider}.{field}"
     for provider in (
         "alibaba_beijing",

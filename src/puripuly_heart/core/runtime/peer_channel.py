@@ -7,7 +7,12 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Protocol
 
-from puripuly_heart.config.resolved import ResolvedSTTConfig
+from puripuly_heart.config.process_capture_resolution import ProcessCaptureTargetUnavailableError
+from puripuly_heart.config.resolved import ResolvedDesktopAudioCaptureTarget, ResolvedSTTConfig
+from puripuly_heart.core.audio.process_source import (
+    ProcessAudioCaptureSetupError,
+    ProcessAudioCaptureUnavailableError,
+)
 from puripuly_heart.core.clock import Clock
 
 if TYPE_CHECKING:
@@ -22,6 +27,22 @@ class PeerChannelRuntimeState(str, Enum):
     FAULTED = "faulted"
 
 
+class PeerRuntimeFailureReason(str, Enum):
+    PROCESS_TARGET_UNAVAILABLE = "process_target_unavailable"
+    PROCESS_SETUP_FAILED = "process_setup_failed"
+    PROCESS_TARGET_EXITED = "process_target_exited"
+    PROCESS_SOURCE_FAILED = "process_source_failed"
+    PROCESS_PROVIDER_FAILED = "process_provider_failed"
+    PEER_RUNTIME_FAILED = "peer_runtime_failed"
+
+
+@dataclass(frozen=True, slots=True)
+class PeerRuntimeDiagnostic:
+    reason: PeerRuntimeFailureReason
+    capture_kind: str
+    process_unavailable_reason: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class PeerRuntimeConfig:
     backend: ResolvedSTTConfig
@@ -31,6 +52,9 @@ class PeerRuntimeConfig:
     vad_pre_roll_ms: int
     provider_signature: tuple[object, ...]
     runtime_signature: tuple[object, ...]
+    capture_target: ResolvedDesktopAudioCaptureTarget = ResolvedDesktopAudioCaptureTarget(
+        kind="default_output_device"
+    )
 
 
 class SpeechChannelRuntime(Protocol):
@@ -84,6 +108,7 @@ class PeerChannelRuntime:
         vad_factory: Callable[[PeerRuntimeConfig, Path], object],
         vad_model_resolver: Callable[[], Path],
         run_audio_loop: Callable[..., Awaitable[None]],
+        diagnostic_sink: Callable[[PeerRuntimeDiagnostic], object] | None = None,
     ) -> None:
         self.hub = hub
         self.clock = clock
@@ -92,6 +117,7 @@ class PeerChannelRuntime:
         self._vad_factory = vad_factory
         self._vad_model_resolver = vad_model_resolver
         self._run_audio_loop = run_audio_loop
+        self._diagnostic_sink = diagnostic_sink
 
         self._config: PeerRuntimeConfig | None = None
         self._stt: object | None = None
@@ -105,6 +131,10 @@ class PeerChannelRuntime:
         self._lock = asyncio.Lock()
         self._retired_sources: list[object] = []
         self._retired_peer_providers: list[object] = []
+        self._last_failure: PeerRuntimeDiagnostic | None = None
+        self._last_failure_unavailable_reason: str | None = None
+        self._retry_required_capture_target: ResolvedDesktopAudioCaptureTarget | None = None
+        self._deferred_loop_diagnostics: dict[asyncio.Task[None], PeerRuntimeDiagnostic] = {}
 
     @property
     def state(self) -> PeerChannelRuntimeState:
@@ -117,6 +147,10 @@ class PeerChannelRuntime:
     @property
     def loop_task(self) -> asyncio.Task[None] | None:
         return self._loop_task
+
+    @property
+    def last_failure(self) -> PeerRuntimeDiagnostic | None:
+        return self._last_failure
 
     def lifecycle_owner_snapshot(self) -> dict[str, object]:
         return {
@@ -142,6 +176,7 @@ class PeerChannelRuntime:
             self._config = config
             self._desired_active = desired_active
             if not desired_active:
+                self._retry_required_capture_target = None
                 self._state = PeerChannelRuntimeState.STOPPING
             elif (
                 self._signature == config.runtime_signature
@@ -151,6 +186,15 @@ class PeerChannelRuntime:
             else:
                 self._state = PeerChannelRuntimeState.STARTING
 
+            if (
+                desired_active
+                and self._state == PeerChannelRuntimeState.STARTING
+                and self._retry_required_capture_target == config.capture_target
+            ):
+                self._desired_active = False
+                self._state = PeerChannelRuntimeState.FAULTED
+                return
+
         if not desired_active:
             await self._teardown_resources(
                 target_state=PeerChannelRuntimeState.STOPPED,
@@ -159,6 +203,23 @@ class PeerChannelRuntime:
             return
 
         await self._start_generation(generation, config)
+
+    async def retry_process_capture(self, *, config: PeerRuntimeConfig) -> bool:
+        async with self._lock:
+            if (
+                config.capture_target.kind != "process"
+                or self._retry_required_capture_target != config.capture_target
+                or self._state != PeerChannelRuntimeState.FAULTED
+            ):
+                return False
+            self._generation += 1
+            generation = self._generation
+            self._config = config
+            self._desired_active = True
+            self._retry_required_capture_target = None
+            self._state = PeerChannelRuntimeState.STARTING
+        await self._start_generation(generation, config)
+        return self._state == PeerChannelRuntimeState.RUNNING
 
     async def warmup(self) -> None:
         async with self._lock:
@@ -193,7 +254,16 @@ class PeerChannelRuntime:
             if inspect.isawaitable(stt):
                 stt = await stt
         except Exception:
-            await self._mark_faulted_if_current(generation, detach_provider=False)
+            await self._fault_current_generation(
+                generation,
+                config=config,
+                reason=(
+                    PeerRuntimeFailureReason.PROCESS_PROVIDER_FAILED
+                    if config.capture_target.kind == "process"
+                    else PeerRuntimeFailureReason.PEER_RUNTIME_FAILED
+                ),
+                detach_provider=False,
+            )
             return
 
         if self._is_superseded(generation):
@@ -205,8 +275,8 @@ class PeerChannelRuntime:
             source = self._source_factory(config)
             model_path = self._vad_model_resolver()
             vad = self._vad_factory(config, model_path)
-        except Exception:
-            await self._cleanup_failed_startup(generation, source, stt)
+        except Exception as exc:
+            await self._cleanup_failed_startup(generation, source, stt, config=config, exc=exc)
             return
 
         if self._is_superseded(generation):
@@ -240,7 +310,9 @@ class PeerChannelRuntime:
             replacement_failure = exc
             replacement_failed_before_attach = getattr(self.hub, "peer_stt", None) is not stt
 
-        if replacement_failed_before_attach:
+        if replacement_failed_before_attach or (
+            replacement_failure is not None and config.capture_target.kind == "process"
+        ):
             if replacement_failure is not None:
                 cleanup_failures.append(replacement_failure)
             await self._attempt_cleanup(
@@ -259,13 +331,19 @@ class PeerChannelRuntime:
             )
             await self._attempt_cleanup(
                 cleanup_failures,
-                lambda: self._close_peer_provider_for_discard(stt),
+                lambda: self._close_replacement_provider(stt),
                 retain_on_failure=lambda: self._retain_retired_peer_provider(stt),
             )
             await self._attempt_cleanup(
                 cleanup_failures,
-                lambda: self._mark_faulted_if_current(
+                lambda: self._fault_current_generation(
                     generation,
+                    config=config,
+                    reason=(
+                        PeerRuntimeFailureReason.PROCESS_PROVIDER_FAILED
+                        if config.capture_target.kind == "process"
+                        else PeerRuntimeFailureReason.PEER_RUNTIME_FAILED
+                    ),
                     detach_provider=True,
                     retry_retired=False,
                 ),
@@ -388,11 +466,35 @@ class PeerChannelRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await self._on_runtime_failure(exc, generation=generation)
+            await self._on_runtime_failure(exc, generation=generation, config=self._config)
+            return
+        terminal_reason = self._terminal_reason_from_source(source)
+        if terminal_reason is not None:
+            await self._fault_current_generation(
+                generation,
+                config=self._config,
+                reason=self._failure_reason_from_terminal_source(terminal_reason),
+                detach_provider=True,
+            )
 
-    async def _on_runtime_failure(self, exc: Exception, *, generation: int) -> None:
+    async def _on_runtime_failure(
+        self,
+        exc: Exception,
+        *,
+        generation: int,
+        config: PeerRuntimeConfig | None,
+    ) -> None:
         _ = exc
-        await self._mark_faulted_if_current(generation, detach_provider=True)
+        await self._fault_current_generation(
+            generation,
+            config=config,
+            reason=(
+                PeerRuntimeFailureReason.PROCESS_SOURCE_FAILED
+                if config is not None and config.capture_target.kind == "process"
+                else PeerRuntimeFailureReason.PEER_RUNTIME_FAILED
+            ),
+            detach_provider=True,
+        )
 
     async def _on_terminal_stt_failure(
         self,
@@ -402,6 +504,7 @@ class PeerChannelRuntime:
     ) -> None:
         _ = exc
         target_generation = self._generation if generation is None else generation
+        config = self._config
         async with self._lock:
             if self._is_superseded(target_generation):
                 return
@@ -409,9 +512,54 @@ class PeerChannelRuntime:
                 self._desired_active
                 and self._state == PeerChannelRuntimeState.RUNNING
                 and self._stt is not None
+                and (config is None or config.capture_target.kind != "process")
             ):
                 return
-        await self._mark_faulted_if_current(target_generation, detach_provider=True)
+        await self._fault_current_generation(
+            target_generation,
+            config=config,
+            reason=(
+                PeerRuntimeFailureReason.PROCESS_PROVIDER_FAILED
+                if config is not None and config.capture_target.kind == "process"
+                else PeerRuntimeFailureReason.PEER_RUNTIME_FAILED
+            ),
+            detach_provider=True,
+        )
+
+    async def _fault_current_generation(
+        self,
+        generation: int,
+        *,
+        config: PeerRuntimeConfig | None,
+        reason: PeerRuntimeFailureReason,
+        detach_provider: bool,
+        retry_retired: bool = True,
+    ) -> None:
+        current_task = asyncio.current_task()
+        defer_diagnostic = current_task is not None and self._loop_task is current_task
+        diagnostic = None
+        if config is not None and config.capture_target.kind == "process":
+            unavailable_reason = None
+            if reason is PeerRuntimeFailureReason.PROCESS_TARGET_UNAVAILABLE:
+                unavailable_reason = self._last_failure_unavailable_reason
+            diagnostic = PeerRuntimeDiagnostic(
+                reason=reason,
+                capture_kind=config.capture_target.kind,
+                process_unavailable_reason=unavailable_reason,
+            )
+            self._retry_required_capture_target = config.capture_target
+        try:
+            await self._mark_faulted_if_current(
+                generation,
+                detach_provider=detach_provider,
+                retry_retired=retry_retired,
+            )
+        finally:
+            if diagnostic is not None:
+                if defer_diagnostic:
+                    self._deferred_loop_diagnostics[current_task] = diagnostic
+                else:
+                    self._emit_failure(diagnostic)
 
     async def _mark_faulted_if_current(
         self,
@@ -494,6 +642,9 @@ class PeerChannelRuntime:
         generation: int,
         source: object | None,
         stt: object,
+        *,
+        config: PeerRuntimeConfig,
+        exc: Exception,
     ) -> None:
         cleanup_failures: list[Exception] = []
         await self._attempt_cleanup(
@@ -508,8 +659,10 @@ class PeerChannelRuntime:
         )
         await self._attempt_cleanup(
             cleanup_failures,
-            lambda: self._mark_faulted_if_current(
+            lambda: self._fault_current_generation(
                 generation,
+                config=config,
+                reason=self._failure_reason_from_startup_exception(config, exc),
                 detach_provider=True,
                 retry_retired=False,
             ),
@@ -620,12 +773,14 @@ class PeerChannelRuntime:
         await asyncio.gather(loop_task, return_exceptions=True)
 
     def _on_loop_task_done(self, task: asyncio.Task[None]) -> None:
-        if task.cancelled():
-            return
-        try:
-            task.exception()
-        except asyncio.CancelledError:
-            pass
+        if not task.cancelled():
+            try:
+                task.exception()
+            except asyncio.CancelledError:
+                pass
+        diagnostic = self._deferred_loop_diagnostics.pop(task, None)
+        if diagnostic is not None:
+            self._emit_failure(diagnostic)
 
     async def _close_if_possible(self, resource: object | None) -> None:
         if resource is None or not hasattr(resource, "close"):
@@ -639,6 +794,12 @@ class PeerChannelRuntime:
             return
         if getattr(self.hub, "peer_stt", None) is stt:
             await self._replace_peer_stt_provider(None, start=False)
+            return
+        await self._close_peer_provider_for_discard(stt)
+
+    async def _close_replacement_provider(self, stt: object) -> None:
+        if getattr(self.hub, "peer_stt", None) is stt:
+            await self._close_peer_provider_if_current(stt)
             return
         await self._close_peer_provider_for_discard(stt)
 
@@ -710,3 +871,43 @@ class PeerChannelRuntime:
 
     def is_current_generation(self, generation: int) -> bool:
         return not self._is_superseded(generation)
+
+    def _failure_reason_from_startup_exception(
+        self,
+        config: PeerRuntimeConfig,
+        exc: Exception,
+    ) -> PeerRuntimeFailureReason:
+        if config.capture_target.kind != "process":
+            return PeerRuntimeFailureReason.PEER_RUNTIME_FAILED
+        if isinstance(exc, ProcessCaptureTargetUnavailableError):
+            self._last_failure_unavailable_reason = exc.reason
+            return PeerRuntimeFailureReason.PROCESS_TARGET_UNAVAILABLE
+        if isinstance(exc, (ProcessAudioCaptureSetupError, ProcessAudioCaptureUnavailableError)):
+            return PeerRuntimeFailureReason.PROCESS_SETUP_FAILED
+        return PeerRuntimeFailureReason.PROCESS_SETUP_FAILED
+
+    @staticmethod
+    def _terminal_reason_from_source(source: object) -> str | None:
+        current = source
+        for _ in range(4):
+            terminal_reason = getattr(current, "terminal_reason", None)
+            if isinstance(terminal_reason, str):
+                return terminal_reason
+            current = getattr(current, "source", None)
+            if current is None:
+                return None
+        return None
+
+    @staticmethod
+    def _failure_reason_from_terminal_source(reason: str) -> PeerRuntimeFailureReason:
+        if reason == "target_exited":
+            return PeerRuntimeFailureReason.PROCESS_TARGET_EXITED
+        return PeerRuntimeFailureReason.PROCESS_SOURCE_FAILED
+
+    def _emit_failure(self, diagnostic: PeerRuntimeDiagnostic) -> None:
+        self._last_failure = diagnostic
+        if self._diagnostic_sink is not None:
+            try:
+                self._diagnostic_sink(diagnostic)
+            except Exception:
+                pass

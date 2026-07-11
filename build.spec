@@ -17,14 +17,27 @@ Output:
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import (
+    collect_data_files,
+    collect_dynamic_libs,
+    collect_submodules,
+    get_module_file_attribute,
+)
 
 # Add src to path for imports
 src_path = Path("src").resolve()
 sys.path.insert(0, str(src_path))
+release_smoke = os.environ.get("PURIPULY_HEART_RELEASE_PROCESS_CAPTURE_SMOKE") == "1"
+entry_script = (
+    Path("scripts/release/process-capture-runtime-smoke.py").resolve()
+    if release_smoke
+    else src_path / "puripuly_heart" / "main.py"
+)
+executable_name = "PuriPulyHeartProcessCaptureSmoke" if release_smoke else "PuriPulyHeart"
 
 overlay_staged_path = Path("build").resolve() / "overlay" / "PuriPulyHeartOverlay.exe"
 if not overlay_staged_path.exists():
@@ -122,6 +135,12 @@ datas = [
 runtime_binaries = collect_dynamic_libs(
     "onnxruntime", destdir=LOCAL_QWEN_PACKAGED_RUNTIME_RELATIVE_DIR.as_posix()
 )
+proctap_native_extension = Path(get_module_file_attribute("proctap._native")).resolve()
+if not proctap_native_extension.is_file() or not proctap_native_extension.name.lower().startswith("_native"):
+    raise SystemExit("Pinned ProcTap package did not provide a packageable _native extension")
+proctap_runtime_binaries = [(str(proctap_native_extension), "proctap")]
+proctap_runtime_binaries += collect_dynamic_libs("proctap", destdir="proctap")
+runtime_binaries += proctap_runtime_binaries
 runtime_binaries += collect_staged_soxr_runtime_binaries()
 runtime_binaries += collect_vendored_openvr_runtime_binaries()
 
@@ -146,10 +165,16 @@ hiddenimports = [
     "numpy._core._multiarray_umath",
     "soxr",
     "sounddevice",
-]
+    "puripuly_heart.config.process_capture_platform",
+    "puripuly_heart.core.audio.process_source",
+] + collect_submodules("proctap")
+
+required_proctap_hiddenimports = {"proctap", "proctap._native", "proctap.backends.windows"}
+if not required_proctap_hiddenimports.issubset(set(hiddenimports)):
+    raise SystemExit("Required ProcTap hidden imports were not collected")
 
 a = Analysis(
-    [str(src_path / "puripuly_heart" / "main.py")],
+    [str(entry_script)],
     pathex=[str(src_path)],
     binaries=runtime_binaries,
     datas=datas,
@@ -167,7 +192,7 @@ a = Analysis(
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
-    noarchive=False,
+    noarchive=release_smoke,
 )
 
 normalize_soxr_runtime_binaries(a.binaries)
@@ -179,12 +204,12 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="PuriPulyHeart",
+    name=executable_name,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,  # Windowed application (no terminal)
+    console=release_smoke,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -203,5 +228,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="PuriPulyHeart",
+    name=executable_name,
 )

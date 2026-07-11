@@ -20,6 +20,8 @@ dependencies = [
   "cryptography>=41.0",
   "python-osc>=1.9.0",
   "PyAudioWPatch; platform_system == 'Windows'",
+  "proc-tap==1.0.3; platform_system == 'Windows' and platform_python_implementation == 'CPython' and python_version == '3.12' and platform_machine == 'AMD64'",
+  "psutil>=5.9; platform_system == 'Windows' and platform_python_implementation == 'CPython' and python_version == '3.12' and platform_machine == 'AMD64'",
   "sounddevice>=0.5.0",
   "onnxruntime>=1.18.0",
   "google-genai>=1.56.0",

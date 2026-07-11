@@ -1045,6 +1045,21 @@ wheels = [
 ]
 
 [[package]]
+name = "proc-tap"
+version = "1.0.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/aa/67/b620f134a9609e16a9344e58f820a92efbb83a2609324bd2f1ed3b99faa5/proc_tap-1.0.3.tar.gz", hash = "sha256:f6b2c1bcd1cfca2428e6ee26493200c7d79d7ce7ffa442174a09f2787e20dd89", size = 105906, upload-time = "2025-12-09T14:51:24.139Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f6/2c/165217a8df09088adc974495ca9e316ebe19f1d8f600197cfd13ad95c9a9/proc_tap-1.0.3-cp312-cp312-win_amd64.whl", hash = "sha256:48ddc19b36db2ee67d78eabe5a49a7f5e445de71011d870e3dd7be064d2f474f", size = 105997, upload-time = "2025-12-09T14:51:18.648Z" },
+    { url = "https://files.pythonhosted.org/packages/23/d5/210cb5c95c2250adddf8a0c79fb2b759e4c84b7e36cd16417c050e2201f1/proc_tap-1.0.3-cp313-cp313-win_amd64.whl", hash = "sha256:88c6246147fc437ca7b59d9042b71881939cd194042bda3a038228ce4979ee39", size = 105991, upload-time = "2025-12-09T14:51:20.227Z" },
+    { url = "https://files.pythonhosted.org/packages/0d/74/c6887c5e4955d4f17a4f649b7b2c310351094d6d25e2a241815d622f84a1/proc_tap-1.0.3-py3-none-any.whl", hash = "sha256:5e8b02863f787a992377b2c0c5e1f3680fac92d608caa79fed3a0de0bb58b72e", size = 85309, upload-time = "2025-12-09T14:51:21.81Z" },
+]
+
+[[package]]
 name = "propcache"
 version = "0.4.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1114,6 +1129,16 @@ wheels = [
 ]
 
 [[package]]
+name = "psutil"
+version = "7.2.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/aa/c6/d1ddf4abb55e93cebc4f2ed8b5d6dbad109ecb8d63748dd2b20ab5e57ebe/psutil-7.2.2.tar.gz", hash = "sha256:0746f5f8d406af344fd547f1c8daa5f5c33dbc293bb8d6a16d80b4bb88f59372", size = 493740, upload-time = "2026-01-28T18:14:54.428Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/16/ba/0756dca669f5a9300d0cbcbfae9a4c30e446dfc7440ffe43ded5724bfd93/psutil-7.2.2-cp313-cp313t-win_amd64.whl", hash = "sha256:ab486563df44c17f5173621c7b198955bd6b613fb87c71c161f827d3fb149a9b", size = 139893, upload-time = "2026-01-28T18:15:06.378Z" },
+    { url = "https://files.pythonhosted.org/packages/b4/90/e2159492b5426be0c1fef7acba807a03511f97c5f86b3caeda6ad92351a7/psutil-7.2.2-cp37-abi3-win_amd64.whl", hash = "sha256:eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988", size = 137737, upload-time = "2026-01-28T18:15:33.849Z" },
+]
+
+[[package]]
 name = "puripuly-heart"
 version = "2.2.2"
 source = { editable = "." }
@@ -1130,6 +1155,8 @@ dependencies = [
     { name = "keyring" },
     { name = "numpy" },
     { name = "onnxruntime" },
+    { name = "proc-tap", marker = "python_full_version < '3.13' and platform_machine == 'AMD64' and platform_python_implementation == 'CPython' and sys_platform == 'win32'" },
+    { name = "psutil", marker = "python_full_version < '3.13' and platform_machine == 'AMD64' and platform_python_implementation == 'CPython' and sys_platform == 'win32'" },
     { name = "pyaudiowpatch", marker = "sys_platform == 'win32'" },
     { name = "python-osc" },
     { name = "sherpa-onnx" },
@@ -1175,6 +1202,8 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.0" },
     { name = "onnxruntime", specifier = ">=1.18.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.7.0" },
+    { name = "proc-tap", marker = "python_full_version == '3.12.*' and platform_machine == 'AMD64' and platform_python_implementation == 'CPython' and sys_platform == 'win32'", specifier = "==1.0.3" },
+    { name = "psutil", marker = "python_full_version == '3.12.*' and platform_machine == 'AMD64' and platform_python_implementation == 'CPython' and sys_platform == 'win32'", specifier = ">=5.9" },
     { name = "pyaudiowpatch", marker = "sys_platform == 'win32'" },
     { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0" },
@@ -1523,6 +1552,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/28/cd/9ebb50029b6d8a3ee9e38cdce514ebd70190ec1edf28ab0a1f66d0b84670/scikit_build_core-0.12.2.tar.gz", hash = "sha256:562e0bbc9de1a354c87825ccf732080268d6582a0200f648e8c4a2dcb1e3736d", size = 303553, upload-time = "2026-03-05T18:25:57.666Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/07/49/b2f0fbe3165d55c02e7f9eec6a10685d518af0ef6e919ff2f589c2d15c85/scikit_build_core-0.12.2-py3-none-any.whl", hash = "sha256:6ea4730da400f9a998ec3287bd3ebc1d751fe45ad0a93451bead8618adbc02b1", size = 192625, upload-time = "2026-03-05T18:25:56.207Z" },
+]
+
+[[package]]
+name = "scipy"
+version = "1.18.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a7/25/c2700dfaf6442b4effaa91af24ebce5dc9d31bb4a69706313aae70d72cd0/scipy-1.18.0.tar.gz", hash = "sha256:67b2ad2ad54c72ca6d04975a9b2df8c3638c34ddd5b28738e94fc2b57929d378", size = 30774447, upload-time = "2026-06-19T15:01:43.456Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2b/54/9a9edb45345bd6744da5ddfb6628e5d5185920494c6a67ec45b6381004cb/scipy-1.18.0-cp312-cp312-win_amd64.whl", hash = "sha256:71ccc8faa2dd16ac310233203474a8b5cb67f10dedd54a3116d34943f4b19132", size = 36597428, upload-time = "2026-06-19T15:00:08.112Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/d2/ae881ee28d014f38e0ccbfd974a06a919ba9af34f1f74bf42b5301891d63/scipy-1.18.0-cp313-cp313-win_amd64.whl", hash = "sha256:1afac4a847207c7ff8efd321734a50b06d0280b3b2a2c0fc2f413101747ad7c7", size = 36554943, upload-time = "2026-06-19T15:00:36.903Z" },
 ]
 
 [[package]]

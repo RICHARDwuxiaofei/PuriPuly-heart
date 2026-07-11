@@ -23,6 +23,7 @@ from typing import Any, Protocol, cast
 import flet as ft
 import numpy as np
 
+from puripuly_heart.app.language_selection import LanguageSelectionChange
 from puripuly_heart.app.ports.canonical_settings_persistence import (
     CanonicalSettingsPersistencePort,
 )
@@ -40,6 +41,7 @@ from puripuly_heart.app.ports.settings_repository import (
 from puripuly_heart.app.services.canonical_settings_persistence import (
     compose_canonical_settings_persistence,
 )
+from puripuly_heart.app.services.capture_target_settings import persist_desktop_audio_capture_target
 from puripuly_heart.app.services.managed_auth_claims import (
     MANAGED_AUTH_CLAIM_SOURCE_DISCORD,
     ManagedAuthClaimGuard,
@@ -48,6 +50,7 @@ from puripuly_heart.app.services.managed_connection_auth import (
     ManagedConnectionAuthRequest,
     ManagedConnectionAuthService,
 )
+from puripuly_heart.app.services.peer_capture_target import PeerCaptureTargetResolutionService
 from puripuly_heart.app.services.provider_runtime_apply import (
     _ControllerNoopRuntimeApply,
     _ControllerOverlayOscOutputRuntimeApply,
@@ -112,13 +115,18 @@ from puripuly_heart.app.wiring import (
     resolve_peer_stt_runtime_config_from_vnext,
 )
 from puripuly_heart.config.audio_host_api import normalize_input_host_api
+from puripuly_heart.config.capture_target_resolution import resolve_desktop_audio_capture_target
 from puripuly_heart.config.llm_profiles import (
     get_openrouter_selection_alias_for_model_and_source,
     profile_for_alias,
 )
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
+from puripuly_heart.config.process_capture_resolution import (
+    ProcessCaptureResolver,
+    ProcessCaptureTargetUnavailableError,
+)
 from puripuly_heart.config.profile_bootstrap import import_stable_settings_if_missing
-from puripuly_heart.config.resolved import ResolvedOverlayConfig
+from puripuly_heart.config.resolved import ResolvedDesktopAudioCaptureTarget, ResolvedOverlayConfig
 from puripuly_heart.config.settings import (
     DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA,
     DESKTOP_FLET_DEFAULT_TEXT_SCALE,
@@ -143,12 +151,21 @@ from puripuly_heart.config.settings import (
     normalize_owned_referral_id,
     save_settings,
 )
-from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
+from puripuly_heart.config.settings_vnext.schema import (
+    AppSettingsVNext,
+    CaptureTargetIntent,
+    ProcessCaptureTargetIntent,
+)
 from puripuly_heart.config.vad_defaults import DEFAULT_STABLE_VAD_HANGOVER_MS
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
 from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
 from puripuly_heart.core.audio.diagnostics import compute_audio_frame_metrics
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
+from puripuly_heart.core.audio.process_identity import (
+    PsutilCurrentUserProcessSnapshots,
+    PsutilProcessIdentityWatcher,
+)
+from puripuly_heart.core.audio.process_source import ProcessAudioCaptureSource
 from puripuly_heart.core.audio.source import (
     AudioSource,
     MicrophoneTestRouteObservation,
@@ -230,7 +247,12 @@ from puripuly_heart.core.runtime.logging import RuntimeLoggingService
 from puripuly_heart.core.runtime.mic_test import MicTestRuntime
 from puripuly_heart.core.runtime.oauth import OAuthRuntime
 from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
-from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
+from puripuly_heart.core.runtime.peer_channel import (
+    PeerChannelRuntime,
+    PeerRuntimeConfig,
+    PeerRuntimeDiagnostic,
+    PeerRuntimeFailureReason,
+)
 from puripuly_heart.core.runtime.provider_rebuild import ProviderRuntimeRebuildService
 from puripuly_heart.core.runtime.receiver import VrcMicReceiverRuntime
 from puripuly_heart.core.runtime.self_audio import SelfAudioRuntime
@@ -248,6 +270,7 @@ from puripuly_heart.core.telemetry import (
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
 from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
+from puripuly_heart.ui.components.settings.settings_modal import OptionItem
 from puripuly_heart.ui.event_bridge import (
     AppConversationEventDestination,
     AppDashboardEventDestination,
@@ -884,6 +907,11 @@ class GuiController:
         default_factory=ProviderRuntimeRebuildService,
         repr=False,
     )
+    _peer_capture_target_resolution: PeerCaptureTargetResolutionService = field(
+        init=False,
+        default_factory=PeerCaptureTargetResolutionService,
+        repr=False,
+    )
     _peer_runtime: PeerChannelRuntime | None = None
     receiver: VrcOscReceiver | None = None
     _vrc_mic_receiver_runtime: VrcMicReceiverRuntime | None = field(
@@ -928,6 +956,7 @@ class GuiController:
     _last_microphone_test_audio_settings_signature: tuple[object, ...] | None = None
     _last_peer_translation_enabled: bool | None = None
     _last_peer_translation_activation_requested: bool | None = None
+    _peer_process_warning_reason: str | None = field(init=False, default=None)
     _last_vrc_mic_sync_enabled: bool | None = None
     _settings_view_order22_baseline: _SettingsPathSnapshot | None = field(
         init=False,
@@ -1106,12 +1135,16 @@ class GuiController:
     def build_overlay_peer_consumer_contract(self) -> OverlayPeerConsumerContract | None:
         if self.settings is None:
             return None
+        peer_effective = self._effective_peer_translation_enabled_for(self.settings)
+        if peer_effective or not self.settings.ui.peer_translation_enabled:
+            self._peer_process_warning_reason = None
         return build_overlay_peer_consumer_contract(
             overlay_intent_enabled=bool(self.settings.ui.overlay_enabled),
             overlay_state=self.overlay_state,
             overlay_failure_reason=self.failure_reason,
             peer_intent_enabled=bool(self.settings.ui.peer_translation_enabled),
-            peer_effective_enabled=self._effective_peer_translation_enabled_for(self.settings),
+            peer_effective_enabled=peer_effective,
+            peer_warning_reason=self._peer_process_warning_reason,
         )
 
     def _refresh_overlay_peer_consumers(self) -> None:
@@ -3779,6 +3812,7 @@ class GuiController:
         backend = resolve_peer_stt_runtime_config_from_vnext(vnext_settings)
         provider_signature = build_peer_stt_provider_signature_from_vnext(vnext_settings)
         desktop_audio = vnext_settings.intent.desktop_audio
+        capture_target = resolve_desktop_audio_capture_target(desktop_audio.capture_target)
         return PeerRuntimeConfig(
             backend=backend,
             output_device=desktop_audio.output_device,
@@ -3789,11 +3823,25 @@ class GuiController:
             runtime_signature=(
                 backend.source_language,
                 desktop_audio.output_device,
+                capture_target,
                 desktop_audio.vad_speech_threshold,
                 desktop_audio.vad_hangover_ms,
                 desktop_audio.vad_pre_roll_ms,
                 provider_signature,
             ),
+            capture_target=capture_target,
+        )
+
+    def _resolve_peer_capture_target(
+        self,
+        settings: AppSettings,
+    ) -> ResolvedDesktopAudioCaptureTarget:
+        persisted_capture_target = getattr(settings.desktop_audio, "runtime_capture_target", None)
+        if not isinstance(persisted_capture_target, ResolvedDesktopAudioCaptureTarget):
+            persisted_capture_target = None
+        return self._peer_capture_target_resolution.resolve(
+            legacy_output_device=settings.desktop_audio.output_device,
+            persisted_capture_target=persisted_capture_target,
         )
 
     async def _close_peer_runtime_for_release(self, failures: list[Exception]) -> None:
@@ -3963,6 +4011,23 @@ class GuiController:
         if enabled:
             self._enqueue_peer_translation_disclosure()
         self._refresh_overlay_peer_consumers()
+
+    async def retry_peer_process_capture(self) -> bool:
+        if (
+            self.settings is None
+            or self._peer_runtime is None
+            or not self._peer_runtime_should_be_active(self.settings)
+        ):
+            return False
+        if not await self._ensure_peer_local_stt_ready():
+            return False
+        config = self._build_peer_runtime_config(self.settings)
+        retried = await self._peer_runtime.retry_process_capture(config=config)
+        if retried:
+            self._peer_process_warning_reason = None
+        self._sync_effective_hub_flags(self.settings)
+        self._refresh_overlay_peer_consumers()
+        return retried
 
     def _enqueue_peer_translation_disclosure(self) -> None:
         hub = self.hub
@@ -5267,22 +5332,19 @@ class GuiController:
 
     async def on_dashboard_language_change(
         self,
-        *,
-        source_code: str,
-        target_code: str,
-        peer_source_code: str = "",
-        peer_target_code: str = "",
-        peer_source_mode: str = "manual",
+        change: LanguageSelectionChange,
     ) -> None:
         if self.settings is None:
             return
 
         updated = copy.deepcopy(self.settings)
-        updated.languages.source_language = source_code
-        updated.languages.target_language = target_code
-        updated.languages.peer_source_mode = peer_source_mode
-        updated.languages.peer_source_language = peer_source_code
-        updated.languages.peer_target_language = peer_target_code
+        updated.languages.source_language = change.source_code
+        updated.languages.target_language = change.target_code
+        updated.languages.peer_source_mode = change.peer_source_mode
+        updated.languages.peer_source_language = change.peer_source_code
+        updated.languages.peer_target_language = change.peer_target_code
+        updated.languages.recent_source_languages = list(change.recent_source_codes)
+        updated.languages.recent_target_languages = list(change.recent_target_codes)
         self._begin_canonical_mutation(
             legacy_snapshot=self._canonical_legacy_projection_snapshot or self.settings
         )
@@ -7131,11 +7193,255 @@ class GuiController:
             ),
         )
 
+    def _on_peer_runtime_diagnostic(self, diagnostic: PeerRuntimeDiagnostic) -> None:
+        self.log_detailed(
+            "[PeerRuntime] "
+            f"reason={diagnostic.reason.value} "
+            f"capture_kind={diagnostic.capture_kind} "
+            f"unavailable_reason={diagnostic.process_unavailable_reason}"
+        )
+        if diagnostic.capture_kind == "process":
+            self._peer_process_warning_reason = self._peer_process_warning_reason_for_diagnostic(
+                diagnostic
+            )
+            self._refresh_overlay_peer_consumers()
+
+    @staticmethod
+    def _peer_process_warning_reason_for_diagnostic(
+        diagnostic: PeerRuntimeDiagnostic,
+    ) -> str:
+        if diagnostic.reason is PeerRuntimeFailureReason.PROCESS_TARGET_UNAVAILABLE:
+            unavailable = diagnostic.process_unavailable_reason or "no_process"
+            return f"process_unavailable_{unavailable}"
+        return diagnostic.reason.value
+
+    def loopback_capture_summary(self, settings: AppSettings | None = None) -> str:
+        resolved_settings = settings or self.settings
+        if resolved_settings is None:
+            return t("settings.default_option")
+        target = self._resolve_peer_capture_target(resolved_settings)
+        if target.kind == "named_output_device":
+            return target.device_name or t("settings.default_option")
+        if target.kind == "process":
+            return self._process_capture_display_name(target)
+        return t("settings.default_option")
+
+    def list_loopback_capture_options(self) -> list[OptionItem]:
+        options = self.list_loopback_process_options()
+        options.extend(self.list_loopback_device_options())
+        return options
+
+    def list_loopback_process_options(self) -> list[OptionItem]:
+        process_section = t("settings.desktop_audio.section.process")
+        options: list[OptionItem] = []
+        seen_process_values: set[str] = set()
+        for candidate in ProcessCaptureResolver(
+            snapshots=PsutilCurrentUserProcessSnapshots()
+        ).enumerate_candidates():
+            value = self._encode_process_capture_option(candidate.target)
+            seen_process_values.add(value)
+            options.append(
+                OptionItem(
+                    value=value,
+                    label=self._process_option_label(candidate.target, candidate.name),
+                    description="",
+                    disabled=not candidate.enabled,
+                    section=process_section,
+                )
+            )
+        current_value = self.current_loopback_capture_option_value()
+        if current_value.startswith("process:") and current_value not in seen_process_values:
+            process = self._decode_capture_option(current_value).process
+            if process is not None:
+                options.insert(
+                    0,
+                    OptionItem(
+                        value=current_value,
+                        label=self._process_option_label(process, ""),
+                        description="",
+                        disabled=False,
+                        section=process_section,
+                    ),
+                )
+        return options
+
+    def list_loopback_device_options(self) -> list[OptionItem]:
+        device_section = t("settings.desktop_audio.section.device")
+        options: list[OptionItem] = [
+            OptionItem(
+                value="device:",
+                label=t("settings.default_option"),
+                description="",
+                disabled=False,
+                section=device_section,
+            )
+        ]
+        for device in self._enumerate_loopback_device_names():
+            options.append(
+                OptionItem(
+                    value=f"device:{device}",
+                    label=device,
+                    description="",
+                    disabled=False,
+                    section=device_section,
+                )
+            )
+        return options
+
+    def current_loopback_capture_option_value(self, settings: AppSettings | None = None) -> str:
+        resolved_settings = settings or self.settings
+        if resolved_settings is None:
+            return "device:"
+        target = self._resolve_peer_capture_target(resolved_settings)
+        if target.kind == "process":
+            process = self._process_target_from_resolved(target)
+            return self._encode_process_capture_option(process)
+        if target.kind == "named_output_device":
+            return f"device:{target.device_name or ''}"
+        return "device:"
+
+    async def apply_loopback_capture_option(self, value: str) -> None:
+        if self.settings is None:
+            return
+        capture_target = self._decode_capture_option(value)
+        next_settings = persist_desktop_audio_capture_target(
+            self.config_path,
+            self.settings,
+            capture_target,
+        )
+        # Keep non-capture runtime fields from the live session.
+        next_settings.ui.overlay_enabled = self.settings.ui.overlay_enabled
+        next_settings.ui.peer_translation_enabled = self.settings.ui.peer_translation_enabled
+        self.settings = next_settings
+        self.vnext_settings = self._load_canonical_vnext_settings(
+            self.config_path,
+            next_settings,
+        )
+        self._vnext_settings_authoritative = True
+        self._peer_process_warning_reason = None
+        await self._refresh_peer_stt_runtime()
+        self._sync_effective_hub_flags(self.settings)
+        self._refresh_overlay_peer_consumers()
+        view_settings = getattr(self.app, "view_settings", None)
+        if view_settings is not None:
+            with contextlib.suppress(Exception):
+                refresh_capture_target = getattr(
+                    view_settings,
+                    "refresh_loopback_capture_target",
+                    None,
+                )
+                if callable(refresh_capture_target):
+                    refresh_capture_target(self.settings)
+
+    def peer_warning_action_is_retry(self) -> bool:
+        if self.settings is None or not self.settings.ui.peer_translation_enabled:
+            return False
+        reason = self._peer_process_warning_reason
+        return reason is not None and (
+            reason.startswith("process_") or reason.startswith("process_unavailable_")
+        )
+
+    @staticmethod
+    def _encode_process_capture_option(target: ProcessCaptureTargetIntent) -> str:
+        if target.kind == "discord":
+            return f"process:discord:{target.discord_channel}"
+        if target.kind == "vrchat":
+            return f"process:vrchat:{target.executable_identity}"
+        return f"process:generic:{target.executable_identity}"
+
+    def _decode_capture_option(self, value: str) -> CaptureTargetIntent:
+        if value.startswith("process:"):
+            payload = value[len("process:") :]
+            kind, _, rest = payload.partition(":")
+            if kind == "discord":
+                return CaptureTargetIntent.process_target(ProcessCaptureTargetIntent.discord(rest))
+            if kind == "vrchat":
+                return CaptureTargetIntent.process_target(ProcessCaptureTargetIntent.vrchat(rest))
+            return CaptureTargetIntent.process_target(
+                ProcessCaptureTargetIntent.generic_executable(rest)
+            )
+        device_name = value[len("device:") :] if value.startswith("device:") else value
+        if device_name:
+            return CaptureTargetIntent.named_output_device(device_name)
+        return CaptureTargetIntent.default_output_device()
+
+    def _process_target_from_resolved(
+        self,
+        target: ResolvedDesktopAudioCaptureTarget,
+    ) -> ProcessCaptureTargetIntent:
+        if target.process_kind == "discord":
+            return ProcessCaptureTargetIntent.discord(target.discord_channel or "")
+        if target.process_kind == "vrchat":
+            return ProcessCaptureTargetIntent.vrchat(target.executable_identity or "")
+        return ProcessCaptureTargetIntent.generic_executable(target.executable_identity or "")
+
+    def _process_capture_display_name(self, target: ResolvedDesktopAudioCaptureTarget) -> str:
+        process = self._process_target_from_resolved(target)
+        return self._process_option_label(process, "")
+
+    def _process_option_label(
+        self,
+        target: ProcessCaptureTargetIntent,
+        fallback_name: str,
+    ) -> str:
+        if target.kind == "vrchat":
+            base = t("settings.desktop_audio.process.vrchat")
+        elif target.kind == "discord":
+            channel = target.discord_channel or "stable"
+            if channel == "ptb":
+                base = t("settings.desktop_audio.process.discord_ptb")
+            elif channel == "canary":
+                base = t("settings.desktop_audio.process.discord_canary")
+            else:
+                base = t("settings.desktop_audio.process.discord_stable")
+        elif fallback_name:
+            return fallback_name
+        else:
+            path = target.executable_identity or ""
+            basename = path.rsplit("\\", 1)[-1]
+            if basename.lower().endswith(".exe"):
+                basename = basename[:-4]
+            base = basename or t("settings.default_option")
+        if target.kind in {"vrchat", "discord"} and fallback_name:
+            count_suffix = fallback_name.rsplit(" (", 1)
+            if len(count_suffix) == 2 and count_suffix[1].endswith(")"):
+                count = count_suffix[1][:-1]
+                if count.isdigit():
+                    return f"{base} ({count})"
+        return base
+
+    @staticmethod
+    def _enumerate_loopback_device_names() -> list[str]:
+        names: list[str] = []
+        manager = None
+        try:
+            import pyaudiowpatch as pyaudio  # type: ignore
+
+            manager = pyaudio.PyAudio()
+            seen: set[str] = set()
+            for info in manager.get_loopback_device_info_generator():
+                name = str(info.get("name", "") or "").strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                names.append(name)
+        except Exception:
+            return names
+        finally:
+            if manager is not None:
+                with contextlib.suppress(Exception):
+                    manager.terminate()
+        return names
+
     def _create_peer_audio_source_from_runtime_config(self, config: PeerRuntimeConfig):
-        raw_source = DesktopLoopbackAudioSource(device_name=config.output_device)
+        if config.capture_target.kind == "process":
+            return self._create_process_peer_audio_source(config)
+
+        device_name = config.capture_target.device_name or config.output_device
+        raw_source = DesktopLoopbackAudioSource(device_name=device_name)
         self.log_detailed(
             "[AudioDiag][Loopback][peer] "
-            f"requested_device={config.output_device!r} "
+            f"requested_device={device_name!r} "
             f"resolved_device_name={getattr(raw_source, 'resolved_device_name', None)!r} "
             f"resolved_device_index={getattr(raw_source, 'resolved_device_index', None)} "
             f"resolved_channels={getattr(raw_source, 'resolved_channels', None)} "
@@ -7149,6 +7455,43 @@ class GuiController:
             is_detailed_enabled=self._detailed_audio_diag_enabled,
             log_detailed=lambda message: self.log_detailed(message),
         )
+
+    def _create_process_peer_audio_source(self, config: PeerRuntimeConfig) -> DesktopPeerPipeline:
+        process_target = self._process_target_from_runtime_config(config)
+        resolution = ProcessCaptureResolver(
+            snapshots=PsutilCurrentUserProcessSnapshots()
+        ).resolve_for_start(process_target)
+        if resolution.identity is None:
+            assert resolution.unavailable_reason is not None
+            raise ProcessCaptureTargetUnavailableError(resolution.unavailable_reason)
+        raw_source = ProcessAudioCaptureSource(
+            identity=resolution.identity,
+            watcher=PsutilProcessIdentityWatcher(),
+        )
+        self.log_detailed(
+            "[AudioDiag][ProcessCapture][peer] "
+            f"target_kind={config.capture_target.process_kind} capture=process"
+        )
+        wrapped_source = self._wrap_diagnostic_audio_source(raw_source, channel_label="peer")
+        return DesktopPeerPipeline(
+            source=wrapped_source,
+            target_sample_rate_hz=config.backend.sample_rate_hz,
+            is_detailed_enabled=self._detailed_audio_diag_enabled,
+            log_detailed=lambda message: self.log_detailed(message),
+        )
+
+    @staticmethod
+    def _process_target_from_runtime_config(
+        config: PeerRuntimeConfig,
+    ) -> ProcessCaptureTargetIntent:
+        target = config.capture_target
+        if target.kind != "process" or target.process_kind is None:
+            raise ValueError("process peer source requires a process capture target")
+        if target.process_kind == "discord":
+            return ProcessCaptureTargetIntent.discord(target.discord_channel or "")
+        if target.process_kind == "vrchat":
+            return ProcessCaptureTargetIntent.vrchat(target.executable_identity or "")
+        return ProcessCaptureTargetIntent.generic_executable(target.executable_identity or "")
 
     @property
     def debug_capture_fault_profile(self) -> str:
@@ -7502,6 +7845,7 @@ class GuiController:
             vad_factory=self._create_peer_vad_from_runtime_config,
             vad_model_resolver=ensure_silero_vad_onnx,
             run_audio_loop=self._run_peer_audio_vad_loop,
+            diagnostic_sink=self._on_peer_runtime_diagnostic,
         )
         self._last_peer_translation_enabled = self.settings.ui.peer_translation_enabled
         await self._configure_vrc_mic_receiver(enabled=self.settings.osc.vrc_mic_intercept)
@@ -8786,7 +9130,6 @@ class GuiController:
                 settings.languages.recent_source_languages,
                 settings.languages.recent_target_languages,
             )
-            dash.on_recent_languages_change = self._on_recent_languages_change
             dash.set_peer_auto_detect_available(
                 settings.provider.peer_stt == STTProviderName.SONIOX
             )
@@ -8801,34 +9144,6 @@ class GuiController:
                 view_settings.set_overlay_calibration(self.overlay_calibration)
 
         self._refresh_overlay_peer_consumers()
-
-    def _on_recent_languages_change(self, source: list[str], target: list[str]) -> None:
-        """Callback when recent languages change in dashboard."""
-        if self.settings is None:
-            return
-        next_settings = copy.deepcopy(self.settings)
-        next_settings.languages.recent_source_languages = list(source)
-        next_settings.languages.recent_target_languages = list(target)
-
-        async def _task() -> None:
-            await self.apply_settings(next_settings)
-
-        run_task = getattr(self.page, "run_task", None)
-        if callable(run_task):
-            try:
-                run_task(_task)
-                return
-            except Exception:
-                self.log_detailed(
-                    "[Settings] Recent language apply skipped reason=page_run_task_failed",
-                    level=logging.WARNING,
-                )
-                return
-
-        self.log_detailed(
-            "[Settings] Recent language apply skipped reason=page_run_task_unavailable",
-            level=logging.WARNING,
-        )
 
     @property
     def runtime_logging(self) -> RuntimeLoggingService:

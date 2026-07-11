@@ -75,7 +75,6 @@ def build_parser() -> argparse.ArgumentParser:
         "soxr-runtime-check",
         help="Verify the packaged soxr runtime contract and smoke resample",
     )
-
     run_gui = sub.add_parser("run-gui", help="Run the Graphical User Interface (Flet)")
     run_gui.add_argument(
         "--debug-ui-preview",

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -8,18 +10,28 @@ from typing import Any
 
 import pytest
 
+from puripuly_heart.config.process_capture_platform import ProcessCapturePlatformAvailability
+from puripuly_heart.config.process_capture_resolution import ProcessCaptureTargetUnavailableError
 from puripuly_heart.config.resolved import (
     CREDENTIAL_SOURCE_SECRET_STORE,
     ResolvedCredentialRequirement,
+    ResolvedDesktopAudioCaptureTarget,
     ResolvedSTTConfig,
 )
 from puripuly_heart.config.settings import STTProviderName
+from puripuly_heart.config.settings_vnext.schema import ProcessCaptureTargetIntent
+from puripuly_heart.core.audio.process_identity import PsutilProcessIdentityWatcher
+from puripuly_heart.core.audio.process_source import (
+    ProcessAudioCaptureSource,
+    ResolvedProcessCaptureIdentity,
+)
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.runtime.peer_channel import (
     PeerChannelRuntime,
     PeerChannelRuntimeState,
     PeerRuntimeConfig,
+    PeerRuntimeFailureReason,
 )
 from puripuly_heart.core.runtime.provider_handle import ProviderRuntimeHandle
 
@@ -169,6 +181,19 @@ class FailureAwareSTT:
     async def trigger_failure(self, exc: Exception) -> None:
         assert self.on_terminal_failure is not None
         await self.on_terminal_failure(exc)
+
+
+@dataclass(slots=True)
+class TerminalFailureProvider:
+    on_terminal_failure: object | None = None
+    close_backend_calls: int = 0
+
+    async def close_backend(self) -> None:
+        self.close_backend_calls += 1
+
+    async def trigger_failure(self) -> None:
+        assert self.on_terminal_failure is not None
+        await self.on_terminal_failure(RuntimeError("provider terminal failure"))
 
 
 class DummyHub:
@@ -347,6 +372,420 @@ def make_peer_runtime_config(output_device: str = "Headphones (Loopback)") -> Pe
             provider_signature,
         ),
     )
+
+
+def make_process_peer_runtime_config() -> PeerRuntimeConfig:
+    config = make_peer_runtime_config()
+    target = ResolvedDesktopAudioCaptureTarget(
+        kind="process",
+        process_kind="generic_executable",
+        executable_identity=r"c:\apps\game\game.exe",
+    )
+    return PeerRuntimeConfig(
+        backend=config.backend,
+        output_device="",
+        vad_threshold=config.vad_threshold,
+        vad_hangover_ms=config.vad_hangover_ms,
+        vad_pre_roll_ms=config.vad_pre_roll_ms,
+        provider_signature=config.provider_signature,
+        runtime_signature=("process", target),
+        capture_target=target,
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_unavailable_never_routes_to_device_and_requires_explicit_retry() -> None:
+    hub = DummyHub()
+    attempted_targets: list[ResolvedDesktopAudioCaptureTarget] = []
+    diagnostics = []
+
+    def source_factory(config: PeerRuntimeConfig) -> DummySource:
+        attempted_targets.append(config.capture_target)
+        raise ProcessCaptureTargetUnavailableError("no_process")
+
+    runtime = PeerChannelRuntime(
+        hub=hub,
+        clock=FakeClock(),
+        stt_factory=lambda config, on_terminal_failure: DummyBackendClosingSTT(),
+        source_factory=source_factory,
+        vad_factory=lambda config, model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=fake_run_audio_loop,
+        diagnostic_sink=diagnostics.append,
+    )
+    config = make_process_peer_runtime_config()
+
+    await runtime.apply_policy(config=config, desired_active=True)
+    await runtime.apply_policy(config=config, desired_active=True)
+
+    assert runtime.state == PeerChannelRuntimeState.FAULTED
+    assert attempted_targets == [config.capture_target]
+    assert runtime.last_failure is not None
+    assert runtime.last_failure.reason is PeerRuntimeFailureReason.PROCESS_TARGET_UNAVAILABLE
+    assert runtime.last_failure.process_unavailable_reason == "no_process"
+    assert diagnostics == [runtime.last_failure]
+    assert hub.peer_stt is None
+
+    assert await runtime.retry_process_capture(config=config) is False
+    assert attempted_targets == [config.capture_target, config.capture_target]
+
+
+@pytest.mark.asyncio
+async def test_process_target_exit_tears_down_source_provider_and_owned_loop_without_reconnect() -> (
+    None
+):
+    events: list[str] = []
+
+    class OrderedHub(DummyHub):
+        async def replace_peer_stt_provider(self, stt: object | None) -> None:
+            events.append("provider_detached" if stt is None else "provider_attached")
+            await super().replace_peer_stt_provider(stt)
+
+    class TerminalSource(DummySource):
+        terminal_reason = "target_exited"
+
+        async def close(self) -> None:
+            events.append("source_closed")
+            await super().close()
+
+    hub = OrderedHub()
+    created_sources: list[TerminalSource] = []
+
+    def source_factory(config: PeerRuntimeConfig) -> TerminalSource:
+        assert config.capture_target.kind == "process"
+        source = TerminalSource()
+        created_sources.append(source)
+        return source
+
+    async def completed_loop(**_kwargs) -> None:
+        return None
+
+    runtime = PeerChannelRuntime(
+        hub=hub,
+        clock=FakeClock(),
+        stt_factory=lambda config, on_terminal_failure: DummyManagedSTT(),
+        source_factory=source_factory,
+        vad_factory=lambda config, model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=completed_loop,
+    )
+    config = make_process_peer_runtime_config()
+
+    await runtime.apply_policy(config=config, desired_active=True)
+    await wait_until(lambda: runtime.state == PeerChannelRuntimeState.FAULTED)
+    await asyncio.sleep(0)
+    await runtime.apply_policy(config=config, desired_active=True)
+
+    assert runtime.last_failure is not None
+    assert runtime.last_failure.reason is PeerRuntimeFailureReason.PROCESS_TARGET_EXITED
+    assert events == [
+        "provider_attached",
+        "provider_detached",
+        "source_closed",
+        "provider_detached",
+    ]
+    assert created_sources[0].close_calls == 1
+    assert len(created_sources) == 1
+
+
+@pytest.mark.asyncio
+async def test_process_fault_completes_teardown_when_diagnostic_sink_fails() -> None:
+    hub = DummyHub()
+    stt = DummyBackendClosingSTT()
+    source = DummySource()
+    sink_observations: list[tuple[int, object | None]] = []
+
+    def source_factory(config: PeerRuntimeConfig) -> DummySource:
+        _ = config
+        raise ProcessCaptureTargetUnavailableError("no_process")
+
+    def failing_sink(_diagnostic: object) -> None:
+        sink_observations.append((stt.close_backend_calls, hub.peer_stt))
+        raise RuntimeError("sink failed")
+
+    runtime = PeerChannelRuntime(
+        hub=hub,
+        clock=FakeClock(),
+        stt_factory=lambda config, on_terminal_failure: stt,
+        source_factory=source_factory,
+        vad_factory=lambda config, model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=fake_run_audio_loop,
+        diagnostic_sink=failing_sink,
+    )
+
+    await runtime.apply_policy(config=make_process_peer_runtime_config(), desired_active=True)
+
+    assert runtime.state == PeerChannelRuntimeState.FAULTED
+    assert stt.close_backend_calls == 1
+    assert source.close_calls == 0
+    assert hub.peer_stt is None
+    assert sink_observations == [(1, None)]
+
+
+@pytest.mark.asyncio
+async def test_process_provider_replacement_failure_faults_and_does_not_reconnect() -> None:
+    class AttachThenFailHub(DummyHub):
+        async def replace_peer_stt_provider(self, stt: object | None) -> None:
+            self.replace_peer_stt_calls.append(stt)
+            self.peer_stt = stt
+            if stt is not None:
+                raise RuntimeError("attach failed")
+
+    hub = AttachThenFailHub()
+    source = DummySource()
+    diagnostics = []
+    runtime = PeerChannelRuntime(
+        hub=hub,
+        clock=FakeClock(),
+        stt_factory=lambda config, on_terminal_failure: DummyBackendClosingSTT(),
+        source_factory=lambda config: source,
+        vad_factory=lambda config, model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=fake_run_audio_loop,
+        diagnostic_sink=diagnostics.append,
+    )
+    config = make_process_peer_runtime_config()
+
+    with pytest.raises(RuntimeError, match="attach failed"):
+        await runtime.apply_policy(config=config, desired_active=True)
+    replacement_calls_after_fault = len(hub.replace_peer_stt_calls)
+    await runtime.apply_policy(config=config, desired_active=True)
+
+    assert runtime.state == PeerChannelRuntimeState.FAULTED
+    assert source.close_calls == 1
+    assert hub.peer_stt is None
+    assert runtime.last_failure is not None
+    assert runtime.last_failure.reason is PeerRuntimeFailureReason.PROCESS_PROVIDER_FAILED
+    assert diagnostics == [runtime.last_failure]
+    assert hub.replace_peer_stt_calls[0] is not None
+    assert all(call is None for call in hub.replace_peer_stt_calls[1:])
+    assert len(hub.replace_peer_stt_calls) == replacement_calls_after_fault
+
+
+@pytest.mark.asyncio
+async def test_process_provider_terminal_failure_tears_down_and_recovers_only_by_explicit_retry() -> (
+    None
+):
+    class ClosingHub(DummyHub):
+        async def replace_peer_stt_provider(self, stt: object | None) -> None:
+            previous = self.peer_stt
+            self.replace_peer_stt_calls.append(stt)
+            self.peer_stt = stt
+            if previous is not None and previous is not stt:
+                close_backend = getattr(previous, "close_backend", None)
+                if callable(close_backend):
+                    await close_backend()
+
+    hub = ClosingHub()
+    providers: list[TerminalFailureProvider] = []
+    sources: list[DummySource] = []
+    loop_stop = asyncio.Event()
+    observations: list[tuple[int, int, bool]] = []
+    task: asyncio.Task[None] | None = None
+
+    def stt_factory(config: PeerRuntimeConfig, on_terminal_failure):  # noqa: ANN001
+        _ = config
+        provider = TerminalFailureProvider(on_terminal_failure=on_terminal_failure)
+        providers.append(provider)
+        return provider
+
+    def source_factory(config: PeerRuntimeConfig) -> DummySource:
+        _ = config
+        source = DummySource()
+        sources.append(source)
+        return source
+
+    async def waiting_loop(**_kwargs) -> None:
+        await loop_stop.wait()
+
+    def sink(_diagnostic: object) -> None:
+        assert task is not None
+        observations.append((sources[0].close_calls, providers[0].close_backend_calls, task.done()))
+
+    runtime = PeerChannelRuntime(
+        hub=hub,
+        clock=FakeClock(),
+        stt_factory=stt_factory,
+        source_factory=source_factory,
+        vad_factory=lambda config, model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=waiting_loop,
+        diagnostic_sink=sink,
+    )
+    config = make_process_peer_runtime_config()
+
+    await runtime.apply_policy(config=config, desired_active=True)
+    task = runtime.loop_task
+    assert task is not None
+    await providers[0].trigger_failure()
+    await runtime.apply_policy(config=config, desired_active=True)
+
+    assert runtime.state == PeerChannelRuntimeState.FAULTED
+    assert runtime.last_failure is not None
+    assert runtime.last_failure.reason is PeerRuntimeFailureReason.PROCESS_PROVIDER_FAILED
+    assert sources[0].close_calls == 1
+    assert providers[0].close_backend_calls == 1
+    assert observations == [(1, 1, True)]
+    assert len(sources) == 1
+    assert await runtime.retry_process_capture(config=config) is True
+    assert len(sources) == 2
+
+    loop_stop.set()
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_process_provider_terminal_fault_stops_real_identity_watch_thread_while_target_alive() -> (
+    None
+):
+    psutil = pytest.importorskip("psutil")
+
+    @dataclass
+    class CaptureStub:
+        on_data: object
+        started: bool = False
+        closed: bool = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    @dataclass
+    class CaptureFactory:
+        captures: list[CaptureStub] = field(default_factory=list)
+
+        def create(self, *, pid: int, on_data):  # noqa: ANN001
+            _ = pid
+            capture = CaptureStub(on_data=on_data)
+            self.captures.append(capture)
+            return capture
+
+    class ClosingHub(DummyHub):
+        async def replace_peer_stt_provider(self, stt: object | None) -> None:
+            previous = self.peer_stt
+            self.replace_peer_stt_calls.append(stt)
+            self.peer_stt = stt
+            if previous is not None and previous is not stt:
+                close_backend = getattr(previous, "close_backend", None)
+                if callable(close_backend):
+                    await close_backend()
+
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    process = psutil.Process(child.pid)
+    identity = ResolvedProcessCaptureIdentity(
+        pid=child.pid,
+        target=ProcessCaptureTargetIntent.generic_executable(r"C:\Apps\Game\Game.exe"),
+        instance_id=f"{child.pid}:{process.create_time()}",
+    )
+    capture_factory = CaptureFactory()
+    watches: list[object] = []
+    providers: list[TerminalFailureProvider] = []
+    loop_stop = asyncio.Event()
+
+    def stt_factory(config: PeerRuntimeConfig, on_terminal_failure):  # noqa: ANN001
+        _ = config
+        provider = TerminalFailureProvider(on_terminal_failure=on_terminal_failure)
+        providers.append(provider)
+        return provider
+
+    def source_factory(config: PeerRuntimeConfig) -> ProcessAudioCaptureSource:
+        _ = config
+        source = ProcessAudioCaptureSource(
+            identity=identity,
+            watcher=PsutilProcessIdentityWatcher(),
+            capture_factory=capture_factory,
+            platform_availability=lambda: ProcessCapturePlatformAvailability(available=True),
+        )
+        watches.append(source._watch)
+        return source
+
+    async def waiting_loop(**_kwargs) -> None:
+        await loop_stop.wait()
+
+    runtime = PeerChannelRuntime(
+        hub=ClosingHub(),
+        clock=FakeClock(),
+        stt_factory=stt_factory,
+        source_factory=source_factory,
+        vad_factory=lambda config, model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=waiting_loop,
+    )
+    config = make_process_peer_runtime_config()
+    try:
+        await runtime.apply_policy(config=config, desired_active=True)
+        assert watches
+        assert watches[0].watch_thread_alive is True  # type: ignore[attr-defined]
+
+        await providers[0].trigger_failure()
+        await wait_until(lambda: runtime.state == PeerChannelRuntimeState.FAULTED)
+        await asyncio.sleep(0)
+
+        assert runtime.last_failure is not None
+        assert runtime.last_failure.reason is PeerRuntimeFailureReason.PROCESS_PROVIDER_FAILED
+        assert watches[0].watch_thread_alive is False  # type: ignore[attr-defined]
+        assert capture_factory.captures[0].closed is True
+        assert child.poll() is None
+        assert await runtime.retry_process_capture(config=config) is True
+        assert len(watches) == 2
+    finally:
+        loop_stop.set()
+        await runtime.close()
+        child.terminate()
+        child.wait(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_current_peer_loop_fault_emits_diagnostic_only_after_loop_exit() -> None:
+    class ClosingHub(DummyHub):
+        async def replace_peer_stt_provider(self, stt: object | None) -> None:
+            previous = self.peer_stt
+            self.replace_peer_stt_calls.append(stt)
+            self.peer_stt = stt
+            if previous is not None and previous is not stt:
+                await previous.close_backend()
+
+    hub = ClosingHub()
+    source = DummySource()
+    provider = DummyBackendClosingSTT()
+    observations: list[tuple[int, int, bool]] = []
+    task: asyncio.Task[None] | None = None
+
+    async def failing_loop(**_kwargs) -> None:
+        raise RuntimeError("source failed")
+
+    def sink(_diagnostic: object) -> None:
+        assert task is not None
+        observations.append((source.close_calls, provider.close_backend_calls, task.done()))
+
+    runtime = PeerChannelRuntime(
+        hub=hub,
+        clock=FakeClock(),
+        stt_factory=lambda config, on_terminal_failure: provider,
+        source_factory=lambda config: source,
+        vad_factory=lambda config, model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=failing_loop,
+        diagnostic_sink=sink,
+    )
+
+    await runtime.apply_policy(config=make_process_peer_runtime_config(), desired_active=True)
+    task = runtime.loop_task
+    assert task is not None
+    await wait_until(task.done)
+    await asyncio.sleep(0)
+
+    assert runtime.state == PeerChannelRuntimeState.FAULTED
+    assert runtime.last_failure is not None
+    assert runtime.last_failure.reason is PeerRuntimeFailureReason.PROCESS_SOURCE_FAILED
+    assert observations == [(1, 1, True)]
 
 
 @pytest.mark.asyncio

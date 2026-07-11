@@ -151,6 +151,12 @@ def test_vnext_native_provider_verification_evidence_leaves_are_explicitly_exclu
         f"state.provider_verification.{provider}.{field}"
         for provider in providers
         for field in fields
+    ) | frozenset(
+        {
+            "intent.desktop_audio.capture_target.kind",
+            "intent.desktop_audio.capture_target.device_name",
+            "intent.desktop_audio.capture_target.process",
+        }
     )
     classified_vnext_destinations = {
         classification.destination
