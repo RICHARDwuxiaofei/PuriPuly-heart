@@ -132,9 +132,13 @@ route:
   selected_default_commit: e6dc26e505832693ee5b952e3268811948c6af47
   selected_default_executable_sha256: f9440891fb6eb3da44ec0e579a726f196d00060a798d145d331a551d94d45231
   selected_default_windows_release_build: passed in 27.81 seconds
-  next_action: terminal verification of the isolated P05 candidate
+  terminal_restart_repair_commit: 92a2999ee91bf43eb7d91c36cdf81b5f92df4e07
+  terminal_restart_repair_executable_sha256: fe7b8dfcdcf41eb19668abc17b4dfb7d0ed93cdd6ed7ef83a80f361d15385216
+  terminal_restart_repair: preserved Presenter restart force-restores conservative ownership before capability renegotiation and retains exact target continuity across capable and missing-capability routes
+  next_action: await separate DD-004 integration authorization for the isolated P05 candidate
 limitations:
   - SteamVR Home only; no VRChat or other application load was run.
   - HMD model was not recorded.
   - Compositor timing and mis-presented counters are not overlay-attributable or physical-HMD acknowledgement.
   - Profile comparison used explicit runtime-only controls on commit 58880bf; commit e6dc26e applies the reviewed P05 default without changing the compared scheduler implementation.
+  - Terminal review found and held a preserved-Presenter restart ownership defect; commit 92a2999 repairs it with target-bearing manager/controller/Presenter regression coverage.

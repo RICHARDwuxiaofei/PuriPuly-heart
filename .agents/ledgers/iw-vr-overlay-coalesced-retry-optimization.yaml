@@ -11,7 +11,7 @@ current:
   cluster_id: terminal-verification-c1
   work_refs:
     - verify-coalesced-retry-optimization-terminal
-  next_action: continue
+  next_action: integration_authorization
 
 gate_plans:
   - gate_id: evidence-foundation
@@ -66,7 +66,7 @@ gate_plans:
       - id: terminal-verification-c1
         work_refs:
           - verify-coalesced-retry-optimization-terminal
-        status: in_progress
+        status: passed
 
 worktree:
   path: .worktrees/iw-vr-overlay-coalesced-retry-optimization
@@ -135,6 +135,14 @@ checkpoints:
     verification: passed
     review: pass
     summary: Exact affected-HMD P05/P10/P15/P20 evidence and preserved-old-Native fallback select P05 as the shortest accepted profile; the bounded default change is verified and DD-004 remains unresolved.
+  - id: terminal-verification-c1
+    gate_id: terminal-verification
+    cluster_id: terminal-verification-c1
+    decision: pass
+    commit: 92a2999ee91bf43eb7d91c36cdf81b5f92df4e07
+    verification: passed
+    review: pass
+    summary: Full automated, Windows-native, affected-HMD, profile, fallback, restart, target-continuity, lifecycle, privacy, compatibility, and semantic review passes for the isolated P05 candidate; DD-004 remains unresolved.
 
 open_items:
   - type: watchpoint
@@ -150,3 +158,4 @@ notes:
   - Phase-1 live evidence is recorded at .agents/evidence/vr-overlay-coalesced-retry-phase1.yaml; SteamVR Home-only limits and no shorter-profile selection remain explicit.
   - Capability/target integration and the accepted DD-002 design are recorded at .agents/evidence/vr-overlay-capability-target-integration.yaml.
   - Affected-HMD profile comparison, fallback correction history, P05 selection, and selected-default build identity are recorded at .agents/evidence/vr-overlay-quiet-tail-profile-selection.yaml.
+  - Terminal review held on preserved-Presenter restart ownership, then passed after commit 92a2999 added the bounded repair and target-bearing production-surface regression coverage.
