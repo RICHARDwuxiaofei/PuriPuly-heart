@@ -7,10 +7,10 @@ selected_input:
   sha256: eda96ce61e97c63af60145e39c8f967ebac4b5a8157b8b68e2c84d78c78a6527
 
 current:
-  gate_id: capability-and-target-contract
-  cluster_id: capability-and-target-contract-c2
+  gate_id: quiet-tail-profile-selection
+  cluster_id: quiet-tail-profile-selection-c1
   work_refs:
-    - verify-capability-target-integration
+    - implement-bounded-quiet-tail-profiles
   next_action: continue
 
 gate_plans:
@@ -48,14 +48,14 @@ gate_plans:
       - id: capability-and-target-contract-c2
         work_refs:
           - verify-capability-target-integration
-        status: in_progress
+        status: passed
   - gate_id: quiet-tail-profile-selection
     shape: split
     clusters:
       - id: quiet-tail-profile-selection-c1
         work_refs:
           - implement-bounded-quiet-tail-profiles
-        status: pending
+        status: in_progress
       - id: quiet-tail-profile-selection-c2
         work_refs:
           - verify-affected-hmd-profile-selection
@@ -112,14 +112,25 @@ checkpoints:
     verification: passed
     review: pass
     summary: Strict current-process capability negotiation keeps exactly one retry owner while optional target facts bind Native work to the exact visible SELF or PEER target across replacement and teardown.
+  - id: capability-and-target-contract-c2
+    gate_id: capability-and-target-contract
+    cluster_id: capability-and-target-contract-c2
+    decision: pass
+    commit: 6a29b7ea575493c64b51ea157a365e59fa1a0887
+    verification: passed
+    review: pass
+    summary: Fallback, target lifecycle, trigger compatibility, diagnostic safety, and exact DD-002 stream/final budgets pass integration review without shortening the product profile.
 
 open_items:
   - type: watchpoint
     text: Phase 1 must preserve the two-second envelope and checkpoint identity.
   - type: watchpoint
     text: P05, P10, P15, and P20 selection requires affected-HMD evidence; no-retry and one-retry remain diagnostic controls only.
+  - type: watchpoint
+    text: DD-002 is fixed at four shared stream opportunities per channel/target episode and profile maxima of 5, 10, 15, or 20 final opportunities at 100 ms; implementation must not replenish stream budget on generation replacement.
 
 notes:
   - Derived from preserved branch work/iw-vr-overlay-adaptive-presentation-hardening at the recorded base commit; that worktree and its ledger are read-only for this run.
   - Source PRD C:/Users/salee/Documents/dev/puripuly_heart/.agents/specs/prd/vr-overlay-coalesced-retry-optimization.md validated at bd23681724a419131f4475d109e2089e91c7f591a1bd4716b854fbb0f9642b7b.
   - Phase-1 live evidence is recorded at .agents/evidence/vr-overlay-coalesced-retry-phase1.yaml; SteamVR Home-only limits and no shorter-profile selection remain explicit.
+  - Capability/target integration and the accepted DD-002 design are recorded at .agents/evidence/vr-overlay-capability-target-integration.yaml.
