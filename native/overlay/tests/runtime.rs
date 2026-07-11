@@ -12,15 +12,16 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 use puripuly_heart_overlay::logging::OverlayLogger;
 use puripuly_heart_overlay::runtime::SnapshotApplyOutcome;
 use puripuly_heart_overlay::{
-    load_manifest, run_with_manifest, submit_texture, validate_manifest, AdapterIdentity,
-    BridgeClient, CaptionBlock, CaptionChannel, CaptionRenderer, FakeOpenVr,
-    NativePresentationOwner, OpenVrError, OverlayBridgeEvent, OverlayFrameSubmitter,
-    OverlayLoggingMode, OverlayManifest, OverlayPresentationBlock, OverlayPresentationBlockVariant,
-    OverlayPresentationCalibration, OverlayPresentationSnapshot, OverlayRuntime,
-    PresentationBackend, PresentationCause, PresentationCauseChannel, PresentationCauseKind,
-    PresentationOutcome, PresentationStage, PresentationStrategy, QuietTailProfile,
-    ReadinessOutcome, RenderedFrame, RuntimeFailure, StartupError, EXPECTED_CONTRACT_VERSION,
-    NATIVE_FRESH_RETRY_CADENCE, NATIVE_FRESH_RETRY_DEADLINE, NATIVE_FRESH_RETRY_MAX_COMPLETED,
+    load_manifest, resolve_quiet_tail_profile, run_with_manifest, submit_texture,
+    validate_manifest, AdapterIdentity, BridgeClient, CaptionBlock, CaptionChannel,
+    CaptionRenderer, FakeOpenVr, NativePresentationOwner, OpenVrError, OverlayBridgeEvent,
+    OverlayFrameSubmitter, OverlayLoggingMode, OverlayManifest, OverlayPresentationBlock,
+    OverlayPresentationBlockVariant, OverlayPresentationCalibration, OverlayPresentationSnapshot,
+    OverlayRuntime, PresentationBackend, PresentationCause, PresentationCauseChannel,
+    PresentationCauseKind, PresentationOutcome, PresentationStage, PresentationStrategy,
+    QuietTailProfile, ReadinessOutcome, RenderedFrame, RuntimeFailure, StartupError,
+    EXPECTED_CONTRACT_VERSION, NATIVE_FRESH_RETRY_CADENCE, NATIVE_FRESH_RETRY_DEADLINE,
+    NATIVE_FRESH_RETRY_MAX_COMPLETED,
 };
 
 #[test]
@@ -70,9 +71,85 @@ fn old_manifest_json_without_quiet_tail_profile_defaults_to_p20() {
         .unwrap(),
     )
     .unwrap();
-    let manifest = load_manifest(&path).unwrap();
-    assert_eq!(manifest.quiet_tail_profile, QuietTailProfile::P20);
+    load_manifest(&path).unwrap();
+    assert_eq!(
+        resolve_quiet_tail_profile(None).unwrap(),
+        QuietTailProfile::P20
+    );
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn quiet_tail_environment_profiles_resolve_strictly() {
+    for (value, profile) in [
+        ("p05", QuietTailProfile::P05),
+        ("p10", QuietTailProfile::P10),
+        ("p15", QuietTailProfile::P15),
+        ("p20", QuietTailProfile::P20),
+        ("no_retry", QuietTailProfile::NoRetry),
+        ("one_retry", QuietTailProfile::OneRetry),
+    ] {
+        assert_eq!(
+            resolve_quiet_tail_profile(Some(std::ffi::OsStr::new(value))).unwrap(),
+            profile
+        );
+    }
+    let error = resolve_quiet_tail_profile(Some(std::ffi::OsStr::new("P20"))).unwrap_err();
+    assert!(matches!(error, StartupError::Manifest(_)));
+    assert!(!error.to_string().contains("P20"));
+}
+
+#[cfg(windows)]
+#[test]
+fn non_unicode_quiet_tail_environment_value_fails_without_value_disclosure() {
+    use std::os::windows::ffi::OsStringExt;
+
+    let value = std::ffi::OsString::from_wide(&[0xd800]);
+    let error = resolve_quiet_tail_profile(Some(value.as_os_str())).unwrap_err();
+    assert!(matches!(error, StartupError::Manifest(_)));
+    assert_eq!(error.failure_reason(), "manifest_invalid");
+    assert_eq!(
+        error.to_string(),
+        "manifest invalid: quiet tail profile environment value is invalid"
+    );
+}
+
+#[test]
+fn cli_reports_invalid_quiet_tail_profile_as_structured_manifest_error() {
+    let path = unique_temp_file("invalid-profile-cli", "json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "contract_version": EXPECTED_CONTRACT_VERSION,
+            "app_version": "2.2.2",
+            "overlay_instance_id": "invalid-profile",
+            "bridge_url": "ws://127.0.0.1:1",
+            "session_token": "token",
+            "parent_pid": 1,
+            "startup_deadline_ms": 3000,
+            "log_dir": std::env::temp_dir(),
+            "log_level": "INFO",
+            "locale": "en",
+            "logging_mode": "basic"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_PuriPulyHeartOverlay"))
+        .args(["--config", path.to_str().unwrap()])
+        .env(
+            "PURIPULY_OVERLAY_QUIET_TAIL_PROFILE",
+            "invalid-secret-value",
+        )
+        .output()
+        .unwrap();
+    std::fs::remove_file(path).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains(r#"EVENT {"failure_reason":"manifest_invalid","type":"startup_error"}"#)
+    );
+    assert!(!stderr.contains("invalid-secret-value"));
 }
 
 fn test_manifest() -> OverlayManifest {
@@ -91,7 +168,6 @@ fn test_manifest() -> OverlayManifest {
         log_level: "INFO".into(),
         locale: "en".into(),
         logging_mode: OverlayLoggingMode::Basic,
-        quiet_tail_profile: QuietTailProfile::P20,
     }
 }
 

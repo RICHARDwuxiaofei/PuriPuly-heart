@@ -12,7 +12,8 @@ use tokio::time::{sleep_until, Instant};
 use crate::bridge::{BridgeClient, BridgeError, BridgeIncoming, OverlayBridgeEvent};
 use crate::logging::{OverlayLogger, OverlayLoggingMode};
 use crate::manifest::{
-    load_manifest, validate_manifest, OverlayManifest, EXPECTED_CONTRACT_VERSION,
+    load_manifest, resolve_quiet_tail_profile_from_env, validate_manifest, OverlayManifest,
+    QuietTailProfile, EXPECTED_CONTRACT_VERSION,
 };
 #[cfg(test)]
 use crate::openvr::OpenVrError;
@@ -2806,6 +2807,13 @@ fn startup_error_from_preflight(error: OpenVrStartupPreflightError) -> StartupEr
 }
 
 pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
+    run_with_manifest_and_profile(manifest, QuietTailProfile::P20).await
+}
+
+async fn run_with_manifest_and_profile(
+    manifest: OverlayManifest,
+    quiet_tail_profile: QuietTailProfile,
+) -> i32 {
     let logger = match OverlayLogger::open(&manifest.log_dir, manifest.logging_mode).await {
         Ok(logger) => logger,
         Err(error) => {
@@ -2859,17 +2867,10 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
     };
 
     let _ = logger
-        .info(format!(
-            "quiet_tail_profile={}",
-            manifest.quiet_tail_profile.id()
-        ))
+        .info(format!("quiet_tail_profile={}", quiet_tail_profile.id()))
         .await;
-    let mut owner = NativePresentationOwner::new_with_profile(
-        snapshot,
-        renderer,
-        openvr,
-        manifest.quiet_tail_profile,
-    );
+    let mut owner =
+        NativePresentationOwner::new_with_profile(snapshot, renderer, openvr, quiet_tail_profile);
     let initial_outcome = SnapshotApplyOutcome::Applied {
         incoming_revision: owner.runtime().state().snapshot().revision,
         current_revision: owner.runtime().state().snapshot().revision,
@@ -2953,7 +2954,18 @@ pub async fn run_cli(args: &[String]) -> i32 {
         }
     };
 
-    run_with_manifest(manifest).await
+    let quiet_tail_profile = match resolve_quiet_tail_profile_from_env() {
+        Ok(profile) => profile,
+        Err(error) => {
+            eprintln!(
+                "[overlay][ERROR] startup_failure reason={}",
+                error.failure_reason()
+            );
+            emit_startup_failure_to_stderr(&error).await;
+            return error.exit_code();
+        }
+    };
+    run_with_manifest_and_profile(manifest, quiet_tail_profile).await
 }
 
 fn startup_error_from_runtime_failure(error: RuntimeFailure) -> StartupError {

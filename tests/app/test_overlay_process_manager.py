@@ -24,6 +24,33 @@ from puripuly_heart.core.overlay.process import (
 )
 
 
+@pytest.mark.asyncio
+async def test_default_runner_passes_profile_in_child_env_without_mutating_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_spawn(*command: str, **kwargs: object) -> object:
+        captured["command"] = command
+        captured.update(kwargs)
+        return SimpleNamespace(stdout=None, stderr=None)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    monkeypatch.delenv(process_module.QUIET_TAIL_PROFILE_ENV, raising=False)
+    runner = DefaultOverlayProcessRunner(quiet_tail_profile="p05")
+    await runner.spawn(tmp_path / "overlay.exe", tmp_path / "manifest.json")
+    child_env = captured["env"]
+    assert isinstance(child_env, dict)
+    assert child_env[process_module.QUIET_TAIL_PROFILE_ENV] == "p05"
+    assert process_module.QUIET_TAIL_PROFILE_ENV not in os.environ
+
+
+def test_new_manifest_serialization_omits_runtime_profile() -> None:
+    payload = _overlay_manifest().to_dict()
+    assert "quiet_tail_profile" not in payload
+
+
 @dataclass(slots=True)
 class FakeOverlayManagedProcess(OverlayManagedProcess):
     ready_event_delay_ms: int | None = None
@@ -410,6 +437,18 @@ async def test_overlay_process_manager_prefers_explicit_startup_error_event_over
 
     assert manager.state == "failed"
     assert manager.failure_reason == "bridge_auth_failed"
+
+
+@pytest.mark.asyncio
+async def test_overlay_process_manager_maps_profile_startup_event_to_manifest_invalid() -> None:
+    manager = OverlayProcessManager(
+        process_runner=FakeProcessRunner(startup_error="manifest_invalid", exit_code=1)
+    )
+
+    await manager.start()
+
+    assert manager.state == "failed"
+    assert manager.failure_reason == "manifest_invalid"
 
 
 @pytest.mark.asyncio

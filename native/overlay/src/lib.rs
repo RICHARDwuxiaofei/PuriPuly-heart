@@ -12,7 +12,9 @@ pub use bridge::{
 };
 pub use logging::{OverlayLogger, OverlayLoggingMode};
 pub use manifest::{
-    load_manifest, validate_manifest, OverlayManifest, QuietTailProfile, EXPECTED_CONTRACT_VERSION,
+    load_manifest, resolve_quiet_tail_profile, resolve_quiet_tail_profile_from_env,
+    validate_manifest, OverlayManifest, QuietTailProfile, EXPECTED_CONTRACT_VERSION,
+    QUIET_TAIL_PROFILE_ENV,
 };
 pub use openvr::{
     submit_texture, FakeOpenVr, OpenVrError, OpenVrOutputAdapter, OpenVrOverlay,

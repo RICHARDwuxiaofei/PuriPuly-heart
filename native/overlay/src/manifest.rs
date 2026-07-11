@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::logging::OverlayLoggingMode;
 use crate::runtime::StartupError;
 
+pub const QUIET_TAIL_PROFILE_ENV: &str = "PURIPULY_OVERLAY_QUIET_TAIL_PROFILE";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuietTailProfile {
@@ -72,7 +74,6 @@ pub struct OverlayManifest {
     pub log_level: String,
     pub locale: String,
     pub logging_mode: OverlayLoggingMode,
-    pub quiet_tail_profile: QuietTailProfile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -92,8 +93,6 @@ struct OverlayManifestSerde {
     logging_mode: Option<OverlayLoggingMode>,
     #[serde(default)]
     diagnostics_enabled: Option<bool>,
-    #[serde(default)]
-    quiet_tail_profile: QuietTailProfile,
 }
 
 impl TryFrom<OverlayManifestSerde> for OverlayManifest {
@@ -123,8 +122,35 @@ impl TryFrom<OverlayManifestSerde> for OverlayManifest {
             log_level: raw.log_level,
             locale: raw.locale,
             logging_mode,
-            quiet_tail_profile: raw.quiet_tail_profile,
         })
+    }
+}
+
+pub fn resolve_quiet_tail_profile_from_env() -> Result<QuietTailProfile, StartupError> {
+    resolve_quiet_tail_profile(std::env::var_os(QUIET_TAIL_PROFILE_ENV).as_deref())
+}
+
+pub fn resolve_quiet_tail_profile(
+    value: Option<&std::ffi::OsStr>,
+) -> Result<QuietTailProfile, StartupError> {
+    let Some(value) = value else {
+        return Ok(QuietTailProfile::P20);
+    };
+    let Some(value) = value.to_str() else {
+        return Err(StartupError::Manifest(
+            "quiet tail profile environment value is invalid".to_string(),
+        ));
+    };
+    match value {
+        "p05" => Ok(QuietTailProfile::P05),
+        "p10" => Ok(QuietTailProfile::P10),
+        "p15" => Ok(QuietTailProfile::P15),
+        "p20" => Ok(QuietTailProfile::P20),
+        "no_retry" => Ok(QuietTailProfile::NoRetry),
+        "one_retry" => Ok(QuietTailProfile::OneRetry),
+        _ => Err(StartupError::Manifest(
+            "quiet tail profile environment value is unsupported".to_string(),
+        )),
     }
 }
 

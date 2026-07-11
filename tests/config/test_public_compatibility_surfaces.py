@@ -1311,10 +1311,13 @@ async def test_overlay_startup_contract_snapshot_matches_python_runners_and_mani
         *args: str,
         stdout: object | None = None,
         stderr: object | None = None,
+        env: dict[str, str] | None = None,
     ) -> FakeSubprocess:
         nonlocal captured_command, captured_stdio
         captured_command = tuple(args)
         captured_stdio = (stdout, stderr)
+        assert env is not None
+        assert env[overlay_process_module.QUIET_TAIL_PROFILE_ENV] == "p20"
         return FakeSubprocess()
 
     monkeypatch.setattr(
@@ -1371,8 +1374,8 @@ async def test_overlay_startup_contract_snapshot_matches_python_runners_and_mani
         overlay_process_module.DefaultOverlayProcessRunner.spawn
     )
     desktop_spawn_source = inspect.getsource(overlay_process_module.DesktopFletOverlayRunner.spawn)
-    assert startup["explicit_env_overrides"] == []
-    assert "env=" not in default_spawn_source
+    assert startup["explicit_env_overrides"] == [overlay_process_module.QUIET_TAIL_PROFILE_ENV]
+    assert "env=child_env" in default_spawn_source
     assert "env=" not in desktop_spawn_source
 
 

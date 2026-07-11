@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 OVERLAY_EXECUTABLE_NAME = "PuriPulyHeartOverlay.exe"
 OPENVR_RUNTIME_DLL_NAME = "openvr_api.dll"
+QUIET_TAIL_PROFILE_ENV = "PURIPULY_OVERLAY_QUIET_TAIL_PROFILE"
 _EXIT_CODE_TO_FAILURE_REASON = {
     10: "contract_mismatch",
     12: "bridge_auth_failed",
@@ -217,6 +218,10 @@ class _AsyncioOverlayProcess:
 class DefaultOverlayProcessRunner:
     executable_path: Path | None = None
     task_factory: Any | None = None
+    quiet_tail_profile: str = "p20"
+
+    def set_quiet_tail_profile(self, profile: str) -> None:
+        self.quiet_tail_profile = profile
 
     def prepare(self, manifest: OverlayLaunchManifest) -> Path:
         _ = manifest
@@ -247,10 +252,13 @@ class DefaultOverlayProcessRunner:
             command = (str(sys.executable), str(executable_path), "--config", str(manifest_path))
         else:
             command = (str(executable_path), "--config", str(manifest_path))
+        child_env = os.environ.copy()
+        child_env[QUIET_TAIL_PROFILE_ENV] = self.quiet_tail_profile
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=child_env,
         )
         return _AsyncioOverlayProcess(process=process, task_factory=self.task_factory)
 
@@ -528,6 +536,9 @@ class OverlayProcessManager:
                 executable_mtime=self._executable_mtime,
                 logging_mode=self.logging_mode,
             )
+            configure_profile = getattr(self.process_runner, "set_quiet_tail_profile", None)
+            if callable(configure_profile):
+                configure_profile(self.quiet_tail_profile)
             self._manifest_path = self._write_manifest(manifest)
             self._record_process("manifest_written", manifest_path=self._manifest_path)
             self._process = await self.process_runner.spawn(executable_path, self._manifest_path)
@@ -582,7 +593,6 @@ class OverlayProcessManager:
             log_level=self.log_level,
             locale=self.locale,
             logging_mode=self.logging_mode,
-            quiet_tail_profile=self.quiet_tail_profile,
         )
 
     def _write_manifest(self, manifest: OverlayLaunchManifest) -> Path:
