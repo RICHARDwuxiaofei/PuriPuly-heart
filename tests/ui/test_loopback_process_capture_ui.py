@@ -107,6 +107,43 @@ def test_settings_modal_renders_process_section_before_device_and_hides_descript
     assert "Game (2)" in labels
 
 
+def test_settings_modal_renders_unsectioned_options_without_loading_section() -> None:
+    modal = SettingsModal(
+        page=SimpleNamespace(open=lambda *_a, **_k: None, close=lambda *_a, **_k: None),
+        title="Provider",
+        options=[
+            OptionItem(value="first", label="First"),
+            OptionItem(value="second", label="Second"),
+        ],
+        on_select=lambda _value: None,
+    )
+
+    option_list = modal._build_option_list("first")
+
+    assert [control.content.value for control in option_list.controls] == ["First", "Second"]
+
+
+def test_settings_modal_only_replaces_explicit_loading_section() -> None:
+    modal = SettingsModal(
+        page=SimpleNamespace(open=lambda *_a, **_k: None, close=lambda *_a, **_k: None),
+        title="Loopback Audio",
+        options=[
+            OptionItem(value="", label="", section="Applications"),
+            OptionItem(value="device:", label="Auto", section="Output devices"),
+        ],
+        on_select=lambda _value: None,
+    )
+    modal._loading_section = "Applications"
+
+    controls = modal._build_option_items("device:")
+
+    assert len(controls) == 4
+    assert controls[0].content.controls[-1].value == "Applications"
+    assert controls[1].content.controls[0].__class__.__name__ == "ProgressRing"
+    assert controls[2].content.controls[-1].value == "Output devices"
+    assert controls[3].content.value == "Auto"
+
+
 def test_process_warning_helper_text_is_localized_and_retry_classified() -> None:
     set_locale("en")
     contract = build_overlay_peer_consumer_contract(

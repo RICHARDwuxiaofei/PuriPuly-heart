@@ -159,10 +159,10 @@ class SettingsModal:
                 items.append(self._build_section_header(option.section, is_first_section))
                 previous_section = option.section
                 is_first_section = False
-                if option.section == self._loading_section:
+                if self._loading_section and option.section == self._loading_section:
                     items.append(self._build_loading_placeholder())
                     continue
-            if option.section == self._loading_section:
+            if self._loading_section and option.section == self._loading_section:
                 continue
             is_selected = option.value == current and not option.disabled
 
