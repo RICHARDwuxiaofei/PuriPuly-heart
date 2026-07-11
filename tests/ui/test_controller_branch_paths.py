@@ -6,7 +6,7 @@ import copy
 import logging
 import re
 import threading
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Literal
@@ -4007,6 +4007,7 @@ def test_active_controller_persistence_preserves_canonical_peer_intent(
     tmp_path: Path,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
+    controller.config_path = tmp_path / "settings.json"
     legacy = AppSettings()
     controller.settings = legacy
     vnext_settings = AppSettingsVNext()
@@ -4023,7 +4024,6 @@ def test_active_controller_persistence_preserves_canonical_peer_intent(
         ),
     )
     controller.vnext_settings = canonical
-    controller.config_path = tmp_path / "settings.json"
     assert save_vnext_settings(controller.config_path, canonical).ok
     controller._vnext_settings_authoritative = True
     controller._canonical_persistence_port_enabled = True
@@ -4137,6 +4137,17 @@ def test_stale_managed_adapter_persists_only_managed_delta_on_current_settings(
     assert saved[0].intent.languages.peer_source_mode == "soniox_auto"
     assert saved[0].intent.languages.peer_expected_languages == ["ja"]
 
+    controller.settings.ui.locale = "ko"
+    controller.persist_settings()
+
+    assert len(saved) == 2
+    assert saved[1].intent.ui.locale == "ko"
+    assert saved[1].intent.peer_stt.provider == "soniox"
+    assert saved[1].intent.languages.peer_source_mode == "soniox_auto"
+    assert saved[1].intent.languages.peer_expected_languages == ["ja"]
+    assert saved[0].intent.languages.peer_source_mode == "soniox_auto"
+    assert saved[0].intent.languages.peer_expected_languages == ["ja"]
+
 
 def test_failed_stale_managed_adapter_persistence_restores_active_and_bound_settings(
     monkeypatch: pytest.MonkeyPatch,
@@ -4225,17 +4236,368 @@ def test_direct_save_stages_legacy_delta_without_overwriting_canonical_peer_inte
     assert saved[0].intent.ui.locale == "ja"
     assert saved[0].state.managed_connection.referral_id == "234567"
     assert saved[0].intent.peer_stt.provider == "soniox"
-    assert saved[0].intent.languages.peer_source_mode == "soniox_auto"
-    assert saved[0].intent.languages.peer_expected_languages == ["ja"]
 
-    controller.settings.ui.locale = "ko"
-    controller.persist_settings()
 
-    assert len(saved) == 2
-    assert saved[1].intent.ui.locale == "ko"
-    assert saved[1].intent.peer_stt.provider == "soniox"
-    assert saved[1].intent.languages.peer_source_mode == "soniox_auto"
-    assert saved[1].intent.languages.peer_expected_languages == ["ja"]
+@pytest.mark.asyncio
+async def test_authoritative_commit_receipt_roundtrip_metadata_and_conflict(tmp_path: Path) -> None:
+    from puripuly_heart.config.settings_vnext import serialization
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.config_path = tmp_path / "settings.json"
+    controller.settings = AppSettings()
+    controller.vnext_settings = AppSettingsVNext()
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    controller._remember_canonical_legacy_projection(controller.settings)
+    assert save_vnext_settings(controller.config_path, controller.vnext_settings).ok
+    assert save_vnext_settings(controller.config_path, AppSettingsVNext()).ok
+    controller.vnext_settings = AppSettingsVNext()
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    controller._remember_canonical_legacy_projection(controller.settings)
+    repository = controller_module._ControllerSettingsPatchRepository(
+        controller=controller,
+        committed_settings=controller.settings,
+    )
+    previous = await repository.load_receipt()
+    caller_patch = {"ui.locale": "ja"}
+    request = controller_module.SettingsCommitRequest(
+        values=caller_patch,
+        expected_revision=previous.revision,
+        reason="c2a1-test",
+        correlation_id="corr-c2a1",
+    )
+    caller_patch["ui.locale"] = "ko"
+
+    result = await repository.save(request)
+
+    assert result.succeeded and result.receipt is not None
+    assert result.receipt.revision != previous.revision
+    assert result.receipt.envelope.intent.ui.locale == "ja"
+    assert result.receipt.reason == "c2a1-test"
+    assert result.receipt.correlation_id == "corr-c2a1"
+    persisted_text = serialization.to_json_text(result.receipt.envelope)
+    assert "c2a1-test" not in persisted_text
+    assert "corr-c2a1" not in persisted_text
+    with pytest.raises(FrozenInstanceError):
+        result.receipt.revision = "mutated"  # type: ignore[misc]
+    mutable_view = result.receipt.envelope
+    mutable_view.intent.languages.peer_expected_languages.append("ja")
+    mutable_view.intent.translation.connection_history["gemma4"] = "openrouter"
+    assert result.receipt.envelope.intent.languages.peer_expected_languages == []
+    assert result.receipt.envelope.intent.translation.connection_history["gemma4"] == "managed"
+
+    conflict = await repository.save(
+        controller_module.SettingsCommitRequest(
+            values={"ui.locale": "ko"},
+            expected_revision=previous.revision,
+            reason="stale",
+            correlation_id="corr-stale",
+        )
+    )
+    assert conflict.succeeded is False
+    assert conflict.receipt is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_commits_return_isolated_receipts_and_one_raced_conflict(
+    tmp_path: Path,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.config_path = tmp_path / "settings.json"
+    controller.settings = AppSettings()
+    controller.vnext_settings = AppSettingsVNext()
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    controller._remember_canonical_legacy_projection(controller.settings)
+    assert save_vnext_settings(controller.config_path, controller.vnext_settings).ok
+    first = controller_module._ControllerSettingsPatchRepository(
+        controller=controller,
+        committed_settings=copy.deepcopy(controller.settings),
+    )
+    second = controller_module._ControllerSettingsPatchRepository(
+        controller=controller,
+        committed_settings=copy.deepcopy(controller.settings),
+    )
+    previous = await first.load_receipt()
+
+    results = await asyncio.gather(
+        first.save(
+            controller_module.SettingsCommitRequest(
+                values={"ui.locale": "ja"},
+                expected_revision=previous.revision,
+                reason="first",
+                correlation_id="corr-first",
+            )
+        ),
+        second.save(
+            controller_module.SettingsCommitRequest(
+                values={"ui.locale": "ko"},
+                expected_revision=previous.revision,
+                reason="second",
+                correlation_id="corr-second",
+            )
+        ),
+    )
+
+    succeeded = [result for result in results if result.succeeded]
+    conflicted = [result for result in results if not result.succeeded]
+    assert len(succeeded) == 1
+    assert len(conflicted) == 1
+    assert succeeded[0].receipt is not None
+    assert conflicted[0].receipt is None
+    assert conflicted[0].diagnostics is not None
+    assert conflicted[0].diagnostics.code == "settings_revision_conflict"
+    receipt = succeeded[0].receipt
+    assert receipt.correlation_id in {"corr-first", "corr-second"}
+    other_correlation = "corr-second" if receipt.correlation_id == "corr-first" else "corr-first"
+    assert receipt.correlation_id != other_correlation
+    expected_locale = "ja" if receipt.correlation_id == "corr-first" else "ko"
+    assert receipt.envelope.intent.ui.locale == expected_locale
+    disk_receipt = await first.load_receipt()
+    assert disk_receipt.revision == receipt.revision
+    assert disk_receipt.envelope.intent.ui.locale == expected_locale
+    assert controller._canonical_legacy_projection_snapshot is not None
+    assert controller._canonical_legacy_projection_snapshot.ui.locale == expected_locale
+    assert controller._canonical_mutation_depth == 0
+    assert controller._canonical_mutation_rollback_pending is False
+    assert controller._canonical_mutation_rollback_snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_repository_mutation_lifecycle_cleans_and_later_failure_cannot_rollback_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.config_path = tmp_path / "settings.json"
+    controller.settings = AppSettings()
+    controller.vnext_settings = AppSettingsVNext()
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    controller._remember_canonical_legacy_projection(controller.settings)
+    assert save_vnext_settings(controller.config_path, controller.vnext_settings).ok
+    repository = controller_module._ControllerSettingsPatchRepository(
+        controller=controller,
+        committed_settings=controller.settings,
+    )
+    initial = await repository.load_receipt()
+    first = await repository.save(
+        controller_module.SettingsCommitRequest(
+            values={"ui.locale": "ja"},
+            expected_revision=initial.revision,
+            reason="first",
+            correlation_id="corr-first",
+        )
+    )
+    assert first.succeeded and first.receipt is not None
+    second = await repository.save(
+        controller_module.SettingsCommitRequest(
+            values={"ui.locale": "ko"},
+            expected_revision=first.receipt.revision,
+            reason="second",
+            correlation_id="corr-second",
+        )
+    )
+    assert second.succeeded and second.receipt is not None
+    assert controller._canonical_mutation_depth == 0
+    assert controller._canonical_mutation_rollback_pending is False
+    assert controller._canonical_mutation_rollback_snapshot is None
+    committed_disk = await repository.load_receipt()
+
+    monkeypatch.setattr(
+        controller.canonical_settings_persistence,
+        "persist_delta",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("forced later failure")),
+    )
+    failed = await repository.save(
+        controller_module.SettingsCommitRequest(
+            values={"ui.locale": "en"},
+            expected_revision=committed_disk.revision,
+            reason="third",
+            correlation_id="corr-third",
+        )
+    )
+    assert failed.succeeded is False
+    disk = await repository.load_receipt()
+    assert disk.revision == committed_disk.revision
+    assert disk.envelope.intent.ui.locale == "ko"
+    assert controller._canonical_legacy_projection_snapshot is not None
+    assert controller._canonical_legacy_projection_snapshot.ui.locale == "ko"
+    assert controller._canonical_mutation_depth == 0
+    assert controller._canonical_mutation_rollback_pending is False
+    assert controller._canonical_mutation_rollback_snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_dashboard_outer_prestaged_language_delta_commits_authoritative_candidate(
+    tmp_path: Path,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.config_path = tmp_path / "settings.json"
+    controller.settings = AppSettings()
+    controller.vnext_settings = AppSettingsVNext()
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    controller._remember_canonical_legacy_projection(controller.settings)
+    assert save_vnext_settings(controller.config_path, controller.vnext_settings).ok
+    updated = copy.deepcopy(controller.settings)
+    updated.languages.source_language = "ja"
+    updated.languages.target_language = "fr"
+    controller._begin_canonical_mutation(legacy_snapshot=controller.settings)
+    controller._update_canonical_settings_from_legacy_delta(controller.settings, updated)
+    repository = controller_module._ControllerSettingsPatchRepository(
+        controller=controller,
+        committed_settings=controller.settings,
+        base_settings=updated,
+    )
+    previous = await repository.load_receipt()
+
+    result = await repository.save(
+        controller_module.SettingsCommitRequest(
+            values={
+                "languages.source_language": "ja",
+                "languages.target_language": "fr",
+            },
+            expected_revision=previous.revision,
+            reason="dashboard_language_change",
+            correlation_id="corr-dashboard-language",
+        )
+    )
+    controller._complete_canonical_mutation()
+
+    assert result.succeeded and result.receipt is not None
+    disk = await repository.load_receipt()
+    assert result.receipt.envelope.intent.languages.source_language == "ja"
+    assert result.receipt.envelope.intent.languages.target_language == "fr"
+    assert disk.envelope.intent.languages.source_language == "ja"
+    assert disk.envelope.intent.languages.target_language == "fr"
+    assert controller.vnext_settings == result.receipt.envelope
+    assert controller._canonical_legacy_projection_snapshot is not None
+    assert controller._canonical_legacy_projection_snapshot.languages.source_language == "ja"
+    assert controller._canonical_legacy_projection_snapshot.languages.target_language == "fr"
+    assert controller._canonical_mutation_depth == 0
+    assert controller._canonical_mutation_rollback_pending is False
+
+
+@pytest.mark.asyncio
+async def test_failed_outer_prestaged_language_commit_restores_authoritative_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.config_path = tmp_path / "settings.json"
+    controller.settings = AppSettings()
+    controller.vnext_settings = AppSettingsVNext()
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    controller._remember_canonical_legacy_projection(controller.settings)
+    assert save_vnext_settings(controller.config_path, controller.vnext_settings).ok
+    repository = controller_module._ControllerSettingsPatchRepository(
+        controller=controller,
+        committed_settings=controller.settings,
+    )
+    authoritative = await repository.load_receipt()
+    authoritative_projection = controller.canonical_settings_persistence.legacy_projection(
+        authoritative.envelope
+    )
+    updated = copy.deepcopy(controller.settings)
+    updated.languages.source_language = "ja"
+    updated.languages.target_language = "fr"
+    controller._begin_canonical_mutation(legacy_snapshot=controller.settings)
+    controller._update_canonical_settings_from_legacy_delta(controller.settings, updated)
+    monkeypatch.setattr(
+        controller.canonical_settings_persistence,
+        "persist_delta",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("forced failure")),
+    )
+
+    result = await repository.save(
+        controller_module.SettingsCommitRequest(
+            values={
+                "languages.source_language": "ja",
+                "languages.target_language": "fr",
+            },
+            expected_revision=authoritative.revision,
+            reason="dashboard_language_change",
+            correlation_id="corr-dashboard-language-failure",
+        )
+    )
+    controller._complete_canonical_mutation()
+
+    assert result.succeeded is False
+    disk = await repository.load_receipt()
+    assert disk.revision == authoritative.revision
+    assert disk.envelope == authoritative.envelope
+    assert controller.vnext_settings == authoritative.envelope
+    assert controller.settings == authoritative_projection
+    assert controller._canonical_legacy_projection_snapshot == authoritative_projection
+    assert controller._canonical_mutation_depth == 0
+    assert controller._canonical_mutation_rollback_pending is False
+    assert controller._canonical_mutation_rollback_snapshot is None
+    assert controller._canonical_mutation_rollback_legacy_snapshot is None
+    assert controller._canonical_mutation_rollback_active_settings is None
+
+
+@pytest.mark.asyncio
+async def test_mapping_valued_dotted_patches_reach_receipt_disk_and_projection(
+    tmp_path: Path,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.config_path = tmp_path / "settings.json"
+    controller.settings = AppSettings()
+    controller.vnext_settings = AppSettingsVNext()
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    controller._remember_canonical_legacy_projection(controller.settings)
+    assert save_vnext_settings(controller.config_path, controller.vnext_settings).ok
+    repository = controller_module._ControllerSettingsPatchRepository(
+        controller=controller,
+        committed_settings=controller.settings,
+    )
+    previous = await repository.load_receipt()
+    fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.GEMMA4,
+        connection=TranslationConnection.OPENROUTER,
+    )
+    connection_history = {TranslationModel.LOCAL_LLM.value: TranslationConnection.OLLAMA}
+    extra_body = {"reasoning": {"effort": "low"}}
+    custom_terms = {"ja": ["Puripuly", "VRChat"]}
+
+    result = await repository.save(
+        controller_module.SettingsCommitRequest(
+            values={
+                "translation.fallback": fallback,
+                "translation.connection_history": connection_history,
+                "local_llm.extra_body": extra_body,
+                "stt.custom_terms": custom_terms,
+            },
+            expected_revision=previous.revision,
+            reason="mapping_dotted_paths",
+            correlation_id="corr-mapping-dotted-paths",
+        )
+    )
+
+    assert result.succeeded and result.receipt is not None
+    disk = await repository.load_receipt()
+    receipt_projection = controller.canonical_settings_persistence.legacy_projection(
+        result.receipt.envelope
+    )
+    disk_projection = controller.canonical_settings_persistence.legacy_projection(disk.envelope)
+    for projection in (
+        receipt_projection,
+        disk_projection,
+        controller._canonical_legacy_projection_snapshot,
+    ):
+        assert projection is not None
+        assert projection.translation.fallback == fallback
+        assert (
+            projection.translation.connection_history[TranslationModel.LOCAL_LLM.value]
+            == TranslationConnection.OLLAMA
+        )
+        assert projection.local_llm.extra_body == extra_body
+        assert projection.stt.custom_terms == custom_terms
 
 
 def test_nested_canonical_completion_keeps_outer_rollback_snapshot() -> None:
@@ -4307,11 +4669,12 @@ async def test_settings_repository_commits_only_scoped_delta_to_canonical_vnext(
         committed_settings=stale_full_draft,
         surface="ui_prompt_clipboard_state",
     )
+    previous = await repository.load_receipt()
 
     result = await repository.save(
         controller_module.SettingsCommitRequest(
             values={"ui.locale": "ja"},
-            expected_revision=None,
+            expected_revision=previous.revision,
             reason="settings.ui_prompt_clipboard_state",
         )
     )
@@ -4366,7 +4729,10 @@ async def test_failed_scoped_persistence_restores_canonical_and_legacy_before_ru
     await controller.apply_settings(updated)
 
     assert controller.settings == legacy
-    assert controller.vnext_settings == canonical
+    assert controller.vnext_settings is not None
+    assert controller._canonical_legacy_projection_snapshot == (
+        controller.canonical_settings_persistence.legacy_projection(controller.vnext_settings)
+    )
     assert runtime_calls == []
 
 
@@ -4551,6 +4917,7 @@ async def test_apply_settings_keeps_peer_translation_effective_flags_off_until_e
 @pytest.mark.asyncio
 async def test_apply_settings_deactivates_peer_runtime_when_eula_acceptance_is_removed(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
     settings = AppSettings()
@@ -4559,6 +4926,7 @@ async def test_apply_settings_deactivates_peer_runtime_when_eula_acceptance_is_r
     settings.ui.peer_translation_eula_accepted = True
     settings.ui.integrated_context_enabled = True
     controller.settings = settings
+    controller.config_path = tmp_path / "settings.json"
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
     controller.hub.peer_translation_enabled = True
     controller.hub.integrated_context_enabled = True
@@ -6551,6 +6919,7 @@ async def test_desktop_lock_toggle_is_runtime_only_and_does_not_save_or_mutate_s
 @pytest.mark.asyncio
 async def test_desktop_size_preset_change_preserves_current_center_without_clamping(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
     saved_desktop: list[tuple[object, object, str]] = []
@@ -6578,6 +6947,7 @@ async def test_desktop_size_preset_change_preserves_current_center_without_clamp
     controller.settings.overlay.desktop_flet.size_preset = "small"
     controller.settings.overlay.desktop_flet.position.x = -100
     controller.settings.overlay.desktop_flet.position.y = 20
+    controller.config_path = tmp_path / "settings.json"
     controller.hub = DummyHub()
 
     await controller.set_overlay_enabled(True)
@@ -7525,6 +7895,7 @@ async def test_desktop_bounds_events_emit_diagnostics_only_in_detailed_mode() ->
 @pytest.mark.asyncio
 async def test_desktop_apply_settings_broadcasts_visual_config_for_background_alpha_change(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
     controller = _make_controller(app=SimpleNamespace())
@@ -7532,6 +7903,7 @@ async def test_desktop_apply_settings_broadcasts_visual_config_for_background_al
     controller.settings.ui.overlay_enabled = True
     controller.settings.overlay.target = "desktop"
     controller.settings.overlay.desktop_flet.visual.background_alpha = 0.5
+    controller.config_path = tmp_path / "settings.json"
     controller._active_overlay_target = "desktop"
     bridge = FakeOverlayBridge(session_token="desktop")
     _attach_overlay_bridge(controller, bridge)
@@ -7554,6 +7926,7 @@ async def test_desktop_apply_settings_broadcasts_visual_config_for_background_al
 @pytest.mark.asyncio
 async def test_desktop_apply_settings_preserves_runtime_lock_without_persisting_saved_lock(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     serialized_desktop: list[dict[str, object]] = []
 
@@ -7566,6 +7939,7 @@ async def test_desktop_apply_settings_preserves_runtime_lock_without_persisting_
     controller.settings.ui.overlay_enabled = True
     controller.settings.overlay.target = "desktop"
     controller.settings.overlay.desktop_flet.locked = False
+    controller.config_path = tmp_path / "settings.json"
     controller._active_overlay_target = "desktop"
     controller.overlay_state = "connected"
     bridge = FakeOverlayBridge(session_token="desktop")
@@ -16131,8 +16505,10 @@ async def test_apply_providers_routes_stt_provider_patch_through_order22_setting
 @pytest.mark.asyncio
 async def test_order21_snapshot_full_default_service_runtime_adapter_receives_committed_settings(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.config_path = tmp_path / "settings.json"
     controller.settings = AppSettings()
     controller.settings.provider.llm = LLMProviderName.OPENROUTER
     controller.settings.languages.source_language = "ja"
@@ -16155,7 +16531,6 @@ async def test_order21_snapshot_full_default_service_runtime_adapter_receives_co
             diagnostics=None,
         )
 
-    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         provider_runtime_apply_module._ControllerProviderRuntimeApply,
         "apply_runtime",
@@ -16184,8 +16559,10 @@ async def test_order21_snapshot_full_default_service_runtime_adapter_receives_co
 @pytest.mark.asyncio
 async def test_order21_snapshot_full_repository_save_offloads_persistence_thread(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.config_path = tmp_path / "settings.json"
     committed = AppSettings()
     committed.provider.llm = LLMProviderName.OPENROUTER
     committed.translation.fallback = TranslationFallbackSettings(
@@ -16196,26 +16573,27 @@ async def test_order21_snapshot_full_repository_save_offloads_persistence_thread
     event_loop_thread_id = threading.get_ident()
     save_thread_ids: list[int] = []
 
-    def record_save_thread(*_args, **_kwargs) -> None:
-        save_thread_ids.append(threading.get_ident())
+    original_persist = GuiController._persist_settings_at_controller_boundary
 
-    monkeypatch.setattr(controller_module, "save_settings", record_save_thread)
+    def record_save_thread(self, *args, **kwargs) -> None:
+        save_thread_ids.append(threading.get_ident())
+        return original_persist(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        GuiController, "_persist_settings_at_controller_boundary", record_save_thread
+    )
     repository = controller_module._ControllerSettingsPatchRepository(
         controller=controller,
         committed_settings=committed,
     )
+    previous = await repository.load_receipt()
 
     result = await repository.save(
         controller_module.SettingsCommitRequest(
             values={
                 "provider.llm": LLMProviderName.OPENROUTER,
-                "translation.fallback": {
-                    "enabled": True,
-                    "model": TranslationModel.DEEPSEEK_V4_FLASH.value,
-                    "connection": TranslationConnection.OPENROUTER.value,
-                },
             },
-            expected_revision=None,
+            expected_revision=previous.revision,
             reason=settings_mutation.SETTINGS_MUTATION_SURFACE_TRANSLATION_PROVIDER,
         )
     )
@@ -16253,6 +16631,7 @@ async def test_managed_auth_repository_persists_pending_delivery_ack_patch(
         committed_settings=committed,
         surface="managed_connection_auth",
     )
+    previous = await repository.load_receipt()
 
     result = await repository.save(
         controller_module.SettingsCommitRequest(
@@ -16266,7 +16645,7 @@ async def test_managed_auth_repository_persists_pending_delivery_ack_patch(
                     }
                 }
             },
-            expected_revision=None,
+            expected_revision=previous.revision,
             reason="managed_connection_auth",
         )
     )

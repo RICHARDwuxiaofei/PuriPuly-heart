@@ -15,7 +15,11 @@
         "src/puripuly_heart/app/adapters/settings_vnext_canonical_persistence.py",
         "src/puripuly_heart/app/ports/canonical_settings_persistence.py",
         "src/puripuly_heart/app/ports/canonical_state_repository.py",
+        "src/puripuly_heart/app/ports/settings_repository.py",
         "src/puripuly_heart/app/services/canonical_state_repositories.py",
+        "src/puripuly_heart/app/services/managed_connection_auth.py",
+        "src/puripuly_heart/app/services/secret_settings_transaction.py",
+        "src/puripuly_heart/app/services/settings_mutation.py",
         "src/puripuly_heart/app/services/telemetry_operational_state.py",
         "src/puripuly_heart/app/wiring_composition.py",
         "src/puripuly_heart/config/prompts.py",
@@ -29,8 +33,8 @@
         "src/puripuly_heart/ui/app.py",
         "src/puripuly_heart/ui/controller.py"
       ],
-      "production_source_sha256": "642afa2e238ae16ef33c0d3d410eec98639b4952fbdbe59308d99a81afb5735a",
-      "source_delta_sha256": "2981a458f92b62530cd8bf0f6bb9eeba35c924dfbb10f32da1d29d6746f3914e"
+      "production_source_sha256": "ed70b58ae48f0d53e98c1c6ec39fb68fdc756be943d310eb520a505dd010a009",
+      "source_delta_sha256": "f612c8234ee60d3d74e846734b27ece74c9e7665caf53dddf8b0a63ddc52fec9"
     },
     "repair_base": "b4ace2631793aa1a1e384c0440b8ec7f315559ae"
   },

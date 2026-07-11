@@ -533,6 +533,7 @@ SETTINGS_PERSISTENCE_COMPOSITION_PATHS = frozenset(
 
 SETTINGS_LEGACY_COMPATIBILITY_ADAPTER_PATHS = frozenset(
     {
+        "src/puripuly_heart/app/adapters/settings_vnext_canonical_persistence.py",
         "src/puripuly_heart/app/services/settings_mutation_legacy.py",
         "src/puripuly_heart/app/wiring_llm_factory.py",
         "src/puripuly_heart/app/wiring_managed_auth_factory.py",
@@ -1535,6 +1536,42 @@ def test_canonical_state_service_does_not_compose_concrete_adapter() -> None:
         and (node.module or "").startswith("puripuly_heart.app.adapters")
         for node in ast.walk(tree)
     )
+
+
+def test_settings_commit_writers_require_non_optional_revision() -> None:
+    repository_port = ast.parse(
+        (SOURCE_PACKAGE_ROOT / "app" / "ports" / "settings_repository.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    request_class = next(
+        node
+        for node in repository_port.body
+        if isinstance(node, ast.ClassDef) and node.name == "SettingsCommitRequest"
+    )
+    expected_revision = next(
+        node
+        for node in request_class.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "expected_revision"
+    )
+    assert isinstance(expected_revision.annotation, ast.Name)
+    assert expected_revision.annotation.id == "str"
+    for path in SOURCE_PACKAGE_ROOT.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function = node.func
+            if not (isinstance(function, ast.Name) and function.id == "SettingsCommitRequest"):
+                continue
+            keyword = next(
+                (item for item in node.keywords if item.arg == "expected_revision"),
+                None,
+            )
+            assert keyword is not None
+            assert not (isinstance(keyword.value, ast.Constant) and keyword.value.value is None)
 
 
 def test_wiring_composition_is_the_only_c1_service_path_allowed_to_import_adapters() -> None:

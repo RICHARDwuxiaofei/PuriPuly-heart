@@ -33,8 +33,12 @@ from puripuly_heart.app.ports.secret_store import (
     SecretWriteResult,
 )
 from puripuly_heart.app.ports.settings_repository import (
+    SettingsCommitReceipt,
     SettingsCommitRequest,
     SettingsCommitResult,
+    SettingsInitializeRequest,
+    SettingsNotInitializedError,
+    SettingsRevisionConflict,
     SettingsSnapshot,
 )
 from puripuly_heart.app.services.canonical_settings_persistence import (
@@ -559,36 +563,114 @@ class _ControllerSettingsPatchRepository:
     surface: str = "translation_provider"
 
     async def load(self) -> SettingsSnapshot:
-        settings = self.controller.settings or self.committed_settings
-        return SettingsSnapshot(values=_settings_snapshot_values(settings), revision=None)
+        receipt = await self.load_receipt()
+        projected = self.controller.canonical_settings_persistence.legacy_projection(
+            receipt.envelope
+        )
+        return SettingsSnapshot(
+            values=_settings_snapshot_values(projected),
+            revision=receipt.revision,
+        )
+
+    async def load_receipt(self) -> SettingsCommitReceipt:
+        try:
+            return await asyncio.to_thread(
+                self.controller.canonical_settings_persistence.load_receipt,
+                self.controller.config_path,
+                reason=None,
+                correlation_id=None,
+            )
+        except SettingsNotInitializedError:
+            canonical = (
+                self.controller.vnext_settings
+                if self.controller._vnext_settings_authoritative
+                and self.controller.vnext_settings is not None
+                else self.controller._canonical_vnext_settings_for(
+                    self.controller.settings or self.committed_settings
+                )
+            )
+            receipt = await self.initialize(SettingsInitializeRequest(canonical, "bootstrap", None))
+            self.controller.vnext_settings = receipt.envelope
+            self.controller._vnext_settings_authoritative = True
+            return receipt
+
+    async def initialize(self, request: SettingsInitializeRequest) -> SettingsCommitReceipt:
+        return await asyncio.to_thread(
+            self.controller.canonical_settings_persistence.initialize,
+            self.controller.config_path,
+            request.envelope,
+            reason=request.reason,
+            correlation_id=request.correlation_id,
+        )
 
     async def save(self, request: SettingsCommitRequest) -> SettingsCommitResult:
-        base_settings = self.base_settings
-        next_settings = copy.deepcopy(base_settings or self.committed_settings)
-        if (
-            base_settings is None
-            and "state" not in request.values
-            and "intent" not in request.values
+        async with self.controller._get_settings_commit_lock():
+            return await self._save_locked(request)
+
+    async def _save_locked(self, request: SettingsCommitRequest) -> SettingsCommitResult:
+        current_receipt = await self.load_receipt()
+        if request.expected_revision != current_receipt.revision:
+            self._restore_authoritative_receipt(current_receipt)
+            return SettingsCommitResult(
+                succeeded=False,
+                snapshot=None,
+                message=None,
+                diagnostics=_settings_mutation_diagnostics(
+                    component="settings_repository",
+                    operation="save",
+                    code="settings_revision_conflict",
+                    surface=self.surface,
+                ),
+            )
+        if self.controller._canonical_persistence_port_enabled:
+            legacy_baseline = self.controller.canonical_settings_persistence.legacy_projection(
+                current_receipt.envelope
+            )
+        else:
+            legacy_baseline = copy.deepcopy(self.base_settings or self.committed_settings)
+        next_settings = copy.deepcopy(legacy_baseline)
+        if all(isinstance(path, str) and "." in path for path in request.values) or (
+            all(isinstance(path, str) for path in request.values)
+            and not ("state" in request.values or "intent" in request.values)
+            and not any(isinstance(value, Mapping) for value in request.values.values())
         ):
-            next_settings = copy.deepcopy(self.committed_settings)
-        elif all(isinstance(path, str) and "." in path for path in request.values):
             _apply_settings_path_patch(next_settings, request.values)
         elif "state" in request.values or "intent" in request.values:
             _apply_managed_pending_delivery_ack_patch(next_settings, request.values)
         else:
-            next_settings = copy.deepcopy(self.committed_settings)
-        self.controller._begin_canonical_mutation()
+            next_settings = copy.deepcopy(self.base_settings or legacy_baseline)
+        outer_mutation_depth = self.controller._canonical_mutation_depth
+        if self.controller._canonical_persistence_port_enabled:
+            self.controller.vnext_settings = current_receipt.envelope
+            self.controller._vnext_settings_authoritative = True
         self.controller._update_canonical_settings_from_legacy_delta(
-            base_settings or next_settings,
+            legacy_baseline,
             next_settings,
         )
         try:
-            await asyncio.to_thread(
+            receipt = await asyncio.to_thread(
                 self.controller._persist_settings_at_controller_boundary,
                 next_settings,
+                expected_revision=current_receipt.revision,
+                reason=request.reason,
+                correlation_id=request.correlation_id,
+                canonical_baseline=current_receipt.envelope,
+            )
+        except SettingsRevisionConflict:
+            self._restore_authoritative_receipt(current_receipt)
+            return SettingsCommitResult(
+                succeeded=False,
+                snapshot=None,
+                message=None,
+                diagnostics=_settings_mutation_diagnostics(
+                    component="settings_repository",
+                    operation="save",
+                    code="settings_revision_conflict",
+                    surface=self.surface,
+                ),
             )
         except Exception:
-            self.controller._rollback_canonical_mutation()
+            self._restore_authoritative_receipt(current_receipt)
             self.controller._log_error("Failed to save settings mutation")
             return SettingsCommitResult(
                 succeeded=False,
@@ -601,17 +683,46 @@ class _ControllerSettingsPatchRepository:
                     surface=self.surface,
                 ),
             )
-        self.committed_settings = next_settings
-        self.controller._remember_canonical_legacy_projection(next_settings)
+        if receipt is None:
+            raise RuntimeError("canonical commit receipt missing")
+        projected = self.controller.canonical_settings_persistence.legacy_projection(
+            receipt.envelope
+        )
+        _copy_runtime_only_ui_state(next_settings, projected)
+        self.committed_settings = copy.deepcopy(projected)
+        self.controller._remember_canonical_legacy_projection(projected)
+        if outer_mutation_depth > 0:
+            self.controller._rebase_canonical_mutation_rollback(
+                receipt=receipt,
+                projected=projected,
+            )
         return SettingsCommitResult(
             succeeded=True,
             snapshot=SettingsSnapshot(
-                values=_settings_snapshot_values(self.committed_settings),
-                revision=None,
+                values=_settings_snapshot_values(projected),
+                revision=receipt.revision,
             ),
             message=None,
             diagnostics=None,
+            receipt=receipt,
         )
+
+    def _restore_authoritative_receipt(self, receipt: SettingsCommitReceipt) -> None:
+        if not self.controller._canonical_persistence_port_enabled:
+            return
+        projected = self.controller.canonical_settings_persistence.legacy_projection(
+            receipt.envelope
+        )
+        self.controller.vnext_settings = receipt.envelope
+        self.controller._vnext_settings_authoritative = True
+        self.controller.settings = copy.deepcopy(projected)
+        self.committed_settings = copy.deepcopy(projected)
+        self.controller._remember_canonical_legacy_projection(projected)
+        if self.controller._canonical_mutation_depth > 0:
+            self.controller._rebase_canonical_mutation_rollback(
+                receipt=receipt,
+                projected=projected,
+            )
 
 
 def _apply_managed_pending_delivery_ack_patch(
@@ -874,6 +985,11 @@ class GuiController:
         init=False,
         default=None,
     )
+    _settings_commit_lock: asyncio.Lock | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     clock: SystemClock = SystemClock()
     _managed_openrouter_release_service: ManagedOpenRouterReleaseService | None = None
     _openrouter_pkce_client: OpenRouterPKCEClient | None = None
@@ -1037,6 +1153,11 @@ class GuiController:
     )
     overlay_calibration: OverlayCalibration = field(default_factory=OverlayCalibration)
     _overlay_calibration_draft: OverlayCalibration | None = None
+
+    def _get_settings_commit_lock(self) -> asyncio.Lock:
+        if self._settings_commit_lock is None:
+            self._settings_commit_lock = asyncio.Lock()
+        return self._settings_commit_lock
 
     @property
     def effective_peer_translation_enabled(self) -> bool:
@@ -6855,19 +6976,47 @@ class GuiController:
     ) -> AppSettingsVNext:
         return self.canonical_settings_persistence.load(path, compatibility_settings)
 
-    def _persist_settings_at_controller_boundary(self, settings: AppSettings) -> None:
+    def _persist_settings_at_controller_boundary(
+        self,
+        settings: AppSettings,
+        *,
+        expected_revision: str | None = None,
+        reason: str | None = None,
+        correlation_id: str | None = None,
+        canonical_baseline: AppSettingsVNext | None = None,
+        force_canonical: bool = False,
+    ) -> SettingsCommitReceipt | None:
         canonical = self.vnext_settings
-        if self._canonical_persistence_port_enabled and canonical is not None:
-            baseline = self._canonical_mutation_rollback_snapshot
+        if (force_canonical or self._canonical_persistence_port_enabled) and canonical is not None:
+            baseline = canonical_baseline or self._canonical_mutation_rollback_snapshot
             if baseline is None:
                 raise RuntimeError("canonical persistence delta baseline missing")
-            self.vnext_settings = self.canonical_settings_persistence.persist_delta(
+            revision = (
+                expected_revision
+                or self.canonical_settings_persistence.load_receipt(
+                    self.config_path,
+                    reason=None,
+                    correlation_id=None,
+                ).revision
+            )
+            receipt = self.canonical_settings_persistence.persist_delta(
                 self.config_path,
                 baseline=baseline,
                 next_settings=canonical,
+                expected_revision=revision,
+                reason=reason,
+                correlation_id=correlation_id,
             )
-            return
+            self.vnext_settings = receipt.envelope
+            return receipt
         save_settings(self.config_path, settings)
+        if canonical is not None:
+            return self.canonical_settings_persistence.receipt_for(
+                canonical,
+                reason=reason,
+                correlation_id=correlation_id,
+            )
+        return None
 
     def _canonical_vnext_settings_for(self, settings: AppSettings) -> AppSettingsVNext:
         projected = self.canonical_settings_persistence.project(
@@ -6971,6 +7120,18 @@ class GuiController:
             self._canonical_mutation_rollback_authoritative = self._vnext_settings_authoritative
             self._canonical_mutation_rollback_pending = True
         self._canonical_mutation_depth += 1
+
+    def _rebase_canonical_mutation_rollback(
+        self,
+        *,
+        receipt: SettingsCommitReceipt,
+        projected: AppSettings,
+    ) -> None:
+        self._canonical_mutation_rollback_snapshot = receipt.envelope
+        self._canonical_mutation_rollback_legacy_snapshot = copy.deepcopy(projected)
+        self._canonical_mutation_rollback_active_settings = copy.deepcopy(projected)
+        self._canonical_mutation_rollback_authoritative = True
+        self._canonical_mutation_rollback_pending = self._canonical_mutation_depth > 0
 
     def _rollback_canonical_mutation(self) -> None:
         if not self._canonical_mutation_rollback_pending:

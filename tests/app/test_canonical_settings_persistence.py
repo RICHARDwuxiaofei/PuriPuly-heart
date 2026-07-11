@@ -10,6 +10,7 @@ import pytest
 from puripuly_heart.app.adapters import (
     settings_vnext_canonical_persistence as adapter_module,
 )
+from puripuly_heart.app.adapters.canonical_state_repository import CanonicalStateUnitOfWork
 from puripuly_heart.app.adapters.settings_vnext_canonical_persistence import (
     SettingsVNextCanonicalPersistenceAdapter,
 )
@@ -112,11 +113,14 @@ def test_stale_full_envelope_delta_does_not_overwrite_repository_operational_sta
         path,
         baseline=cached_baseline,
         next_settings=desired,
+        expected_revision=CanonicalStateUnitOfWork(path).load().revision,
+        reason="test",
+        correlation_id="corr-test",
     )
 
-    assert committed.intent.ui.locale == "ja"
-    assert committed.state.telemetry.anonymous_id == "repository-owned-id"
-    assert committed.state.telemetry.sent_translation_success_dates_utc == ("2026-07-11",)
+    assert committed.envelope.intent.ui.locale == "ja"
+    assert committed.envelope.state.telemetry.anonymous_id == "repository-owned-id"
+    assert committed.envelope.state.telemetry.sent_translation_success_dates_utc == ("2026-07-11",)
 
 
 @pytest.mark.parametrize("status", ["parse_failed", "migration_failed", "backup_failed"])
@@ -152,6 +156,13 @@ def test_persist_delta_fails_closed_when_latest_envelope_cannot_load(
 
     monkeypatch.setattr(adapter_module, "save_vnext_settings", unexpected_save)
     with pytest.raises(RuntimeError, match=f"canonical latest load failed: safe {status}"):
-        adapter.persist_delta(path, baseline=baseline, next_settings=desired)
+        adapter.persist_delta(
+            path,
+            baseline=baseline,
+            next_settings=desired,
+            expected_revision="sha256:unreachable",
+            reason="test",
+            correlation_id="corr-test",
+        )
     assert not save_called
     assert path.read_bytes() == original

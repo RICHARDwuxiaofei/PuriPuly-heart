@@ -9,6 +9,7 @@ from puripuly_heart.app.ports.canonical_state_repository import (
     CanonicalIntentSnapshot,
     OperationalStateSnapshot,
 )
+from puripuly_heart.app.ports.settings_repository import SettingsRevisionConflict
 from puripuly_heart.config.settings_vnext import serialization
 from puripuly_heart.config.settings_vnext.compat import canonical_settings_path_lock
 from puripuly_heart.config.settings_vnext.facade import load_vnext_settings, save_vnext_settings
@@ -25,7 +26,7 @@ class CanonicalStateRepositoryError(RuntimeError):
     pass
 
 
-class CanonicalStateRevisionConflict(CanonicalStateRepositoryError):
+class CanonicalStateRevisionConflict(CanonicalStateRepositoryError, SettingsRevisionConflict):
     pass
 
 

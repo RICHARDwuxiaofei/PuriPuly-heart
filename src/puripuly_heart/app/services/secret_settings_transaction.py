@@ -259,11 +259,15 @@ class SecretSettingsTransaction:
             )
         )
         try:
+            expected_revision = request.expected_settings_revision
+            if expected_revision is None:
+                expected_revision = (await self.settings_repository.load_receipt()).revision
             commit_result = await self.settings_repository.save(
                 SettingsCommitRequest(
                     values=settings_values,
-                    expected_revision=request.expected_settings_revision,
+                    expected_revision=expected_revision,
                     reason=request.reason,
+                    correlation_id=request.correlation_id,
                 )
             )
         except Exception:
@@ -308,11 +312,15 @@ class SecretSettingsTransaction:
         action: str,
     ) -> TransactionResult:
         try:
+            expected_revision = request.expected_settings_revision
+            if expected_revision is None:
+                expected_revision = (await self.settings_repository.load_receipt()).revision
             commit_result = await self.settings_repository.save(
                 SettingsCommitRequest(
                     values=request.settings_values,
-                    expected_revision=request.expected_settings_revision,
+                    expected_revision=expected_revision,
                     reason=request.reason,
+                    correlation_id=request.correlation_id,
                 )
             )
         except Exception:

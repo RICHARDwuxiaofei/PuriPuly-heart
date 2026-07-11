@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, TypeVar, runtime_checkable
 
+from puripuly_heart.app.ports.settings_repository import SettingsCommitReceipt
+
 LegacySettingsT = TypeVar("LegacySettingsT", contravariant=True)
 CanonicalSettingsT = TypeVar("CanonicalSettingsT")
 
@@ -19,7 +21,37 @@ class CanonicalSettingsPersistencePort(Protocol[LegacySettingsT, CanonicalSettin
         *,
         baseline: CanonicalSettingsT,
         next_settings: CanonicalSettingsT,
-    ) -> CanonicalSettingsT: ...
+        expected_revision: str,
+        reason: str | None,
+        correlation_id: str | None,
+    ) -> SettingsCommitReceipt: ...
+
+    def initialize(
+        self,
+        path: Path,
+        settings: CanonicalSettingsT,
+        *,
+        reason: str | None,
+        correlation_id: str | None,
+    ) -> SettingsCommitReceipt: ...
+
+    def load_receipt(
+        self,
+        path: Path,
+        *,
+        reason: str | None,
+        correlation_id: str | None,
+    ) -> SettingsCommitReceipt: ...
+
+    def legacy_projection(self, settings: CanonicalSettingsT) -> LegacySettingsT: ...
+
+    def receipt_for(
+        self,
+        settings: CanonicalSettingsT,
+        *,
+        reason: str | None,
+        correlation_id: str | None,
+    ) -> SettingsCommitReceipt: ...
 
     def project(
         self,

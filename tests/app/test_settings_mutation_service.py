@@ -11,6 +11,7 @@ from typing import get_type_hints
 import pytest
 
 from puripuly_heart.app.ports import runtime_apply, settings_repository
+from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core import messages
 
 SERVICE_MODULE = "puripuly_heart.app.services.settings_mutation"
@@ -39,6 +40,14 @@ class RecordingSettingsRepository:
 
     async def load(self) -> settings_repository.SettingsSnapshot:
         raise AssertionError("SettingsMutationService should not load in these scenarios")
+
+    async def load_receipt(self) -> settings_repository.SettingsCommitReceipt:
+        return settings_repository.SettingsCommitReceipt(
+            AppSettingsVNext(),
+            "settings-r1",
+            None,
+            None,
+        )
 
     async def save(
         self,

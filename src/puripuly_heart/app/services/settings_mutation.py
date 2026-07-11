@@ -193,11 +193,15 @@ class SettingsMutationService:
                 diagnostics=validation_result.diagnostics,
             )
 
+        expected_revision = request.expected_revision
+        if expected_revision is None:
+            expected_revision = (await self.settings_repository.load_receipt()).revision
         commit_result = await self.settings_repository.save(
             SettingsCommitRequest(
                 values=request.values,
-                expected_revision=request.expected_revision,
+                expected_revision=expected_revision,
                 reason=request.reason,
+                correlation_id=request.correlation_id,
             )
         )
         if not commit_result.succeeded or commit_result.snapshot is None:

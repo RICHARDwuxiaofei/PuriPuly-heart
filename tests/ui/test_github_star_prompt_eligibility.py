@@ -9,6 +9,10 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.app.adapters.settings_vnext_canonical_persistence import (
+    SettingsVNextCanonicalPersistenceAdapter,
+)
+from puripuly_heart.app.ports.settings_repository import SettingsCommitReceipt
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
@@ -17,6 +21,11 @@ from puripuly_heart.config.settings import (
     from_dict,
     materialize_translation_settings,
     to_dict,
+)
+from puripuly_heart.config.settings_vnext.facade import save_vnext_settings
+from puripuly_heart.config.settings_vnext.migration import (
+    from_legacy_app_settings,
+    to_legacy_dict,
 )
 from puripuly_heart.domain.events import UIEvent, UIEventType
 from puripuly_heart.domain.models import Translation
@@ -182,6 +191,14 @@ def test_user_owned_cloud_translation_success_observation_persists_through_setti
         saved_payloads.append(to_dict(updated))
 
     monkeypatch.setattr(controller_module, "save_settings", fake_save_settings)
+    monkeypatch.setattr(
+        SettingsVNextCanonicalPersistenceAdapter,
+        "persist_delta",
+        lambda _self, _path, *, baseline, next_settings, expected_revision, reason, correlation_id: (
+            saved_payloads.append(to_legacy_dict(next_settings))
+            or SettingsCommitReceipt(next_settings, "sha256:test", reason, correlation_id)
+        ),
+    )
 
     assert controller.record_github_star_prompt_translation_success_observed() is True
 
@@ -339,9 +356,16 @@ async def test_event_bridge_schedules_github_star_observation_after_translation_
 @pytest.mark.asyncio
 async def test_event_bridge_records_successful_translation_for_user_owned_cloud_connection(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     settings = _settings_for_connection(TranslationConnection.OPENROUTER)
     controller = _controller_for(settings)
+    controller.config_path = tmp_path / "settings.json"
+    controller.vnext_settings = from_legacy_app_settings(settings)
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    controller._remember_canonical_legacy_projection(settings)
+    assert save_vnext_settings(controller.config_path, controller.vnext_settings).ok
     saved_payloads: list[dict[str, object]] = []
 
     class Dashboard:
@@ -352,6 +376,14 @@ async def test_event_bridge_records_successful_translation_for_user_owned_cloud_
         saved_payloads.append(to_dict(updated))
 
     monkeypatch.setattr(controller_module, "save_settings", fake_save_settings)
+    monkeypatch.setattr(
+        SettingsVNextCanonicalPersistenceAdapter,
+        "persist_delta",
+        lambda _self, _path, *, baseline, next_settings, expected_revision, reason, correlation_id: (
+            saved_payloads.append(to_legacy_dict(next_settings))
+            or SettingsCommitReceipt(next_settings, "sha256:test", reason, correlation_id)
+        ),
+    )
 
     app = SimpleNamespace(
         controller=controller,
@@ -377,6 +409,7 @@ async def test_event_bridge_records_successful_translation_for_user_owned_cloud_
         )
     )
 
+    await asyncio.sleep(0.1)
     await _wait_until(lambda: bool(saved_payloads))
 
     assert settings.ui.github_star_prompt_translation_success_observed is True
