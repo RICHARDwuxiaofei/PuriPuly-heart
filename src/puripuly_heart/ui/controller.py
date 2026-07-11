@@ -26,6 +26,7 @@ import numpy as np
 from puripuly_heart.app.ports.canonical_settings_persistence import (
     CanonicalSettingsPersistencePort,
 )
+from puripuly_heart.app.ports.post_commit_runtime import SurfaceRuntimeTransactionPort
 from puripuly_heart.app.ports.runtime_apply import RuntimeApplyRequest
 from puripuly_heart.app.ports.secret_store import (
     SecretReadResult,
@@ -933,6 +934,7 @@ class GuiController:
     config_path: Path
     allow_stable_settings_import: bool = False
     settings_mutation_service: SettingsMutationService | None = None
+    surface_runtime_transactions: SurfaceRuntimeTransactionPort | None = None
     provider_verifier: _ControllerProviderVerifier | None = None
     telemetry_client: TranslationSuccessTelemetryClientPort | None = None
     canonical_settings_persistence: CanonicalSettingsPersistencePort[

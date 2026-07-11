@@ -9,6 +9,7 @@ from pathlib import Path
 
 import flet as ft
 
+from puripuly_heart.app.ports.post_commit_runtime import SurfaceRuntimeTransactionPort
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
@@ -116,6 +117,7 @@ class TranslatorApp:
         config_path,
         debug_ui_preview: bool = False,
         allow_stable_settings_import: bool = False,
+        surface_runtime_transactions: SurfaceRuntimeTransactionPort | None = None,
     ):
         self.page = page
         controller_kwargs = {
@@ -124,6 +126,10 @@ class TranslatorApp:
             "config_path": config_path,
         }
         parameters = inspect.signature(GuiController).parameters
+        if "surface_runtime_transactions" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        ):
+            controller_kwargs["surface_runtime_transactions"] = surface_runtime_transactions
         if "allow_stable_settings_import" in parameters or any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         ):

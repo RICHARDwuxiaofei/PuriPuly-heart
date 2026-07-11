@@ -60,7 +60,7 @@ class ResolvedRuntimeResourceAdapter(ApplicationRuntimePort):
     _active_state: InstalledRuntimeState = field(
         default_factory=lambda: InstalledRuntimeState({}), init=False, repr=False
     )
-    _ownership_state_known: bool = field(default=True, init=False, repr=False)
+    _ownership_state_known: bool = field(default=False, init=False, repr=False)
     _pending_settlement: dict[tuple[str, int], ResourceRef] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -75,6 +75,21 @@ class ResolvedRuntimeResourceAdapter(ApplicationRuntimePort):
     )
 
     async def replace_runtime(self, request: ResolvedRuntimeActivationRequest) -> None:
+        await self._replace_runtime(request, explicit_plan=None)
+
+    async def replace_runtime_with_plan(
+        self,
+        request: ResolvedRuntimeActivationRequest,
+        plan: RuntimeResourceReplacementPlan,
+    ) -> None:
+        await self._replace_runtime(request, explicit_plan=plan)
+
+    async def _replace_runtime(
+        self,
+        request: ResolvedRuntimeActivationRequest,
+        *,
+        explicit_plan: RuntimeResourceReplacementPlan | None,
+    ) -> None:
         async with self._lock:
             if not self._ownership_state_known or self._pending_settlement:
                 try:
@@ -89,7 +104,7 @@ class ResolvedRuntimeResourceAdapter(ApplicationRuntimePort):
                     raise RuntimeResourceInstallError("host_state_query_failed")
                 self._ownership_state_known = True
                 await self._settle_pending(self._active_state)
-            plan = self.planner.plan(self._active_config, request.config)
+            plan = explicit_plan or self.planner.plan(self._active_config, request.config)
             if plan.is_noop:
                 self._active_config = request.config
                 return

@@ -368,6 +368,7 @@ async def test_invalid_replace_outcomes_are_rejected_and_candidates_settled(case
     adapter = ResolvedRuntimeResourceAdapter(
         Factory(_staged(staged_ref)), Host(result), ReplaceAllPlanner()
     )
+    adapter._ownership_state_known = True
     with pytest.raises(RuntimeResourceInstallError) as caught:
         await adapter.replace_runtime(_request(2))
     assert caught.value.cause_code == "invalid_install_result"
@@ -413,6 +414,7 @@ async def test_host_exception_query_failure_preserves_primary_and_closes_nothing
             raise RuntimeError("secondary query failure")
 
     adapter = ResolvedRuntimeResourceAdapter(Factory(_staged(candidate)), QueryFailingHost())
+    adapter._ownership_state_known = True
     with pytest.raises(RuntimeError, match="primary host failure"):
         await adapter.replace_runtime(_request(2))
     assert candidate.resource.close_calls == 0
@@ -449,6 +451,7 @@ async def test_failure_active_same_identity_different_object_must_return_staged_
         origin_cause_code="runtime_install_postcommit_state_failed",
     )
     adapter = ResolvedRuntimeResourceAdapter(Factory(_staged(staged)), Host(failure))
+    adapter._ownership_state_known = True
     with pytest.raises(RuntimeResourceInstallError) as caught:
         await adapter.replace_runtime(_request(2))
     assert caught.value.cause_code == "invalid_install_result"
@@ -599,6 +602,7 @@ async def test_host_exception_query_cancellation_leaves_no_query_task() -> None:
             await asyncio.Event().wait()
 
     adapter = ResolvedRuntimeResourceAdapter(Factory(_staged(candidate)), BlockingQueryHost())
+    adapter._ownership_state_known = True
     task = asyncio.create_task(adapter.replace_runtime(_request(2)))
     await query_started.wait()
     task.cancel()
@@ -631,6 +635,7 @@ async def test_build_failure_query_cancellation_leaves_no_query_task() -> None:
     adapter = ResolvedRuntimeResourceAdapter(
         Factory(_staged(candidate), fail=True), BlockingQueryHost()
     )
+    adapter._ownership_state_known = True
     task = asyncio.create_task(adapter.replace_runtime(_request(2)))
     await query_started.wait()
     task.cancel()

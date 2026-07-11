@@ -169,4 +169,15 @@ class CommittedRuntimeSynchronizationPort(Protocol):
     ) -> RuntimeApplyResult: ...
 
 
+class SurfaceRuntimeTransactionPort(Protocol):
+    async def apply_surface_runtime(
+        self,
+        *,
+        before: SettingsCommitReceipt | None,
+        after: SettingsCommitReceipt,
+        provenance: RuntimeMutationProvenance,
+        operational: RuntimeOperationalSnapshot,
+    ) -> PostCommitRuntimeExecutionResult: ...
+
+
 __all__ = [name for name in globals() if not name.startswith("_")]

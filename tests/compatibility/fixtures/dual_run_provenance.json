@@ -12,6 +12,7 @@
     "repair_manifest": {
       "files": [
         "src/puripuly_heart/app/adapters/canonical_state_repository.py",
+        "src/puripuly_heart/app/adapters/post_commit_provider_activation.py",
         "src/puripuly_heart/app/adapters/resolved_runtime_resource_factory.py",
         "src/puripuly_heart/app/adapters/settings_vnext_canonical_persistence.py",
         "src/puripuly_heart/app/ports/application_runtime.py",
@@ -31,6 +32,7 @@
         "src/puripuly_heart/app/services/runtime_activation.py",
         "src/puripuly_heart/app/services/secret_settings_transaction.py",
         "src/puripuly_heart/app/services/settings_mutation.py",
+        "src/puripuly_heart/app/services/surface_runtime_transactions.py",
         "src/puripuly_heart/app/services/telemetry_operational_state.py",
         "src/puripuly_heart/app/wiring_composition.py",
         "src/puripuly_heart/config/prompts.py",
@@ -48,8 +50,8 @@
         "src/puripuly_heart/ui/app.py",
         "src/puripuly_heart/ui/controller.py"
       ],
-      "production_source_sha256": "096e8d40fbe805068211413a4f3e1d7fe53a278d8489b36f6a88fbef0cd6c26d",
-      "source_delta_sha256": "78981b5d34f5ca0bd307d3b1e264b92f4c8d92e7d3ac080dbf3bc130e6d147f7"
+      "production_source_sha256": "279f862d0e497fc3984f03d57f36788c2c696943a3477120d2d1bbf967b5841f",
+      "source_delta_sha256": "112f48dafa3fc6191aee9b32c9800d963c179ce7036771f91474bbededc2bbb0"
     },
     "repair_base": "b4ace2631793aa1a1e384c0440b8ec7f315559ae"
   },
