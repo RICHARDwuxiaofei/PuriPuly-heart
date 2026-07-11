@@ -8,10 +8,26 @@ from puripuly_heart.core.overlay.protocol import (
     U64_MAX,
     NativeFreshRenderGenerations,
     NativeFreshRenderTargets,
+    NativeQuietTailEpisode,
+    NativeQuietTailEpisodes,
     OverlayPresentationBlock,
     OverlayPresentationCalibration,
     OverlayPresentationSnapshot,
 )
+
+
+def test_native_quiet_tail_episodes_are_optional_runtime_only_facts() -> None:
+    legacy = OverlayPresentationSnapshot.from_dict({"revision": 1, "blocks": []})
+    assert legacy.native_quiet_tail_episodes is None
+    snapshot = OverlayPresentationSnapshot(
+        native_quiet_tail_episodes=NativeQuietTailEpisodes(
+            self=NativeQuietTailEpisode(phase="final", generation=4),
+            peer=NativeQuietTailEpisode(phase="stream", generation=9),
+        )
+    )
+    assert OverlayPresentationSnapshot.from_dict(snapshot.to_dict()) == snapshot
+    with pytest.raises(ValueError):
+        NativeQuietTailEpisode(phase="unknown", generation=1)
 
 
 def test_native_fresh_render_generations_are_optional_and_round_trip_independently() -> None:

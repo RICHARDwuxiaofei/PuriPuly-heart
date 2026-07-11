@@ -7393,6 +7393,8 @@ async def test_presenter_native_fresh_render_peer_event_matrix_uses_exact_visibl
         )
     )
     assert presenter.snapshot().native_fresh_render_generations.peer == 1
+    stream_episode = presenter.snapshot().native_quiet_tail_episodes.peer
+    assert stream_episode is not None and stream_episode.phase == "stream"
 
     await presenter.emit(
         adapter.transcript_final(
@@ -7424,6 +7426,7 @@ async def test_presenter_native_fresh_render_peer_event_matrix_uses_exact_visibl
         )
     )
     assert presenter.snapshot().native_fresh_render_generations.peer == 2
+    assert presenter.snapshot().native_quiet_tail_episodes.peer == stream_episode
     await presenter.emit(
         adapter.transcript_final(
             Transcript(
@@ -7438,6 +7441,9 @@ async def test_presenter_native_fresh_render_peer_event_matrix_uses_exact_visibl
         )
     )
     assert presenter.snapshot().native_fresh_render_generations.peer == 3
+    final_episode = presenter.snapshot().native_quiet_tail_episodes.peer
+    assert final_episode is not None and final_episode.phase == "final"
+    assert final_episode.generation != stream_episode.generation
     await presenter.emit(
         adapter.translation_final(
             utterance_id=visible,
@@ -7450,6 +7456,7 @@ async def test_presenter_native_fresh_render_peer_event_matrix_uses_exact_visibl
         )
     )
     assert presenter.snapshot().native_fresh_render_generations.peer == 4
+    assert presenter.snapshot().native_quiet_tail_episodes.peer == final_episode
 
 
 @pytest.mark.asyncio
@@ -7494,9 +7501,11 @@ async def test_presenter_native_fresh_render_generations_preserve_channels_and_e
         )
     )
     self_generation = presenter.snapshot().native_fresh_render_generations.self
+    self_episode = presenter.snapshot().native_quiet_tail_episodes.self
+    assert self_episode is not None and self_episode.phase == "final"
     await presenter.emit(
         adapter.self_active_update(
-            text="live update is ineligible",
+            text="live update",
             utterance_id=self_turn,
             occupant_key=f"self:{self_turn}",
         )
@@ -7505,13 +7514,14 @@ async def test_presenter_native_fresh_render_generations_preserve_channels_and_e
         adapter.translation_stream_update(
             utterance_id=self_turn,
             channel="self",
-            text="stream update is ineligible",
+            text="stream update",
             source_language="en",
             target_language="ko",
             applied_context_mode=None,
         )
     )
     assert presenter.snapshot().native_fresh_render_generations.self == self_generation
+    assert presenter.snapshot().native_quiet_tail_episodes.self == self_episode
     await presenter.emit(
         adapter.transcript_final(
             Transcript(
@@ -7525,7 +7535,7 @@ async def test_presenter_native_fresh_render_generations_preserve_channels_and_e
             target_language="ko",
         )
     )
-    assert presenter.snapshot().native_fresh_render_generations.self == 1
+    assert presenter.snapshot().native_fresh_render_generations.self == self_generation
     assert presenter.snapshot().native_fresh_render_generations.peer is None
 
     peer_translation = adapter.translation_final(
@@ -7540,11 +7550,14 @@ async def test_presenter_native_fresh_render_generations_preserve_channels_and_e
     )
     await presenter.emit(peer_translation)
     generations = presenter.snapshot().native_fresh_render_generations
-    assert (generations.self, generations.peer) == (1, 1)
+    assert (generations.self, generations.peer) == (self_generation, 1)
+    peer_episode = presenter.snapshot().native_quiet_tail_episodes.peer
+    assert peer_episode is not None and peer_episode.phase == "final"
 
     await presenter.emit(peer_translation)
     generations = presenter.snapshot().native_fresh_render_generations
-    assert (generations.self, generations.peer) == (1, 2)
+    assert (generations.self, generations.peer) == (self_generation, 1)
+    assert presenter.snapshot().native_quiet_tail_episodes.peer == peer_episode
     await presenter.update_display_preferences(
         show_translation=False,
         show_peer_original=False,
@@ -7564,9 +7577,41 @@ async def test_presenter_native_fresh_render_generations_preserve_channels_and_e
     )
     await presenter.emit(peer_translation)
     rolled = presenter.snapshot().native_fresh_render_generations
-    assert (rolled.self, rolled.peer) == (1, 0)
+    assert (rolled.self, rolled.peer) == (self_generation, 1)
     presenter.reset_scene()
     assert presenter.snapshot().native_fresh_render_generations is None
+
+
+@pytest.mark.asyncio
+async def test_presenter_episode_generation_is_monotonic_after_target_loss() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+        self_presentation_refresh_burst=False,
+        native_retry_trigger_emission=True,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    turn = uuid4()
+    event = adapter.transcript_final(
+        Transcript(
+            utterance_id=turn,
+            channel="self",
+            text="first",
+            is_final=True,
+            created_at=10.0,
+        ),
+        source_language="en",
+        target_language="ko",
+    )
+    await presenter.emit(event)
+    first = presenter.snapshot().native_quiet_tail_episodes.self
+    assert first is not None
+    presenter.reset_scene()
+    assert presenter.snapshot().native_quiet_tail_episodes is None
+    await presenter.emit(event)
+    second = presenter.snapshot().native_quiet_tail_episodes.self
+    assert second is not None
+    assert second.generation > first.generation
 
 
 @pytest.mark.asyncio

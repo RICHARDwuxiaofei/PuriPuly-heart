@@ -537,6 +537,7 @@
       "logging_mode",
       "overlay_instance_id",
       "parent_pid",
+      "quiet_tail_profile",
       "session_token",
       "startup_deadline_ms"
     ],

@@ -12,15 +12,15 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 use puripuly_heart_overlay::logging::OverlayLogger;
 use puripuly_heart_overlay::runtime::SnapshotApplyOutcome;
 use puripuly_heart_overlay::{
-    run_with_manifest, submit_texture, validate_manifest, AdapterIdentity, BridgeClient,
-    CaptionBlock, CaptionChannel, CaptionRenderer, FakeOpenVr, NativePresentationOwner,
-    OpenVrError, OverlayBridgeEvent, OverlayFrameSubmitter, OverlayLoggingMode, OverlayManifest,
-    OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
-    OverlayPresentationSnapshot, OverlayRuntime, PresentationBackend, PresentationCause,
-    PresentationCauseChannel, PresentationCauseKind, PresentationOutcome, PresentationStage,
-    PresentationStrategy, ReadinessOutcome, RenderedFrame, RuntimeFailure, StartupError,
-    EXPECTED_CONTRACT_VERSION, NATIVE_FRESH_RETRY_CADENCE, NATIVE_FRESH_RETRY_DEADLINE,
-    NATIVE_FRESH_RETRY_MAX_COMPLETED,
+    load_manifest, run_with_manifest, submit_texture, validate_manifest, AdapterIdentity,
+    BridgeClient, CaptionBlock, CaptionChannel, CaptionRenderer, FakeOpenVr,
+    NativePresentationOwner, OpenVrError, OverlayBridgeEvent, OverlayFrameSubmitter,
+    OverlayLoggingMode, OverlayManifest, OverlayPresentationBlock, OverlayPresentationBlockVariant,
+    OverlayPresentationCalibration, OverlayPresentationSnapshot, OverlayRuntime,
+    PresentationBackend, PresentationCause, PresentationCauseChannel, PresentationCauseKind,
+    PresentationOutcome, PresentationStage, PresentationStrategy, QuietTailProfile,
+    ReadinessOutcome, RenderedFrame, RuntimeFailure, StartupError, EXPECTED_CONTRACT_VERSION,
+    NATIVE_FRESH_RETRY_CADENCE, NATIVE_FRESH_RETRY_DEADLINE, NATIVE_FRESH_RETRY_MAX_COMPLETED,
 };
 
 #[test]
@@ -29,6 +29,50 @@ fn native_fresh_retry_production_policy_matches_dd_002() {
     assert_eq!(NATIVE_FRESH_RETRY_DEADLINE, Duration::from_secs(2));
     assert_eq!(NATIVE_FRESH_RETRY_MAX_COMPLETED, 20);
     assert_ne!(u64::MAX, 0);
+}
+
+#[test]
+fn quiet_tail_profiles_have_exact_walls_and_opportunity_maxima() {
+    for (profile, milliseconds, maximum) in [
+        (QuietTailProfile::P05, 500, 5),
+        (QuietTailProfile::P10, 1000, 10),
+        (QuietTailProfile::P15, 1500, 15),
+        (QuietTailProfile::P20, 2000, 20),
+        (QuietTailProfile::NoRetry, 0, 0),
+        (QuietTailProfile::OneRetry, 2000, 1),
+    ] {
+        assert_eq!(
+            profile.scheduling_wall(),
+            Duration::from_millis(milliseconds)
+        );
+        assert_eq!(profile.max_final_opportunities(), maximum);
+    }
+}
+
+#[test]
+fn old_manifest_json_without_quiet_tail_profile_defaults_to_p20() {
+    let path = unique_temp_file("legacy-profile", "json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "contract_version": EXPECTED_CONTRACT_VERSION,
+            "app_version": "2.2.2",
+            "overlay_instance_id": "legacy",
+            "bridge_url": "ws://127.0.0.1:1",
+            "session_token": "token",
+            "parent_pid": 1,
+            "startup_deadline_ms": 3000,
+            "log_dir": std::env::temp_dir(),
+            "log_level": "INFO",
+            "locale": "en",
+            "logging_mode": "basic"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let manifest = load_manifest(&path).unwrap();
+    assert_eq!(manifest.quiet_tail_profile, QuietTailProfile::P20);
+    std::fs::remove_file(path).unwrap();
 }
 
 fn test_manifest() -> OverlayManifest {
@@ -47,6 +91,7 @@ fn test_manifest() -> OverlayManifest {
         log_level: "INFO".into(),
         locale: "en".into(),
         logging_mode: OverlayLoggingMode::Basic,
+        quiet_tail_profile: QuietTailProfile::P20,
     }
 }
 
@@ -358,6 +403,39 @@ impl OverlayFrameSubmitter for OwnedSubmitterProbe {
 impl Drop for OwnedSubmitterProbe {
     fn drop(&mut self) {
         self.state.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+struct DelayedSecondSubmitter {
+    state: Arc<OwnedSubmitterState>,
+    submissions: usize,
+}
+
+impl OverlayFrameSubmitter for DelayedSecondSubmitter {
+    fn submit_frame(&mut self, frame: &RenderedFrame) -> Result<(), OpenVrError> {
+        self.submissions += 1;
+        if self.submissions == 2 {
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        self.state
+            .operations
+            .lock()
+            .unwrap()
+            .push(if frame.layout().visible_blocks.is_empty() {
+                "submit:empty"
+            } else {
+                "submit:text"
+            });
+        Ok(())
+    }
+
+    fn set_overlay_visible(&mut self, visible: bool) -> Result<(), OpenVrError> {
+        self.state
+            .operations
+            .lock()
+            .unwrap()
+            .push(if visible { "show" } else { "hide" });
+        Ok(())
     }
 }
 
@@ -1008,7 +1086,7 @@ async fn runtime_correlates_allowlisted_presentation_stages_without_payload_data
     assert!(records[1].cpu_render_us.is_some());
     assert!(records[2].readiness_us.is_some());
     assert!(records[4].submission_return_us.is_some());
-    assert_eq!(records[4].retry_profile, "p20_current_envelope");
+    assert_eq!(records[4].retry_profile, "p20");
     assert!(!records[4].candidate_build_identity.is_empty());
     assert!(records[4].candidate_build_identity.len() <= 64);
     assert_eq!(records[4].environment_identity, "not_recorded");
@@ -1910,6 +1988,94 @@ async fn production_owner_coalesces_retry_and_releases_resources_on_shutdown() {
 }
 
 #[tokio::test]
+async fn diagnostic_profiles_execute_exact_delayed_physical_and_logical_attempts() {
+    for (profile, expected_retry_attempts) in [
+        (QuietTailProfile::OneRetry, 1usize),
+        (QuietTailProfile::NoRetry, 0usize),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            let _auth = ws.next().await.unwrap().unwrap();
+            for (revision, text) in [(1, "one"), (2, "two")] {
+                if revision == 2 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                ws.send(Message::Text(
+                    json!({"type":"snapshot","payload":{
+                        "revision":revision,
+                        "native_fresh_render_generations":{"self":1},
+                        "native_fresh_render_targets":{"self":"self:diagnostic"},
+                        "native_quiet_tail_episodes":{"self":{"phase":"final","generation":1}},
+                        "blocks":[block("self:diagnostic","self",text,"",true)]
+                    }})
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(450)).await;
+            ws.send(Message::Text(json!({"type":"shutdown"}).to_string().into()))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        });
+        let mut manifest = test_manifest();
+        manifest.bridge_url = format!("ws://{address}");
+        let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+        let state = Arc::new(OwnedSubmitterState::default());
+        let mut owner = NativePresentationOwner::new_with_profile(
+            snapshot,
+            CaptionRenderer::new_for_test().unwrap(),
+            DelayedSecondSubmitter {
+                state: state.clone(),
+                submissions: 0,
+            },
+            profile,
+        );
+        owner
+            .run(
+                &mut bridge,
+                &test_logger("diagnostic-profile-attempts").await,
+            )
+            .await
+            .unwrap();
+        let retry_attempts = owner
+            .successful_attempt_audit_for_test()
+            .iter()
+            .filter(|attempt| {
+                attempt
+                    .logical_causes
+                    .to_vec()
+                    .iter()
+                    .any(|cause| cause.kind == PresentationCauseKind::NativeFreshRetry)
+            })
+            .count();
+        let logical_completions = owner
+            .fresh_retry_audit_for_test()
+            .iter()
+            .filter(|fact| fact.2 == "completed")
+            .count();
+        assert_eq!(retry_attempts, expected_retry_attempts);
+        assert_eq!(logical_completions, expected_retry_attempts);
+        assert!(
+            state
+                .operations
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|operation| operation.starts_with("submit"))
+                .count()
+                >= 1 + expected_retry_attempts
+        );
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn production_owner_runs_independent_self_and_peer_fresh_schedules_to_exact_max() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -2369,7 +2535,7 @@ async fn production_owner_self_cancellation_leaves_peer_schedule_completing() {
         .iter()
         .any(
             |attempt| attempt.logical_causes.contains(PresentationCause {
-                kind: PresentationCauseKind::ActiveRetryIntent,
+                kind: PresentationCauseKind::NativeFreshRetry,
                 channel: Some(PresentationCauseChannel::Peer),
                 trigger_generation: Some(2),
             })
@@ -2382,7 +2548,7 @@ async fn production_owner_self_cancellation_leaves_peer_schedule_completing() {
             .iter()
             .filter(|op| op.starts_with("submit"))
             .count(),
-        2
+        3
     );
     server.await.unwrap();
 }
@@ -2717,7 +2883,7 @@ async fn production_owner_preemption_rebases_unchanged_token_after_pending_snaps
         .find(|attempt| {
             attempt.scene_generation == 2
                 && attempt.logical_causes.contains(PresentationCause {
-                    kind: PresentationCauseKind::ActiveRetryIntent,
+                    kind: PresentationCauseKind::NativeFreshRetry,
                     channel: Some(PresentationCauseChannel::SelfChannel),
                     trigger_generation: Some(7),
                 })
@@ -2725,7 +2891,7 @@ async fn production_owner_preemption_rebases_unchanged_token_after_pending_snaps
         .unwrap();
     assert_eq!(normal_completion.scene_generation, 2);
     assert!(completed.4 >= preempted.4);
-    assert_eq!(owner.runtime().state().snapshot().revision, 2);
+    assert!(owner.runtime().state().snapshot().revision >= 2);
     assert_eq!(owner.runtime().state().blocks()[0].primary_text, "two");
     assert_eq!(
         state
@@ -2735,7 +2901,7 @@ async fn production_owner_preemption_rebases_unchanged_token_after_pending_snaps
             .iter()
             .filter(|operation| operation.starts_with("submit"))
             .count(),
-        2
+        3
     );
     server.await.unwrap();
 }

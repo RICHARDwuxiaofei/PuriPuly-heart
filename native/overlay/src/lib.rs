@@ -11,7 +11,9 @@ pub use bridge::{
     BridgeClient, BridgeError, BridgeIncoming, OverlayBridgeEvent, OverlayRuntimeControl,
 };
 pub use logging::{OverlayLogger, OverlayLoggingMode};
-pub use manifest::{load_manifest, validate_manifest, OverlayManifest, EXPECTED_CONTRACT_VERSION};
+pub use manifest::{
+    load_manifest, validate_manifest, OverlayManifest, QuietTailProfile, EXPECTED_CONTRACT_VERSION,
+};
 pub use openvr::{
     submit_texture, FakeOpenVr, OpenVrError, OpenVrOutputAdapter, OpenVrOverlay,
     OverlayFrameSubmitter, OverlayPlacementPolicy,

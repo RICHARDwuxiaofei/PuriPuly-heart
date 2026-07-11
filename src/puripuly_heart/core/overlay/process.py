@@ -461,6 +461,7 @@ class OverlayProcessManager:
     log_dir: str = "logs"
     log_level: str = "INFO"
     logging_mode: str = "basic"
+    quiet_tail_profile: str = "p20"
     renderer_events: asyncio.Queue[dict[str, object]] | None = None
     overlay_instance_id: str = field(default_factory=lambda: f"overlay-{uuid4()}")
     diagnostics_dir: Path = field(default_factory=default_overlay_diagnostics_dir)
@@ -581,6 +582,7 @@ class OverlayProcessManager:
             log_level=self.log_level,
             locale=self.locale,
             logging_mode=self.logging_mode,
+            quiet_tail_profile=self.quiet_tail_profile,
         )
 
     def _write_manifest(self, manifest: OverlayLaunchManifest) -> Path:

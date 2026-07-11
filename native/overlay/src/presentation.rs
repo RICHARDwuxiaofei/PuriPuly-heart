@@ -342,6 +342,7 @@ pub struct PresentationDiagnostics {
     openvr_adapter_identity: AdapterIdentity,
     renderer_adapter_identity: AdapterIdentity,
     adapter_match: AdapterMatch,
+    retry_profile: &'static str,
 }
 
 impl PresentationDiagnostics {
@@ -362,7 +363,12 @@ impl PresentationDiagnostics {
             openvr_adapter_identity: AdapterIdentity::NotObservedStageOne,
             renderer_adapter_identity: AdapterIdentity::NotObservedStageOne,
             adapter_match: AdapterMatch::Unavailable,
+            retry_profile: "p20",
         }
+    }
+
+    pub fn configure_retry_profile(&mut self, retry_profile: &'static str) {
+        self.retry_profile = retry_profile;
     }
 
     pub fn configure_adapter_handoff(
@@ -701,7 +707,7 @@ impl PresentationDiagnostics {
                 "release"
             },
             target_os: std::env::consts::OS,
-            retry_profile: "p20_current_envelope",
+            retry_profile: self.retry_profile,
             candidate_build_identity: allowlisted_build_identity(option_env!(
                 "PURIPULY_OVERLAY_BUILD_ID"
             )),
@@ -735,6 +741,21 @@ impl Default for PresentationDiagnostics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_presentation_record_uses_selected_non_p20_profile() {
+        let mut diagnostics = PresentationDiagnostics::new();
+        diagnostics.configure_retry_profile("p05");
+        diagnostics.accept_logical_revision(
+            PresentationBackend::Test,
+            1,
+            PresentationCauses::default(),
+        );
+        assert!(diagnostics
+            .records()
+            .iter()
+            .all(|record| record.retry_profile == "p05"));
+    }
 
     #[test]
     fn records_are_bounded_and_shutdown_removes_owned_work() {

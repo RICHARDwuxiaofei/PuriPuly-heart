@@ -5,6 +5,58 @@ use serde::{Deserialize, Serialize};
 use crate::logging::OverlayLoggingMode;
 use crate::runtime::StartupError;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuietTailProfile {
+    P05,
+    P10,
+    P15,
+    P20,
+    NoRetry,
+    OneRetry,
+}
+
+impl Default for QuietTailProfile {
+    fn default() -> Self {
+        Self::P20
+    }
+}
+
+impl QuietTailProfile {
+    pub fn max_final_opportunities(self) -> u32 {
+        match self {
+            Self::P05 => 5,
+            Self::P10 => 10,
+            Self::P15 => 15,
+            Self::P20 => 20,
+            Self::NoRetry => 0,
+            Self::OneRetry => 1,
+        }
+    }
+
+    pub fn scheduling_wall(self) -> std::time::Duration {
+        std::time::Duration::from_millis(match self {
+            Self::P05 => 500,
+            Self::P10 => 1000,
+            Self::P15 => 1500,
+            Self::P20 => 2000,
+            Self::NoRetry => 0,
+            Self::OneRetry => 2000,
+        })
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::P05 => "p05",
+            Self::P10 => "p10",
+            Self::P15 => "p15",
+            Self::P20 => "p20",
+            Self::NoRetry => "no_retry",
+            Self::OneRetry => "one_retry",
+        }
+    }
+}
+
 pub const EXPECTED_CONTRACT_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -20,6 +72,7 @@ pub struct OverlayManifest {
     pub log_level: String,
     pub locale: String,
     pub logging_mode: OverlayLoggingMode,
+    pub quiet_tail_profile: QuietTailProfile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -39,6 +92,8 @@ struct OverlayManifestSerde {
     logging_mode: Option<OverlayLoggingMode>,
     #[serde(default)]
     diagnostics_enabled: Option<bool>,
+    #[serde(default)]
+    quiet_tail_profile: QuietTailProfile,
 }
 
 impl TryFrom<OverlayManifestSerde> for OverlayManifest {
@@ -68,6 +123,7 @@ impl TryFrom<OverlayManifestSerde> for OverlayManifest {
             log_level: raw.log_level,
             locale: raw.locale,
             logging_mode,
+            quiet_tail_profile: raw.quiet_tail_profile,
         })
     }
 }

@@ -178,6 +178,52 @@ class NativeFreshRenderTargets:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeQuietTailEpisode:
+    phase: str
+    generation: int
+
+    def __post_init__(self) -> None:
+        if self.phase not in {"stream", "final"}:
+            raise ValueError("native quiet tail episode phase must be stream or final")
+        _validate_optional_generation(self.generation, "generation")
+
+    def to_dict(self) -> dict[str, object]:
+        return {"phase": self.phase, "generation": self.generation}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> "NativeQuietTailEpisode":
+        if not isinstance(data, dict):
+            raise ValueError("native quiet tail episode must be an object")
+        return cls(
+            phase=_require_string_field(data, "phase"),
+            generation=_require_non_negative_int_field(data, "generation"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NativeQuietTailEpisodes:
+    self: NativeQuietTailEpisode | None = None
+    peer: NativeQuietTailEpisode | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {}
+        if self.self is not None:
+            payload["self"] = self.self.to_dict()
+        if self.peer is not None:
+            payload["peer"] = self.peer.to_dict()
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> "NativeQuietTailEpisodes":
+        if not isinstance(data, dict):
+            raise ValueError("native quiet tail episodes must be an object")
+        return cls(
+            self=(NativeQuietTailEpisode.from_dict(data["self"]) if "self" in data else None),
+            peer=(NativeQuietTailEpisode.from_dict(data["peer"]) if "peer" in data else None),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class OverlayPresentationSnapshot:
     revision: int = 0
     calibration: OverlayPresentationCalibration = field(
@@ -186,6 +232,7 @@ class OverlayPresentationSnapshot:
     blocks: list[OverlayPresentationBlock] = field(default_factory=list)
     native_fresh_render_generations: NativeFreshRenderGenerations | None = None
     native_fresh_render_targets: NativeFreshRenderTargets | None = None
+    native_quiet_tail_episodes: NativeQuietTailEpisodes | None = None
 
     def __post_init__(self) -> None:
         generations = self.native_fresh_render_generations
@@ -194,6 +241,9 @@ class OverlayPresentationSnapshot:
         targets = self.native_fresh_render_targets
         if targets is not None and targets.self is None and targets.peer is None:
             object.__setattr__(self, "native_fresh_render_targets", None)
+        episodes = self.native_quiet_tail_episodes
+        if episodes is not None and episodes.self is None and episodes.peer is None:
+            object.__setattr__(self, "native_quiet_tail_episodes", None)
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -207,6 +257,8 @@ class OverlayPresentationSnapshot:
             )
         if self.native_fresh_render_targets is not None:
             payload["native_fresh_render_targets"] = self.native_fresh_render_targets.to_dict()
+        if self.native_quiet_tail_episodes is not None:
+            payload["native_quiet_tail_episodes"] = self.native_quiet_tail_episodes.to_dict()
         return payload
 
     @classmethod
@@ -233,6 +285,9 @@ class OverlayPresentationSnapshot:
         raw_targets = data.get("native_fresh_render_targets")
         if raw_targets is not None and not isinstance(raw_targets, dict):
             raise ValueError("native fresh render targets must be an object")
+        raw_episodes = data.get("native_quiet_tail_episodes")
+        if raw_episodes is not None and not isinstance(raw_episodes, dict):
+            raise ValueError("native quiet tail episodes must be an object")
         return cls(
             revision=int(data.get("revision", 0)),
             calibration=OverlayPresentationCalibration.from_dict(calibration),
@@ -244,6 +299,11 @@ class OverlayPresentationSnapshot:
             ),
             native_fresh_render_targets=(
                 NativeFreshRenderTargets.from_dict(raw_targets) if raw_targets is not None else None
+            ),
+            native_quiet_tail_episodes=(
+                NativeQuietTailEpisodes.from_dict(raw_episodes)
+                if raw_episodes is not None
+                else None
             ),
         )
 

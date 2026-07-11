@@ -83,6 +83,8 @@ pub struct NativeFreshRenderGenerations {
     pub self_target: Option<String>,
     #[serde(skip)]
     pub peer_target: Option<String>,
+    #[serde(skip)]
+    pub quiet_tail_episodes: Option<NativeQuietTailEpisodes>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -91,6 +93,27 @@ pub struct NativeFreshRenderTargets {
     pub self_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeQuietTailPhase {
+    Stream,
+    Final,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeQuietTailEpisode {
+    pub phase: NativeQuietTailPhase,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct NativeQuietTailEpisodes {
+    #[serde(default, rename = "self", skip_serializing_if = "Option::is_none")]
+    pub self_episode: Option<NativeQuietTailEpisode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<NativeQuietTailEpisode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -113,6 +136,8 @@ struct OverlayPresentationSnapshotWire {
     native_fresh_render_generations: Option<NativeFreshRenderGenerations>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     native_fresh_render_targets: Option<NativeFreshRenderTargets>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_quiet_tail_episodes: Option<NativeQuietTailEpisodes>,
 }
 
 impl Serialize for OverlayPresentationSnapshot {
@@ -137,6 +162,10 @@ impl Serialize for OverlayPresentationSnapshot {
             blocks: self.blocks.clone(),
             native_fresh_render_generations: self.native_fresh_render_generations.clone(),
             native_fresh_render_targets: targets,
+            native_quiet_tail_episodes: self
+                .native_fresh_render_generations
+                .as_ref()
+                .and_then(|generations| generations.quiet_tail_episodes.clone()),
         }
         .serialize(serializer)
     }
@@ -154,6 +183,9 @@ impl<'de> Deserialize<'de> for OverlayPresentationSnapshot {
         {
             generations.self_target = targets.self_target;
             generations.peer_target = targets.peer;
+        }
+        if let Some(generations) = &mut generations {
+            generations.quiet_tail_episodes = wire.native_quiet_tail_episodes;
         }
         Ok(Self {
             revision: wire.revision,
@@ -440,6 +472,7 @@ mod tests {
                 peer: Some(7),
                 self_target: None,
                 peer_target: None,
+                quiet_tail_episodes: None,
             })
         );
         assert_eq!(

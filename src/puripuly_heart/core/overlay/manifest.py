@@ -18,6 +18,7 @@ _MANIFEST_FIELDS = {
     "locale",
     "logging_mode",
     "diagnostics_enabled",
+    "quiet_tail_profile",
 }
 
 
@@ -42,6 +43,7 @@ class OverlayLaunchManifest:
     log_level: str
     locale: str
     logging_mode: str = SessionLoggingMode.BASIC.value
+    quiet_tail_profile: str = "p20"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -56,6 +58,7 @@ class OverlayLaunchManifest:
             "log_level": self.log_level,
             "locale": self.locale,
             "logging_mode": normalize_overlay_logging_mode(self.logging_mode),
+            "quiet_tail_profile": self.quiet_tail_profile,
         }
 
     @classmethod
@@ -65,7 +68,11 @@ class OverlayLaunchManifest:
             joined = ", ".join(sorted(extra_fields))
             raise ValueError(f"overlay manifest contains unsupported runtime fields: {joined}")
 
-        required_fields = _MANIFEST_FIELDS - {"logging_mode", "diagnostics_enabled"}
+        required_fields = _MANIFEST_FIELDS - {
+            "logging_mode",
+            "diagnostics_enabled",
+            "quiet_tail_profile",
+        }
         missing_fields = [field for field in required_fields if field not in data]
         if missing_fields:
             joined = ", ".join(sorted(missing_fields))
@@ -90,4 +97,5 @@ class OverlayLaunchManifest:
             log_level=str(data["log_level"]),
             locale=str(data["locale"]),
             logging_mode=normalize_overlay_logging_mode(logging_mode),
+            quiet_tail_profile=str(data.get("quiet_tail_profile", "p20")),
         )

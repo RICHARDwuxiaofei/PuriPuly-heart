@@ -17,6 +17,8 @@ from .protocol import (
     U64_MAX,
     NativeFreshRenderGenerations,
     NativeFreshRenderTargets,
+    NativeQuietTailEpisode,
+    NativeQuietTailEpisodes,
     OverlayPresentationBlock,
     OverlayPresentationCalibration,
     OverlayPresentationSnapshot,
@@ -108,6 +110,13 @@ class OverlayPresenter(OverlaySink):
     _native_fresh_render_targets: NativeFreshRenderTargets = field(
         init=False, default_factory=NativeFreshRenderTargets
     )
+    _native_quiet_tail_episodes: NativeQuietTailEpisodes = field(
+        init=False, default_factory=NativeQuietTailEpisodes
+    )
+    _native_quiet_tail_self_target: str | None = field(init=False, default=None)
+    _native_quiet_tail_peer_target: str | None = field(init=False, default=None)
+    _native_quiet_tail_self_generation: int | None = field(init=False, default=None)
+    _native_quiet_tail_peer_generation: int | None = field(init=False, default=None)
     _presentation_state: OverlayPresentationState = field(init=False)
     _last_visible_window_signature: tuple[object, ...] | None = field(init=False, default=None)
     _peer_presentation_refresh_burst_task: asyncio.Task[None] | None = field(
@@ -416,6 +425,9 @@ class OverlayPresenter(OverlaySink):
         self._appearance_seq = 0
         self._native_fresh_render_generations = NativeFreshRenderGenerations()
         self._native_fresh_render_targets = NativeFreshRenderTargets()
+        self._native_quiet_tail_episodes = NativeQuietTailEpisodes()
+        self._native_quiet_tail_self_target = None
+        self._native_quiet_tail_peer_target = None
         self._last_visible_window_signature = None
         peer_refresh_key = self._presentation_state.peer_presentation_refresh_target_key
         if peer_refresh_key is not None:
@@ -443,6 +455,9 @@ class OverlayPresenter(OverlaySink):
         self._revision += 1
         self._native_fresh_render_generations = NativeFreshRenderGenerations()
         self._native_fresh_render_targets = NativeFreshRenderTargets()
+        self._native_quiet_tail_episodes = NativeQuietTailEpisodes()
+        self._native_quiet_tail_self_target = None
+        self._native_quiet_tail_peer_target = None
         self._last_visible_window_signature = None
         peer_refresh_key = self._presentation_state.peer_presentation_refresh_target_key
         if peer_refresh_key is not None:
@@ -907,6 +922,11 @@ class OverlayPresenter(OverlaySink):
                 fresh_render_channel,
                 event=fresh_render_event,
             )
+            self._advance_native_quiet_tail_episode(
+                fresh_render_channel,
+                event=fresh_render_event,
+            )
+        self._prune_native_quiet_tail_targets(rendered_entries)
         self._revision += 1
         snapshot = self._presentation_state.generate_snapshot(
             revision=self._revision,
@@ -919,6 +939,9 @@ class OverlayPresenter(OverlaySink):
             ),
             native_fresh_render_targets=(
                 self._native_fresh_render_targets if self.native_retry_trigger_emission else None
+            ),
+            native_quiet_tail_episodes=(
+                self._native_quiet_tail_episodes if self.native_retry_trigger_emission else None
             ),
         )
         blocks_summary = [
@@ -1234,10 +1257,13 @@ class OverlayPresenter(OverlaySink):
             return None
         key = (event.channel, event.utterance_id)
         if event.channel == "self":
-            if not event_changed or not isinstance(event, (SelfTranscriptFinal, TranslationFinal)):
+            if not event_changed or not isinstance(
+                event,
+                (SelfTranscriptFinal, TranslationFinal),
+            ):
                 return None
         elif event.channel == "peer":
-            if not isinstance(
+            if not event_changed or not isinstance(
                 event,
                 (
                     PeerActiveUpdate,
@@ -1252,8 +1278,8 @@ class OverlayPresenter(OverlaySink):
         for rendered_key, block in rendered_entries:
             if rendered_key != key:
                 continue
-            if block.block_variant == "finalized" and block.primary_text.strip():
-                if event.channel == "self":
+            if block.primary_text.strip():
+                if event.channel == "self" and block.block_variant == "finalized":
                     previous_block = self._refreshable_self_block_in_snapshot(
                         previous_snapshot,
                         key,
@@ -1270,6 +1296,87 @@ class OverlayPresenter(OverlaySink):
                         return None
                 return event.channel
         return None
+
+    def _advance_native_quiet_tail_episode(
+        self,
+        channel: str,
+        *,
+        event: OverlayEventUnion | None,
+    ) -> None:
+        if event is None or event.utterance_id is None:
+            return
+        phase = (
+            "final"
+            if isinstance(
+                event,
+                (SelfTranscriptFinal, PeerTranscriptFinal, TranslationFinal),
+            )
+            else "stream"
+        )
+        current = (
+            self._native_quiet_tail_episodes.self
+            if channel == "self"
+            else self._native_quiet_tail_episodes.peer
+        )
+        current_target = (
+            self._native_quiet_tail_self_target
+            if channel == "self"
+            else self._native_quiet_tail_peer_target
+        )
+        target = f"{channel}:{event.utterance_id}"
+        replace = current is None or current.phase != phase or current_target != target
+        if channel == "self" and isinstance(event, TranslationFinal):
+            replace = True
+        episode = (
+            NativeQuietTailEpisode(
+                phase=phase,
+                generation=self._next_native_fresh_render_generation(
+                    self._native_quiet_tail_self_generation
+                    if channel == "self"
+                    else self._native_quiet_tail_peer_generation
+                ),
+            )
+            if replace
+            else current
+        )
+        if channel == "self":
+            self._native_quiet_tail_self_target = target
+            if replace:
+                self._native_quiet_tail_self_generation = episode.generation
+            self._native_quiet_tail_episodes = NativeQuietTailEpisodes(
+                self=episode,
+                peer=self._native_quiet_tail_episodes.peer,
+            )
+        else:
+            self._native_quiet_tail_peer_target = target
+            if replace:
+                self._native_quiet_tail_peer_generation = episode.generation
+            self._native_quiet_tail_episodes = NativeQuietTailEpisodes(
+                self=self._native_quiet_tail_episodes.self,
+                peer=episode,
+            )
+
+    def _prune_native_quiet_tail_targets(
+        self,
+        rendered_entries: list[tuple[tuple[str, UUID], OverlayPresentationBlock]],
+    ) -> None:
+        visible = {block.id for _, block in rendered_entries if block.primary_text.strip()}
+        self_target = self._native_fresh_render_targets.self
+        peer_target = self._native_fresh_render_targets.peer
+        if self_target is not None and self_target not in visible:
+            self_target = None
+            self._native_quiet_tail_self_target = None
+        if peer_target is not None and peer_target not in visible:
+            peer_target = None
+            self._native_quiet_tail_peer_target = None
+        self._native_fresh_render_targets = NativeFreshRenderTargets(
+            self=self_target,
+            peer=peer_target,
+        )
+        self._native_quiet_tail_episodes = NativeQuietTailEpisodes(
+            self=(self._native_quiet_tail_episodes.self if self_target is not None else None),
+            peer=(self._native_quiet_tail_episodes.peer if peer_target is not None else None),
+        )
 
     def _increment_native_fresh_render_generation(
         self,
