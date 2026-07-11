@@ -17,10 +17,11 @@ pub use openvr::{
     OverlayFrameSubmitter, OverlayPlacementPolicy,
 };
 pub use presentation::{
-    AdapterIdentity, AdapterMatch, PendingPresentationDiagnostics, PhysicalHmdVisibility,
-    PresentationBackend, PresentationCorrelation, PresentationDiagnosticRecord,
-    PresentationDiagnostics, PresentationOutcome, PresentationStage, PresentationStrategy,
-    ReadinessCancellation, ReadinessOutcome,
+    AdapterIdentity, AdapterMatch, CompositorAttribution, PendingPresentationDiagnostics,
+    PhysicalHmdVisibility, PresentationBackend, PresentationCause, PresentationCauseChannel,
+    PresentationCauseKind, PresentationCauses, PresentationCorrelation,
+    PresentationDiagnosticRecord, PresentationDiagnostics, PresentationOutcome, PresentationStage,
+    PresentationStrategy, ReadinessCancellation, ReadinessOutcome,
 };
 #[cfg(windows)]
 pub use renderer::WindowsBundledFontCollection;

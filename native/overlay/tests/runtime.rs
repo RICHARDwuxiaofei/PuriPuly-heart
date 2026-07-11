@@ -997,6 +997,21 @@ async fn runtime_correlates_allowlisted_presentation_stages_without_payload_data
     );
     assert_eq!(records[2].outcome, PresentationOutcome::Ready);
     assert_eq!(records[4].outcome, PresentationOutcome::Success);
+    assert_eq!(records[1].scene_generation, 934);
+    assert_eq!(records[1].logical_causes.len(), 1);
+    assert_eq!(
+        records[1].logical_causes[0].kind,
+        puripuly_heart_overlay::PresentationCauseKind::Startup
+    );
+    assert!(records[1].cpu_prepare_us.is_some());
+    assert!(records[1].cpu_render_us.is_some());
+    assert!(records[2].readiness_us.is_some());
+    assert!(records[4].submission_return_us.is_some());
+    assert_eq!(records[4].retry_profile, "p20_current_envelope");
+    assert!(!records[4].candidate_build_identity.is_empty());
+    assert!(records[4].candidate_build_identity.len() <= 64);
+    assert_eq!(records[4].environment_identity, "not_recorded");
+    assert_eq!(records[4].manual_hmd_observation, "not_recorded");
     assert!(records
         .iter()
         .all(|record| record.strategy == PresentationStrategy::BoundedGpuCompletion));

@@ -1,0 +1,95 @@
+version: 2
+schema_ref: .skills/implement-work/references/ledger.md
+run_ref: vr-overlay-coalesced-retry-optimization
+
+selected_input:
+  path: C:/Users/salee/Documents/dev/puripuly_heart/.agents/bundles/vr-overlay-coalesced-retry-optimization.yaml
+  sha256: eda96ce61e97c63af60145e39c8f967ebac4b5a8157b8b68e2c84d78c78a6527
+
+current:
+  gate_id: coalesced-presentation
+  cluster_id: coalesced-presentation-c1
+  work_refs:
+    - coordinate-coalesced-physical-presentation
+    - preserve-repeated-work-equivalence
+  next_action: continue
+
+gate_plans:
+  - gate_id: evidence-foundation
+    shape: split
+    clusters:
+      - id: evidence-foundation-c1
+        work_refs:
+          - establish-attributable-presentation-evidence
+        status: passed
+      - id: evidence-foundation-c2
+        work_refs:
+          - verify-evidence-foundation-integration
+        status: passed
+  - gate_id: coalesced-presentation
+    shape: split
+    clusters:
+      - id: coalesced-presentation-c1
+        work_refs:
+          - coordinate-coalesced-physical-presentation
+          - preserve-repeated-work-equivalence
+        status: in_progress
+      - id: coalesced-presentation-c2
+        work_refs:
+          - verify-phase-one-coalescing-equivalence
+        status: pending
+  - gate_id: capability-and-target-contract
+    shape: split
+    clusters:
+      - id: capability-and-target-contract-c1
+        work_refs:
+          - negotiate-native-retry-ownership
+          - scope-retry-intent-to-visible-target
+        status: pending
+      - id: capability-and-target-contract-c2
+        work_refs:
+          - verify-capability-target-integration
+        status: pending
+  - gate_id: quiet-tail-profile-selection
+    shape: split
+    clusters:
+      - id: quiet-tail-profile-selection-c1
+        work_refs:
+          - implement-bounded-quiet-tail-profiles
+        status: pending
+      - id: quiet-tail-profile-selection-c2
+        work_refs:
+          - verify-affected-hmd-profile-selection
+        status: pending
+  - gate_id: terminal-verification
+    shape: whole_gate
+    clusters:
+      - id: terminal-verification-c1
+        work_refs:
+          - verify-coalesced-retry-optimization-terminal
+        status: pending
+
+worktree:
+  path: .worktrees/iw-vr-overlay-coalesced-retry-optimization
+  branch: work/iw-vr-overlay-coalesced-retry-optimization
+  base_branch: vnext
+  base_commit: 92eff4229021189b7e9a82288cfc4eb6d260e838
+
+checkpoints:
+  - id: evidence-foundation
+    gate_id: evidence-foundation
+    cluster_id: evidence-foundation-c2
+    decision: pass
+    verification: passed
+    review: pass
+    summary: Behavior-neutral bounded diagnostics establish causal physical-attempt evidence under the unchanged P20 envelope; HMD and environment observations remain explicitly unrecorded.
+
+open_items:
+  - type: watchpoint
+    text: Phase 1 must preserve the two-second envelope and checkpoint identity.
+  - type: watchpoint
+    text: P05, P10, P15, and P20 selection requires affected-HMD evidence; no-retry and one-retry remain diagnostic controls only.
+
+notes:
+  - Derived from preserved branch work/iw-vr-overlay-adaptive-presentation-hardening at the recorded base commit; that worktree and its ledger are read-only for this run.
+  - Source PRD C:/Users/salee/Documents/dev/puripuly_heart/.agents/specs/prd/vr-overlay-coalesced-retry-optimization.md validated at bd23681724a419131f4475d109e2089e91c7f591a1bd4716b854fbb0f9642b7b.

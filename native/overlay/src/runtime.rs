@@ -21,7 +21,8 @@ use crate::openvr::{
     OpenVrOverlay, OpenVrStartupPreflightError, OverlayFrameSubmitter,
 };
 use crate::presentation::{
-    PresentationBackend, PresentationCorrelation, PresentationDiagnostics, ReadinessCancellation,
+    PresentationBackend, PresentationCause, PresentationCauseChannel, PresentationCauseKind,
+    PresentationCauses, PresentationCorrelation, PresentationDiagnostics, ReadinessCancellation,
     ReadinessOutcome,
 };
 use crate::renderer::{
@@ -147,6 +148,7 @@ pub struct PresentationRuntime {
     last_logical_caption_identity: LogicalCaptionIdentity,
     last_presentation_correlation: Option<PresentationCorrelation>,
     last_presentation_backend: Option<PresentationBackend>,
+    pending_presentation_causes: PresentationCauses,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,6 +249,15 @@ impl PresentationRuntime {
             last_logical_caption_identity: LogicalCaptionIdentity::default(),
             last_presentation_correlation: None,
             last_presentation_backend: None,
+            pending_presentation_causes: {
+                let mut causes = PresentationCauses::default();
+                causes.insert(PresentationCause {
+                    kind: PresentationCauseKind::Startup,
+                    channel: None,
+                    trigger_generation: None,
+                });
+                causes
+            },
         };
         if runtime.state.seed_snapshot(&snapshot) {
             runtime.redraw_requested = true;
@@ -304,6 +315,11 @@ impl PresentationRuntime {
         }
         if visual_changed {
             self.redraw_requested = true;
+            self.pending_presentation_causes.insert(PresentationCause {
+                kind: PresentationCauseKind::SceneUpdate,
+                channel: None,
+                trigger_generation: Some(snapshot.revision),
+            });
         }
         let previous_visible_rows = self.last_submitted_visible_rows.clone();
         let diagnostic_rows = collect_diagnostic_rows(self.state());
@@ -341,7 +357,37 @@ impl PresentationRuntime {
             return false;
         }
         self.redraw_requested = true;
+        self.pending_presentation_causes.insert(PresentationCause {
+            kind: PresentationCauseKind::ExternalRetry,
+            channel: None,
+            trigger_generation: None,
+        });
         true
+    }
+
+    fn request_fresh_presentation_retry(
+        &mut self,
+        channel: FreshRetryChannel,
+        trigger_generation: u64,
+    ) -> bool {
+        if self.stopped {
+            return false;
+        }
+        self.redraw_requested = true;
+        self.pending_presentation_causes.insert(PresentationCause {
+            kind: PresentationCauseKind::NativeFreshRetry,
+            channel: Some(match channel {
+                FreshRetryChannel::SelfChannel => PresentationCauseChannel::SelfChannel,
+                FreshRetryChannel::Peer => PresentationCauseChannel::Peer,
+            }),
+            trigger_generation: Some(trigger_generation),
+        });
+        true
+    }
+
+    fn retain_failed_presentation_causes(&mut self, correlation: PresentationCorrelation) {
+        self.pending_presentation_causes
+            .merge(correlation.logical_causes);
     }
 
     fn apply_runtime_logging_mode(
@@ -355,6 +401,11 @@ impl PresentationRuntime {
         let changed = was_detailed != is_detailed;
         if changed {
             self.redraw_requested = true;
+            self.pending_presentation_causes.insert(PresentationCause {
+                kind: PresentationCauseKind::RuntimeControl,
+                channel: None,
+                trigger_generation: None,
+            });
         }
         changed
     }
@@ -592,16 +643,21 @@ impl PresentationRuntime {
             renderer.adapter_identity(),
             renderer.adapter_match(openvr_adapter_identity),
         );
+        let scene_generation = self.state.snapshot().revision;
+        let presentation_causes = std::mem::take(&mut self.pending_presentation_causes);
         if self.pending_logical_revision_acceptance {
-            self.presentation_diagnostics
-                .accept_logical_revision(presentation_backend);
+            self.presentation_diagnostics.accept_logical_revision(
+                presentation_backend,
+                scene_generation,
+                presentation_causes.clone(),
+            );
             self.pending_logical_revision_acceptance = false;
         }
         let presentation_correlation = self
             .presentation_diagnostics
-            .begin_presentation()
+            .begin_presentation(scene_generation, presentation_causes)
             .expect("active presentation diagnostics owner");
-
+        let prepare_started = Instant::now();
         renderer.set_presentation(CaptionPresentation {
             background_alpha: self.state.calibration().background_alpha,
             text_scale: self.state.calibration().text_scale,
@@ -612,8 +668,10 @@ impl PresentationRuntime {
         let detailed_logging = logger.is_detailed();
         let visual_debug_overlays = false;
         let blocks = self.caption_blocks_for_render(visual_debug_overlays);
+        let mut cpu_prepare_us = duration_us(prepare_started.elapsed());
         self.emit_pending_peer_overlay_first_emit_hooks(logger)
             .await?;
+        let prepare_resumed = Instant::now();
         let has_drawable_text = blocks.iter().any(CaptionBlock::has_drawable_text);
         let debug_overlay = debug_overlay_for_frame(
             visual_debug_overlays,
@@ -624,6 +682,7 @@ impl PresentationRuntime {
             &blocks,
             &self.pending_peer_first_render_ids,
         );
+        cpu_prepare_us = cpu_prepare_us.saturating_add(duration_us(prepare_resumed.elapsed()));
         let overlay_visible_before = self.overlay_visible;
         let should_show_after_submit = has_drawable_text && !self.overlay_visible;
         let hide_deadline_was_active = self.hide_deadline.is_some();
@@ -636,29 +695,29 @@ impl PresentationRuntime {
         {
             self.hide_deadline = Some(Instant::now() + EMPTY_OVERLAY_HIDE_DELAY);
         }
-        let render_started = if detailed_logging {
-            Some(Instant::now())
-        } else {
-            None
-        };
+        let render_started = Instant::now();
         let render_result = if blocks.is_empty() {
             renderer.render_empty_frame()
         } else {
             renderer.render_blocks_with_debug_overlay(blocks, debug_overlay)
         };
+        let cpu_render_us = duration_us(render_started.elapsed());
         self.presentation_diagnostics.record_render_return(
             presentation_correlation,
             presentation_backend,
             render_result.is_ok(),
+            cpu_prepare_us,
+            cpu_render_us,
         );
         let frame = match render_result {
             Ok(frame) => frame,
             Err(error) => {
+                self.retain_failed_presentation_causes(presentation_correlation);
                 self.emit_pending_presentation_diagnostics(logger).await?;
                 return Err(RuntimeFailure::Render(error.to_string()));
             }
         };
-        let render_duration_us = render_started.map(|start| start.elapsed().as_micros());
+        let render_duration_us = detailed_logging.then_some(u128::from(cpu_render_us));
         let self_block_count = visible_self_block_count(frame.layout());
         let fully_transparent = frame.is_fully_transparent();
         let rendered_diagnostic_rows =
@@ -721,6 +780,7 @@ impl PresentationRuntime {
             None
         };
         let readiness_cancellation = ReadinessCancellation::default();
+        let readiness_started = Instant::now();
         if self.stopped {
             readiness_cancellation.cancel();
         }
@@ -770,8 +830,10 @@ impl PresentationRuntime {
             presentation_correlation,
             presentation_backend,
             readiness_outcome,
+            duration_us(readiness_started.elapsed()),
         );
         if readiness_outcome != ReadinessOutcome::Ready {
+            self.retain_failed_presentation_causes(presentation_correlation);
             self.emit_pending_presentation_diagnostics(logger).await?;
             if readiness_outcome == ReadinessOutcome::Cancelled && pending_message.is_some() {
                 return Ok(FrameCycleOutcome::Preempted(
@@ -788,13 +850,16 @@ impl PresentationRuntime {
         }
         self.presentation_diagnostics
             .record_submission_attempt(presentation_correlation, presentation_backend);
+        let submission_started = Instant::now();
         let submission_result = openvr.submit_frame(&frame);
         self.presentation_diagnostics.record_submission_return(
             presentation_correlation,
             presentation_backend,
             submission_result.is_ok(),
+            duration_us(submission_started.elapsed()),
         );
         if let Err(error) = submission_result {
+            self.retain_failed_presentation_causes(presentation_correlation);
             self.emit_pending_presentation_diagnostics(logger).await?;
             return Err(RuntimeFailure::OpenVr(error.to_string()));
         }
@@ -838,6 +903,16 @@ impl PresentationRuntime {
         }
         self.last_presentation_correlation = Some(presentation_correlation);
         self.last_presentation_backend = Some(presentation_backend);
+        if detailed_logging {
+            self.sample_and_log_frame_timing(
+                openvr,
+                logger,
+                self.state.snapshot().revision,
+                submit_duration_us,
+                presentation_backend,
+            )
+            .await?;
+        }
         self.emit_pending_presentation_diagnostics(logger).await?;
         self.note_submitted_visible_rows(logger, &rendered_diagnostic_rows, Instant::now())
             .await?;
@@ -862,15 +937,6 @@ impl PresentationRuntime {
                     &rendered_diagnostic_rows,
                     stage_durations,
                 ),
-            )
-            .await?;
-        }
-        if detailed_logging {
-            self.sample_and_log_frame_timing(
-                openvr,
-                logger,
-                self.state.snapshot().revision,
-                submit_duration_us,
             )
             .await?;
         }
@@ -1105,6 +1171,7 @@ impl PresentationRuntime {
         logger: &OverlayLogger,
         revision: u64,
         submit_duration_us: Option<u128>,
+        backend: PresentationBackend,
     ) -> Result<(), RuntimeFailure> {
         const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
         let now = Instant::now();
@@ -1117,6 +1184,15 @@ impl PresentationRuntime {
         let Some(t) = openvr.sample_frame_timing() else {
             return Ok(());
         };
+        self.presentation_diagnostics.record_compositor_observation(
+            backend,
+            t.frame_index,
+            t.num_dropped_frames,
+            t.num_mis_presented,
+            milliseconds_to_microseconds(t.compositor_render_cpu_ms),
+            milliseconds_to_microseconds(t.total_render_gpu_ms),
+            milliseconds_to_microseconds(t.post_submit_gpu_ms),
+        );
         log_runtime_info(
             logger,
             format_frame_timing_log(revision, &t, submit_duration_us),
@@ -1148,6 +1224,18 @@ impl PresentationRuntime {
 
     pub fn presentation_diagnostics(&self) -> &PresentationDiagnostics {
         &self.presentation_diagnostics
+    }
+}
+
+fn duration_us(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn milliseconds_to_microseconds(milliseconds: f32) -> Option<u64> {
+    if milliseconds.is_finite() && milliseconds >= 0.0 {
+        Some((milliseconds * 1_000.0).round() as u64)
+    } else {
+        None
     }
 }
 
@@ -1472,7 +1560,8 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
             self.record_fresh_retry(logger, schedule, "expired").await?;
             return Ok(FrameCycleOutcome::NoWork);
         }
-        self.runtime.request_native_presentation_retry();
+        self.runtime
+            .request_fresh_presentation_retry(channel, schedule.trigger_generation);
         let attempt = {
             let renderer = self.renderer.as_ref().expect("active renderer");
             let openvr = self.openvr.as_mut().expect("active OpenVR session");
@@ -2583,7 +2672,8 @@ mod tests {
         format_peer_first_render_visibility_checkpoint_log,
         format_peer_first_render_visibility_desync_suspected_log, format_snapshot_received_log,
         format_snapshot_slot_correlation_log, format_state_snapshot_log,
-        format_two_row_window_closed_log, peer_overlay_first_emit_block_ids_from_snapshot,
+        format_two_row_window_closed_log, milliseconds_to_microseconds,
+        peer_overlay_first_emit_block_ids_from_snapshot,
         peer_overlay_first_render_block_ids_from_caption_blocks, prepare_openvr_runtime,
         DiagnosticRow, FrameStageDurations, FreshRetryChannel, NativeFreshSchedule,
         NativePresentationOwner, OverlayRuntime, RenderedDiagnosticRow, RuntimeFailure,
@@ -2595,7 +2685,10 @@ mod tests {
         FakeOpenVr, FrameTimingSample, OpenVrError, OpenVrStartupPreflightError,
         OverlayFrameSubmitter,
     };
-    use crate::presentation::{PresentationBackend, PresentationOutcome, PresentationStage};
+    use crate::presentation::{
+        PresentationBackend, PresentationCauseChannel, PresentationCauseKind, PresentationCauses,
+        PresentationOutcome, PresentationStage,
+    };
     use crate::renderer::{
         CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
         CaptionPresentation, CaptionRenderer, FontLanguageBucket, FontSource, RenderDiagnostics,
@@ -2780,6 +2873,73 @@ mod tests {
             origin_wall_clock_ms: None,
             session_scope: None,
         }
+    }
+
+    #[test]
+    fn runtime_accumulates_normal_external_self_and_peer_attempt_causes() {
+        let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
+        runtime.apply_snapshot(OverlayPresentationSnapshot {
+            revision: 1,
+            calibration: OverlayPresentationCalibration::default(),
+            native_fresh_render_generations: None,
+            blocks: vec![block("synthetic", "self", "synthetic", "", true)],
+        });
+        assert!(runtime.request_native_presentation_retry());
+        assert!(runtime.request_fresh_presentation_retry(FreshRetryChannel::SelfChannel, 4));
+        assert!(runtime.request_fresh_presentation_retry(FreshRetryChannel::Peer, 9));
+
+        let causes = runtime.pending_presentation_causes.to_vec();
+        assert!(causes
+            .iter()
+            .any(|cause| cause.kind == PresentationCauseKind::Startup));
+        assert!(causes
+            .iter()
+            .any(|cause| cause.kind == PresentationCauseKind::SceneUpdate
+                && cause.trigger_generation == Some(1)));
+        assert!(causes
+            .iter()
+            .any(|cause| cause.kind == PresentationCauseKind::ExternalRetry));
+        assert!(causes.iter().any(|cause| cause.channel
+            == Some(PresentationCauseChannel::SelfChannel)
+            && cause.trigger_generation == Some(4)));
+        assert!(causes.iter().any(
+            |cause| cause.channel == Some(PresentationCauseChannel::Peer)
+                && cause.trigger_generation == Some(9)
+        ));
+    }
+
+    #[test]
+    fn failed_attempt_causes_are_retained_with_newer_pending_activity() {
+        let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
+        let attempt_causes = std::mem::take(&mut runtime.pending_presentation_causes);
+        runtime.presentation_diagnostics.accept_logical_revision(
+            PresentationBackend::Test,
+            0,
+            attempt_causes,
+        );
+        let correlation = runtime
+            .presentation_diagnostics
+            .begin_presentation(0, attempt_causes)
+            .unwrap();
+        runtime.request_native_presentation_retry();
+
+        runtime.retain_failed_presentation_causes(correlation);
+
+        let causes = runtime.pending_presentation_causes.to_vec();
+        assert!(causes
+            .iter()
+            .any(|cause| cause.kind == PresentationCauseKind::Startup));
+        assert!(causes
+            .iter()
+            .any(|cause| cause.kind == PresentationCauseKind::ExternalRetry));
+    }
+
+    #[test]
+    fn compositor_metric_conversion_preserves_unavailable_values() {
+        assert_eq!(milliseconds_to_microseconds(1.25), Some(1_250));
+        assert_eq!(milliseconds_to_microseconds(f32::NAN), None);
+        assert_eq!(milliseconds_to_microseconds(f32::INFINITY), None);
+        assert_eq!(milliseconds_to_microseconds(-1.0), None);
     }
 
     #[test]
@@ -3140,9 +3300,11 @@ mod tests {
         let stdout = ControlledSink::new(ControlledSinkMode::Success);
         let logger = controlled_logger(OverlayLoggingMode::Basic, stdout.clone());
         let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
-        runtime
-            .presentation_diagnostics
-            .accept_logical_revision(PresentationBackend::Test);
+        runtime.presentation_diagnostics.accept_logical_revision(
+            PresentationBackend::Test,
+            0,
+            PresentationCauses::default(),
+        );
 
         runtime
             .emit_pending_presentation_diagnostics(&logger)
@@ -3170,9 +3332,11 @@ mod tests {
             ControlledSink::new(ControlledSinkMode::Error),
         );
         let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
-        runtime
-            .presentation_diagnostics
-            .accept_logical_revision(PresentationBackend::Test);
+        runtime.presentation_diagnostics.accept_logical_revision(
+            PresentationBackend::Test,
+            0,
+            PresentationCauses::default(),
+        );
 
         runtime
             .emit_pending_presentation_diagnostics(&logger)
@@ -3189,9 +3353,11 @@ mod tests {
             ControlledSink::new(ControlledSinkMode::Pending),
         );
         let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
-        runtime
-            .presentation_diagnostics
-            .accept_logical_revision(PresentationBackend::Test);
+        runtime.presentation_diagnostics.accept_logical_revision(
+            PresentationBackend::Test,
+            0,
+            PresentationCauses::default(),
+        );
 
         runtime
             .emit_pending_presentation_diagnostics(&logger)
@@ -3210,12 +3376,14 @@ mod tests {
         let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
         runtime.first_texture_submitted = true;
         runtime.overlay_visible = true;
-        runtime
-            .presentation_diagnostics
-            .accept_logical_revision(PresentationBackend::Test);
+        runtime.presentation_diagnostics.accept_logical_revision(
+            PresentationBackend::Test,
+            0,
+            PresentationCauses::default(),
+        );
         let correlation = runtime
             .presentation_diagnostics
-            .begin_presentation()
+            .begin_presentation(0, PresentationCauses::default())
             .unwrap();
         runtime.last_presentation_correlation = Some(correlation);
         runtime.last_presentation_backend = Some(PresentationBackend::Test);
