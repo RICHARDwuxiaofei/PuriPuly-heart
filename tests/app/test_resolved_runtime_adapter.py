@@ -101,6 +101,44 @@ class ReplaceAllPlanner:
         return RuntimeResourceReplacementPlan("replace", "replace", "replace")
 
 
+@pytest.mark.parametrize(
+    "values",
+    [
+        {
+            "restored": False,
+            "cause_code": "runtime_install_validation_failed",
+        },
+        {
+            "restored": False,
+            "cause_code": "runtime_install_precommit_quiesce_failed",
+        },
+        {
+            "restored": False,
+            "cause_code": "runtime_install_rollback_state_failed",
+        },
+        {
+            "restored": True,
+            "cause_code": "runtime_install_rollback_task_start_failed",
+            "origin_cause_code": "runtime_install_postcommit_task_start_failed",
+        },
+        {
+            "restored": True,
+            "cause_code": "runtime_install_postcommit_binding_failed",
+            "origin_cause_code": "runtime_install_postcommit_binding_failed",
+        },
+    ],
+)
+def test_runtime_install_failure_rejects_invalid_restoration_contract(
+    values,
+) -> None:  # noqa: ANN001
+    with pytest.raises(ValueError):
+        RuntimeInstallFailure(
+            active=InstalledRuntimeState({}),
+            returned_candidates=(),
+            **values,
+        )
+
+
 def test_resource_identity_validation_and_shared_slots() -> None:
     resource = Resource()
     shared = _staged(ResourceRef("shared", resource))
@@ -147,7 +185,9 @@ async def test_restored_failure_closes_only_returned_candidates_and_preserves_ca
     await adapter.replace_runtime(_request(2))
     returned = ResourceRef("returned", Resource())
     adapter.factory = Factory(_staged(returned))
-    adapter.host = Host(RuntimeInstallFailure(active, (returned,), True, "install_failed"))
+    adapter.host = Host(
+        RuntimeInstallFailure(active, (returned,), True, "runtime_install_precommit_quiesce_failed")
+    )
     with pytest.raises(RuntimeResourceInstallError):
         await adapter.replace_runtime(_request(3))
     assert returned.resource.close_calls == 1
@@ -159,12 +199,16 @@ async def test_restored_failure_closes_only_returned_candidates_and_preserves_ca
 async def test_incomplete_rollback_invalidates_cache_and_cleanup_failure_keeps_primary() -> None:
     returned = ResourceRef("returned", Resource(fail=True))
     failure = RuntimeInstallFailure(
-        InstalledRuntimeState({}), (returned,), False, "rollback_incomplete"
+        InstalledRuntimeState({}),
+        (returned,),
+        False,
+        "runtime_install_rollback_state_failed",
+        origin_cause_code="runtime_install_postcommit_state_failed",
     )
     adapter = ResolvedRuntimeResourceAdapter(Factory(_staged(returned)), Host(failure))
     with pytest.raises(RuntimeResourceInstallError) as caught:
         await adapter.replace_runtime(_request(2))
-    assert caught.value.cause_code == "rollback_incomplete"
+    assert caught.value.cause_code == "runtime_install_rollback_state_failed"
     assert adapter._active_config is None
     assert adapter.cleanup_diagnostics[0].failed_resources == 1
 
@@ -401,7 +445,8 @@ async def test_failure_active_same_identity_different_object_must_return_staged_
         InstalledRuntimeState({"llm": active}),
         (),
         False,
-        "failed",
+        "runtime_install_rollback_state_failed",
+        origin_cause_code="runtime_install_postcommit_state_failed",
     )
     adapter = ResolvedRuntimeResourceAdapter(Factory(_staged(staged)), Host(failure))
     with pytest.raises(RuntimeResourceInstallError) as caught:
@@ -480,6 +525,45 @@ async def test_pending_cleanup_failure_retries_on_later_known_state_activation()
 
     await adapter.replace_runtime(_request(2))
     assert pending.resource.close_calls == 2
+    assert adapter._pending_settlement == {}
+
+
+@pytest.mark.asyncio
+async def test_ownership_return_close_failure_is_pending_and_retried_on_noop() -> None:
+    prior = ResourceRef("prior", Resource(fail_once=True))
+    candidate = ResourceRef("candidate", Resource())
+    initial = RuntimeInstallSuccess(
+        InstalledRuntimeState({slot: prior for slot in ("llm", "self_stt", "peer_stt")}),
+        frozenset({"prior"}),
+    )
+    adapter = ResolvedRuntimeResourceAdapter(
+        Factory(_staged(prior)), Host(initial), ReplaceAllPlanner()
+    )
+    await adapter.replace_runtime(_request(1))
+    success = RuntimeInstallSuccess(
+        InstalledRuntimeState({slot: candidate for slot in ("llm", "self_stt", "peer_stt")}),
+        frozenset({"candidate"}),
+        displaced=(prior,),
+    )
+    adapter.factory = Factory(_staged(candidate))
+    adapter.host = Host(success)
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        await adapter.replace_runtime(_request(2))
+    assert prior.resource.close_calls == 1
+    assert len(adapter._pending_settlement) == 1
+
+    adapter.planner = type(
+        "NoopPlanner",
+        (),
+        {
+            "plan": lambda self, current, target: RuntimeResourceReplacementPlan(
+                "retain", "retain", "retain"
+            )
+        },
+    )()
+    await adapter.replace_runtime(_request(2))
+    assert prior.resource.close_calls == 2
     assert adapter._pending_settlement == {}
 
 

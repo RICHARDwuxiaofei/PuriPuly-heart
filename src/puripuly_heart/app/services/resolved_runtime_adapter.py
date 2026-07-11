@@ -129,7 +129,7 @@ class ResolvedRuntimeResourceAdapter(ApplicationRuntimePort):
                 raise RuntimeResourceInstallError("invalid_install_result")
             if isinstance(result, RuntimeInstallFailure):
                 await self._close_refs(
-                    result.returned_candidates,
+                    (*result.displaced_prior, *result.returned_candidates),
                     set(result.active.identities),
                     "install_failure",
                     True,
@@ -251,6 +251,14 @@ class ResolvedRuntimeResourceAdapter(ApplicationRuntimePort):
             actual_returned = {ref.identity: ref for ref in result.returned_candidates}
             if not _same_ref_map(actual_returned, expected_returned):
                 return False
+            expected_displaced = {
+                ref.identity: ref
+                for ref in prior.slots.values()
+                if not any(_same_ref(ref, active_ref) for active_ref in active.slots.values())
+            }
+            actual_displaced = {ref.identity: ref for ref in result.displaced_prior}
+            if not _same_ref_map(actual_displaced, expected_displaced):
+                return False
             return not result.restored or _same_ref_map(active.slots, prior.slots)
         active_by_id = {ref.identity: ref for ref in active.slots.values()}
         expected_adopted = {
@@ -304,6 +312,7 @@ class ResolvedRuntimeResourceAdapter(ApplicationRuntimePort):
                 await ref.resource.close()
             except BaseException as exc:
                 failures.append(exc)
+                self._pending_settlement[(ref.identity, id(ref.resource))] = ref
         if failures:
             self.cleanup_diagnostics.append(
                 RuntimeResourceCleanupDiagnostic(operation, len(failures))

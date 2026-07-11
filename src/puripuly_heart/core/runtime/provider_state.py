@@ -1,16 +1,34 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Literal, Mapping
+from uuid import uuid4
 
 ProviderSlot = Literal["llm", "self_stt", "peer_stt"]
 
 
 @dataclass(frozen=True, slots=True)
+class ResourceRef:
+    identity: str
+    resource: object
+
+    def __post_init__(self) -> None:
+        if not self.identity.strip():
+            raise ValueError("resource identity must be non-empty")
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderSlotState:
-    provider: object | None
-    identity: int | None
+    ref: ResourceRef | None
     generation: int
+
+    @property
+    def provider(self) -> object | None:
+        return None if self.ref is None else self.ref.resource
+
+    @property
+    def identity(self) -> str | None:
+        return None if self.ref is None else self.ref.identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,9 +46,9 @@ class ProviderStateCell:
     def __init__(
         self,
         *,
-        llm: object | None = None,
-        self_stt: object | None = None,
-        peer_stt: object | None = None,
+        llm: object | ResourceRef | None = None,
+        self_stt: object | ResourceRef | None = None,
+        peer_stt: object | ResourceRef | None = None,
     ) -> None:
         self._snapshot = ProviderStateSnapshot(
             epoch=0,
@@ -43,29 +61,38 @@ class ProviderStateCell:
         return self._snapshot
 
     def replace(self, slot: ProviderSlot, provider: object | None) -> ProviderStateSnapshot:
+        ref = provider if isinstance(provider, ResourceRef) else _new_ref(provider)
+        return self.transition({slot: ref})
+
+    def transition(
+        self, replacements: Mapping[ProviderSlot, ResourceRef | None]
+    ) -> ProviderStateSnapshot:
         current = self._snapshot
-        prior = current.slot(slot)
-        if prior.provider is provider:
+        if all(current.slot(slot).ref is ref for slot, ref in replacements.items()):
             return current
-        updated = ProviderSlotState(
-            provider=provider,
-            identity=id(provider) if provider is not None else None,
-            generation=prior.generation + 1,
-        )
-        self._snapshot = replace(current, epoch=current.epoch + 1, **{slot: updated})
+        updates = {
+            slot: ProviderSlotState(ref=ref, generation=current.slot(slot).generation + 1)
+            for slot, ref in replacements.items()
+            if current.slot(slot).ref is not ref
+        }
+        self._snapshot = replace(current, epoch=current.epoch + 1, **updates)
         return self._snapshot
 
 
-def _initial_slot(provider: object | None) -> ProviderSlotState:
-    return ProviderSlotState(
-        provider=provider,
-        identity=id(provider) if provider is not None else None,
-        generation=0,
-    )
+def _new_ref(provider: object | None) -> ResourceRef | None:
+    if provider is None:
+        return None
+    return ResourceRef(f"provider-{uuid4().hex}", provider)
+
+
+def _initial_slot(provider: object | ResourceRef | None) -> ProviderSlotState:
+    ref = provider if isinstance(provider, ResourceRef) else _new_ref(provider)
+    return ProviderSlotState(ref=ref, generation=0)
 
 
 __all__ = [
     "ProviderSlot",
+    "ResourceRef",
     "ProviderSlotState",
     "ProviderStateCell",
     "ProviderStateSnapshot",

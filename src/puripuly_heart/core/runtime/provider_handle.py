@@ -5,7 +5,7 @@ import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from puripuly_heart.core.runtime.provider_state import ProviderSlot, ProviderStateCell
+from puripuly_heart.core.runtime.provider_state import ProviderSlot, ProviderStateCell, ResourceRef
 
 ProviderEventHandler = Callable[[object], Awaitable[None]]
 ProviderExceptionHandler = Callable[[Exception], Awaitable[None] | None]
@@ -62,6 +62,10 @@ class ProviderRuntimeHandle:
     @property
     def provider(self) -> object | None:
         return self._state_cell.snapshot().slot(self._slot).provider
+
+    @property
+    def resource_ref(self) -> ResourceRef | None:
+        return self._state_cell.snapshot().slot(self._slot).ref
 
     @property
     def event_task(self) -> asyncio.Task[None] | None:
@@ -152,6 +156,19 @@ class ProviderRuntimeHandle:
         async with self._lock:
             self._running = False
             await self._cancel_event_task()
+
+    async def _quiesce_for_transition(self) -> None:
+        async with self._lock:
+            self._running = False
+            await self._cancel_event_task()
+
+    def _bind_committed_state(self, *, running: bool) -> None:
+        self._running = running
+        self._closed = False
+        self._notify_state_changed()
+
+    def _start_committed_task(self) -> None:
+        self._start_event_loop_if_needed()
 
     async def close(self) -> None:
         async with self._lock:

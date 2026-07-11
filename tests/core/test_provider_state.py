@@ -6,7 +6,7 @@ from inspect import getsource
 import pytest
 
 from puripuly_heart.core.runtime.provider_handle import ProviderRuntimeHandle
-from puripuly_heart.core.runtime.provider_state import ProviderStateCell
+from puripuly_heart.core.runtime.provider_state import ProviderStateCell, ResourceRef
 
 
 def test_initial_snapshot_is_immutable_and_matches_all_slots() -> None:
@@ -69,6 +69,37 @@ def test_changed_generations_and_epoch_are_monotonic_while_retained_slots_preser
     assert after_rollback.epoch == 2
     assert after_rollback.llm.generation == 2
     assert after_rollback.llm.provider is original
+
+
+def test_resource_refs_are_stable_authority_and_re_adoption_keeps_exact_ref() -> None:
+    provider = object()
+    cell = ProviderStateCell(llm=provider)
+    original = cell.snapshot().llm.ref
+    assert original is not None
+    assert isinstance(original.identity, str)
+    assert original.resource is provider
+
+    replacement = ResourceRef("configured-provider", object())
+    cell.transition({"llm": replacement})
+    cell.transition({"llm": original})
+
+    assert cell.snapshot().llm.ref is original
+    assert cell.snapshot().llm.identity == original.identity
+    assert cell.snapshot().llm.generation == 2
+
+
+def test_atomic_transition_preserves_retained_slot_identity_and_generation() -> None:
+    cell = ProviderStateCell(llm=object(), self_stt=object(), peer_stt=object())
+    before = cell.snapshot()
+    llm = ResourceRef("new-llm", object())
+    peer = ResourceRef("new-peer", object())
+
+    after = cell.transition({"llm": llm, "peer_stt": peer})
+
+    assert after.epoch == before.epoch + 1
+    assert after.llm.ref is llm
+    assert after.peer_stt.ref is peer
+    assert after.self_stt is before.self_stt
 
 
 @pytest.mark.asyncio
