@@ -2,8 +2,10 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 #[cfg(windows)]
 use std::mem::ManuallyDrop;
+use std::sync::Arc;
 #[cfg(windows)]
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 #[cfg(windows)]
 use windows::core::{Interface, PCWSTR};
@@ -175,6 +177,7 @@ pub struct CaptionRenderer {
     test_readiness_call_count: Cell<usize>,
     test_readiness_pending_on_call: Cell<Option<(usize, usize)>>,
     test_readiness_terminal_on_call: Cell<Option<(usize, ReadinessOutcome)>>,
+    test_readiness_started_on_call: RefCell<Option<(usize, Arc<Notify>)>>,
 }
 
 impl CaptionRenderer {
@@ -269,6 +272,7 @@ impl CaptionRenderer {
             test_readiness_call_count: Cell::new(0),
             test_readiness_pending_on_call: Cell::new(None),
             test_readiness_terminal_on_call: Cell::new(None),
+            test_readiness_started_on_call: RefCell::new(None),
         })
     }
 
@@ -317,6 +321,16 @@ impl CaptionRenderer {
     ) -> ReadinessOutcome {
         let call = self.test_readiness_call_count.get() + 1;
         self.test_readiness_call_count.set(call);
+        let readiness_started = self
+            .test_readiness_started_on_call
+            .borrow()
+            .as_ref()
+            .filter(|(target_call, _)| *target_call == call)
+            .map(|(_, notify)| notify.clone());
+        if let Some(readiness_started) = readiness_started {
+            self.test_readiness_started_on_call.borrow_mut().take();
+            readiness_started.notify_one();
+        }
         if let Some((target_call, yields)) = self.test_readiness_pending_on_call.get() {
             if call == target_call {
                 self.test_readiness_pending_yields.set(yields);
@@ -355,6 +369,12 @@ impl CaptionRenderer {
     pub fn set_test_readiness_pending_yields_on_call(&self, call: usize, yields: usize) {
         self.test_readiness_pending_on_call
             .set(Some((call, yields)));
+    }
+
+    #[doc(hidden)]
+    pub fn set_test_readiness_started_notify_on_call(&self, call: usize, notify: Arc<Notify>) {
+        self.test_readiness_started_on_call
+            .replace(Some((call, notify)));
     }
 
     #[doc(hidden)]

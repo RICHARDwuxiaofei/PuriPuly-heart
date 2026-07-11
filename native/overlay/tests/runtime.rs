@@ -2872,9 +2872,11 @@ async fn production_owner_replaces_channel_token_and_empty_snapshot_cancels_sche
 }
 
 #[tokio::test]
-async fn production_owner_preemption_rebases_unchanged_token_after_pending_snapshot() {
+async fn production_owner_preemption_preserves_due_and_completes_on_pending_snapshot() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let readiness_started = Arc::new(tokio::sync::Notify::new());
+    let server_readiness_started = readiness_started.clone();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut ws = accept_async(stream).await.unwrap();
@@ -2883,6 +2885,8 @@ async fn production_owner_preemption_rebases_unchanged_token_after_pending_snaps
             json!({"type":"snapshot","payload":{
                 "revision":1,
                 "native_fresh_render_generations":{"self":7},
+                "native_fresh_render_targets":{"self":"self:preempt"},
+                "native_quiet_tail_episodes":{"self":{"phase":"final","generation":1}},
                 "blocks":[block("self:preempt","self","one","",true)]
             }})
             .to_string()
@@ -2896,11 +2900,13 @@ async fn production_owner_preemption_rebases_unchanged_token_after_pending_snaps
                 break;
             }
         }
-        tokio::time::sleep(Duration::from_millis(22)).await;
+        server_readiness_started.notified().await;
         ws.send(Message::Text(
             json!({"type":"snapshot","payload":{
                 "revision":2,
-                "native_fresh_render_generations":{"self":7},
+                "native_fresh_render_generations":{"self":8},
+                "native_fresh_render_targets":{"self":"self:preempt"},
+                "native_quiet_tail_episodes":{"self":{"phase":"final","generation":1}},
                 "blocks":[block("self:preempt","self","two","",true)]
             }})
             .to_string()
@@ -2919,6 +2925,7 @@ async fn production_owner_preemption_rebases_unchanged_token_after_pending_snaps
     let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
     let renderer = CaptionRenderer::new_for_test().unwrap();
     renderer.set_test_readiness_pending_yields_on_call(2, usize::MAX);
+    renderer.set_test_readiness_started_notify_on_call(2, readiness_started);
     let state = Arc::new(OwnedSubmitterState::default());
     let mut owner = NativePresentationOwner::new_with_retry_policy_for_test(
         snapshot,
@@ -2929,7 +2936,7 @@ async fn production_owner_preemption_rebases_unchanged_token_after_pending_snaps
             fail_on_submission: None,
             submit_delay: Duration::ZERO,
         },
-        Duration::from_millis(20),
+        Duration::ZERO,
         Duration::from_millis(200),
         1,
     );
@@ -2937,7 +2944,7 @@ async fn production_owner_preemption_rebases_unchanged_token_after_pending_snaps
     owner
         .run(
             &mut bridge,
-            &test_logger("unchanged-token-preemption").await,
+            &test_logger("generation-transfer-preemption").await,
         )
         .await
         .unwrap();
@@ -2950,7 +2957,7 @@ async fn production_owner_preemption_rebases_unchanged_token_after_pending_snaps
     assert_eq!(preempted.3, 0);
     let completed = audit
         .iter()
-        .find(|fact| fact.0 == "self" && fact.1 == 7 && fact.2 == "completed")
+        .find(|fact| fact.0 == "self" && fact.1 == 8 && fact.2 == "completed")
         .unwrap();
     assert_eq!(completed.3, 1);
     let normal_completion = owner
@@ -2977,7 +2984,7 @@ async fn production_owner_preemption_rebases_unchanged_token_after_pending_snaps
             .iter()
             .filter(|operation| operation.starts_with("submit"))
             .count(),
-        3
+        2
     );
     server.await.unwrap();
 }
