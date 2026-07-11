@@ -107,15 +107,41 @@ def _run_gui(
 ) -> int:
     import flet as ft
 
+    from puripuly_heart.app.adapters.overlay_lifecycle_production import (
+        resolve_overlay_lifecycle_configuration,
+    )
+    from puripuly_heart.app.wiring_composition import (
+        create_overlay_production_composition,
+    )
     from puripuly_heart.ui.app import main_gui
     from puripuly_heart.ui.fonts import assets_dir
 
+    initial_settings = _call_load_settings_or_default(
+        config_path, allow_stable_settings_import=allow_stable_settings_import
+    )
+
     async def _target(page: ft.Page):
+        composition = create_overlay_production_composition(
+            configuration=resolve_overlay_lifecycle_configuration(initial_settings)
+        )
         kwargs = {
             "config_path": config_path,
             "debug_ui_preview": debug_ui_preview,
         }
         parameters = inspect.signature(main_gui).parameters
+        accepts_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        )
+        if "overlay_commands" in parameters or accepts_kwargs:
+            kwargs["overlay_commands"] = composition.commands
+        if "overlay_application_state" in parameters or accepts_kwargs:
+            kwargs["overlay_application_state"] = composition.state
+        if "surface_runtime_transactions" in parameters or accepts_kwargs:
+            kwargs["surface_runtime_transactions"] = composition.transactions
+        if "overlay_ui_projection" in parameters or accepts_kwargs:
+            kwargs["overlay_ui_projection"] = composition.ui_projection
+        if "vrc_audio_gate" in parameters or accepts_kwargs:
+            kwargs["vrc_audio_gate"] = composition.audio_gate
         if "allow_stable_settings_import" in parameters or any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         ):

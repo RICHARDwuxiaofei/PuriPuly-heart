@@ -133,7 +133,7 @@ CURRENT_NODES = {
         "tests/core/test_overlay_bridge.py::test_overlay_bridge_swallows_authenticated_disconnect_without_close_frame",
         "tests/core/test_overlay_bridge.py::test_overlay_bridge_sends_authenticated_initial_snapshot",
         "tests/core/test_overlay_bridge.py::test_overlay_bridge_desktop_runtime_control_is_target_gated_from_steamvr_path",
-        "tests/ui/test_controller_branch_paths.py::test_overlay_target_routing_apply_settings_stops_before_switching_running_target",
+        "tests/app/services/test_overlay_lifecycle_engine.py::test_overlay_target_routing_apply_settings_stops_before_switching_running_target",
         "tests/core/test_overlay_bridge.py::test_overlay_bridge_resets_one_time_token_after_stop_and_restart",
     ],
     "prompt_fallback": [

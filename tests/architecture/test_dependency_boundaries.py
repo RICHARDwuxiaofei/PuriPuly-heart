@@ -468,14 +468,6 @@ KNOWN_ALLOWED_VIOLATIONS: frozenset[ImportViolation] = frozenset(
         ImportViolation(
             rule_id="ui-adapters-avoid-provider-construction",
             importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.core.osc.receiver",
-            importer_layer="UI adapters/renderers",
-            imported_layer="adapters",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
             imported="puripuly_heart.core.osc.udp_sender",
             importer_layer="UI adapters/renderers",
             imported_layer="adapters",
@@ -1338,6 +1330,39 @@ def test_ui_controller_active_overlay_logic_avoids_legacy_resource_mirrors() -> 
     assert offenders == []
 
 
+def test_ui_controller_does_not_own_overlay_lifecycle_or_concrete_resources() -> None:
+    controller_path = SOURCE_PACKAGE_ROOT / "ui" / "controller.py"
+    source = controller_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    forbidden_methods = {
+        "_begin_overlay_start",
+        "_run_overlay_start",
+        "_watch_overlay_runtime",
+        "_shutdown_overlay_runtime",
+        "_teardown_overlay_runtime",
+        "_new_overlay_runtime_handle",
+        "_ensure_overlay_runtime_handle",
+    }
+    definitions = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+    assert not forbidden_methods & definitions
+    for forbidden in (
+        "OverlayRuntimeHandle",
+        "OverlayProcessManager",
+        "DefaultOverlayProcessRunner",
+        "DesktopFletOverlayRunner",
+        "self._overlay_runtime",
+        "self._overlay_lock",
+        "self._active_overlay_target",
+        "self.hub.overlay_sink",
+        "self.hub.overlay_diagnostics",
+    ):
+        assert forbidden not in source
+
+
 def test_current_concrete_osc_imports_are_adapter_boundary_violations() -> None:
     orchestrator_rule = _rule_for_layer(ORCHESTRATOR)
     ui_rule = _rule_for_layer(UI_ADAPTERS_RENDERERS)
@@ -1346,14 +1371,6 @@ def test_current_concrete_osc_imports_are_adapter_boundary_violations() -> None:
             rule_id=ui_rule.rule_id,
             importer="src/puripuly_heart/ui/controller.py",
             imported="puripuly_heart.core.osc.chatbox_paginator",
-            importer_layer=UI_ADAPTERS_RENDERERS,
-            imported_layer=ADAPTERS,
-            reason=ui_rule.reason,
-        ),
-        ImportViolation(
-            rule_id=ui_rule.rule_id,
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.core.osc.receiver",
             importer_layer=UI_ADAPTERS_RENDERERS,
             imported_layer=ADAPTERS,
             reason=ui_rule.reason,

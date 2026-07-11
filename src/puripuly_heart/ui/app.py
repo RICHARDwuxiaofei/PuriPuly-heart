@@ -9,6 +9,11 @@ from pathlib import Path
 
 import flet as ft
 
+from puripuly_heart.app.ports.overlay_application import (
+    AudioCaptureGatePort,
+    OverlayApplicationCommandPort,
+    OverlayApplicationStatePort,
+)
 from puripuly_heart.app.ports.post_commit_runtime import SurfaceRuntimeTransactionPort
 from puripuly_heart.config.settings import (
     AppSettings,
@@ -118,6 +123,10 @@ class TranslatorApp:
         debug_ui_preview: bool = False,
         allow_stable_settings_import: bool = False,
         surface_runtime_transactions: SurfaceRuntimeTransactionPort | None = None,
+        overlay_commands: OverlayApplicationCommandPort | None = None,
+        overlay_application_state: OverlayApplicationStatePort | None = None,
+        overlay_ui_projection: object | None = None,
+        vrc_audio_gate: AudioCaptureGatePort | None = None,
     ):
         self.page = page
         controller_kwargs = {
@@ -126,15 +135,28 @@ class TranslatorApp:
             "config_path": config_path,
         }
         parameters = inspect.signature(GuiController).parameters
+        if "overlay_commands" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        ):
+            controller_kwargs["overlay_commands"] = overlay_commands
+        if "overlay_application_state" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        ):
+            controller_kwargs["overlay_application_state"] = overlay_application_state
         if "surface_runtime_transactions" in parameters or any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         ):
             controller_kwargs["surface_runtime_transactions"] = surface_runtime_transactions
+        if "vrc_audio_gate" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        ):
+            controller_kwargs["vrc_audio_gate"] = vrc_audio_gate
         if "allow_stable_settings_import" in parameters or any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         ):
             controller_kwargs["allow_stable_settings_import"] = allow_stable_settings_import
         self.controller = GuiController(**controller_kwargs)
+        self.overlay_commands = overlay_commands
         self.overlay_state = "off"
         self.overlay_failure_reason: str | None = None
         self.overlay_peer_contract = None
@@ -160,6 +182,13 @@ class TranslatorApp:
         self._telemetry_consent_dialog: TelemetryConsentDialog | None = None
         self._setup_page()
         self._build_layout()
+        if overlay_ui_projection is not None:
+            subscribe_dashboard = getattr(overlay_ui_projection, "subscribe_dashboard", None)
+            if callable(subscribe_dashboard):
+                subscribe_dashboard(self._apply_dashboard_runtime_facts)
+            subscribe_desktop = getattr(overlay_ui_projection, "subscribe_desktop", None)
+            if callable(subscribe_desktop):
+                subscribe_desktop(self._apply_desktop_renderer_projection)
 
         # Link Dashboard callbacks
         self.view_dashboard.on_send_message = self._on_manual_submit
@@ -216,6 +245,47 @@ class TranslatorApp:
         overlay_calibration = getattr(self.controller, "overlay_calibration", None)
         if callable(set_overlay_calibration) and overlay_calibration is not None:
             set_overlay_calibration(overlay_calibration)
+
+    def _apply_dashboard_runtime_facts(self, facts: object) -> None:
+        self.view_dashboard.translation_needs_key = not bool(getattr(facts, "llm_available", False))
+        self.view_dashboard.stt_needs_key = not bool(getattr(facts, "self_stt_available", False))
+
+    def _apply_desktop_renderer_projection(self, projection: object) -> None:
+        event = getattr(projection, "event", None)
+        bounds = getattr(projection, "bounds", None)
+        source = getattr(projection, "source", None)
+        persist = getattr(projection, "persist", False)
+        if (
+            event == "window_bounds_changed"
+            and source == "user"
+            and persist is True
+            and isinstance(bounds, tuple)
+            and len(bounds) == 4
+            and self.overlay_commands is not None
+        ):
+            payload = dict(zip(("x", "y", "width", "height"), bounds, strict=True))
+
+            async def _persist_bounds() -> None:
+                await self.overlay_commands.persist_desktop_bounds(payload)
+
+            self.page.run_task(_persist_bounds)
+        elif (
+            event == "reset_to_bottom_center_requested"
+            or (event == "window_bounds_changed" and source == "reset")
+        ) and self.overlay_commands is not None:
+
+            async def _reset_position() -> None:
+                await self.overlay_commands.reset_desktop_position()
+
+            self.page.run_task(_reset_position)
+        mode = getattr(projection, "interaction_mode", None)
+        if mode is not None:
+            if self.overlay_commands is not None:
+                self.overlay_commands.apply_desktop_interaction_mode_event(mode)
+            self.on_desktop_overlay_state_changed(
+                interaction_mode=mode,
+                captions_locked=mode in {"locked", "pass_through"},
+            )
 
     def _setup_page(self):
         self.page.title = t("app.title")
@@ -1759,12 +1829,28 @@ async def main_gui(
     config_path,
     debug_ui_preview: bool = False,
     allow_stable_settings_import: bool = False,
+    overlay_commands: OverlayApplicationCommandPort | None = None,
+    overlay_application_state: OverlayApplicationStatePort | None = None,
+    overlay_ui_projection: object | None = None,
+    vrc_audio_gate: AudioCaptureGatePort | None = None,
+    surface_runtime_transactions: SurfaceRuntimeTransactionPort | None = None,
 ):
-    app_kwargs = {
+    parameters = inspect.signature(TranslatorApp).parameters
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    candidates = {
         "config_path": config_path,
         "debug_ui_preview": debug_ui_preview,
+        "overlay_commands": overlay_commands,
+        "overlay_application_state": overlay_application_state,
+        "overlay_ui_projection": overlay_ui_projection,
+        "surface_runtime_transactions": surface_runtime_transactions,
+        "vrc_audio_gate": vrc_audio_gate,
     }
-    parameters = inspect.signature(TranslatorApp).parameters
+    app_kwargs = {
+        name: value for name, value in candidates.items() if name in parameters or accepts_kwargs
+    }
     if "allow_stable_settings_import" in parameters or any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     ):

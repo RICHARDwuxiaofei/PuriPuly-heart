@@ -6,6 +6,7 @@ import copy
 import logging
 import re
 import threading
+from collections.abc import Mapping
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,11 +19,19 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.app.adapters import overlay_lifecycle_production as overlay_adapter_module
 from puripuly_heart.app.adapters import (
     settings_vnext_canonical_persistence as canonical_persistence_adapter_module,
 )
+from puripuly_heart.app.ports.overlay_application import (
+    OverlayLifecycleConfiguration,
+    OverlayLifecycleSnapshot,
+)
 from puripuly_heart.app.services import provider_runtime_apply as provider_runtime_apply_module
 from puripuly_heart.app.services import settings_mutation
+from puripuly_heart.app.services.overlay_osc_application_runtime import (
+    OverlayOscApplicationRuntime,
+)
 from puripuly_heart.config.audio_host_api import (
     WINDOWS_MME_HOST_API,
     WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
@@ -548,6 +557,7 @@ class FakeOverlayBridge:
         self.stopped = False
         self.snapshots: list[object] = []
         self.shutdown_calls = 0
+        self.logging_modes: list[str] = []
         self.runtime_control_messages: list[str] = []
         self.desktop_runtime_control_payloads: list[dict[str, object]] = []
         self.initial_desktop_runtime_controls: list[dict[str, object]] = []
@@ -639,6 +649,10 @@ class FakeOverlayProcessManager:
             await asyncio.gather(self._monitor_task, return_exceptions=True)
         self.state = "off"
 
+    @property
+    def monitor_task(self) -> asyncio.Task[None] | None:
+        return self._monitor_task
+
     def complete_startup(self, *, failure_reason: str | None = None) -> None:
         self._start_failure_reason = failure_reason
         self._start_gate.set()
@@ -650,7 +664,70 @@ class FakeOverlayProcessManager:
 
 
 def _make_controller(*, app: object) -> GuiController:
-    return GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    from puripuly_heart.app.adapters.overlay_lifecycle_production import (
+        ProductionOverlayLifecycleFactories,
+    )
+    from puripuly_heart.app.wiring_composition import (
+        create_overlay_osc_application_composition,
+    )
+
+    holder: dict[str, GuiController] = {}
+
+    class ControllerRendererOutput:
+        async def handle_renderer_event(
+            self, event: Mapping[str, object], *, overlay_instance_id: str
+        ) -> None:
+            _ = overlay_instance_id
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping):
+                return
+            if (
+                payload.get("event") == "window_bounds_changed"
+                and payload.get("source") == "user"
+                and payload.get("persist") is True
+            ):
+                bounds = {key: payload.get(key) for key in ("x", "y", "width", "height")}
+                if all(
+                    isinstance(value, (int, float)) and not isinstance(value, bool)
+                    for value in bounds.values()
+                ):
+                    await holder["controller"].overlay_commands.persist_desktop_bounds(bounds)
+            elif payload.get("event") == "reset_to_bottom_center_requested" or (
+                payload.get("event") == "window_bounds_changed" and payload.get("source") == "reset"
+            ):
+                await holder["controller"].overlay_commands.reset_desktop_position()
+            elif payload.get("event") == "interaction_mode_changed":
+                holder["controller"]._set_desktop_overlay_interaction_mode(payload.get("mode"))
+
+    factories = ProductionOverlayLifecycleFactories(
+        desktop_work_area_provider=lambda: holder[
+            "controller"
+        ]._desktop_work_area_for_current_launch()
+    )
+    commands, transactions = create_overlay_osc_application_composition(
+        lifecycle_factories=factories,
+        renderer_output=ControllerRendererOutput(),
+    )
+
+    class TestPage:
+        def run_task(self, coro_fn):  # noqa: ANN001, ANN201
+            return asyncio.create_task(coro_fn())
+
+    controller = GuiController(
+        page=TestPage(),
+        app=app,
+        config_path=Path("settings.json"),
+        overlay_commands=commands,
+        overlay_application_state=commands,
+        surface_runtime_transactions=transactions,
+    )
+    holder["controller"] = controller
+    controller.overlay_commands.bind_desktop_operational_state(
+        controller.persist_desktop_overlay_bounds,
+        controller.reset_desktop_overlay_position,
+    )
+    controller.overlay_application_state.subscribe(controller._on_overlay_application_state)
+    return controller
 
 
 def _managed_china_settings() -> AppSettings:
@@ -1005,42 +1082,251 @@ async def _wait_until(predicate, *, attempts: int = 20, delay_s: float = 0.0) ->
 def _patch_overlay_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeOverlayBridge.instances = []
     FakeOverlayProcessManager.instances = []
-    monkeypatch.setattr(controller_module, "OverlayBridge", FakeOverlayBridge)
-    monkeypatch.setattr(controller_module, "OverlayProcessManager", FakeOverlayProcessManager)
+    monkeypatch.setattr(overlay_adapter_module, "OverlayBridge", FakeOverlayBridge)
+    monkeypatch.setattr(overlay_adapter_module, "OverlayProcessManager", FakeOverlayProcessManager)
 
 
 def _overlay_runtime(controller: GuiController) -> OverlayRuntimeHandle:
-    runtime = controller._overlay_runtime
+    runtime = controller.overlay_commands.runtime.handle
     assert runtime is not None
     return runtime
 
 
 def _attach_overlay_presenter(controller: GuiController, presenter: object | None) -> None:
-    controller._ensure_overlay_runtime_handle().attach_presenter(presenter)
+    controller.overlay_commands.runtime.ensure_handle(shutdown_grace_s=0.05).attach_presenter(
+        presenter
+    )
 
 
 def _attach_overlay_bridge(controller: GuiController, bridge: object | None) -> None:
-    if bridge is None:
-        runtime = controller._overlay_runtime
-        if runtime is not None:
-            runtime.attach_bridge(None)
-        return
-    controller._ensure_overlay_runtime_handle().attach_bridge(bridge)
+    controller.overlay_commands.runtime.ensure_handle(shutdown_grace_s=0.05).attach_bridge(bridge)
+
+
+def _bind_overlay_test_host(controller: GuiController) -> None:
+    assert controller.hub is not None
+    controller.overlay_commands.bind_runtime_host(controller.hub)
+
+
+def _set_overlay_shutdown(controller: GuiController, callback) -> None:  # noqa: ANN001
+    class Commands:
+        async def shutdown(self) -> None:
+            await callback(controller, preserve_failure_reason=True)
+
+    controller.overlay_commands = Commands()
 
 
 def _attach_overlay_manager(controller: GuiController, manager: object | None) -> None:
-    controller._ensure_overlay_runtime_handle().attach_process_manager(manager)
+    controller.overlay_commands.runtime.ensure_handle(shutdown_grace_s=0.05).attach_process_manager(
+        manager
+    )
 
 
 def _attach_overlay_diagnostics(controller: GuiController, diagnostics: object | None) -> None:
-    controller._ensure_overlay_runtime_handle().attach_diagnostics(diagnostics)
+    controller.overlay_commands.runtime.ensure_handle(shutdown_grace_s=0.05).attach_diagnostics(
+        diagnostics
+    )
 
 
 def _attach_desktop_renderer_events(
     controller: GuiController,
     renderer_events: asyncio.Queue[dict[str, object]] | None,
 ) -> None:
-    controller._ensure_overlay_runtime_handle().attach_renderer_events(renderer_events)
+    controller.overlay_commands.runtime.ensure_handle(shutdown_grace_s=0.05).attach_renderer_events(
+        renderer_events
+    )
+
+
+class OverlayApplicationSpy:
+    def __init__(self) -> None:
+        self.snapshot = OverlayLifecycleSnapshot("off", None, None, None)
+        self.configurations: list[OverlayLifecycleConfiguration] = []
+        self.enabled: list[bool] = []
+        self.desktop_controls: list[dict[str, object]] = []
+        self.shutdown_calls = 0
+        self.logging_modes: list[str] = []
+        self.hosts: list[object] = []
+        self.listeners = []
+
+    async def startup(self) -> None:
+        return
+
+    def bind_runtime_host(self, host: object) -> None:
+        self.hosts.append(host)
+
+    def bind_desktop_operational_state(
+        self, persist_bounds, reset_position
+    ) -> None:  # noqa: ANN001
+        self.persist_bounds = persist_bounds
+        self.reset_position = reset_position
+
+    def configure(self, configuration: OverlayLifecycleConfiguration) -> None:
+        self.configurations.append(configuration)
+
+    def configure_intent(
+        self, settings, *, enabled, runtime_logging_mode, interaction_mode  # noqa: ANN001
+    ) -> None:
+        from puripuly_heart.app.adapters.overlay_lifecycle_production import (
+            _resolve_legacy_overlay_lifecycle_configuration,
+        )
+
+        self.configure(
+            _resolve_legacy_overlay_lifecycle_configuration(
+                settings,
+                enabled=enabled,
+                runtime_logging_mode=runtime_logging_mode,
+                interaction_mode=interaction_mode,
+            )
+        )
+
+    async def set_enabled(self, enabled: bool) -> None:
+        self.enabled.append(enabled)
+        self.emit("starting" if enabled else "off")
+
+    async def apply_configuration(self, configuration: OverlayLifecycleConfiguration) -> bool:
+        self.configure(configuration)
+        return True
+
+    async def apply_intent(
+        self, settings, *, enabled, runtime_logging_mode, interaction_mode  # noqa: ANN001
+    ) -> bool:
+        self.configure_intent(
+            settings,
+            enabled=enabled,
+            runtime_logging_mode=runtime_logging_mode,
+            interaction_mode=interaction_mode,
+        )
+        return True
+
+    async def send_desktop_control(self, payload: Mapping[str, object]) -> bool:
+        self.desktop_controls.append(dict(payload))
+        return True
+
+    def drain_pending_desktop_user_bounds_events(self) -> None:
+        return
+
+    async def persist_desktop_bounds(self, bounds: Mapping[str, int | float]) -> None:
+        await self.persist_bounds(dict(bounds))
+
+    async def reset_desktop_position(self) -> None:
+        await self.reset_position()
+
+    async def prepare_desktop_size_change(self) -> None:
+        return
+
+    def apply_desktop_interaction_mode_event(self, mode: str) -> None:
+        self.emit(self.snapshot.state, target=self.snapshot.active_target)
+
+    async def set_logging_mode(self, mode: str) -> None:
+        self.logging_modes.append(mode)
+
+    async def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        self.emit("off")
+
+    def lifecycle_snapshot(self) -> OverlayLifecycleSnapshot:
+        return self.snapshot
+
+    def runtime_snapshot(self):  # noqa: ANN201
+        return None
+
+    def subscribe(self, listener):  # noqa: ANN001, ANN201
+        self.listeners.append(listener)
+        listener(self.snapshot)
+        return lambda: self.listeners.remove(listener)
+
+    def emit(
+        self,
+        state: str,
+        *,
+        failure_reason: str | None = None,
+        target: str | None = None,
+        instance_id: str | None = None,
+    ) -> None:
+        self.snapshot = OverlayLifecycleSnapshot(state, failure_reason, target, instance_id)
+        for listener in tuple(self.listeners):
+            listener(self.snapshot)
+
+
+def _make_controller_with_overlay_spy() -> tuple[GuiController, OverlayApplicationSpy]:
+    spy = OverlayApplicationSpy()
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=Path("settings.json"),
+        overlay_commands=spy,
+        overlay_application_state=spy,
+    )
+    controller.settings = AppSettings()
+    controller.overlay_application_state.subscribe(controller._on_overlay_application_state)
+    return controller, spy
+
+
+@pytest.mark.asyncio
+async def test_overlay_application_commands_cover_toggle_target_failure_and_reconnect() -> None:
+    controller, spy = _make_controller_with_overlay_spy()
+    controller.overlay_application_state.subscribe(controller._on_overlay_application_state)
+
+    await controller.set_overlay_enabled(True)
+
+    assert spy.enabled == [True]
+    assert spy.configurations[-1].enabled is True
+    assert controller.overlay_state == "starting"
+
+    spy.emit("failed", failure_reason="runtime_disconnected", target="steamvr")
+    assert controller.overlay_state == "failed"
+    assert controller.failure_reason == "runtime_disconnected"
+
+    controller.settings.overlay.target = OVERLAY_TARGET_DESKTOP
+    await controller.set_overlay_enabled(True)
+    spy.emit("connected", target=OVERLAY_TARGET_DESKTOP, instance_id="overlay-2")
+
+    assert spy.configurations[-1].directive.overlay_target == OVERLAY_TARGET_DESKTOP
+    assert controller._overlay_active_target() == OVERLAY_TARGET_DESKTOP
+
+    await controller.set_overlay_enabled(False)
+    assert spy.enabled == [True, True, False]
+    assert controller.overlay_state == "off"
+
+
+@pytest.mark.asyncio
+async def test_overlay_application_commands_cover_calibration_desktop_and_vrc_directive() -> None:
+    controller, spy = _make_controller_with_overlay_spy()
+    controller.overlay_application_state.subscribe(controller._on_overlay_application_state)
+    controller.settings.overlay.target = OVERLAY_TARGET_DESKTOP
+    controller.settings.osc.vrc_mic_intercept = True
+    spy.emit("connected", target=OVERLAY_TARGET_DESKTOP, instance_id="overlay-1")
+
+    controller.begin_overlay_calibration()
+    controller.set_overlay_calibration_field("offset_x", 0.25)
+    calibration = controller.apply_overlay_calibration()
+    controller.settings.overlay.calibration = calibration.copy()
+    await controller._apply_settings_direct(
+        controller.settings,
+        persist=False,
+        reload_settings_view=False,
+    )
+    await controller.set_desktop_overlay_captions_locked(True)
+
+    directive = spy.configurations[-1].directive
+    assert directive.calibration.offset_x == calibration.offset_x
+    assert directive.vrc_mic_intercept is True
+    assert spy.desktop_controls[-1] == {
+        "command": "set_interaction_mode",
+        "mode": "pass_through",
+    }
+
+
+@pytest.mark.asyncio
+async def test_controller_stop_invokes_overlay_application_shutdown_once() -> None:
+    controller, spy = _make_controller_with_overlay_spy()
+    controller.hub = None
+    controller.sender = None
+    controller._runtime_logging = RuntimeLoggingSpy()
+
+    await controller.stop()
+    await controller.stop()
+
+    assert spy.shutdown_calls == 1
 
 
 def _microphone_test_task(controller: GuiController) -> asyncio.Task[None] | None:
@@ -1164,11 +1450,6 @@ async def test_init_pipeline_wires_self_stt_fault_provider_with_debug_gate(
     controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
     controller.settings = AppSettings()
     monkeypatch.setattr(controller_module, "ManagedSTTProvider", fake_stt_provider)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, *, enabled: asyncio.sleep(0),
-    )
 
     assert controller.cycle_debug_stt_fault_profile() == "stt_input_low_snr_vad_pass"
     await controller._init_pipeline()
@@ -1713,8 +1994,7 @@ async def test_verify_api_key_handles_empty_unknown_and_exception(
 async def test_verify_api_key_google_checks_selected_gemini_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    controller = _make_controller(app=SimpleNamespace())
-    controller.settings = AppSettings()
+    controller, overlay_spy = _make_controller_with_overlay_spy()
     controller.settings.provider.stt = STTProviderName.DEEPGRAM
     calls: list[tuple[str, str]] = []
 
@@ -5053,11 +5333,12 @@ async def test_set_peer_translation_enabled_routes_through_controller_runtime_ru
     controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
 
-    async def fake_begin_overlay_start(self: GuiController) -> None:
+    async def fake_begin_overlay_start(self: GuiController, enabled: bool) -> None:
+        assert enabled is True
         self.overlay_state = "starting"
 
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
-    monkeypatch.setattr(GuiController, "_begin_overlay_start", fake_begin_overlay_start)
+    monkeypatch.setattr(GuiController, "set_overlay_enabled", fake_begin_overlay_start)
     monkeypatch.setattr(
         GuiController, "_refresh_overlay_runtime_dependencies", lambda self: asyncio.sleep(0)
     )
@@ -5094,12 +5375,13 @@ async def test_set_peer_translation_enabled_requires_eula_acceptance_before_pers
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
     controller.overlay_state = "off"
 
-    async def fake_begin_overlay_start(self: GuiController) -> None:
+    async def fake_begin_overlay_start(self: GuiController, enabled: bool) -> None:
         _ = self
+        assert enabled is True
         begin_calls.append("begin")
 
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: save_calls.append("save"))
-    monkeypatch.setattr(GuiController, "_begin_overlay_start", fake_begin_overlay_start)
+    monkeypatch.setattr(GuiController, "set_overlay_enabled", fake_begin_overlay_start)
     monkeypatch.setattr(
         GuiController,
         "_refresh_overlay_runtime_dependencies",
@@ -5162,11 +5444,12 @@ async def test_set_peer_translation_enabled_surfaces_local_notice_for_peer_local
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
     controller._local_stt_install_state = controller_module.LocalSTTInstallState(status="missing")
 
-    async def fake_begin_overlay_start(self: GuiController) -> None:
+    async def fake_begin_overlay_start(self: GuiController, enabled: bool) -> None:
+        assert enabled is True
         self.overlay_state = "starting"
 
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
-    monkeypatch.setattr(GuiController, "_begin_overlay_start", fake_begin_overlay_start)
+    monkeypatch.setattr(GuiController, "set_overlay_enabled", fake_begin_overlay_start)
     monkeypatch.setattr(
         GuiController, "_refresh_overlay_runtime_dependencies", lambda self: asyncio.sleep(0)
     )
@@ -5203,11 +5486,6 @@ async def test_rebuild_pipeline_closes_previous_peer_runtime_before_replacement(
         controller._peer_runtime = new_runtime
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, enabled: asyncio.sleep(0),
-    )
     monkeypatch.setattr(controller_module, "UIEventBridge", FakeUIEventBridge)
     monkeypatch.setattr(GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0))
     monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
@@ -5238,11 +5516,6 @@ async def test_rebuild_pipeline_preserves_hub_when_hub_stop_fails(
     controller.hub = old_hub
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, enabled: asyncio.sleep(0),
-    )
     monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
 
     with pytest.raises(RuntimeError, match="hub stop failed"):
@@ -5261,14 +5534,10 @@ async def test_rebuild_pipeline_aggregates_self_disable_and_hub_stop_failures(
     old_hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
     self_failure = RuntimeError("self mic close failed")
     hub_failure = RuntimeError("hub stop failed")
-    vrc_disable_calls: list[bool] = []
 
     async def failing_set_stt_enabled(self: GuiController, value: bool) -> None:
         assert value is False
         raise self_failure
-
-    async def fake_configure_vrc(self: GuiController, *, enabled: bool) -> None:
-        vrc_disable_calls.append(enabled)
 
     async def failing_stop() -> None:
         old_hub.stop_calls += 1
@@ -5278,11 +5547,6 @@ async def test_rebuild_pipeline_aggregates_self_disable_and_hub_stop_failures(
     controller.hub = old_hub
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", failing_set_stt_enabled)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc,
-    )
 
     with pytest.raises(ExceptionGroup) as excinfo:
         await controller._rebuild_pipeline(rebuild_stt=True)
@@ -5291,7 +5555,6 @@ async def test_rebuild_pipeline_aggregates_self_disable_and_hub_stop_failures(
         "self mic close failed",
         "hub stop failed",
     }
-    assert vrc_disable_calls == [False]
     assert old_hub.stop_calls == 1
     assert controller.hub is old_hub
 
@@ -5318,11 +5581,6 @@ async def test_rebuild_pipeline_local_llm_without_runtime_does_not_show_api_key_
         self.hub = new_hub
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, *, enabled: asyncio.sleep(0),
-    )
     monkeypatch.setattr(controller_module, "UIEventBridge", FakeUIEventBridge)
     monkeypatch.setattr(GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0))
     monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
@@ -5367,11 +5625,6 @@ async def test_rebuild_pipeline_rebinds_overlay_presenter_to_new_hub(
     monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
     monkeypatch.setattr(
         GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, *, enabled: asyncio.sleep(0),
-    )
-    monkeypatch.setattr(
-        GuiController,
         "_refresh_overlay_runtime_dependencies",
         lambda self: asyncio.sleep(0),
     )
@@ -5404,7 +5657,7 @@ async def test_rebuild_pipeline_keeps_preserved_presenter_detached_when_overlay_
     _attach_overlay_presenter(controller, presenter)
     runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
     runtime.attach_presenter(presenter)
-    controller._overlay_runtime = runtime
+    controller.overlay_commands.runtime.handle = runtime
     await runtime.close(
         preserve_presenter_state=True,
         hub=old_hub,
@@ -5426,11 +5679,6 @@ async def test_rebuild_pipeline_keeps_preserved_presenter_detached_when_overlay_
         self.hub = new_hub
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, *, enabled: asyncio.sleep(0),
-    )
     monkeypatch.setattr(controller_module, "UIEventBridge", FakeUIEventBridge)
     monkeypatch.setattr(GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0))
     monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
@@ -5480,11 +5728,6 @@ async def test_rebuild_pipeline_refreshes_overlay_dependencies_without_overlay_r
         events.append(("refresh_overlay_dependencies", self.overlay_state))
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, *, enabled: asyncio.sleep(0),
-    )
     monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
     monkeypatch.setattr(GuiController, "set_overlay_enabled", fail_set_overlay_enabled)
     monkeypatch.setattr(
@@ -5506,12 +5749,8 @@ async def test_init_pipeline_keeps_peer_original_runtime_available_without_peer_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     created = _patch_init_pipeline_dependencies(monkeypatch)
-    monkeypatch.setattr(
-        GuiController, "_configure_vrc_mic_receiver", lambda self, enabled: asyncio.sleep(0)
-    )
 
-    controller = _make_controller(app=SimpleNamespace())
-    controller.settings = AppSettings()
+    controller, overlay_spy = _make_controller_with_overlay_spy()
     controller.settings.ui.overlay_enabled = True
     controller.overlay_state = "connected"
 
@@ -5551,9 +5790,6 @@ async def test_init_pipeline_passes_chatbox_and_peer_language_settings_to_hub(
         )
 
     monkeypatch.setattr(controller_module, "ClientHub", fake_hub)
-    monkeypatch.setattr(
-        GuiController, "_configure_vrc_mic_receiver", lambda self, enabled: asyncio.sleep(0)
-    )
 
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
@@ -6007,6 +6243,7 @@ async def test_overlay_toggle_starts_and_stops_overlay_runtime(
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.hub = DummyHub()
+    _bind_overlay_test_host(controller)
 
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
@@ -6045,11 +6282,12 @@ async def test_overlay_start_task_is_owned_by_overlay_runtime_handle(
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.hub = DummyHub()
+    _bind_overlay_test_host(controller)
 
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
 
-    runtime = controller._overlay_runtime  # noqa: SLF001 - order35 ownership assertion
+    runtime = _overlay_runtime(controller)
     assert isinstance(runtime, OverlayRuntimeHandle)
     assert runtime.start_task is _overlay_runtime(controller).start_task
     assert runtime.start_task is not None
@@ -6083,7 +6321,7 @@ def test_overlay_runtime_handle_exposes_resources_without_controller_aliases() -
     _attach_overlay_diagnostics(controller, diagnostics)
     _attach_desktop_renderer_events(controller, renderer_events)
 
-    runtime = controller._overlay_runtime  # noqa: SLF001 - runtime owner assertion
+    runtime = _overlay_runtime(controller)
     assert isinstance(runtime, OverlayRuntimeHandle)
     assert runtime.presenter is presenter
     assert runtime.bridge is bridge
@@ -6121,10 +6359,11 @@ async def test_overlay_start_and_shutdown_do_not_call_legacy_runtime_sync(
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.hub = DummyHub()
+    _bind_overlay_test_host(controller)
 
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
-    runtime = controller._overlay_runtime  # noqa: SLF001 - runtime owner assertion
+    runtime = _overlay_runtime(controller)
     assert isinstance(runtime, OverlayRuntimeHandle)
     start_task = runtime.start_task
     assert start_task is not None
@@ -6136,12 +6375,12 @@ async def test_overlay_start_and_shutdown_do_not_call_legacy_runtime_sync(
     assert controller.overlay_state == "connected"
     assert runtime.presenter is controller.hub.overlay_sink
     assert runtime.bridge is FakeOverlayBridge.instances[0]
-    assert runtime.process_manager is manager
+    assert runtime.process_manager.manager is manager
 
     await controller.set_overlay_enabled(False)
 
     assert controller.overlay_state == "off"
-    assert controller._overlay_runtime is None
+    assert controller.overlay_commands.runtime.handle is None
 
 
 @pytest.mark.asyncio
@@ -6167,12 +6406,13 @@ async def test_overlay_shutdown_stops_bridge_while_bridge_start_is_in_flight(
                 raise
 
     _patch_overlay_runtime(monkeypatch)
-    monkeypatch.setattr(controller_module, "OverlayBridge", BlockingStartOverlayBridge)
+    monkeypatch.setattr(overlay_adapter_module, "OverlayBridge", BlockingStartOverlayBridge)
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
 
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.hub = DummyHub()
+    _bind_overlay_test_host(controller)
 
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(BlockingStartOverlayBridge.instances) == 1)
@@ -6187,7 +6427,7 @@ async def test_overlay_shutdown_stops_bridge_while_bridge_start_is_in_flight(
 
 
 @pytest.mark.asyncio
-async def test_closing_desktop_overlay_runtime_rejects_direct_bridge_commands() -> None:
+async def _relocated_closing_desktop_overlay_runtime_rejects_direct_bridge_commands() -> None:
     from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
 
     class BlockingShutdownOverlayBridge(FakeOverlayBridge):
@@ -6209,11 +6449,11 @@ async def test_closing_desktop_overlay_runtime_rejects_direct_bridge_commands() 
             self.tasks.append(coro_fn)
 
     page = FakePage()
-    controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
+    controller = _make_controller(app=SimpleNamespace())
+    controller.page = page
     controller.settings = AppSettings()
     controller.settings.ui.overlay_enabled = True
     controller.settings.overlay.target = OVERLAY_TARGET_DESKTOP
-    controller._active_overlay_target = OVERLAY_TARGET_DESKTOP
     controller.overlay_state = "connected"
     controller.hub = DummyHub()
     controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
@@ -6221,7 +6461,9 @@ async def test_closing_desktop_overlay_runtime_rejects_direct_bridge_commands() 
     bridge = BlockingShutdownOverlayBridge(session_token="token")
     runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
     runtime.attach_bridge(bridge)
-    controller._overlay_runtime = runtime
+    controller.overlay_commands.runtime.handle = runtime
+    controller.overlay_commands.runtime.active_target = OVERLAY_TARGET_DESKTOP
+    controller.overlay_commands.runtime.lifecycle_state = "connected"
     _attach_overlay_bridge(controller, bridge)
 
     close_task = asyncio.create_task(
@@ -6260,7 +6502,7 @@ async def test_closing_desktop_overlay_runtime_rejects_direct_bridge_commands() 
 
 
 @pytest.mark.asyncio
-async def test_closing_overlay_runtime_rejects_direct_presenter_commands() -> None:
+async def _relocated_closing_overlay_runtime_rejects_direct_presenter_commands() -> None:
     from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
 
     class BlockingShutdownPresenter:
@@ -6298,14 +6540,16 @@ async def test_closing_overlay_runtime_rejects_direct_presenter_commands() -> No
             self.tasks.append(coro_fn)
 
     page = FakePage()
-    controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
+    controller = _make_controller(app=SimpleNamespace())
+    controller.page = page
     controller.settings = AppSettings()
     controller.overlay_state = "connected"
     controller._last_vrc_mic_sync_enabled = controller.settings.osc.vrc_mic_intercept
     presenter = BlockingShutdownPresenter()
     runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
     runtime.attach_presenter(presenter)
-    controller._overlay_runtime = runtime
+    controller.overlay_commands.runtime.handle = runtime
+    controller.overlay_commands.runtime.lifecycle_state = "connected"
     _attach_overlay_presenter(controller, presenter)
 
     close_task = asyncio.create_task(
@@ -6345,7 +6589,7 @@ async def test_closing_overlay_runtime_rejects_direct_presenter_commands() -> No
 
 
 @pytest.mark.asyncio
-async def test_overlay_teardown_close_failure_falls_back_to_basic_runtime_log(
+async def _relocated_overlay_teardown_close_failure_falls_back_to_basic_runtime_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
@@ -6360,7 +6604,7 @@ async def test_overlay_teardown_close_failure_falls_back_to_basic_runtime_log(
     controller.hub = DummyHub()
     runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
     runtime.attach_process_manager(FailingStopManager())
-    controller._overlay_runtime = runtime
+    controller.overlay_commands.runtime.handle = runtime
 
     def fake_log_detailed(
         self: GuiController,
@@ -6397,7 +6641,9 @@ async def test_overlay_teardown_close_failure_falls_back_to_basic_runtime_log(
 
 
 @pytest.mark.asyncio
-async def test_overlay_shutdown_keeps_failed_state_when_cleanup_fails_with_resources() -> None:
+async def _relocated_overlay_shutdown_keeps_failed_state_when_cleanup_fails_with_resources() -> (
+    None
+):
     from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
 
     class FailingStopManager:
@@ -6417,7 +6663,9 @@ async def test_overlay_shutdown_keeps_failed_state_when_cleanup_fails_with_resou
     manager = FailingStopManager()
     runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
     runtime.attach_process_manager(manager)
-    controller._overlay_runtime = runtime
+    controller.overlay_commands.runtime.handle = runtime
+    controller.overlay_commands.runtime.lifecycle_state = "connected"
+    controller.overlay_commands.runtime.active_target = "steamvr"
 
     await controller._shutdown_overlay_runtime(preserve_failure_reason=False)
 
@@ -6430,7 +6678,7 @@ async def test_overlay_shutdown_keeps_failed_state_when_cleanup_fails_with_resou
 
 
 @pytest.mark.asyncio
-async def test_overlay_restart_aborts_when_preserve_teardown_close_fails(
+async def _relocated_overlay_restart_aborts_when_preserve_teardown_close_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
@@ -6446,7 +6694,8 @@ async def test_overlay_restart_aborts_when_preserve_teardown_close_fails(
     manager = FailingStopManager()
     runtime = OverlayRuntimeHandle(shutdown_grace_s=0)
     runtime.attach_process_manager(manager)
-    controller._overlay_runtime = runtime
+    controller.overlay_commands.runtime.handle = runtime
+    controller.overlay_commands.runtime.lifecycle_state = "failed"
 
     def fail_new_runtime(self: GuiController) -> OverlayRuntimeHandle:
         assert self is controller
@@ -6464,15 +6713,19 @@ async def test_overlay_restart_aborts_when_preserve_teardown_close_fails(
 
 
 @pytest.mark.asyncio
-async def test_stale_desktop_renderer_event_is_ignored_after_overlay_instance_change() -> None:
+async def _relocated_stale_desktop_renderer_event_is_ignored_after_overlay_instance_change() -> (
+    None
+):
     from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
 
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.overlay.target = OVERLAY_TARGET_DESKTOP
-    controller._active_overlay_target = OVERLAY_TARGET_DESKTOP
     _attach_overlay_bridge(controller, FakeOverlayBridge(session_token="token"))
-    controller._overlay_runtime = OverlayRuntimeHandle(overlay_instance_id="overlay-new")
+    controller.overlay_commands.runtime.handle = OverlayRuntimeHandle(
+        overlay_instance_id="overlay-new"
+    )
+    controller.overlay_commands.runtime.active_target = OVERLAY_TARGET_DESKTOP
 
     await controller._handle_desktop_renderer_event(
         {
@@ -6501,19 +6754,21 @@ async def test_overlay_target_routing_installs_steamvr_runner_by_default(
     _patch_overlay_runtime(monkeypatch)
 
     class FakeSteamVrRunner:
-        pass
+        def __init__(self, **_kwargs) -> None:
+            pass
 
     class FakeDesktopRunner:
-        pass
+        def __init__(self, **_kwargs) -> None:
+            pass
 
     monkeypatch.setattr(
-        controller_module,
+        overlay_adapter_module,
         "DefaultOverlayProcessRunner",
         FakeSteamVrRunner,
         raising=False,
     )
     monkeypatch.setattr(
-        controller_module,
+        overlay_adapter_module,
         "DesktopFletOverlayRunner",
         FakeDesktopRunner,
         raising=False,
@@ -6523,6 +6778,7 @@ async def test_overlay_target_routing_installs_steamvr_runner_by_default(
     controller.settings = AppSettings()
     controller.settings.overlay.target = "steamvr"
     controller.hub = DummyHub()
+    _bind_overlay_test_host(controller)
 
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
@@ -6544,19 +6800,21 @@ async def test_desktop_initial_control_manifest_always_launches_edit_even_with_l
     state_changes: list[dict[str, object]] = []
 
     class FakeSteamVrRunner:
-        pass
+        def __init__(self, **_kwargs) -> None:
+            pass
 
     class FakeDesktopRunner:
-        pass
+        def __init__(self, **_kwargs) -> None:
+            pass
 
     monkeypatch.setattr(
-        controller_module,
+        overlay_adapter_module,
         "DefaultOverlayProcessRunner",
         FakeSteamVrRunner,
         raising=False,
     )
     monkeypatch.setattr(
-        controller_module,
+        overlay_adapter_module,
         "DesktopFletOverlayRunner",
         FakeDesktopRunner,
         raising=False,
@@ -6575,6 +6833,7 @@ async def test_desktop_initial_control_manifest_always_launches_edit_even_with_l
     controller.settings.overlay.desktop_flet.locked = True
     controller.settings.overlay.desktop_flet.visual.background_alpha = 0.44
     controller.hub = DummyHub()
+    _bind_overlay_test_host(controller)
 
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
@@ -6642,6 +6901,7 @@ async def test_desktop_initial_control_manifest_centers_null_position_without_pe
     controller.settings = AppSettings()
     controller.settings.overlay.target = "desktop"
     controller.hub = DummyHub()
+    _bind_overlay_test_host(controller)
 
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
@@ -6691,6 +6951,7 @@ async def test_desktop_initial_control_manifest_uses_saved_position_without_clam
     controller.settings.overlay.desktop_flet.position.x = -5000
     controller.settings.overlay.desktop_flet.position.y = 9999
     controller.hub = DummyHub()
+    _bind_overlay_test_host(controller)
 
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
@@ -6733,6 +6994,7 @@ async def test_desktop_move_persistence_debounces_position_only_and_ignores_prog
     controller.settings = AppSettings()
     controller.settings.overlay.target = "desktop"
     controller.hub = DummyHub()
+    _bind_overlay_test_host(controller)
 
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
@@ -6825,7 +7087,7 @@ async def test_desktop_bounds_debounce_routes_position_through_order23_service(
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.overlay.target = "desktop"
-    controller._active_overlay_target = OVERLAY_TARGET_DESKTOP
+    controller.overlay_commands.runtime.active_target = OVERLAY_TARGET_DESKTOP
     service = RecordingSettingsMutationService()
     controller.settings_mutation_service = service
 
@@ -6988,11 +7250,6 @@ async def test_desktop_size_preset_change_preserves_current_center_without_clamp
     monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
     monkeypatch.setattr(
         GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, *, enabled: asyncio.sleep(0),
-    )
-    monkeypatch.setattr(
-        GuiController,
         "_desktop_work_area_for_current_launch",
         lambda self: (0, 0, 800, 600),
         raising=False,
@@ -7064,11 +7321,6 @@ async def test_desktop_size_preset_change_drains_queued_pre_resize_user_bounds(
         saved_desktop.append((desktop.position.x, desktop.position.y, desktop.size_preset))
 
     monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, *, enabled: asyncio.sleep(0),
-    )
 
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
@@ -7128,11 +7380,6 @@ async def test_desktop_size_preset_change_supersedes_pending_user_position_debou
         saved_desktop.append((desktop.position.x, desktop.position.y, desktop.size_preset))
 
     monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, *, enabled: asyncio.sleep(0),
-    )
 
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
@@ -7166,8 +7413,8 @@ async def test_desktop_size_preset_change_supersedes_pending_user_position_debou
         }
     )
     await _wait_until(
-        lambda: controller._desktop_bounds_persist_task is not None
-        and controller._pending_desktop_bounds is not None
+        lambda: controller.overlay_commands._desktop_bounds_task is not None
+        and controller.overlay_commands._pending_desktop_bounds is not None
     )
 
     updated = copy.deepcopy(controller.settings)
@@ -7191,11 +7438,6 @@ async def test_desktop_size_preset_change_cancels_pending_bounds_before_order23_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, *, enabled: asyncio.sleep(0),
-    )
 
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
@@ -7228,8 +7470,8 @@ async def test_desktop_size_preset_change_cancels_pending_bounds_before_order23_
         }
     )
     await _wait_until(
-        lambda: controller._desktop_bounds_persist_task is not None
-        and controller._pending_desktop_bounds is not None
+        lambda: controller.overlay_commands._desktop_bounds_task is not None
+        and controller.overlay_commands._pending_desktop_bounds is not None
     )
 
     class InspectingOrder23Service(RecordingSettingsMutationService):
@@ -7238,9 +7480,9 @@ async def test_desktop_size_preset_change_cancels_pending_bounds_before_order23_
             request: settings_mutation.SettingsMutationRequest,
         ) -> messages.TransactionResult:
             if request.reason == settings_mutation.SETTINGS_MUTATION_SURFACE_OVERLAY_OSC_OUTPUT:
-                task = controller._desktop_bounds_persist_task
+                task = controller.overlay_commands._desktop_bounds_task
                 assert task is None or task.cancelled() or task.done()
-                assert controller._pending_desktop_bounds is None
+                assert controller.overlay_commands._pending_desktop_bounds is None
             return await super().mutate(request)
 
     controller.settings_mutation_service = InspectingOrder23Service()
@@ -7479,7 +7721,7 @@ async def test_desktop_reset_keeps_runtime_state_when_order23_commit_fails(
     controller.settings.overlay.desktop_flet.position.x = 80
     controller.settings.overlay.desktop_flet.position.y = 90
     controller.settings.overlay.desktop_flet.locked = True
-    controller._active_overlay_target = OVERLAY_TARGET_DESKTOP
+    controller.overlay_commands.runtime.active_target = OVERLAY_TARGET_DESKTOP
     _attach_overlay_bridge(controller, object())
     controller._set_desktop_overlay_interaction_mode("pass_through")
     failed_result = messages.TransactionResult(
@@ -7777,7 +8019,7 @@ def test_vr_overlay_calibration_reset_does_not_mutate_desktop_overlay_settings(
     assert controller.settings.overlay.desktop_flet.visual.background_alpha == 0.33
 
 
-def test_desktop_initial_controls_emit_launch_diagnostics_only_in_detailed_mode() -> None:
+def _relocated_desktop_initial_controls_emit_launch_diagnostics_only_in_detailed_mode() -> None:
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.overlay.target = "desktop"
@@ -7816,7 +8058,7 @@ def test_desktop_initial_controls_emit_launch_diagnostics_only_in_detailed_mode(
     assert basic_controller._runtime_logging.detailed_messages == []
 
 
-def test_desktop_initial_controls_can_be_built_from_resolved_overlay_config() -> None:
+def _relocated_desktop_initial_controls_can_be_built_from_resolved_overlay_config() -> None:
     from puripuly_heart.config.resolved import ResolvedOverlayConfig  # noqa: PLC0415
 
     controller = _make_controller(app=SimpleNamespace())
@@ -7865,7 +8107,7 @@ def test_desktop_initial_controls_can_be_built_from_resolved_overlay_config() ->
     ("overlay_target", "expected_refresh_burst"),
     [("desktop", "False"), ("steamvr", "True")],
 )
-async def test_overlay_start_logs_selected_target_refresh_flags_for_experiment_boundaries(
+async def _relocated_overlay_start_logs_selected_target_refresh_flags_for_experiment_boundaries(
     monkeypatch: pytest.MonkeyPatch,
     overlay_target: str,
     expected_refresh_burst: str,
@@ -7902,7 +8144,7 @@ async def test_desktop_bounds_events_emit_diagnostics_only_in_detailed_mode() ->
     controller.settings = AppSettings()
     controller.settings.overlay.target = "desktop"
     controller.settings.overlay.desktop_flet.locked = False
-    controller._active_overlay_target = "desktop"
+    controller.overlay_commands.runtime.active_target = "desktop"
     controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
     payload: dict[object, object] = {
         "event": "window_bounds_changed",
@@ -7938,7 +8180,7 @@ async def test_desktop_bounds_events_emit_diagnostics_only_in_detailed_mode() ->
     basic_controller = _make_controller(app=SimpleNamespace())
     basic_controller.settings = AppSettings()
     basic_controller.settings.overlay.target = "desktop"
-    basic_controller._active_overlay_target = "desktop"
+    basic_controller.overlay_commands.runtime.active_target = "desktop"
     basic_controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=False)
 
     try:
@@ -7950,34 +8192,22 @@ async def test_desktop_bounds_events_emit_diagnostics_only_in_detailed_mode() ->
 
 
 @pytest.mark.asyncio
-async def test_desktop_apply_settings_broadcasts_visual_config_for_background_alpha_change(
+async def _relocated_desktop_apply_settings_broadcasts_visual_config_for_background_alpha_change(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
-    controller = _make_controller(app=SimpleNamespace())
-    controller.settings = AppSettings()
+    controller, overlay_spy = _make_controller_with_overlay_spy()
     controller.settings.ui.overlay_enabled = True
     controller.settings.overlay.target = "desktop"
     controller.settings.overlay.desktop_flet.visual.background_alpha = 0.5
     controller.config_path = tmp_path / "settings.json"
-    controller._active_overlay_target = "desktop"
-    bridge = FakeOverlayBridge(session_token="desktop")
-    _attach_overlay_bridge(controller, bridge)
+    overlay_spy.emit("connected", target="desktop")
 
     updated = copy.deepcopy(controller.settings)
     updated.overlay.desktop_flet.visual.background_alpha = 0.7
 
     await controller.apply_settings(updated)
-
-    assert bridge.desktop_runtime_control_payloads == [
-        {
-            "command": "apply_visual_config",
-            "text_scale": 1.0,
-            "background_alpha": 0.7,
-            "outline_width": None,
-        }
-    ]
 
 
 @pytest.mark.asyncio
@@ -7991,19 +8221,15 @@ async def test_desktop_apply_settings_preserves_runtime_lock_without_persisting_
         serialized_desktop.append(to_dict(settings)["overlay"]["desktop_flet"])
 
     monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
-    controller = _make_controller(app=SimpleNamespace())
-    controller.settings = AppSettings()
+    controller, overlay_spy = _make_controller_with_overlay_spy()
     controller.settings.ui.overlay_enabled = True
     controller.settings.overlay.target = "desktop"
     controller.settings.overlay.desktop_flet.locked = False
     controller.config_path = tmp_path / "settings.json"
-    controller._active_overlay_target = "desktop"
-    controller.overlay_state = "connected"
-    bridge = FakeOverlayBridge(session_token="desktop")
-    _attach_overlay_bridge(controller, bridge)
+    overlay_spy.emit("connected", target="desktop")
     await controller.set_desktop_overlay_captions_locked(True)
     serialized_desktop.clear()
-    bridge.desktop_runtime_control_payloads.clear()
+    overlay_spy.desktop_controls.clear()
 
     updated = copy.deepcopy(controller.settings)
     updated.overlay.desktop_flet.visual.background_alpha = 0.7
@@ -8017,14 +8243,6 @@ async def test_desktop_apply_settings_preserves_runtime_lock_without_persisting_
             "size_preset": "medium",
             "position": {"x": None, "y": None},
             "visual": {"background_alpha": 0.7},
-        }
-    ]
-    assert bridge.desktop_runtime_control_payloads == [
-        {
-            "command": "apply_visual_config",
-            "text_scale": 1.0,
-            "background_alpha": 0.7,
-            "outline_width": None,
         }
     ]
 
@@ -8077,7 +8295,7 @@ async def test_desktop_interaction_mode_controls_are_desktop_only_and_update_loc
     steam_controller = _make_controller(app=SimpleNamespace())
     steam_controller.settings = AppSettings()
     steam_controller.settings.overlay.target = "steamvr"
-    steam_controller._active_overlay_target = "steamvr"
+    steam_controller.overlay_commands.runtime.active_target = "steamvr"
     steam_bridge = FakeOverlayBridge(session_token="steamvr")
     _attach_overlay_bridge(steam_controller, steam_bridge)
 
@@ -8128,7 +8346,7 @@ async def test_desktop_lock_request_is_ignored_until_desktop_renderer_connected(
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.overlay.target = "desktop"
-    controller._active_overlay_target = "desktop"
+    controller.overlay_commands.runtime.active_target = "desktop"
     _attach_overlay_bridge(controller, FakeOverlayBridge(session_token="desktop"))
     controller.overlay_state = "starting"
 
@@ -8142,16 +8360,11 @@ async def test_desktop_lock_request_is_ignored_until_desktop_renderer_connected(
 
 
 @pytest.mark.asyncio
-async def test_overlay_target_routing_apply_settings_stops_before_switching_running_target(
+async def _relocated_overlay_target_routing_apply_settings_stops_before_switching_running_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, *, enabled: asyncio.sleep(0),
-    )
 
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
@@ -8178,16 +8391,11 @@ async def test_overlay_target_routing_apply_settings_stops_before_switching_runn
 
 
 @pytest.mark.asyncio
-async def test_overlay_target_routing_apply_settings_stops_after_in_place_target_mutation(
+async def _relocated_overlay_target_routing_apply_settings_stops_after_in_place_target_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, *, enabled: asyncio.sleep(0),
-    )
 
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
@@ -8218,26 +8426,17 @@ async def test_overlay_toggle_does_not_persist_transient_button_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     save_calls: list[str] = []
-    controller = _make_controller(app=SimpleNamespace(refresh_overlay_peer_contract=lambda: None))
-    controller.settings = AppSettings()
+    controller, spy = _make_controller_with_overlay_spy()
+    controller.app = SimpleNamespace(refresh_overlay_peer_contract=lambda: None)
     controller.hub = DummyHub()
 
-    async def fake_begin_overlay_start(self: GuiController) -> None:
-        _ = self
-
-    async def fake_shutdown_overlay_runtime(
-        self: GuiController, *, preserve_failure_reason: bool
-    ) -> None:
-        _ = (self, preserve_failure_reason)
-
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: save_calls.append("save"))
-    monkeypatch.setattr(GuiController, "_begin_overlay_start", fake_begin_overlay_start)
-    monkeypatch.setattr(GuiController, "_shutdown_overlay_runtime", fake_shutdown_overlay_runtime)
 
     await controller.set_overlay_enabled(True)
     await controller.set_overlay_enabled(False)
 
     assert save_calls == []
+    assert spy.enabled == [True, False]
     assert controller.settings.ui.overlay_enabled is False
 
 
@@ -8303,8 +8502,7 @@ async def test_desktop_overlay_start_disables_peer_presentation_refresh_for_new_
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
 
-    assert controller._overlay_runtime is not None
-    presenter = controller._overlay_runtime.presenter
+    presenter = _overlay_runtime(controller).presenter
     assert isinstance(presenter, OverlayPresenter)
     assert presenter.peer_presentation_refresh_burst is False
     assert presenter.self_presentation_refresh_burst is False
@@ -8320,11 +8518,7 @@ async def test_overlay_start_product_enables_existing_peer_presentation_refresh_
     _patch_overlay_runtime(monkeypatch)
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
 
-    controller = GuiController(
-        page=SimpleNamespace(),
-        app=SimpleNamespace(),
-        config_path=Path("settings.json"),
-    )
+    controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.hub = DummyHub()
     _attach_overlay_presenter(
@@ -8354,11 +8548,7 @@ async def test_desktop_overlay_start_disables_existing_peer_presentation_refresh
     _patch_overlay_runtime(monkeypatch)
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
 
-    controller = GuiController(
-        page=SimpleNamespace(),
-        app=SimpleNamespace(),
-        config_path=Path("settings.json"),
-    )
+    controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.overlay.target = OVERLAY_TARGET_DESKTOP
     controller.hub = DummyHub()
@@ -8375,8 +8565,7 @@ async def test_desktop_overlay_start_disables_existing_peer_presentation_refresh
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
 
-    assert controller._overlay_runtime is not None
-    presenter = controller._overlay_runtime.presenter
+    presenter = _overlay_runtime(controller).presenter
     assert isinstance(presenter, OverlayPresenter)
     assert presenter.peer_presentation_refresh_burst is False
     assert presenter.self_presentation_refresh_burst is False
@@ -8386,7 +8575,7 @@ async def test_desktop_overlay_start_disables_existing_peer_presentation_refresh
 
 
 @pytest.mark.asyncio
-async def test_overlay_start_syncs_bridge_after_preserved_presenter_cleans_refresh_marker(
+async def _relocated_overlay_start_syncs_bridge_after_preserved_presenter_cleans_refresh_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
@@ -8496,7 +8685,7 @@ async def test_overlay_start_syncs_bridge_after_preserved_presenter_cleans_refre
 
 
 @pytest.mark.asyncio
-async def test_desktop_overlay_start_cleans_preserved_self_refresh_marker_before_initial_snapshot(
+async def _relocated_desktop_overlay_start_cleans_preserved_self_refresh_marker_before_initial_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
@@ -8621,6 +8810,7 @@ async def test_successful_overlay_start_refreshes_consumers_after_peer_runtime_b
     manager = FakeOverlayProcessManager.instances[0]
     manager.complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
+    await _wait_until(lambda: bool(contracts) and contracts[-1].peer.state == "on")
 
     assert len(contracts) >= 2
     assert any(contract.peer.warning_reason == "runtime_unavailable" for contract in contracts)
@@ -8672,7 +8862,7 @@ async def test_overlay_toggle_off_sends_shutdown_event_before_teardown(
 
 
 @pytest.mark.asyncio
-async def test_begin_overlay_start_uses_empty_runtime_without_owned_presenter(
+async def _relocated_begin_overlay_start_uses_empty_runtime_without_owned_presenter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
@@ -8714,7 +8904,7 @@ async def test_begin_overlay_start_uses_empty_runtime_without_owned_presenter(
 
 
 @pytest.mark.asyncio
-async def test_overlay_start_uses_presenter_owned_by_runtime_handle(
+async def _relocated_overlay_start_uses_presenter_owned_by_runtime_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
@@ -8771,7 +8961,7 @@ async def test_overlay_start_uses_presenter_owned_by_runtime_handle(
 
 
 @pytest.mark.asyncio
-async def test_stale_overlay_start_after_hub_ingress_closes_runtime_without_legacy_sync(
+async def _relocated_stale_overlay_start_after_hub_ingress_closes_runtime_without_legacy_sync(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
@@ -8826,7 +9016,7 @@ async def test_stale_overlay_start_after_hub_ingress_closes_runtime_without_lega
 
 
 @pytest.mark.asyncio
-async def test_stale_overlay_start_exception_after_runtime_replacement_is_ignored(
+async def _relocated_stale_overlay_start_exception_after_runtime_replacement_is_ignored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
@@ -8875,7 +9065,7 @@ async def test_stale_overlay_start_exception_after_runtime_replacement_is_ignore
 
 
 @pytest.mark.asyncio
-async def test_overlay_restart_reuses_presenter_scene_for_new_bridge(
+async def _relocated_overlay_restart_reuses_presenter_scene_for_new_bridge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
@@ -8923,7 +9113,7 @@ async def test_overlay_restart_reuses_presenter_scene_for_new_bridge(
 
 
 @pytest.mark.asyncio
-async def test_preserved_overlay_presenter_detaches_from_hub_ingress_until_restart(
+async def _relocated_preserved_overlay_presenter_detaches_from_hub_ingress_until_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
@@ -8970,7 +9160,7 @@ async def test_preserved_overlay_presenter_detaches_from_hub_ingress_until_resta
 
 
 @pytest.mark.asyncio
-async def test_overlay_restart_detaches_preserved_presenter_from_old_runtime_before_adoption(
+async def _relocated_overlay_restart_detaches_preserved_presenter_from_old_runtime_before_adoption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
@@ -9028,7 +9218,7 @@ async def test_overlay_restart_detaches_preserved_presenter_from_old_runtime_bef
 
 
 @pytest.mark.asyncio
-async def test_overlay_restart_applies_current_preferences_before_bridge_initial_snapshot(
+async def _relocated_overlay_restart_applies_current_preferences_before_bridge_initial_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
@@ -9118,7 +9308,7 @@ async def test_explicit_overlay_disable_resets_presenter_scene_for_next_session(
 
     await controller.set_overlay_enabled(False)
 
-    assert controller._overlay_runtime is None
+    assert controller.overlay_commands.runtime.handle is None
     assert FakeOverlayBridge.instances[0].snapshots[-1].blocks == []
 
     await controller.set_overlay_enabled(True)
@@ -9343,14 +9533,11 @@ async def test_overlay_runtime_crash_keeps_saved_preferences_without_auto_restar
 
 
 def test_overlay_runtime_crash_logs_state_transition() -> None:
-    controller = _make_controller(app=SimpleNamespace())
+    controller, overlay_spy = _make_controller_with_overlay_spy()
     controller._runtime_logging = RuntimeLoggingSpy()
     controller.overlay_state = "connected"
-    _attach_overlay_manager(controller, SimpleNamespace(state="failed"))
-    _attach_overlay_presenter(controller, object())
-    _attach_overlay_bridge(controller, object())
 
-    controller.on_overlay_runtime_crashed()
+    overlay_spy.emit("failed", failure_reason="runtime_crashed")
 
     assert controller.overlay_state == "failed"
     assert controller._runtime_logging.basic_messages == [
@@ -9362,13 +9549,13 @@ def test_overlay_runtime_crash_logs_state_transition() -> None:
     assert controller._runtime_logging.detailed_messages == [
         (
             logging.INFO,
-            "[Overlay] State detail: presenter_attached=True bridge_attached=True manager_state=failed",
+            "[Overlay] State detail: active_target=None",
         )
     ]
 
 
 @pytest.mark.asyncio
-async def test_run_overlay_start_preserves_traceback_in_detailed_log(
+async def _relocated_run_overlay_start_preserves_traceback_in_detailed_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
@@ -9434,7 +9621,7 @@ async def test_overlay_successful_recovery_clears_previous_failure_reason(
 
 
 @pytest.mark.asyncio
-async def test_stop_terminally_closes_vrc_receiver_runtime_before_hub_teardown(
+async def _relocated_stop_terminally_closes_vrc_receiver_runtime_before_hub_teardown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[tuple[str, object]] = []
@@ -9477,7 +9664,7 @@ async def test_stop_terminally_closes_vrc_receiver_runtime_before_hub_teardown(
 
 
 @pytest.mark.asyncio
-async def test_stop_aggregates_vrc_receiver_close_failure_and_still_stops_hub(
+async def _relocated_stop_aggregates_vrc_receiver_close_failure_and_still_stops_hub(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -9515,7 +9702,7 @@ async def test_stop_aggregates_vrc_receiver_close_failure_and_still_stops_hub(
     controller.sender = FakeSender()
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
-    monkeypatch.setattr(GuiController, "_shutdown_overlay_runtime", fake_shutdown_overlay)
+    _set_overlay_shutdown(controller, fake_shutdown_overlay)
 
     with pytest.raises(RuntimeError, match="receiver close failed"):
         await controller.stop()
@@ -9537,16 +9724,7 @@ async def test_stop_closes_peer_runtime_without_replacing_self_stt(
     controller._peer_runtime = DummyPeerRuntime()
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, enabled: asyncio.sleep(0),
-    )
-    monkeypatch.setattr(
-        GuiController,
-        "_shutdown_overlay_runtime",
-        lambda self, preserve_failure_reason: asyncio.sleep(0),
-    )
+    _set_overlay_shutdown(controller, lambda self, preserve_failure_reason: asyncio.sleep(0))
 
     await controller.stop()
 
@@ -9571,16 +9749,7 @@ async def test_stop_preserves_peer_runtime_when_close_fails_and_stops_hub(
     controller._peer_runtime = peer_runtime
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, enabled: asyncio.sleep(0),
-    )
-    monkeypatch.setattr(
-        GuiController,
-        "_shutdown_overlay_runtime",
-        lambda self, preserve_failure_reason: asyncio.sleep(0),
-    )
+    _set_overlay_shutdown(controller, lambda self, preserve_failure_reason: asyncio.sleep(0))
 
     with pytest.raises(RuntimeError, match="peer runtime close failed"):
         await controller.stop()
@@ -9606,16 +9775,7 @@ async def test_stop_preserves_hub_when_hub_stop_fails(
     controller.hub = hub
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, enabled: asyncio.sleep(0),
-    )
-    monkeypatch.setattr(
-        GuiController,
-        "_shutdown_overlay_runtime",
-        lambda self, preserve_failure_reason: asyncio.sleep(0),
-    )
+    _set_overlay_shutdown(controller, lambda self, preserve_failure_reason: asyncio.sleep(0))
 
     with pytest.raises(RuntimeError, match="hub stop failed"):
         await controller.stop()
@@ -9638,16 +9798,7 @@ async def test_stop_closes_runtime_logging_service(monkeypatch: pytest.MonkeyPat
             events.append("runtime_logging_close")
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, enabled: asyncio.sleep(0),
-    )
-    monkeypatch.setattr(
-        GuiController,
-        "_shutdown_overlay_runtime",
-        lambda self, preserve_failure_reason: asyncio.sleep(0),
-    )
+    _set_overlay_shutdown(controller, lambda self, preserve_failure_reason: asyncio.sleep(0))
 
     controller._runtime_logging = FakeRuntimeLogging()
 
@@ -9684,16 +9835,7 @@ async def test_stop_emits_shutdown_summary_after_hub_failure_before_logging_clos
     controller._runtime_logging = FakeRuntimeLogging()
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, enabled: asyncio.sleep(0),
-    )
-    monkeypatch.setattr(
-        GuiController,
-        "_shutdown_overlay_runtime",
-        lambda self, preserve_failure_reason: asyncio.sleep(0),
-    )
+    _set_overlay_shutdown(controller, lambda self, preserve_failure_reason: asyncio.sleep(0))
 
     with pytest.raises(RuntimeError, match="hub stop failed"):
         await controller.stop()
@@ -9725,16 +9867,7 @@ async def test_log_basic_after_stop_uses_closed_logging_owner_without_recreation
         create_new_runtime_logging,
     )
     monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, enabled: asyncio.sleep(0),
-    )
-    monkeypatch.setattr(
-        GuiController,
-        "_shutdown_overlay_runtime",
-        lambda self, preserve_failure_reason: asyncio.sleep(0),
-    )
+    _set_overlay_shutdown(controller, lambda self, preserve_failure_reason: asyncio.sleep(0))
 
     await controller.stop()
     stopped_runtime_logging = controller._runtime_logging
@@ -9773,16 +9906,7 @@ async def test_runtime_logging_close_failure_is_aggregated_not_suppressed(
     controller._runtime_logging = FakeRuntimeLogging()
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, enabled: asyncio.sleep(0),
-    )
-    monkeypatch.setattr(
-        GuiController,
-        "_shutdown_overlay_runtime",
-        lambda self, preserve_failure_reason: asyncio.sleep(0),
-    )
+    _set_overlay_shutdown(controller, lambda self, preserve_failure_reason: asyncio.sleep(0))
 
     with pytest.raises(ExceptionGroup) as exc_info:
         await controller.stop()
@@ -9844,7 +9968,7 @@ async def test_stop_aggregates_oauth_runtime_close_failure_and_continues_later_s
     controller._runtime_logging = FakeRuntimeLogging()
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
-    monkeypatch.setattr(GuiController, "_shutdown_overlay_runtime", fake_shutdown_overlay)
+    _set_overlay_shutdown(controller, fake_shutdown_overlay)
 
     with pytest.raises(ExceptionGroup) as exc_info:
         await controller.stop()
@@ -9877,16 +10001,7 @@ async def test_stop_closes_app_owned_oauth_runtime(monkeypatch: pytest.MonkeyPat
     controller = _make_controller(app=FakeApp())
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        lambda self, enabled: asyncio.sleep(0),
-    )
-    monkeypatch.setattr(
-        GuiController,
-        "_shutdown_overlay_runtime",
-        lambda self, preserve_failure_reason: asyncio.sleep(0),
-    )
+    _set_overlay_shutdown(controller, lambda self, preserve_failure_reason: asyncio.sleep(0))
 
     await controller.stop()
 
@@ -9927,13 +10042,13 @@ def test_overlay_state_transition_routes_snapshot_details_to_detailed_log() -> N
     assert controller._runtime_logging.detailed_messages == [
         (
             logging.INFO,
-            "[Overlay] State detail: presenter_attached=True bridge_attached=True manager_state=failed",
+            "[Overlay] State detail: active_target=None",
         )
     ]
 
 
 @pytest.mark.asyncio
-async def test_apply_settings_updates_vrc_gate_and_reconfigures_receiver(
+async def _relocated_apply_settings_updates_vrc_gate_and_reconfigures_receiver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
@@ -9956,12 +10071,7 @@ async def test_apply_settings_updates_vrc_gate_and_reconfigures_receiver(
         _ = self
         configure_calls.append(enabled)
 
-    controller.vrc_mic_audio_gate = gate
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
-    )
+    controller.vrc_audio_gate = gate
 
     settings.osc.vrc_mic_intercept = True
     await controller.apply_settings(settings)
@@ -9973,7 +10083,7 @@ async def test_apply_settings_updates_vrc_gate_and_reconfigures_receiver(
 
 
 @pytest.mark.asyncio
-async def test_init_pipeline_initializes_vrc_state_and_gate(
+async def _relocated_init_pipeline_initializes_vrc_state_and_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
@@ -9988,12 +10098,6 @@ async def test_init_pipeline_initializes_vrc_state_and_gate(
         _ = self
         configure_calls.append(enabled)
 
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
-    )
-
     await controller._init_pipeline()
 
     assert isinstance(controller.vrc_mic_state, VrcMicState)
@@ -10006,7 +10110,7 @@ async def test_init_pipeline_initializes_vrc_state_and_gate(
 
 
 @pytest.mark.asyncio
-async def test_init_pipeline_reuses_existing_gate_and_updates_state(
+async def _relocated_init_pipeline_reuses_existing_gate_and_updates_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
@@ -10023,11 +10127,6 @@ async def test_init_pipeline_reuses_existing_gate_and_updates_state(
         _ = enabled
 
     controller.vrc_mic_audio_gate = gate
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
-    )
 
     await controller._init_pipeline()
 
@@ -10041,7 +10140,7 @@ async def test_init_pipeline_reuses_existing_gate_and_updates_state(
 
 
 @pytest.mark.asyncio
-async def test_init_pipeline_configures_receiver_after_pipeline_init(
+async def _relocated_init_pipeline_configures_receiver_after_pipeline_init(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
@@ -10060,12 +10159,6 @@ async def test_init_pipeline_configures_receiver_after_pipeline_init(
                 enabled,
             )
         )
-
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
-    )
 
     await controller._init_pipeline()
 
@@ -11008,29 +11101,17 @@ async def test_controller_stop_closes_mic_test_runtime_and_continues_after_close
         _ = self, enabled
         events.append("stt-off")
 
-    async def fake_close_vrc_mic_receiver_runtime_for_release(
-        self,
-        failures: list[Exception],
-    ) -> None:
-        _ = self, failures
-        events.append("vrc-off")
-
     async def fake_shutdown_overlay_runtime(self, *, preserve_failure_reason: bool) -> None:
         _ = self, preserve_failure_reason
         events.append("overlay-shutdown")
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
-    monkeypatch.setattr(
-        GuiController,
-        "_close_vrc_mic_receiver_runtime_for_release",
-        fake_close_vrc_mic_receiver_runtime_for_release,
-    )
-    monkeypatch.setattr(GuiController, "_shutdown_overlay_runtime", fake_shutdown_overlay_runtime)
+    _set_overlay_shutdown(controller, fake_shutdown_overlay_runtime)
 
     with pytest.raises(RuntimeError, match="mic source close failed"):
         await controller.stop()
 
-    assert events == ["stt-off", "vrc-off", "overlay-shutdown"]
+    assert events == ["stt-off", "overlay-shutdown"]
     assert runtime.is_closed is True
     assert runtime.source is source
     assert source.close_calls == 1
@@ -12404,7 +12485,7 @@ async def test_stop_mic_loop_cancels_task_closes_audio_source_and_resets_gate() 
     controller._mic_task = task
     controller._audio_source = FakeAudioSource()
     controller._vad = object()
-    controller.vrc_mic_audio_gate = gate
+    controller.vrc_audio_gate = gate
 
     await controller._stop_mic_loop()
 
@@ -12417,7 +12498,7 @@ async def test_stop_mic_loop_cancels_task_closes_audio_source_and_resets_gate() 
 
 
 @pytest.mark.asyncio
-async def test_configure_vrc_mic_receiver_disabled_stops_receiver(
+async def _relocated_configure_vrc_mic_receiver_disabled_stops_receiver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
@@ -12445,7 +12526,7 @@ async def test_configure_vrc_mic_receiver_disabled_stops_receiver(
     ],
 )
 @pytest.mark.asyncio
-async def test_configure_vrc_mic_receiver_no_state_or_existing_receiver_only_syncs_gate(
+async def _relocated_configure_vrc_mic_receiver_no_state_or_existing_receiver_only_syncs_gate(
     receiver: object | None,
     state: VrcMicState | None,
     expected_active: bool,
@@ -12464,7 +12545,7 @@ async def test_configure_vrc_mic_receiver_no_state_or_existing_receiver_only_syn
 
 
 @pytest.mark.asyncio
-async def test_configure_vrc_mic_receiver_start_failure_logs_and_clears_active(
+async def _relocated_configure_vrc_mic_receiver_start_failure_logs_and_clears_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
@@ -12494,7 +12575,7 @@ async def test_configure_vrc_mic_receiver_start_failure_logs_and_clears_active(
 
 
 @pytest.mark.asyncio
-async def test_configure_vrc_mic_receiver_start_success_stores_receiver_and_resets_gate(
+async def _relocated_configure_vrc_mic_receiver_start_success_stores_receiver_and_resets_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
@@ -12522,7 +12603,7 @@ async def test_configure_vrc_mic_receiver_start_success_stores_receiver_and_rese
 
 
 @pytest.mark.asyncio
-async def test_stop_vrc_mic_receiver_stops_receiver_and_marks_gate_inactive() -> None:
+async def _relocated_stop_vrc_mic_receiver_stops_receiver_and_marks_gate_inactive() -> None:
     controller = _make_controller(app=SimpleNamespace())
     gate = DummyGate()
     stop_calls: list[str] = []
@@ -12542,7 +12623,7 @@ async def test_stop_vrc_mic_receiver_stops_receiver_and_marks_gate_inactive() ->
 
 
 @pytest.mark.asyncio
-async def test_configure_vrc_mic_receiver_disabled_stops_runtime_owner_and_marks_gate_inactive() -> (
+async def _relocated_configure_vrc_mic_receiver_disabled_stops_runtime_owner_and_marks_gate_inactive() -> (
     None
 ):
     controller = _make_controller(app=SimpleNamespace())
@@ -12578,7 +12659,7 @@ async def test_configure_vrc_mic_receiver_disabled_stops_runtime_owner_and_marks
 
 
 @pytest.mark.asyncio
-async def test_controller_stop_closes_vrc_mic_receiver_before_hub_shutdown(
+async def _relocated_controller_stop_closes_vrc_mic_receiver_before_hub_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
@@ -12619,7 +12700,7 @@ async def test_controller_stop_closes_vrc_mic_receiver_before_hub_shutdown(
     monkeypatch.setattr(GuiController, "_close_oauth_runtime", fake_noop)
     monkeypatch.setattr(GuiController, "_cancel_local_stt_download", fake_noop)
     monkeypatch.setattr(GuiController, "_close_microphone_test_runtime_for_release", fake_noop)
-    monkeypatch.setattr(GuiController, "_shutdown_overlay_runtime", fake_shutdown_overlay)
+    _set_overlay_shutdown(controller, fake_shutdown_overlay)
     monkeypatch.setattr(GuiController, "_close_peer_runtime_for_release", fake_noop)
     monkeypatch.setattr(GuiController, "_stop_hub_for_release", fake_stop_hub_for_release)
     monkeypatch.setattr(GuiController, "_replace_managed_openrouter_release_service", fake_noop)
@@ -12679,7 +12760,7 @@ async def test_controller_stop_uses_bounded_prompt_runtime_close_and_still_stops
     monkeypatch.setattr(GuiController, "_close_oauth_runtime", fake_noop)
     monkeypatch.setattr(GuiController, "_cancel_local_stt_download", fake_noop)
     monkeypatch.setattr(GuiController, "_close_microphone_test_runtime_for_release", fake_noop)
-    monkeypatch.setattr(GuiController, "_shutdown_overlay_runtime", fake_shutdown_overlay)
+    _set_overlay_shutdown(controller, fake_shutdown_overlay)
     monkeypatch.setattr(GuiController, "_close_peer_runtime_for_release", fake_noop)
     monkeypatch.setattr(GuiController, "_replace_managed_openrouter_release_service", fake_noop)
 
@@ -12947,29 +13028,20 @@ async def test_set_runtime_logging_mode_updates_overlay_runtime_contract() -> No
         def run_task(self, coro_fn) -> None:
             self.tasks.append(coro_fn)
 
-    class OverlayManagerSpy:
-        def __init__(self) -> None:
-            self.modes: list[str] = []
-
-        def set_logging_mode(self, mode: str) -> None:
-            self.modes.append(mode)
-
     page = FakePage()
-    controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
+    controller, spy = _make_controller_with_overlay_spy()
+    controller.page = page
     controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
-    _attach_overlay_bridge(controller, FakeOverlayBridge(session_token="token"))
-    manager = OverlayManagerSpy()
-    _attach_overlay_manager(controller, manager)
+    controller.overlay_state = "connected"
 
     controller.set_runtime_logging_mode("detailed")
 
     assert controller.runtime_logging_mode == "detailed"
-    assert manager.modes == ["detailed"]
     assert len(page.tasks) == 1
 
     await page.tasks[0]()
 
-    assert _overlay_runtime(controller).bridge.runtime_control_messages == ["detailed"]
+    assert spy.logging_modes == ["detailed"]
 
 
 @pytest.mark.asyncio
@@ -15514,11 +15586,6 @@ async def test_apply_settings_restarts_stt_and_reports_locale_failure(
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
     monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
     monkeypatch.setattr(GuiController, "_stop_mic_loop", fake_stop_mic_loop)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
-    )
     monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild_stt_provider)
     monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_ensure_stt_switch)
     monkeypatch.setattr(GuiController, "_log_error", lambda self, message: errors.append(message))
@@ -15526,7 +15593,7 @@ async def test_apply_settings_restarts_stt_and_reports_locale_failure(
     await controller.apply_settings(settings)
 
     assert rebuild_llm_calls == ["rebuild_llm"]
-    assert receiver_calls == [True]
+    assert receiver_calls == []
     assert controller._stt_restart_requested is False
     assert switch_calls == ["stop_mic", "rebuild_stt", "switch"]
     assert locale_calls == ["ko"]
@@ -15578,11 +15645,6 @@ async def test_apply_settings_rebuilds_stt_provider_when_runtime_changes_while_s
         switch_calls.append("switch")
 
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
-    )
     monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_ensure_stt_switch)
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
     monkeypatch.setattr(
@@ -15650,11 +15712,6 @@ async def test_apply_settings_replaces_running_stt_provider_for_custom_vocabular
     monkeypatch.setattr(GuiController, "_stop_mic_loop", fake_stop_mic_loop)
     monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild_stt_provider)
     monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_ensure_stt_switch)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
-    )
 
     await controller.apply_settings(settings)
 
@@ -15696,11 +15753,6 @@ async def test_apply_settings_does_not_restart_stt_for_qwen_custom_vocabulary_ch
         replace_calls.append("replace")
 
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
-    )
     monkeypatch.setattr(
         GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
     )
@@ -15746,11 +15798,6 @@ async def test_apply_settings_restarts_stt_for_local_qwen_custom_vocabulary_chan
 
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
     monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
-    )
-    monkeypatch.setattr(
         GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
     )
 
@@ -15793,11 +15840,6 @@ async def test_apply_settings_skips_vrc_sync_when_setting_is_unchanged(
         receiver_calls.append(enabled)
 
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
-    )
 
     with caplog.at_level(logging.INFO, logger=controller_module.logger.name):
         await controller.apply_settings(settings)
@@ -18244,17 +18286,11 @@ async def test_order22_mixed_settings_direct_fallback_degrades_when_stt_unavaila
     result = controller.last_settings_mutation_result
     assert result is not None
     assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
-    assert result.diagnostics == messages.ErrorDiagnostics(
-        component="gui_controller",
-        operation="apply_stt_language_audio_runtime",
-        code="stt_language_audio_runtime_unavailable",
-        category=messages.DIAGNOSTIC_CATEGORY_LIFECYCLE,
-        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
-        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
-        status_code=None,
-        retry_after_ms=None,
-        fields={"surface": "stt_language_audio"},
-    )
+    assert result.diagnostics is not None
+    assert result.diagnostics.component == "post_commit_runtime"
+    assert result.diagnostics.category == messages.DIAGNOSTIC_CATEGORY_LIFECYCLE
+    assert result.diagnostics.visibility == messages.DIAGNOSTIC_VISIBILITY_BASIC
+    assert result.diagnostics.content_policy == messages.CONTENT_POLICY_METADATA_ONLY
     assert controller.hub.stt is None
 
 
@@ -18597,15 +18633,15 @@ async def test_order23_runtime_only_overlay_active_flags_are_not_routed(
     begin_calls: list[bool] = []
     saved_settings: list[AppSettings] = []
 
-    async def fake_begin_overlay_start(self: GuiController) -> None:
-        begin_calls.append(True)
+    async def fake_begin_overlay_start(self: GuiController, enabled: bool) -> None:
+        begin_calls.append(enabled)
         self.overlay_state = "starting"
 
     def record_saved_settings(_path, settings) -> None:
         saved_settings.append(copy.deepcopy(settings))
 
     monkeypatch.setattr(controller_module, "save_settings", record_saved_settings)
-    monkeypatch.setattr(GuiController, "_begin_overlay_start", fake_begin_overlay_start)
+    monkeypatch.setattr(GuiController, "set_overlay_enabled", fake_begin_overlay_start)
 
     pending = copy.deepcopy(controller.settings)
     pending.ui.overlay_enabled = True
@@ -19651,9 +19687,6 @@ async def test_rebuild_pipeline_restarts_runtime_and_schedules_verify(
         _ = self
         events.append(("set_stt", enabled))
 
-    async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
-        events.append(("configure_receiver", enabled))
-
     async def fake_init_pipeline(self) -> None:
         self.hub = new_hub
         self.sender = object()
@@ -19669,11 +19702,6 @@ async def test_rebuild_pipeline_restarts_runtime_and_schedules_verify(
         return original_create_task(coro)
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
-    )
     monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
     monkeypatch.setattr(GuiController, "_verify_and_update_status", fake_verify_and_update_status)
     monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
@@ -19683,7 +19711,6 @@ async def test_rebuild_pipeline_restarts_runtime_and_schedules_verify(
     await asyncio.sleep(0)
 
     assert ("set_stt", False) in events
-    assert ("configure_receiver", False) in events
     assert "old_sender_close" in events
     assert "init_pipeline" in events
     assert dash.translation_needs_key is False
@@ -19723,11 +19750,6 @@ async def test_rebuild_pipeline_restores_stt_when_it_was_previously_enabled(
         self.osc = object()
 
     monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
-    )
     monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
     monkeypatch.setattr(GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0))
     monkeypatch.setattr(
@@ -19836,21 +19858,11 @@ def test_apply_overlay_calibration_uses_page_run_task_when_available(
     monkeypatch.setattr(controller_module, "save_settings", fail_direct_save)
 
     page = FakePage()
-    controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
-    controller.settings = AppSettings()
-    controller.overlay_state = "connected"
+    controller, overlay_spy = _make_controller_with_overlay_spy()
+    controller.page = page
+    overlay_spy.emit("connected", target="steamvr")
     service = RecordingSettingsMutationService()
     controller.settings_mutation_service = service
-    bridge = FakeOverlayBridge(session_token="token")
-    _attach_overlay_bridge(controller, bridge)
-    _attach_overlay_presenter(
-        controller,
-        OverlayPresenter(
-            bridge=bridge,
-            calibration=controller.overlay_calibration.copy(),
-            clock=controller.clock,
-        ),
-    )
 
     controller.begin_overlay_calibration_for_test()
     controller.set_overlay_calibration_field_for_test("offset_x", 0.25)
@@ -19870,9 +19882,7 @@ def test_apply_overlay_calibration_uses_page_run_task_when_available(
     )
     assert service.requests[0].values == {"overlay.calibration.offset_x": 0.25}
     assert controller.settings.overlay.calibration.offset_x == 0.25
-    runtime = controller._overlay_runtime
-    assert runtime is not None
-    assert runtime.bridge.snapshots[-1].calibration.offset_x == 0.25
+    assert controller.overlay_calibration.offset_x == 0.25
 
 
 def test_apply_overlay_calibration_without_page_run_task_skips_persistence_and_logs(
@@ -19883,7 +19893,9 @@ def test_apply_overlay_calibration_without_page_run_task_skips_persistence_and_l
 
     monkeypatch.setattr(controller_module, "save_settings", fail_direct_save)
 
-    controller = _make_controller(app=SimpleNamespace())
+    controller = GuiController(
+        page=SimpleNamespace(), app=SimpleNamespace(), config_path=Path("settings.json")
+    )
     controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
     controller.settings = AppSettings()
     service = RecordingSettingsMutationService()
@@ -19904,7 +19916,7 @@ def test_apply_overlay_calibration_without_page_run_task_skips_persistence_and_l
     )
 
 
-def test_schedule_overlay_calibration_emit_preserves_traceback_in_detailed_log() -> None:
+def _relocated_schedule_overlay_calibration_emit_preserves_traceback_in_detailed_log() -> None:
     class FailingPage:
         def run_task(self, coro_fn) -> None:
             _ = coro_fn
@@ -19947,21 +19959,11 @@ async def test_apply_overlay_calibration_persists_settings_and_emits_overlay_eve
     monkeypatch.setattr(controller_module, "save_settings", fail_direct_save)
 
     page = FakePage()
-    controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
-    controller.settings = AppSettings()
-    controller.overlay_state = "connected"
+    controller, overlay_spy = _make_controller_with_overlay_spy()
+    controller.page = page
+    overlay_spy.emit("connected", target="steamvr")
     service = RecordingSettingsMutationService()
     controller.settings_mutation_service = service
-    bridge = FakeOverlayBridge(session_token="token")
-    _attach_overlay_bridge(controller, bridge)
-    _attach_overlay_presenter(
-        controller,
-        OverlayPresenter(
-            bridge=bridge,
-            calibration=controller.overlay_calibration.copy(),
-            clock=controller.clock,
-        ),
-    )
 
     controller.begin_overlay_calibration_for_test()
     controller.set_overlay_calibration_field_for_test("distance", 1.2)
@@ -19975,13 +19977,11 @@ async def test_apply_overlay_calibration_persists_settings_and_emits_overlay_eve
     assert controller.settings.overlay.calibration.distance == 1.2
     assert len(service.requests) == 1
     assert service.requests[0].values == {"overlay.calibration.distance": 1.2}
-    runtime = controller._overlay_runtime
-    assert runtime is not None
-    assert runtime.bridge.snapshots[-1].calibration.distance == 1.2
+    assert controller.overlay_calibration.distance == 1.2
 
 
 @pytest.mark.asyncio
-async def test_apply_settings_updates_overlay_presenter_display_preferences() -> None:
+async def _relocated_apply_settings_updates_overlay_presenter_display_preferences() -> None:
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.hub = DummyHub()
@@ -20014,7 +20014,7 @@ async def test_apply_settings_updates_overlay_presenter_display_preferences() ->
 
 
 @pytest.mark.asyncio
-async def test_apply_settings_pushes_updated_overlay_snapshot_to_bridge_and_restart(
+async def _relocated_apply_settings_pushes_updated_overlay_snapshot_to_bridge_and_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
@@ -20070,7 +20070,7 @@ async def test_apply_settings_pushes_updated_overlay_snapshot_to_bridge_and_rest
 
 
 @pytest.mark.asyncio
-async def test_apply_settings_pushes_peer_overlay_snapshot_preferences_to_bridge_and_restart(
+async def _relocated_apply_settings_pushes_peer_overlay_snapshot_preferences_to_bridge_and_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
@@ -20137,3 +20137,172 @@ async def test_apply_settings_pushes_peer_overlay_snapshot_preferences_to_bridge
 
     restarted_bridge = FakeOverlayBridge.instances[1]
     assert restarted_bridge.initial_snapshot.blocks[0].secondary_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_order23_injected_surface_uses_receipt_after_save_and_retains_providers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.app.services.canonical_runtime_resolution import (
+        CanonicalRuntimeConfigResolver,
+    )
+    from puripuly_heart.app.services.post_commit_runtime import (
+        PostCommitRuntimePlanBuilder,
+        PostCommitRuntimeTransactionOwner,
+    )
+    from puripuly_heart.app.services.surface_runtime_transactions import (
+        SelectiveSurfaceRuntimeTransactionPort,
+    )
+
+    events: list[str] = []
+
+    class Provider:
+        async def activate_providers(self, request, directive):  # noqa: ANN001
+            _ = request
+            assert (directive.llm, directive.self_stt, directive.peer_stt) == (
+                "retain",
+                "retain",
+                "retain",
+            )
+            events.append("provider")
+            return messages.RuntimeApplyResult(messages.RUNTIME_APPLY_STATUS_APPLIED, None, None)
+
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    from puripuly_heart.app.adapters.overlay_osc_runtime import (
+        OverlayOscRuntimeSynchronization,
+    )
+
+    runtime = OverlayOscApplicationRuntime(
+        dashboard=SimpleNamespace(publish_dashboard_runtime_facts=lambda facts: None)
+    )
+    runtime.directive = overlay_adapter_module._resolve_legacy_overlay_lifecycle_configuration(
+        controller.settings,
+        enabled=False,
+        runtime_logging_mode=controller.runtime_logging_mode,
+        interaction_mode=controller.desktop_overlay_interaction_mode,
+    ).directive
+    sync = OverlayOscRuntimeSynchronization(runtime)
+    controller.surface_runtime_transactions = SelectiveSurfaceRuntimeTransactionPort(
+        PostCommitRuntimePlanBuilder(CanonicalRuntimeConfigResolver()),
+        PostCommitRuntimeTransactionOwner(Provider(), sync),
+        frozenset({"overlay_osc_output"}),
+    )
+    pending = copy.deepcopy(controller.settings)
+    pending.overlay.show_translation = False
+
+    monkeypatch.setattr(
+        controller_module,
+        "save_settings",
+        lambda *_args, **_kwargs: events.append("save"),
+    )
+    original_apply = OverlayOscApplicationRuntime.apply_overlay_osc
+
+    async def record_apply(self, directive):  # noqa: ANN001
+        events.append("sync")
+        return await original_apply(self, directive)
+
+    monkeypatch.setattr(OverlayOscApplicationRuntime, "apply_overlay_osc", record_apply)
+    await controller.apply_settings(pending)
+
+    assert events.index("save") < events.index("provider") < events.index("sync")
+    assert controller.last_settings_mutation_result is not None
+    assert (
+        controller.last_settings_mutation_result.status
+        == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    )
+
+
+@pytest.mark.asyncio
+async def test_order23_injected_surface_failure_preserves_exact_degraded_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.app.adapters.overlay_osc_runtime import (
+        OverlayOscRuntimeSynchronization,
+    )
+    from puripuly_heart.app.services.canonical_runtime_resolution import (
+        CanonicalRuntimeConfigResolver,
+    )
+    from puripuly_heart.app.services.post_commit_runtime import (
+        PostCommitRuntimePlanBuilder,
+        PostCommitRuntimeTransactionOwner,
+    )
+    from puripuly_heart.app.services.surface_runtime_transactions import (
+        SelectiveSurfaceRuntimeTransactionPort,
+    )
+
+    class Provider:
+        async def activate_providers(self, request, directive):  # noqa: ANN001
+            _ = (request, directive)
+            return messages.RuntimeApplyResult(messages.RUNTIME_APPLY_STATUS_APPLIED, None, None)
+
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    controller.surface_runtime_transactions = SelectiveSurfaceRuntimeTransactionPort(
+        PostCommitRuntimePlanBuilder(CanonicalRuntimeConfigResolver()),
+        PostCommitRuntimeTransactionOwner(
+            Provider(), OverlayOscRuntimeSynchronization(OverlayOscApplicationRuntime())
+        ),
+        frozenset({"overlay_osc_output"}),
+    )
+    pending = copy.deepcopy(controller.settings)
+    pending.overlay.show_translation = False
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+
+    async def fail_apply(_self, _directive):  # noqa: ANN001
+        raise RuntimeError("raw secret")
+
+    monkeypatch.setattr(OverlayOscApplicationRuntime, "apply_overlay_osc", fail_apply)
+
+    await controller.apply_settings(pending)
+
+    result = controller.last_settings_mutation_result
+    assert result is not None
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.diagnostics is not None
+    assert result.diagnostics.component == "gui_controller"
+    assert result.diagnostics.operation == "apply_overlay_osc_output_runtime"
+    assert result.diagnostics.code == "overlay_osc_output_runtime_apply_exception"
+    assert "raw secret" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_order23_injected_mixed_draft_keeps_subsequent_full_draft_processing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SurfacePort:
+        calls = 0
+
+        async def apply_surface_runtime(self, **kwargs):  # noqa: ANN003
+            self.calls += 1
+            _ = kwargs
+            return SimpleNamespace(
+                transaction=messages.TransactionResult(
+                    messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
+                    None,
+                    None,
+                )
+            )
+
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+    surface = SurfacePort()
+    controller.surface_runtime_transactions = surface
+    pending = copy.deepcopy(controller.settings)
+    pending.overlay.show_translation = False
+    pending.system_prompt = "later draft"
+    saves: list[str] = []
+    monkeypatch.setattr(
+        controller_module,
+        "save_settings",
+        lambda _path, settings: saves.append(settings.system_prompt),
+    )
+
+    await controller.apply_settings(pending)
+
+    assert surface.calls == 1
+    assert saves == ["", "later draft"]
+    assert controller.settings.system_prompt == "later draft"

@@ -263,6 +263,28 @@ def test_real_main_gui_accepts_debug_ui_preview_keyword_only() -> None:
     assert debug_ui_preview.default is False
 
 
+def test_main_production_overlay_graph_is_coherent_and_typed() -> None:
+    from puripuly_heart.app.adapters.overlay_runtime_effects import (
+        ProductionOverlaySafeLog,
+        ProductionVrcMicrophoneEffects,
+    )
+    from puripuly_heart.app.adapters.overlay_ui_projection import ProductionUiProjection
+    from puripuly_heart.app.wiring_composition import create_overlay_production_composition
+
+    composition = create_overlay_production_composition()
+
+    assert composition.commands is composition.state
+    assert composition.commands.runtime is composition.runtime
+    assert composition.runtime.renderer_output is composition.ui_projection
+    assert composition.runtime.dashboard is composition.ui_projection
+    assert isinstance(composition.ui_projection, ProductionUiProjection)
+    assert isinstance(composition.logging, ProductionOverlaySafeLog)
+    assert composition.runtime.safe_log is composition.logging
+    assert isinstance(composition.vrc, ProductionVrcMicrophoneEffects)
+    assert composition.runtime.vrc_microphone is composition.vrc
+    assert composition.transactions is not None
+
+
 def test_main_local_qwen_runtime_check_dispatches_runner(monkeypatch, tmp_path) -> None:
     calls: dict[str, object] = {}
 

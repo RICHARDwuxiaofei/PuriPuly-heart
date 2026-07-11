@@ -911,23 +911,7 @@ async def test_stop_cancels_active_local_stt_download_task(
     async def fake_set_stt_enabled(self, enabled: bool) -> None:
         _ = self, enabled
 
-    async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
-        _ = self, enabled
-
-    async def fake_shutdown_overlay_runtime(self, *, preserve_failure_reason: bool) -> None:
-        _ = self, preserve_failure_reason
-
     monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
-    )
-    monkeypatch.setattr(
-        GuiController,
-        "_shutdown_overlay_runtime",
-        fake_shutdown_overlay_runtime,
-    )
 
     owner = controller._get_local_stt_download_runtime()
     active_download = owner.start(

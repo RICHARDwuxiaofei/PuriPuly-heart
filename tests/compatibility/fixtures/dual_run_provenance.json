@@ -12,12 +12,17 @@
     "repair_manifest": {
       "files": [
         "src/puripuly_heart/app/adapters/canonical_state_repository.py",
+        "src/puripuly_heart/app/adapters/overlay_lifecycle_production.py",
+        "src/puripuly_heart/app/adapters/overlay_osc_runtime.py",
+        "src/puripuly_heart/app/adapters/overlay_runtime_effects.py",
+        "src/puripuly_heart/app/adapters/overlay_ui_projection.py",
         "src/puripuly_heart/app/adapters/post_commit_provider_activation.py",
         "src/puripuly_heart/app/adapters/resolved_runtime_resource_factory.py",
         "src/puripuly_heart/app/adapters/settings_vnext_canonical_persistence.py",
         "src/puripuly_heart/app/ports/application_runtime.py",
         "src/puripuly_heart/app/ports/canonical_settings_persistence.py",
         "src/puripuly_heart/app/ports/canonical_state_repository.py",
+        "src/puripuly_heart/app/ports/overlay_application.py",
         "src/puripuly_heart/app/ports/post_commit_runtime.py",
         "src/puripuly_heart/app/ports/runtime_apply.py",
         "src/puripuly_heart/app/ports/runtime_resource_factory.py",
@@ -27,6 +32,7 @@
         "src/puripuly_heart/app/services/canonical_state_repositories.py",
         "src/puripuly_heart/app/services/managed_connection_auth.py",
         "src/puripuly_heart/app/services/openrouter_pkce_handoff.py",
+        "src/puripuly_heart/app/services/overlay_osc_application_runtime.py",
         "src/puripuly_heart/app/services/post_commit_runtime.py",
         "src/puripuly_heart/app/services/resolved_runtime_adapter.py",
         "src/puripuly_heart/app/services/runtime_activation.py",
@@ -41,17 +47,20 @@
         "src/puripuly_heart/config/settings_vnext/serialization.py",
         "src/puripuly_heart/core/orchestrator/channel_runtime.py",
         "src/puripuly_heart/core/orchestrator/hub.py",
+        "src/puripuly_heart/core/overlay/process.py",
+        "src/puripuly_heart/core/runtime/overlay.py",
         "src/puripuly_heart/core/runtime/provider_handle.py",
         "src/puripuly_heart/core/runtime/provider_state.py",
         "src/puripuly_heart/core/runtime/self_audio.py",
         "src/puripuly_heart/core/stt/controller.py",
         "src/puripuly_heart/core/telemetry.py",
         "src/puripuly_heart/data/i18n/zh-CN.json",
+        "src/puripuly_heart/main.py",
         "src/puripuly_heart/ui/app.py",
         "src/puripuly_heart/ui/controller.py"
       ],
-      "production_source_sha256": "279f862d0e497fc3984f03d57f36788c2c696943a3477120d2d1bbf967b5841f",
-      "source_delta_sha256": "112f48dafa3fc6191aee9b32c9800d963c179ce7036771f91474bbededc2bbb0"
+      "production_source_sha256": "f35fa39d2bb282fca1282ee6aa815ed7a9658a54a6d4cb4268372619fe1b3833",
+      "source_delta_sha256": "4737a70c98d58f96cf0bb78eb3d34f253e14e0f9b10e61f5da1552d036e07614"
     },
     "repair_base": "b4ace2631793aa1a1e384c0440b8ec7f315559ae"
   },
@@ -59,15 +68,15 @@
   "sha256": {
     "runner": "5f9252d28e091d21dd7f506ec2d384c2e7ab9993add235a182001dea156c7961",
     "baseline_trace": "fdb3e1f58b13b83445967733ca737f17823e385efb1f5f85442161cb4224b78e",
-    "current_trace": "cc952ad1a8294cae0df0be5c303be698eeb7d672b71252c6f14800c68922f6c5",
+    "current_trace": "7a1193b04f0f3e498497ec2da006c84d4b1a949842bc27cdaa616e8e7ba0eaa7",
     "difference_rules": "48b2c253511110aa0d7984d402bf6163206d9f729bb867a2989db977605fbe0b"
   },
   "scenario_sha256": {
-    "runner": "429a77a2d4b223517a1e7cbdf1dcb8f77593660d977549ecb37abbbc9a3498cc",
+    "runner": "2c0b546b5065433da43530fccd8fdcdc52e76025c516a8af2fa7766e472e0850",
     "structured_runner": "8c6bf8cd57899730972be31f0096ea8ce4349d43fe7b37695b87756fb4b3e071",
     "traces": "cf0d20c9437a5fe28d192ff93c29187cc3798aa749ae86c3b83e2845abfdae44",
     "baseline_nodes": "a346ee8bea5c9e10240926e50c0bfa4079926299e189e2d1f9f4e9cef508da9c",
-    "current_nodes": "92767adfa173c0fe41947d09f395aee65ec4f68de4b961eafc8f8752c7604e4a",
+    "current_nodes": "5f3c84e256ac1c45e811a97c177c52e52a46c1355038cdbfcc97887d3d566f5b",
     "field_node_indexes": "07e0619746ac60eb6ab2f7eb14aa13d66092a5b459fefd62ccb9ebf2b8d054f0"
   },
   "execution": "Independent subprocesses with each source tree first on sys.path; fixed sources use GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM=1, and git -c core.autocrlf=false -c core.eol=lf archive so user Git configuration cannot alter bytes; current repair inventory and binary patch are always compared directly with base b4ace2631793aa1a1e384c0440b8ec7f315559ae so unstaged, staged, and committed states have identical provenance; prompt state is temporary, providers are deterministic fakes, and no secrets or network are used.",

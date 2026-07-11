@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal, Protocol
+from dataclasses import dataclass, field
+from typing import Literal, Mapping, Protocol
 
 from puripuly_heart.app.ports.application_runtime import ResolvedRuntimeActivationRequest
 from puripuly_heart.app.ports.runtime_resources import RuntimeResourceAction
 from puripuly_heart.app.ports.settings_repository import SettingsCommitReceipt
+from puripuly_heart.config.overlay_calibration import OverlayCalibration
 from puripuly_heart.core.messages import RuntimeApplyResult, TransactionResult
 
 RuntimeMutationSurface = Literal[
@@ -91,6 +92,8 @@ class OverlayOscDirective:
     chatbox_max_chars: int
     vrc_mic_intercept: bool
     chatbox_include_source: bool
+    calibration: OverlayCalibration = field(default_factory=OverlayCalibration)
+    desktop_overlay_options: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,7 +168,13 @@ class ProviderActivationPort(Protocol):
 
 class CommittedRuntimeSynchronizationPort(Protocol):
     async def synchronize_runtime(
-        self, request: ResolvedRuntimeActivationRequest, directive: RuntimeSyncDirective
+        self,
+        request: ResolvedRuntimeActivationRequest,
+        directive: RuntimeSyncDirective,
+        *,
+        before: SettingsCommitReceipt | None,
+        after: SettingsCommitReceipt,
+        operational: RuntimeOperationalSnapshot,
     ) -> RuntimeApplyResult: ...
 
 

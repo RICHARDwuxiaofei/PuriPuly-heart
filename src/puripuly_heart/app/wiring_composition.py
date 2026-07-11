@@ -27,6 +27,98 @@ from puripuly_heart.app.services.runtime_activation import (
 )
 
 
+def create_overlay_osc_application_composition(
+    *,
+    configuration=None,
+    hub=None,
+    lifecycle_output=None,
+    renderer_output=None,
+    safe_log=None,
+    lifecycle_factories=None,
+):  # noqa: ANN001, ANN201
+    from puripuly_heart.app.adapters.overlay_lifecycle_production import (
+        HubOverlayIngress,
+        ProductionOverlayApplication,
+        ProductionOverlayLifecycleFactories,
+        ResolvedOverlayConfiguration,
+    )
+    from puripuly_heart.app.adapters.overlay_osc_runtime import (
+        OverlayOscRuntimeSynchronization,
+        RetainedProviderActivation,
+    )
+    from puripuly_heart.app.adapters.overlay_ui_projection import ProductionUiProjection
+    from puripuly_heart.app.services.canonical_runtime_resolution import (
+        CanonicalRuntimeConfigResolver,
+    )
+    from puripuly_heart.app.services.overlay_osc_application_runtime import (
+        OverlayOscApplicationRuntime,
+    )
+    from puripuly_heart.app.services.post_commit_runtime import (
+        PostCommitRuntimePlanBuilder,
+        PostCommitRuntimeTransactionOwner,
+    )
+    from puripuly_heart.app.services.surface_runtime_transactions import (
+        SelectiveSurfaceRuntimeTransactionPort,
+    )
+
+    ui_projection = renderer_output or ProductionUiProjection()
+    runtime = OverlayOscApplicationRuntime(
+        dashboard=(
+            ui_projection if hasattr(ui_projection, "publish_dashboard_runtime_facts") else None
+        ),
+        configuration=(
+            ResolvedOverlayConfiguration(configuration) if configuration is not None else None
+        ),
+        ingress=HubOverlayIngress(hub) if hub is not None else None,
+        factories=lifecycle_factories or ProductionOverlayLifecycleFactories(),
+        lifecycle_output=lifecycle_output,
+        renderer_output=ui_projection,
+        safe_log=safe_log,
+    )
+    resolver = CanonicalRuntimeConfigResolver()
+    owner = PostCommitRuntimeTransactionOwner(
+        RetainedProviderActivation(), OverlayOscRuntimeSynchronization(runtime)
+    )
+    transactions = SelectiveSurfaceRuntimeTransactionPort(
+        PostCommitRuntimePlanBuilder(resolver),
+        owner,
+        frozenset({"overlay_osc_output"}),
+    )
+    application = ProductionOverlayApplication(runtime)
+    if hub is not None:
+        application.host = hub
+    if configuration is not None:
+        application.configuration = runtime.configuration
+    if lifecycle_output is None:
+        runtime.lifecycle_output = application
+    return application, transactions
+
+
+def create_overlay_osc_surface_runtime(runtime):  # noqa: ANN001, ANN201
+    from puripuly_heart.app.adapters.overlay_osc_runtime import (
+        OverlayOscRuntimeSynchronization,
+        RetainedProviderActivation,
+    )
+    from puripuly_heart.app.services.canonical_runtime_resolution import (
+        CanonicalRuntimeConfigResolver,
+    )
+    from puripuly_heart.app.services.post_commit_runtime import (
+        PostCommitRuntimePlanBuilder,
+        PostCommitRuntimeTransactionOwner,
+    )
+    from puripuly_heart.app.services.surface_runtime_transactions import (
+        SelectiveSurfaceRuntimeTransactionPort,
+    )
+
+    resolver = CanonicalRuntimeConfigResolver()
+    owner = PostCommitRuntimeTransactionOwner(
+        RetainedProviderActivation(), OverlayOscRuntimeSynchronization(runtime)
+    )
+    return SelectiveSurfaceRuntimeTransactionPort(
+        PostCommitRuntimePlanBuilder(resolver), owner, frozenset({"overlay_osc_output"})
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class AdditiveRuntimeComposition:
     canonical_repositories: CanonicalStateRepositories
@@ -36,6 +128,43 @@ class AdditiveRuntimeComposition:
     activation_owner: RuntimeActivationOwner
     postcommit_coordinator: object
     surface_transactions: SurfaceRuntimeTransactionPort
+
+
+@dataclass(frozen=True, slots=True)
+class OverlayProductionComposition:
+    commands: object
+    state: object
+    transactions: SurfaceRuntimeTransactionPort
+    ui_projection: object
+    runtime: object
+    logging: object
+    vrc: object
+    audio_gate: object
+
+
+def create_overlay_production_composition(
+    *, configuration=None, hub=None, vrc_microphone=None
+):  # noqa: ANN001, ANN201
+    from puripuly_heart.app.adapters.overlay_runtime_effects import (
+        ProductionOverlaySafeLog,
+        ProductionVrcMicrophoneEffects,
+    )
+    from puripuly_heart.app.adapters.overlay_ui_projection import ProductionUiProjection
+
+    projection = ProductionUiProjection()
+    logging = ProductionOverlaySafeLog()
+    vrc = vrc_microphone or ProductionVrcMicrophoneEffects()
+    commands, transactions = create_overlay_osc_application_composition(
+        configuration=configuration,
+        hub=hub,
+        renderer_output=projection,
+        safe_log=logging,
+    )
+    commands.runtime.dashboard = projection
+    commands.runtime.vrc_microphone = vrc
+    return OverlayProductionComposition(
+        commands, commands, transactions, projection, commands.runtime, logging, vrc, vrc.gate
+    )
 
 
 def create_provider_verifier() -> ProviderVerifierPort:

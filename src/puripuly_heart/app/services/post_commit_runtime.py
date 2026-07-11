@@ -22,7 +22,10 @@ from puripuly_heart.app.ports.post_commit_runtime import (
     RuntimeSyncDirective,
 )
 from puripuly_heart.app.ports.settings_repository import SettingsCommitReceipt
-from puripuly_heart.config.resolved import ResolvedApplicationRuntimeConfig
+from puripuly_heart.config.resolved import (
+    ResolvedApplicationRuntimeConfig,
+    resolve_desktop_overlay_size,
+)
 from puripuly_heart.core.messages import (
     CONTENT_POLICY_METADATA_ONLY,
     DIAGNOSTIC_CATEGORY_LIFECYCLE,
@@ -139,6 +142,15 @@ class PostCommitRuntimePlanBuilder:
             ),
             managed_legacy=managed_legacy,
         )
+        if provenance.surface == "overlay_osc_output":
+            providers = ProviderActivationDirective(
+                "retain",
+                "retain",
+                "retain",
+                providers.self_stt_policy,
+                providers.peer_stt_policy,
+                "none",
+            )
         return PostCommitRuntimePlan(
             before=before,
             after=after,
@@ -181,7 +193,13 @@ class PostCommitRuntimeTransactionOwner:
         completed.append("provider_activation")
         for directive in plan.synchronization:
             try:
-                result = await self.synchronization.synchronize_runtime(plan.request, directive)
+                result = await self.synchronization.synchronize_runtime(
+                    plan.request,
+                    directive,
+                    before=plan.before,
+                    after=plan.after,
+                    operational=plan.operational,
+                )
             except Exception:
                 return _failed_execution(plan, operations, completed, directive.operation, None)
             if result.status != RUNTIME_APPLY_STATUS_APPLIED:
@@ -250,6 +268,9 @@ def _synchronization_directives(
     operations: tuple[str, ...],
 ) -> tuple[RuntimeSyncDirective, ...]:
     intent = after.envelope.intent
+    desktop_width, desktop_height = resolve_desktop_overlay_size(
+        intent.overlay.desktop_flet.size_preset
+    )
     values: dict[str, RuntimeSyncDirective] = {
         "language_runtime_clear": LanguageRuntimeDirective(
             "language_runtime_clear",
@@ -282,6 +303,24 @@ def _synchronization_directives(
             intent.osc.chatbox_max_chars,
             intent.osc.vrc_mic_intercept,
             intent.osc.chatbox_include_source,
+            intent.overlay.calibration.copy(),
+            {
+                "size_preset": intent.overlay.desktop_flet.size_preset,
+                "size": {
+                    "width": desktop_width,
+                    "height": desktop_height,
+                },
+                "position": {
+                    "x": intent.overlay.desktop_flet.position.x,
+                    "y": intent.overlay.desktop_flet.position.y,
+                },
+                "visual": {
+                    "text_scale": 1.0,
+                    "background_alpha": intent.overlay.desktop_flet.visual.background_alpha,
+                    "outline_width": None,
+                },
+                "interaction_mode": "edit",
+            },
         ),
         "locale_ui_projection": LocaleUiProjectionDirective(
             "locale_ui_projection", intent.ui.locale
@@ -319,7 +358,11 @@ def _failed_execution(
     code = (
         "provider_runtime_apply_failed"
         if failed == "provider_activation"
-        else f"{failed}_runtime_apply_failed"
+        else (
+            "overlay_osc_output_runtime_apply_exception"
+            if failed == "overlay_osc"
+            else f"{failed}_runtime_apply_failed"
+        )
     )
     message = result.message if result is not None and result.message is not None else _message()
     diagnostics = _diagnostics(
@@ -369,11 +412,13 @@ def _diagnostics(
         "skipped_operations": ",".join(skipped),
         "reconciliation_required": True,
     }
+    if failed == "overlay_osc":
+        fields = {"surface": plan.provenance.surface}
     if prior is not None:
         fields["reported_component"] = prior.component
         fields["reported_code"] = prior.code
     return ErrorDiagnostics(
-        component="post_commit_runtime",
+        component="gui_controller" if failed == "overlay_osc" else "post_commit_runtime",
         operation=operation,
         code=code,
         category=DIAGNOSTIC_CATEGORY_LIFECYCLE,

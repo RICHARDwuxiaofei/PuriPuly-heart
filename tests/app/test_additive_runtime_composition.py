@@ -118,8 +118,8 @@ class Synchronization:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def synchronize_runtime(self, request, directive):  # noqa: ANN001
-        _ = (request, directive)
+    async def synchronize_runtime(self, request, directive, **context):  # noqa: ANN001, ANN003
+        _ = (request, directive, context)
         self.calls += 1
         return RuntimeApplyResult(RUNTIME_APPLY_STATUS_APPLIED, None, None)
 

@@ -44,6 +44,22 @@ ResolvedOptionValue: TypeAlias = (
     ResolvedScalar | tuple["ResolvedOptionValue", ...] | Mapping[str, "ResolvedOptionValue"]
 )
 
+DESKTOP_OVERLAY_SIZE_PRESETS: Final[Mapping[str, tuple[int, int]]] = MappingProxyType(
+    {
+        "tiny": (640, 160),
+        "xsmall": (960, 240),
+        "small": (1152, 288),
+        "medium": (1344, 336),
+        "large": (1600, 400),
+        "xlarge": (1792, 448),
+    }
+)
+
+
+def resolve_desktop_overlay_size(size_preset: str) -> tuple[int, int]:
+    return DESKTOP_OVERLAY_SIZE_PRESETS.get(size_preset, DESKTOP_OVERLAY_SIZE_PRESETS["medium"])
+
+
 _RAW_SECRET_BEARING_OPTION_NAMES: Final = frozenset(
     {
         "access_token",

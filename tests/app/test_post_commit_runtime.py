@@ -95,8 +95,10 @@ class Sync:
         self.cancel_at = cancel_at
         self.calls: list[str] = []
 
-    async def synchronize_runtime(self, request, directive):  # noqa: ANN001, ANN202
-        _ = request
+    async def synchronize_runtime(
+        self, request, directive, **context
+    ):  # noqa: ANN001, ANN003, ANN202
+        _ = (request, context)
         self.calls.append(directive.operation)
         if directive.operation == self.cancel_at:
             raise asyncio.CancelledError
