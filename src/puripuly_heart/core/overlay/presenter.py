@@ -14,6 +14,11 @@ from puripuly_heart.core.clock import Clock, SystemClock
 
 from .diagnostics import OverlayDiagnosticsRecorder
 from .protocol import (
+    U64_MAX,
+    NativeFreshRenderGenerations,
+    NativeFreshRenderTargets,
+    NativeQuietTailEpisode,
+    NativeQuietTailEpisodes,
     OverlayPresentationBlock,
     OverlayPresentationCalibration,
     OverlayPresentationSnapshot,
@@ -78,6 +83,7 @@ class OverlayPresenter(OverlaySink):
     show_peer_original: bool = True
     peer_presentation_refresh_burst: bool = True
     self_presentation_refresh_burst: bool = True
+    native_retry_trigger_emission: bool = False
     task_factory: Any | None = None
 
     _terminal_registry: OrderedDict[tuple[str, UUID], int] = field(
@@ -98,6 +104,19 @@ class OverlayPresenter(OverlaySink):
     )
     _revision: int = field(init=False, default=0)
     _appearance_seq: int = field(init=False, default=0)
+    _native_fresh_render_generations: NativeFreshRenderGenerations = field(
+        init=False, default_factory=NativeFreshRenderGenerations
+    )
+    _native_fresh_render_targets: NativeFreshRenderTargets = field(
+        init=False, default_factory=NativeFreshRenderTargets
+    )
+    _native_quiet_tail_episodes: NativeQuietTailEpisodes = field(
+        init=False, default_factory=NativeQuietTailEpisodes
+    )
+    _native_quiet_tail_self_target: str | None = field(init=False, default=None)
+    _native_quiet_tail_peer_target: str | None = field(init=False, default=None)
+    _native_quiet_tail_self_generation: int | None = field(init=False, default=None)
+    _native_quiet_tail_peer_generation: int | None = field(init=False, default=None)
     _presentation_state: OverlayPresentationState = field(init=False)
     _last_visible_window_signature: tuple[object, ...] | None = field(init=False, default=None)
     _peer_presentation_refresh_burst_task: asyncio.Task[None] | None = field(
@@ -114,6 +133,12 @@ class OverlayPresenter(OverlaySink):
     _self_presentation_refresh_burst_cancel_cleanup_counts: dict[asyncio.Task[None], int] = field(
         init=False, default_factory=dict
     )
+    _ownership_transition_lock: asyncio.Lock = field(
+        init=False,
+        default_factory=asyncio.Lock,
+    )
+    _closing: bool = field(init=False, default=False)
+    _closed: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         self._presentation_state = OverlayPresentationState()
@@ -398,6 +423,11 @@ class OverlayPresenter(OverlaySink):
         self._live_peer_turn_key = None
         self._revision = 0
         self._appearance_seq = 0
+        self._native_fresh_render_generations = NativeFreshRenderGenerations()
+        self._native_fresh_render_targets = NativeFreshRenderTargets()
+        self._native_quiet_tail_episodes = NativeQuietTailEpisodes()
+        self._native_quiet_tail_self_target = None
+        self._native_quiet_tail_peer_target = None
         self._last_visible_window_signature = None
         peer_refresh_key = self._presentation_state.peer_presentation_refresh_target_key
         if peer_refresh_key is not None:
@@ -423,6 +453,11 @@ class OverlayPresenter(OverlaySink):
         self._live_self_turn_key = None
         self._live_peer_turn_key = None
         self._revision += 1
+        self._native_fresh_render_generations = NativeFreshRenderGenerations()
+        self._native_fresh_render_targets = NativeFreshRenderTargets()
+        self._native_quiet_tail_episodes = NativeQuietTailEpisodes()
+        self._native_quiet_tail_self_target = None
+        self._native_quiet_tail_peer_target = None
         self._last_visible_window_signature = None
         peer_refresh_key = self._presentation_state.peer_presentation_refresh_target_key
         if peer_refresh_key is not None:
@@ -439,11 +474,24 @@ class OverlayPresenter(OverlaySink):
             await self.bridge.replace_snapshot(snapshot)
 
     async def emit(self, event: OverlayEventUnion) -> None:
+        async with self._ownership_transition_lock:
+            await self._emit_serialized(event)
+
+    async def _emit_serialized(self, event: OverlayEventUnion) -> None:
         previous_snapshot = self.snapshot()
         changed = self._apply_event(event)
-        if changed:
-            await self._publish_if_changed()
-        if changed or self._peer_presentation_refresh_event_is_current(event):
+        peer_event_is_current = self._peer_presentation_refresh_event_is_current(event)
+        peer_event_is_visible = (
+            peer_event_is_current
+            and event.utterance_id is not None
+            and self._snapshot_has_refreshable_peer_key(("peer", event.utterance_id))
+        )
+        if changed or peer_event_is_visible:
+            await self._publish_if_changed(
+                fresh_render_event=event,
+                event_changed=changed,
+            )
+        if changed or peer_event_is_current:
             await self._start_peer_presentation_refresh_burst_for_event(event)
         if changed:
             await self._start_self_presentation_refresh_burst_for_event(
@@ -505,13 +553,65 @@ class OverlayPresenter(OverlaySink):
             ):
                 await self._publish_if_changed()
 
+    async def update_native_retry_ownership(self, confirmed: bool) -> None:
+        async with self._ownership_transition_lock:
+            await self._update_native_retry_ownership_serialized(confirmed)
+
+    async def _update_native_retry_ownership_serialized(self, confirmed: bool) -> None:
+        confirmed = bool(confirmed)
+        if self._closing or self._closed:
+            self.native_retry_trigger_emission = False
+            self._native_fresh_render_generations = NativeFreshRenderGenerations()
+            self._native_fresh_render_targets = NativeFreshRenderTargets()
+            return
+        if confirmed:
+            if (
+                self.native_retry_trigger_emission
+                and not self.peer_presentation_refresh_burst
+                and not self.self_presentation_refresh_burst
+            ):
+                return
+            active_targets = self._active_python_retry_targets()
+            if not active_targets:
+                active_targets = self._active_native_retry_targets()
+            await self.update_peer_presentation_refresh_burst(False)
+            await self.update_self_presentation_refresh_burst(False)
+            self.native_retry_trigger_emission = True
+            self._synchronize_native_retry_targets(active_targets)
+            await self._publish_if_changed(force_protocol_publish=True)
+            return
+        if (
+            not self.native_retry_trigger_emission
+            and self.peer_presentation_refresh_burst
+            and self.self_presentation_refresh_burst
+            and self.snapshot().native_fresh_render_generations is None
+            and self.snapshot().native_fresh_render_targets is None
+        ):
+            return
+        active_targets = self._active_native_retry_targets()
+        self.native_retry_trigger_emission = False
+        self._native_fresh_render_generations = NativeFreshRenderGenerations()
+        self._native_fresh_render_targets = NativeFreshRenderTargets()
+        await self._publish_if_changed(force_protocol_publish=True)
+        await self.update_peer_presentation_refresh_burst(True)
+        await self.update_self_presentation_refresh_burst(True)
+        await self._restart_python_retry_targets(active_targets)
+
     async def broadcast_shutdown(self) -> None:
         if self.bridge is None:
             return
         await self.bridge.broadcast_shutdown()
 
     async def close(self) -> None:
-        await self.clear_for_runtime_detach()
+        async with self._ownership_transition_lock:
+            if self._closed:
+                return
+            self._closing = True
+            await self.clear_for_runtime_detach()
+            self.native_retry_trigger_emission = False
+            self._native_fresh_render_generations = NativeFreshRenderGenerations()
+            self._native_fresh_render_targets = NativeFreshRenderTargets()
+            self._closed = True
 
     def _apply_event(self, event: OverlayEventUnion) -> bool:
         now = self.clock.now()
@@ -735,7 +835,13 @@ class OverlayPresenter(OverlaySink):
     def _live_peer_entry(self) -> tuple[tuple[str, UUID], _LogicalTurnEntry] | None:
         return self._live_entry_for_channel("peer")
 
-    async def _publish_if_changed(self) -> None:
+    async def _publish_if_changed(
+        self,
+        *,
+        fresh_render_event: OverlayEventUnion | None = None,
+        event_changed: bool = False,
+        force_protocol_publish: bool = False,
+    ) -> None:
         now = self.clock.now()
         self._expire_closed_entries(now=now)
         previous_snapshot = self.snapshot()
@@ -770,6 +876,12 @@ class OverlayPresenter(OverlaySink):
         rendered_entries = selection.rendered_entries
         next_blocks = [block for _, block in rendered_entries]
         next_calibration = _calibration_from_overlay(self.calibration)
+        fresh_render_channel = self._eligible_fresh_render_channel(
+            fresh_render_event,
+            event_changed=event_changed,
+            rendered_entries=rendered_entries,
+            previous_snapshot=previous_snapshot,
+        )
         previous_rendered_signature = self._presentation_state.rendered_blocks_signature(
             previous_snapshot.blocks
         )
@@ -786,6 +898,8 @@ class OverlayPresenter(OverlaySink):
         if (
             next_rendered_signature == previous_rendered_signature
             and next_calibration == previous_snapshot.calibration
+            and fresh_render_channel is None
+            and not force_protocol_publish
         ):
             self._emit_turn_decision(
                 "overlay_turn_no_visible_change",
@@ -817,11 +931,32 @@ class OverlayPresenter(OverlaySink):
                 )
                 self._emit_pair_state(key, entry, block, publish_kind="visible_update")
 
+        if fresh_render_channel is not None and self.native_retry_trigger_emission:
+            self._increment_native_fresh_render_generation(
+                fresh_render_channel,
+                event=fresh_render_event,
+            )
+            self._advance_native_quiet_tail_episode(
+                fresh_render_channel,
+                event=fresh_render_event,
+            )
+        self._prune_native_quiet_tail_targets(rendered_entries)
         self._revision += 1
         snapshot = self._presentation_state.generate_snapshot(
             revision=self._revision,
             calibration=next_calibration,
             rendered_entries=rendered_entries,
+            native_fresh_render_generations=(
+                self._native_fresh_render_generations
+                if self.native_retry_trigger_emission
+                else None
+            ),
+            native_fresh_render_targets=(
+                self._native_fresh_render_targets if self.native_retry_trigger_emission else None
+            ),
+            native_quiet_tail_episodes=(
+                self._native_quiet_tail_episodes if self.native_retry_trigger_emission else None
+            ),
         )
         blocks_summary = [
             {
@@ -1123,6 +1258,253 @@ class OverlayPresenter(OverlaySink):
         if self.task_factory is not None:
             return self.task_factory(coroutine, task_name=task_name)
         return asyncio.create_task(coroutine, name=f"OverlayPresenter:{task_name}")
+
+    def _eligible_fresh_render_channel(
+        self,
+        event: OverlayEventUnion | None,
+        *,
+        event_changed: bool,
+        rendered_entries: list[tuple[tuple[str, UUID], OverlayPresentationBlock]],
+        previous_snapshot: OverlayPresentationSnapshot,
+    ) -> str | None:
+        if event is None or event.utterance_id is None:
+            return None
+        key = (event.channel, event.utterance_id)
+        if event.channel == "self":
+            if not event_changed or not isinstance(
+                event,
+                (SelfTranscriptFinal, TranslationFinal),
+            ):
+                return None
+        elif event.channel == "peer":
+            if not event_changed or not isinstance(
+                event,
+                (
+                    PeerActiveUpdate,
+                    PeerTranscriptFinal,
+                    TranslationStreamUpdate,
+                    TranslationFinal,
+                ),
+            ):
+                return None
+        else:
+            return None
+        for rendered_key, block in rendered_entries:
+            if rendered_key != key:
+                continue
+            if block.primary_text.strip():
+                if event.channel == "self" and block.block_variant == "finalized":
+                    previous_block = self._refreshable_self_block_in_snapshot(
+                        previous_snapshot,
+                        key,
+                    )
+                    previous_signature = (
+                        self._presentation_state.visible_block_content_signature(previous_block)
+                        if previous_block is not None
+                        else None
+                    )
+                    current_signature = self._presentation_state.visible_block_content_signature(
+                        block
+                    )
+                    if previous_signature == current_signature:
+                        return None
+                return event.channel
+        return None
+
+    def _advance_native_quiet_tail_episode(
+        self,
+        channel: str,
+        *,
+        event: OverlayEventUnion | None,
+    ) -> None:
+        if event is None or event.utterance_id is None:
+            return
+        phase = (
+            "final"
+            if isinstance(
+                event,
+                (SelfTranscriptFinal, PeerTranscriptFinal, TranslationFinal),
+            )
+            else "stream"
+        )
+        current = (
+            self._native_quiet_tail_episodes.self
+            if channel == "self"
+            else self._native_quiet_tail_episodes.peer
+        )
+        current_target = (
+            self._native_quiet_tail_self_target
+            if channel == "self"
+            else self._native_quiet_tail_peer_target
+        )
+        target = f"{channel}:{event.utterance_id}"
+        replace = current is None or current.phase != phase or current_target != target
+        if channel == "self" and isinstance(event, TranslationFinal):
+            replace = True
+        episode = (
+            NativeQuietTailEpisode(
+                phase=phase,
+                generation=self._next_native_fresh_render_generation(
+                    self._native_quiet_tail_self_generation
+                    if channel == "self"
+                    else self._native_quiet_tail_peer_generation
+                ),
+            )
+            if replace
+            else current
+        )
+        if channel == "self":
+            self._native_quiet_tail_self_target = target
+            if replace:
+                self._native_quiet_tail_self_generation = episode.generation
+            self._native_quiet_tail_episodes = NativeQuietTailEpisodes(
+                self=episode,
+                peer=self._native_quiet_tail_episodes.peer,
+            )
+        else:
+            self._native_quiet_tail_peer_target = target
+            if replace:
+                self._native_quiet_tail_peer_generation = episode.generation
+            self._native_quiet_tail_episodes = NativeQuietTailEpisodes(
+                self=self._native_quiet_tail_episodes.self,
+                peer=episode,
+            )
+
+    def _prune_native_quiet_tail_targets(
+        self,
+        rendered_entries: list[tuple[tuple[str, UUID], OverlayPresentationBlock]],
+    ) -> None:
+        visible = {block.id for _, block in rendered_entries if block.primary_text.strip()}
+        self_target = self._native_fresh_render_targets.self
+        peer_target = self._native_fresh_render_targets.peer
+        if self_target is not None and self_target not in visible:
+            self_target = None
+            self._native_quiet_tail_self_target = None
+        if peer_target is not None and peer_target not in visible:
+            peer_target = None
+            self._native_quiet_tail_peer_target = None
+        self._native_fresh_render_targets = NativeFreshRenderTargets(
+            self=self_target,
+            peer=peer_target,
+        )
+        self._native_quiet_tail_episodes = NativeQuietTailEpisodes(
+            self=(self._native_quiet_tail_episodes.self if self_target is not None else None),
+            peer=(self._native_quiet_tail_episodes.peer if peer_target is not None else None),
+        )
+
+    def _increment_native_fresh_render_generation(
+        self,
+        channel: str,
+        *,
+        event: OverlayEventUnion | None,
+    ) -> None:
+        if event is None or event.utterance_id is None:
+            return
+        target = f"{channel}:{event.utterance_id}"
+        generations = self._native_fresh_render_generations
+        targets = self._native_fresh_render_targets
+        if channel == "self":
+            self._native_fresh_render_generations = NativeFreshRenderGenerations(
+                self=self._next_native_fresh_render_generation(generations.self),
+                peer=generations.peer,
+            )
+            self._native_fresh_render_targets = NativeFreshRenderTargets(
+                self=target,
+                peer=targets.peer,
+            )
+            return
+        self._native_fresh_render_generations = NativeFreshRenderGenerations(
+            self=generations.self,
+            peer=self._next_native_fresh_render_generation(generations.peer),
+        )
+        self._native_fresh_render_targets = NativeFreshRenderTargets(
+            self=targets.self,
+            peer=target,
+        )
+
+    def _active_python_retry_targets(self) -> dict[str, tuple[str, UUID]]:
+        targets: dict[str, tuple[str, UUID]] = {}
+        self_target = self._presentation_state.self_presentation_refresh_target_key
+        peer_target = self._presentation_state.peer_presentation_refresh_target_key
+        if self_target is not None and self._snapshot_has_refreshable_self_key(self_target):
+            targets["self"] = self_target
+        if peer_target is not None and self._snapshot_has_refreshable_peer_key(peer_target):
+            targets["peer"] = peer_target
+        return targets
+
+    def _active_native_retry_targets(self) -> dict[str, tuple[str, UUID]]:
+        targets: dict[str, tuple[str, UUID]] = {}
+        for channel, target in (
+            ("self", self._native_fresh_render_targets.self),
+            ("peer", self._native_fresh_render_targets.peer),
+        ):
+            if target is None:
+                continue
+            prefix, separator, raw_id = target.partition(":")
+            if separator and prefix == channel:
+                try:
+                    targets[channel] = (channel, UUID(raw_id))
+                except ValueError:
+                    continue
+        return targets
+
+    async def _restart_python_retry_targets(
+        self,
+        targets: dict[str, tuple[str, UUID]],
+    ) -> None:
+        self_target = targets.get("self")
+        if self_target is not None and self._snapshot_has_refreshable_self_key(self_target):
+            self._presentation_state.begin_self_presentation_refresh(self_target)
+            self._record_self_presentation_refresh_burst_start(
+                self_target,
+                reason="native_ownership_released",
+            )
+            self._self_presentation_refresh_burst_task = (
+                self._create_self_presentation_refresh_burst_task(self_target)
+            )
+        peer_target = targets.get("peer")
+        if peer_target is not None and self._snapshot_has_refreshable_peer_key(peer_target):
+            self._presentation_state.begin_peer_presentation_refresh(peer_target)
+            self._peer_presentation_refresh_burst_task = self._create_task(
+                self._run_peer_presentation_refresh_burst(peer_target),
+                task_name="presenter-peer-refresh-burst",
+            )
+
+    def _synchronize_native_retry_targets(
+        self,
+        active_targets: dict[str, tuple[str, UUID]],
+    ) -> None:
+        targets: dict[str, str] = {}
+        self_target = active_targets.get("self")
+        if self_target is not None and self._snapshot_has_refreshable_self_key(self_target):
+            targets["self"] = f"{self_target[0]}:{self_target[1]}"
+        peer_target = active_targets.get("peer")
+        if peer_target is not None and self._snapshot_has_refreshable_peer_key(peer_target):
+            targets["peer"] = f"{peer_target[0]}:{peer_target[1]}"
+        generations = self._native_fresh_render_generations
+        self._native_fresh_render_generations = NativeFreshRenderGenerations(
+            self=(
+                self._next_native_fresh_render_generation(generations.self)
+                if "self" in targets
+                else None
+            ),
+            peer=(
+                self._next_native_fresh_render_generation(generations.peer)
+                if "peer" in targets
+                else None
+            ),
+        )
+        self._native_fresh_render_targets = NativeFreshRenderTargets(
+            self=targets.get("self"),
+            peer=targets.get("peer"),
+        )
+
+    def _next_native_fresh_render_generation(self, current: int | None) -> int:
+        if current is None:
+            return 1
+        if current == U64_MAX:
+            return 0
+        return current + 1
 
     def _self_presentation_refresh_key_for_event(
         self,

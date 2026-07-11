@@ -17,6 +17,8 @@ from puripuly_heart.core.overlay.presenter import (
     OverlayPresenter,
 )
 from puripuly_heart.core.overlay.protocol import (
+    U64_MAX,
+    NativeFreshRenderGenerations,
     OverlayPresentationBlock,
     OverlayPresentationCalibration,
 )
@@ -709,6 +711,8 @@ async def test_presenter_hidden_translation_final_without_visible_change_is_not_
 
         assert presenter.snapshot() == previous_snapshot
         assert len(bridge.snapshots) == snapshot_count_before_translation
+        assert presenter.snapshot().native_fresh_render_generations is None
+        assert presenter.snapshot().native_fresh_render_targets is None
         assert (
             presenter._self_presentation_refresh_request_key_for_event(
                 translation_event,
@@ -2630,6 +2634,10 @@ async def test_presenter_peer_presentation_refresh_burst_defaults_on_and_rerende
             for block in first_refresh.blocks
         ] == initial_visible_text
         assert first_refresh.blocks[0].session_scope == "peer_presentation_refresh=1"
+        assert (
+            first_refresh.native_fresh_render_generations
+            == initial_snapshot.native_fresh_render_generations
+        )
 
         assert len(refresh_sleep_indices()) == 2
         sleep_events[refresh_sleep_indices()[-1]].set()
@@ -2644,6 +2652,10 @@ async def test_presenter_peer_presentation_refresh_burst_defaults_on_and_rerende
             for block in second_refresh.blocks
         ] == initial_visible_text
         assert second_refresh.blocks[0].session_scope == "peer_presentation_refresh=2"
+        assert (
+            second_refresh.native_fresh_render_generations
+            == initial_snapshot.native_fresh_render_generations
+        )
 
         for _ in range(25):
             if presenter._peer_presentation_refresh_burst_task is None:
@@ -2660,6 +2672,10 @@ async def test_presenter_peer_presentation_refresh_burst_defaults_on_and_rerende
         assert clean_snapshot.blocks[0].secondary_text == "peer source unchanged during refresh"
         assert clean_snapshot.blocks[0].session_scope is None
         assert bridge.snapshots[-1].blocks[0].session_scope is None
+        assert (
+            clean_snapshot.native_fresh_render_generations
+            == initial_snapshot.native_fresh_render_generations
+        )
     finally:
         await presenter.clear_for_runtime_detach()
 
@@ -2922,8 +2938,8 @@ async def test_presenter_peer_presentation_refresh_burst_restarts_after_coalesce
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-        assert presenter.snapshot().revision == revision_before_duplicate + 1
-        assert len(bridge.snapshots) == snapshot_count_before_duplicate + 1
+        assert presenter.snapshot().revision == revision_before_duplicate + 2
+        assert len(bridge.snapshots) == snapshot_count_before_duplicate + 2
         assert presenter.snapshot().blocks[0].primary_text == "번역 coalesced refresh"
         assert presenter.snapshot().blocks[0].secondary_text == "peer source coalesced refresh"
     finally:
@@ -3061,8 +3077,8 @@ async def test_presenter_peer_presentation_refresh_restart_after_visible_marker_
         assert restarted_task is not None
         assert restarted_task is not first_peer_task
         restart_clean_blocks = blocks_by_id()
-        assert presenter.snapshot().revision == first_marker_snapshot.revision + 1
-        assert len(bridge.snapshots) == snapshot_count_before_restart + 1
+        assert presenter.snapshot().revision == first_marker_snapshot.revision + 2
+        assert len(bridge.snapshots) == snapshot_count_before_restart + 2
         assert restart_clean_blocks[f"peer:{first_peer_turn_id}"].session_scope is None
         assert restart_clean_blocks[f"peer:{second_peer_turn_id}"].session_scope is None
 
@@ -3288,6 +3304,10 @@ async def test_presenter_self_presentation_refresh_burst_defaults_on_and_rerende
             for block in first_refresh.blocks
         ] == initial_visible_text
         assert first_refresh.blocks[0].session_scope == "self_presentation_refresh=1"
+        assert (
+            first_refresh.native_fresh_render_generations
+            == initial_snapshot.native_fresh_render_generations
+        )
 
         assert len(refresh_sleep_indices()) == 2
         sleep_events[refresh_sleep_indices()[-1]].set()
@@ -3302,6 +3322,10 @@ async def test_presenter_self_presentation_refresh_burst_defaults_on_and_rerende
             for block in second_refresh.blocks
         ] == initial_visible_text
         assert second_refresh.blocks[0].session_scope == "self_presentation_refresh=2"
+        assert (
+            second_refresh.native_fresh_render_generations
+            == initial_snapshot.native_fresh_render_generations
+        )
 
         for _ in range(25):
             if presenter._self_presentation_refresh_burst_task is None:
@@ -3318,6 +3342,10 @@ async def test_presenter_self_presentation_refresh_burst_defaults_on_and_rerende
         assert clean_snapshot.blocks[0].secondary_text == ""
         assert clean_snapshot.blocks[0].session_scope is None
         assert bridge.snapshots[-1].blocks[0].session_scope is None
+        assert (
+            clean_snapshot.native_fresh_render_generations
+            == initial_snapshot.native_fresh_render_generations
+        )
 
         start_events = [
             fields
@@ -5596,6 +5624,7 @@ async def test_presenter_hidden_self_translation_metadata_update_does_not_bump_r
         bridge=bridge,
         calibration=OverlayCalibration(),
         self_presentation_refresh_burst=False,
+        native_retry_trigger_emission=True,
     )
     adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
     turn_id = uuid4()
@@ -5656,9 +5685,9 @@ async def test_presenter_hidden_self_translation_metadata_update_does_not_bump_r
         )
     )
 
-    assert presenter.snapshot().revision == snapshot_before_metadata.revision
-    assert len(bridge.snapshots) == snapshot_count_before_metadata
     assert presenter.snapshot() == snapshot_before_metadata
+    assert len(bridge.snapshots) == snapshot_count_before_metadata
+    assert presenter.snapshot().native_fresh_render_generations.self == 2
     assert presenter.snapshot().blocks[0].secondary_enabled is False
 
 
@@ -7325,3 +7354,399 @@ async def test_presenter_preview_translation_visibility_hidden_preview_secondary
     assert removal_event["translation_observed_visible_since"] is None
     assert removal_event["ever_visible_with_translation"] is False
     assert float(removal_event["translated_lifetime_ms"]) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_presenter_native_fresh_render_peer_event_matrix_uses_exact_visible_key() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+        self_presentation_refresh_burst=False,
+        native_retry_trigger_emission=True,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    visible = uuid4()
+    source_only = uuid4()
+
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=visible,
+                channel="peer",
+                text="source",
+                is_final=True,
+                created_at=10.0,
+            ),
+            source_language="en",
+            target_language="ko",
+        )
+    )
+    await presenter.emit(
+        adapter.translation_stream_update(
+            utterance_id=visible,
+            channel="peer",
+            text="번역",
+            source_language="en",
+            target_language="ko",
+            applied_context_mode=None,
+            update_id="peer-stream",
+        )
+    )
+    assert presenter.snapshot().native_fresh_render_generations.peer == 1
+    stream_episode = presenter.snapshot().native_quiet_tail_episodes.peer
+    assert stream_episode is not None and stream_episode.phase == "stream"
+
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=source_only,
+                channel="peer",
+                text="hidden source",
+                is_final=True,
+                created_at=10.1,
+            ),
+            source_language="en",
+            target_language="ko",
+        )
+    )
+    await presenter.emit(
+        adapter.peer_active_update(
+            text="still source only",
+            utterance_id=source_only,
+            occupant_key=f"peer:{source_only}",
+        )
+    )
+    assert presenter.snapshot().native_fresh_render_generations.peer == 1
+
+    await presenter.emit(
+        adapter.peer_active_update(
+            text="updated source",
+            utterance_id=visible,
+            occupant_key=f"peer:{visible}",
+        )
+    )
+    assert presenter.snapshot().native_fresh_render_generations.peer == 2
+    assert presenter.snapshot().native_quiet_tail_episodes.peer == stream_episode
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=visible,
+                channel="peer",
+                text="final source",
+                is_final=True,
+                created_at=10.2,
+            ),
+            source_language="en",
+            target_language="ko",
+        )
+    )
+    assert presenter.snapshot().native_fresh_render_generations.peer == 3
+    final_episode = presenter.snapshot().native_quiet_tail_episodes.peer
+    assert final_episode is not None and final_episode.phase == "final"
+    assert final_episode.generation != stream_episode.generation
+    await presenter.emit(
+        adapter.translation_final(
+            utterance_id=visible,
+            channel="peer",
+            text="최종 번역",
+            source_language="en",
+            target_language="ko",
+            applied_context_mode=None,
+            update_id="peer-final",
+        )
+    )
+    assert presenter.snapshot().native_fresh_render_generations.peer == 4
+    assert presenter.snapshot().native_quiet_tail_episodes.peer == final_episode
+
+
+@pytest.mark.asyncio
+async def test_presenter_native_fresh_render_generations_preserve_channels_and_exact_keys() -> None:
+    bridge = RecordingPresentationBridge()
+    clock = FakeClock(_now=10.0)
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=clock,
+        peer_presentation_refresh_burst=False,
+        self_presentation_refresh_burst=False,
+        native_retry_trigger_emission=True,
+    )
+    adapter = OverlayEventAdapter(clock=clock)
+    self_turn = uuid4()
+    peer_turn = uuid4()
+
+    assert presenter.snapshot().native_fresh_render_generations is None
+    await presenter.update_calibration(OverlayCalibration(distance=1.15))
+    await presenter.update_display_preferences(
+        show_translation=False,
+        show_peer_original=True,
+    )
+    assert presenter.snapshot().native_fresh_render_generations is None
+    await presenter.update_display_preferences(
+        show_translation=True,
+        show_peer_original=True,
+    )
+
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=self_turn,
+                channel="self",
+                text="same visible text",
+                is_final=True,
+                created_at=10.0,
+            ),
+            source_language="en",
+            target_language="ko",
+        )
+    )
+    self_generation = presenter.snapshot().native_fresh_render_generations.self
+    self_episode = presenter.snapshot().native_quiet_tail_episodes.self
+    assert self_episode is not None and self_episode.phase == "final"
+    await presenter.emit(
+        adapter.self_active_update(
+            text="live update",
+            utterance_id=self_turn,
+            occupant_key=f"self:{self_turn}",
+        )
+    )
+    await presenter.emit(
+        adapter.translation_stream_update(
+            utterance_id=self_turn,
+            channel="self",
+            text="stream update",
+            source_language="en",
+            target_language="ko",
+            applied_context_mode=None,
+        )
+    )
+    assert presenter.snapshot().native_fresh_render_generations.self == self_generation
+    assert presenter.snapshot().native_quiet_tail_episodes.self == self_episode
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=peer_turn,
+                channel="peer",
+                text="peer source",
+                is_final=True,
+                created_at=10.1,
+            ),
+            source_language="en",
+            target_language="ko",
+        )
+    )
+    assert presenter.snapshot().native_fresh_render_generations.self == self_generation
+    assert presenter.snapshot().native_fresh_render_generations.peer is None
+
+    peer_translation = adapter.translation_final(
+        utterance_id=peer_turn,
+        channel="peer",
+        text="peer translation",
+        source_language="en",
+        target_language="ko",
+        applied_context_mode=None,
+        created_at=10.2,
+        update_id="stable-peer-update",
+    )
+    await presenter.emit(peer_translation)
+    generations = presenter.snapshot().native_fresh_render_generations
+    assert (generations.self, generations.peer) == (self_generation, 1)
+    peer_episode = presenter.snapshot().native_quiet_tail_episodes.peer
+    assert peer_episode is not None and peer_episode.phase == "final"
+
+    await presenter.emit(peer_translation)
+    generations = presenter.snapshot().native_fresh_render_generations
+    assert (generations.self, generations.peer) == (self_generation, 1)
+    assert presenter.snapshot().native_quiet_tail_episodes.peer == peer_episode
+    await presenter.update_display_preferences(
+        show_translation=False,
+        show_peer_original=False,
+    )
+    assert presenter.snapshot().native_fresh_render_generations == generations
+    await presenter.update_display_preferences(
+        show_translation=True,
+        show_peer_original=True,
+    )
+    assert presenter.snapshot().native_fresh_render_generations == generations
+    await presenter.update_calibration(OverlayCalibration(distance=1.2))
+    assert presenter.snapshot().native_fresh_render_generations == generations
+
+    presenter._native_fresh_render_generations = NativeFreshRenderGenerations(
+        self=generations.self,
+        peer=U64_MAX,
+    )
+    await presenter.emit(peer_translation)
+    rolled = presenter.snapshot().native_fresh_render_generations
+    assert (rolled.self, rolled.peer) == (self_generation, 1)
+    presenter.reset_scene()
+    assert presenter.snapshot().native_fresh_render_generations is None
+
+
+@pytest.mark.asyncio
+async def test_presenter_episode_generation_is_monotonic_after_target_loss() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+        self_presentation_refresh_burst=False,
+        native_retry_trigger_emission=True,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    turn = uuid4()
+    event = adapter.transcript_final(
+        Transcript(
+            utterance_id=turn,
+            channel="self",
+            text="first",
+            is_final=True,
+            created_at=10.0,
+        ),
+        source_language="en",
+        target_language="ko",
+    )
+    await presenter.emit(event)
+    first = presenter.snapshot().native_quiet_tail_episodes.self
+    assert first is not None
+    presenter.reset_scene()
+    assert presenter.snapshot().native_quiet_tail_episodes is None
+    await presenter.emit(event)
+    second = presenter.snapshot().native_quiet_tail_episodes.self
+    assert second is not None
+    assert second.generation > first.generation
+
+
+@pytest.mark.asyncio
+async def test_presenter_native_fresh_render_same_text_new_turn_and_terminal_exclusions() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+        self_presentation_refresh_burst=False,
+        native_retry_trigger_emission=True,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    first_self = uuid4()
+    second_self = uuid4()
+    peer_turn = uuid4()
+
+    for turn_id in (first_self, second_self):
+        await presenter.emit(
+            adapter.transcript_final(
+                Transcript(
+                    utterance_id=turn_id,
+                    channel="self",
+                    text="identical text on a distinct turn",
+                    is_final=True,
+                    created_at=10.0,
+                ),
+                source_language="en",
+                target_language="ko",
+            )
+        )
+    assert presenter.snapshot().native_fresh_render_generations.self == 2
+
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=peer_turn,
+                channel="peer",
+                text="peer source",
+                is_final=True,
+                created_at=10.1,
+            ),
+            source_language="en",
+            target_language="ko",
+        )
+    )
+    await presenter.emit(
+        adapter.translation_final(
+            utterance_id=peer_turn,
+            channel="peer",
+            text="peer translation",
+            source_language="en",
+            target_language="ko",
+            applied_context_mode=None,
+        )
+    )
+    generations = presenter.snapshot().native_fresh_render_generations
+    assert (generations.self, generations.peer) == (2, 1)
+
+    await presenter.emit(adapter.self_active_clear())
+    assert presenter.snapshot().native_fresh_render_generations == generations
+    await presenter.emit(adapter.utterance_closed(utterance_id=second_self, channel="self"))
+    assert presenter.snapshot().native_fresh_render_generations == generations
+    await presenter.emit(adapter.utterance_closed(utterance_id=peer_turn, channel="peer"))
+    assert presenter.snapshot().native_fresh_render_generations == generations
+
+
+@pytest.mark.asyncio
+async def test_native_ownership_transition_serializes_concurrent_target_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    presenter = OverlayPresenter(calibration=OverlayCalibration())
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    first = uuid4()
+    second = uuid4()
+
+    async def publish_peer(turn_id, text: str) -> None:
+        await presenter.emit(
+            adapter.transcript_final(
+                Transcript(
+                    utterance_id=turn_id,
+                    channel="peer",
+                    text=f"source {text}",
+                    is_final=True,
+                    created_at=10.0,
+                ),
+                source_language="en",
+                target_language="ko",
+            )
+        )
+        await presenter.emit(
+            adapter.translation_final(
+                utterance_id=turn_id,
+                channel="peer",
+                text=text,
+                source_language="en",
+                target_language="ko",
+                applied_context_mode=None,
+            )
+        )
+
+    await publish_peer(first, "first")
+    transition_blocked = asyncio.Event()
+    release_transition = asyncio.Event()
+    original = OverlayPresenter.update_peer_presentation_refresh_burst
+
+    async def blocked_update(self, enabled: bool) -> None:
+        if self is presenter and not enabled:
+            transition_blocked.set()
+            await release_transition.wait()
+        await original(self, enabled)
+
+    monkeypatch.setattr(OverlayPresenter, "update_peer_presentation_refresh_burst", blocked_update)
+    transition = asyncio.create_task(presenter.update_native_retry_ownership(True))
+    await transition_blocked.wait()
+    replacement = asyncio.create_task(publish_peer(second, "second"))
+    await asyncio.sleep(0)
+    assert not replacement.done()
+    release_transition.set()
+    await transition
+    await replacement
+
+    snapshot = presenter.snapshot()
+    assert snapshot.native_fresh_render_targets.peer == f"peer:{second}"
+    assert snapshot.native_fresh_render_generations.peer is not None
+    assert presenter._peer_presentation_refresh_burst_task is None
+    presenter.peer_presentation_refresh_burst = True
+    presenter.self_presentation_refresh_burst = True
+    await presenter.update_native_retry_ownership(True)
+    assert presenter.native_retry_trigger_emission is True
+    assert presenter.peer_presentation_refresh_burst is False
+    assert presenter.self_presentation_refresh_burst is False
+    await presenter.update_native_retry_ownership(False)
+    assert presenter.snapshot().native_fresh_render_generations is None
+    assert presenter._presentation_state.peer_presentation_refresh_target_key == ("peer", second)
+    assert presenter._peer_presentation_refresh_burst_task is not None
+    await presenter.close()
+    await presenter.update_native_retry_ownership(False)
+    assert presenter._peer_presentation_refresh_burst_task is None
+    assert presenter._self_presentation_refresh_burst_task is None

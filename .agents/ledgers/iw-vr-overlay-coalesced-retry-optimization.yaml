@@ -1,0 +1,178 @@
+version: 2
+schema_ref: .skills/implement-work/references/ledger.md
+run_ref: vr-overlay-coalesced-retry-optimization
+
+selected_input:
+  path: C:/Users/salee/Documents/dev/puripuly_heart/.agents/bundles/vr-overlay-coalesced-retry-optimization.yaml
+  sha256: eda96ce61e97c63af60145e39c8f967ebac4b5a8157b8b68e2c84d78c78a6527
+
+current:
+  gate_id: terminal-verification
+  cluster_id: terminal-verification-c1
+  work_refs:
+    - verify-coalesced-retry-optimization-terminal
+  next_action: integration_authorization
+
+gate_plans:
+  - gate_id: evidence-foundation
+    shape: split
+    clusters:
+      - id: evidence-foundation-c1
+        work_refs:
+          - establish-attributable-presentation-evidence
+        status: passed
+      - id: evidence-foundation-c2
+        work_refs:
+          - verify-evidence-foundation-integration
+        status: passed
+  - gate_id: coalesced-presentation
+    shape: split
+    clusters:
+      - id: coalesced-presentation-c1
+        work_refs:
+          - coordinate-coalesced-physical-presentation
+          - preserve-repeated-work-equivalence
+        status: passed
+      - id: coalesced-presentation-c2
+        work_refs:
+          - verify-phase-one-coalescing-equivalence
+        status: passed
+  - gate_id: capability-and-target-contract
+    shape: split
+    clusters:
+      - id: capability-and-target-contract-c1
+        work_refs:
+          - negotiate-native-retry-ownership
+          - scope-retry-intent-to-visible-target
+        status: passed
+      - id: capability-and-target-contract-c2
+        work_refs:
+          - verify-capability-target-integration
+        status: passed
+  - gate_id: quiet-tail-profile-selection
+    shape: split
+    clusters:
+      - id: quiet-tail-profile-selection-c1
+        work_refs:
+          - implement-bounded-quiet-tail-profiles
+        status: passed
+      - id: quiet-tail-profile-selection-c2
+        work_refs:
+          - verify-affected-hmd-profile-selection
+        status: passed
+      - id: bounded-active-retry-adjustment-c1
+        work_refs:
+          - replace-quiet-postponement-with-bounded-active-retry
+        status: passed
+  - gate_id: terminal-verification
+    shape: whole_gate
+    clusters:
+      - id: terminal-verification-c1
+        work_refs:
+          - verify-coalesced-retry-optimization-terminal
+        status: passed
+
+worktree:
+  path: .worktrees/iw-vr-overlay-coalesced-retry-optimization
+  branch: work/iw-vr-overlay-coalesced-retry-optimization
+  base_branch: vnext
+  base_commit: 92eff4229021189b7e9a82288cfc4eb6d260e838
+
+checkpoints:
+  - id: evidence-foundation
+    gate_id: evidence-foundation
+    cluster_id: evidence-foundation-c2
+    decision: pass
+    commit: d8bf29968583677602d72033ec3be74f76b81b87
+    verification: passed
+    review: pass
+    summary: Behavior-neutral bounded diagnostics establish causal physical-attempt evidence under the unchanged P20 envelope; HMD and environment observations remain explicitly unrecorded.
+  - id: coalesced-presentation-c1
+    gate_id: coalesced-presentation
+    cluster_id: coalesced-presentation-c1
+    decision: pass
+    commit: da1747ddab0356a302d85e739455a9935577058f
+    verification: passed
+    review: pass
+    summary: One native coordinator coalesces causally compatible SELF and PEER work with exact scene and runtime-only target identity under the unchanged P20 envelope.
+  - id: coalesced-presentation-c2
+    gate_id: coalesced-presentation
+    cluster_id: coalesced-presentation-c2
+    decision: blocked
+    verification: skipped
+    review: blocked
+    summary: Phase 1 holds because affected-HMD checkpoint-versus-candidate equivalence and DD-002 physical-work input are unavailable; automated success cannot substitute.
+  - id: coalesced-presentation-c2-live-advance
+    gate_id: coalesced-presentation
+    cluster_id: coalesced-presentation-c2
+    decision: pass
+    verification: passed
+    review: pass
+    summary: Same affected-HMD P20 A/B evidence preserved final-state behavior while reducing full, simultaneous, mixed, and alternating physical submissions with zero sampled dropped frames.
+  - id: capability-and-target-contract-c1
+    gate_id: capability-and-target-contract
+    cluster_id: capability-and-target-contract-c1
+    decision: pass
+    verification: passed
+    review: pass
+    summary: Strict current-process capability negotiation keeps exactly one retry owner while optional target facts bind Native work to the exact visible SELF or PEER target across replacement and teardown.
+  - id: capability-and-target-contract-c2
+    gate_id: capability-and-target-contract
+    cluster_id: capability-and-target-contract-c2
+    decision: pass
+    commit: 6a29b7ea575493c64b51ea157a365e59fa1a0887
+    verification: passed
+    review: pass
+    summary: Fallback, target lifecycle, trigger compatibility, diagnostic safety, and exact DD-002 stream/final budgets pass integration review without shortening the product profile.
+  - id: quiet-tail-profile-selection-c1
+    gate_id: quiet-tail-profile-selection
+    cluster_id: quiet-tail-profile-selection-c1
+    decision: pass
+    verification: passed
+    review: pass
+    summary: Native quiet-tail scheduling implements fixed 100 ms cadence, non-replenishing four-opportunity stream episodes, independent profile-bounded final episodes, causal due consumption, lifecycle tombstones, and runtime-only comparison controls.
+  - id: quiet-tail-profile-selection-c2
+    gate_id: quiet-tail-profile-selection
+    cluster_id: quiet-tail-profile-selection-c2
+    decision: pass
+    commit: e6dc26e505832693ee5b952e3268811948c6af47
+    verification: passed
+    review: pass
+    summary: Exact affected-HMD P05/P10/P15/P20 evidence and preserved-old-Native fallback select P05 as the shortest accepted profile; the bounded default change is verified and DD-004 remains unresolved.
+  - id: terminal-verification-c1
+    gate_id: terminal-verification
+    cluster_id: terminal-verification-c1
+    decision: pass
+    commit: 92a2999ee91bf43eb7d91c36cdf81b5f92df4e07
+    verification: passed
+    review: pass
+    summary: Full automated, Windows-native, affected-HMD, profile, fallback, restart, target-continuity, lifecycle, privacy, compatibility, and semantic review passes for the isolated P05 candidate; DD-004 remains unresolved.
+  - id: bounded-active-retry-terminal-pass
+    gate_id: terminal-verification
+    cluster_id: terminal-verification-c1
+    decision: pass
+    commit: 0cba2fa5c00fb807af67c88eb212d7d6730934df
+    verification: passed
+    review: pass
+    summary: User-approved bounded active P05 replaces same-episode quiet postponement; full automation, deterministic generation-transfer preemption, affected-HMD 50 ms stream visibility, and independent terminal review pass.
+
+open_items:
+  - type: watchpoint
+    text: User-approved post-terminal override removes only same-episode quiet postponement; P05, 100 ms cadence, four stream opportunities, five final opportunities, coalescing, and all owner/target/lifecycle contracts remain fixed.
+  - type: watchpoint
+    text: Phase 1 must preserve the two-second envelope and checkpoint identity.
+  - type: watchpoint
+    text: P05, P10, P15, and P20 selection requires affected-HMD evidence; no-retry and one-retry remain diagnostic controls only.
+  - type: watchpoint
+    text: DD-002 is fixed at four shared stream opportunities per channel/target episode and profile maxima of 5, 10, 15, or 20 final opportunities at 100 ms; implementation must not replenish stream budget on generation replacement.
+
+notes:
+  - Derived from preserved branch work/iw-vr-overlay-adaptive-presentation-hardening at the recorded base commit; that worktree and its ledger are read-only for this run.
+  - Source PRD C:/Users/salee/Documents/dev/puripuly_heart/.agents/specs/prd/vr-overlay-coalesced-retry-optimization.md validated at bd23681724a419131f4475d109e2089e91c7f591a1bd4716b854fbb0f9642b7b.
+  - Phase-1 live evidence is recorded at .agents/evidence/vr-overlay-coalesced-retry-phase1.yaml; SteamVR Home-only limits and no shorter-profile selection remain explicit.
+  - Capability/target integration and the accepted DD-002 design are recorded at .agents/evidence/vr-overlay-capability-target-integration.yaml.
+  - Affected-HMD profile comparison, fallback correction history, P05 selection, and selected-default build identity are recorded at .agents/evidence/vr-overlay-quiet-tail-profile-selection.yaml.
+  - Terminal review held on preserved-Presenter restart ownership, then passed after commit 92a2999 added the bounded repair and target-bearing production-surface regression coverage.
+  - After terminal closure, the user explicitly approved replacing pure quiet-tail postponement with bounded active retry and required direct orchestrator implementation plus review-agent review; prior terminal pass is superseded pending new evidence.
+  - The bounded active P05 implementation, automated verification, 50 ms affected-HMD run, build identity, and manual observation are recorded at .agents/evidence/vr-overlay-bounded-active-retry-adjustment.yaml.
+  - Independent terminal review held once for generation-transfer preemption and evidence capture, then passed after commit 0cba2fa added strict due transfer, deterministic synchronization, partial-budget coverage, corrected evidence, and final affected-HMD confirmation.

@@ -10,7 +10,7 @@ import secrets
 import shutil
 import sys
 import tempfile
-from collections.abc import Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 OVERLAY_EXECUTABLE_NAME = "PuriPulyHeartOverlay.exe"
 OPENVR_RUNTIME_DLL_NAME = "openvr_api.dll"
+QUIET_TAIL_PROFILE_ENV = "PURIPULY_OVERLAY_QUIET_TAIL_PROFILE"
 _EXIT_CODE_TO_FAILURE_REASON = {
     10: "contract_mismatch",
     12: "bridge_auth_failed",
@@ -217,6 +218,10 @@ class _AsyncioOverlayProcess:
 class DefaultOverlayProcessRunner:
     executable_path: Path | None = None
     task_factory: Any | None = None
+    quiet_tail_profile: str = "p05"
+
+    def set_quiet_tail_profile(self, profile: str) -> None:
+        self.quiet_tail_profile = profile
 
     def prepare(self, manifest: OverlayLaunchManifest) -> Path:
         _ = manifest
@@ -247,10 +252,13 @@ class DefaultOverlayProcessRunner:
             command = (str(sys.executable), str(executable_path), "--config", str(manifest_path))
         else:
             command = (str(executable_path), "--config", str(manifest_path))
+        child_env = os.environ.copy()
+        child_env[QUIET_TAIL_PROFILE_ENV] = self.quiet_tail_profile
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=child_env,
         )
         return _AsyncioOverlayProcess(process=process, task_factory=self.task_factory)
 
@@ -461,11 +469,13 @@ class OverlayProcessManager:
     log_dir: str = "logs"
     log_level: str = "INFO"
     logging_mode: str = "basic"
+    quiet_tail_profile: str = "p05"
     renderer_events: asyncio.Queue[dict[str, object]] | None = None
     overlay_instance_id: str = field(default_factory=lambda: f"overlay-{uuid4()}")
     diagnostics_dir: Path = field(default_factory=default_overlay_diagnostics_dir)
     diagnostics: OverlayDiagnosticsRecorder | None = None
     task_factory: Any | None = None
+    retry_ownership_changed: Callable[[bool], Awaitable[None]] | None = None
 
     state: str = field(init=False, default="off")
     failure_reason: str | None = field(init=False, default=None)
@@ -479,6 +489,8 @@ class OverlayProcessManager:
     _executable_path: Path | None = field(init=False, default=None)
     _executable_mtime: float | None = field(init=False, default=None)
     _failure_dumped: bool = field(init=False, default=False)
+    _shutdown_requested: bool = field(init=False, default=False)
+    native_retry_owner_confirmed: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         self.logging_mode = normalize_overlay_logging_mode(self.logging_mode)
@@ -505,8 +517,10 @@ class OverlayProcessManager:
         self._last_transition = "spawn"
         self._last_exit_code = None
         self._failure_dumped = False
+        self._shutdown_requested = False
         self.restart_scheduled = False
         self.failure_reason = None
+        await self._set_native_retry_owner_confirmed(False, force_notify=True)
 
         manifest = self._build_manifest()
         try:
@@ -522,6 +536,9 @@ class OverlayProcessManager:
                 executable_mtime=self._executable_mtime,
                 logging_mode=self.logging_mode,
             )
+            configure_profile = getattr(self.process_runner, "set_quiet_tail_profile", None)
+            if callable(configure_profile):
+                configure_profile(self.quiet_tail_profile)
             self._manifest_path = self._write_manifest(manifest)
             self._record_process("manifest_written", manifest_path=self._manifest_path)
             self._process = await self.process_runner.spawn(executable_path, self._manifest_path)
@@ -552,10 +569,16 @@ class OverlayProcessManager:
             await process.terminate()
             if self._process is process:
                 self._process = None
+        await self._set_native_retry_owner_confirmed(False)
 
         self._cleanup_manifest()
         self.state = "off"
         self._current_phase = "off"
+        self._shutdown_requested = False
+
+    def mark_shutdown_requested(self) -> None:
+        self._shutdown_requested = True
+        self._record_process("shutdown_requested", phase=self._current_phase)
 
     def _build_manifest(self) -> OverlayLaunchManifest:
         return OverlayLaunchManifest(
@@ -615,7 +638,7 @@ class OverlayProcessManager:
 
                 if event_task in done:
                     outcome = await self._handle_lifecycle_event(
-                        event_task.result(), allow_ready=True
+                        event_task.result(), allow_ready=True, trusted_process_event=True
                     )
                     if outcome == "ready":
                         self._current_phase = "connected"
@@ -639,6 +662,7 @@ class OverlayProcessManager:
                     outcome = await self._handle_lifecycle_event(
                         bridge_task.result(),
                         allow_ready=True,
+                        trusted_process_event=False,
                     )
                     if outcome == "ready":
                         self._current_phase = "connected"
@@ -708,7 +732,11 @@ class OverlayProcessManager:
 
                 if event_task in done:
                     if (
-                        await self._handle_lifecycle_event(event_task.result(), allow_ready=False)
+                        await self._handle_lifecycle_event(
+                            event_task.result(),
+                            allow_ready=False,
+                            trusted_process_event=True,
+                        )
                         == "failed"
                     ):
                         return
@@ -722,6 +750,7 @@ class OverlayProcessManager:
                         await self._handle_lifecycle_event(
                             bridge_task.result(),
                             allow_ready=False,
+                            trusted_process_event=False,
                         )
                         == "failed"
                     ):
@@ -733,7 +762,13 @@ class OverlayProcessManager:
                     self._last_exit_code = exit_code
                     self._record_process("process_exit", phase="connected", exit_code=exit_code)
                     if self.state == "connected" and exit_code is not None:
-                        await self._fail("runtime_crashed", terminate_process=False)
+                        if self._shutdown_requested and exit_code == 0:
+                            self._process = None
+                            self._cleanup_manifest()
+                            self.state = "stopping"
+                            self._current_phase = "expected_shutdown"
+                        else:
+                            await self._fail("runtime_crashed", terminate_process=False)
                     return
         finally:
             for task in (event_task, bridge_task, exit_task):
@@ -767,6 +802,7 @@ class OverlayProcessManager:
         event: object,
         *,
         allow_ready: bool,
+        trusted_process_event: bool = True,
     ) -> str:
         if not isinstance(event, dict):
             self._record_process("renderer_message_ignored", reason="malformed_message")
@@ -783,7 +819,10 @@ class OverlayProcessManager:
             event_type=event_type,
             failure_reason=event.get("failure_reason"),
         )
-        if allow_ready and event_type == "overlay_ready":
+        if allow_ready and trusted_process_event and event_type == "overlay_ready":
+            await self._set_native_retry_owner_confirmed(
+                self._supports_native_retry_ownership(event)
+            )
             self.state = "connected"
             self.failure_reason = None
             logger.info(
@@ -799,6 +838,30 @@ class OverlayProcessManager:
         if event_type == "overlay_event":
             self._handle_renderer_event(event)
         return "ignored"
+
+    def _supports_native_retry_ownership(self, event: dict[str, object]) -> bool:
+        capabilities = event.get("capabilities")
+        if not isinstance(capabilities, dict):
+            return False
+        capability = capabilities.get("native_presentation_retry")
+        if not isinstance(capability, dict) or set(capability) != {"version", "ownership"}:
+            return False
+        version = capability.get("version")
+        ownership = capability.get("ownership")
+        return type(version) is int and version == 1 and ownership == "exclusive"
+
+    async def _set_native_retry_owner_confirmed(
+        self,
+        confirmed: bool,
+        *,
+        force_notify: bool = False,
+    ) -> None:
+        confirmed = bool(confirmed)
+        if confirmed == self.native_retry_owner_confirmed and not force_notify:
+            return
+        self.native_retry_owner_confirmed = confirmed
+        if self.retry_ownership_changed is not None:
+            await self.retry_ownership_changed(confirmed)
 
     def _handle_renderer_event(self, event: dict[str, object]) -> None:
         payload = event.get("payload")
@@ -995,6 +1058,7 @@ class OverlayProcessManager:
                 self._process = None
         elif not terminate_process:
             self._process = None
+        await self._set_native_retry_owner_confirmed(False)
 
         if cleanup_manifest:
             self._cleanup_manifest()

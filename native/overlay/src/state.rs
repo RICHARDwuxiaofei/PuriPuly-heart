@@ -74,13 +74,126 @@ pub struct OverlayPresentationBlock {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct NativeFreshRenderGenerations {
+    #[serde(default, rename = "self", skip_serializing_if = "Option::is_none")]
+    pub self_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<u64>,
+    #[serde(skip)]
+    pub self_target: Option<String>,
+    #[serde(skip)]
+    pub peer_target: Option<String>,
+    #[serde(skip)]
+    pub quiet_tail_episodes: Option<NativeQuietTailEpisodes>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct NativeFreshRenderTargets {
+    #[serde(default, rename = "self", skip_serializing_if = "Option::is_none")]
+    pub self_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeQuietTailPhase {
+    Stream,
+    Final,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeQuietTailEpisode {
+    pub phase: NativeQuietTailPhase,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct NativeQuietTailEpisodes {
+    #[serde(default, rename = "self", skip_serializing_if = "Option::is_none")]
+    pub self_episode: Option<NativeQuietTailEpisode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<NativeQuietTailEpisode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct OverlayPresentationSnapshot {
-    #[serde(default)]
     pub revision: u64,
-    #[serde(default)]
     pub calibration: OverlayPresentationCalibration,
-    #[serde(default)]
     pub blocks: Vec<OverlayPresentationBlock>,
+    pub native_fresh_render_generations: Option<NativeFreshRenderGenerations>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct OverlayPresentationSnapshotWire {
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    calibration: OverlayPresentationCalibration,
+    #[serde(default)]
+    blocks: Vec<OverlayPresentationBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_fresh_render_generations: Option<NativeFreshRenderGenerations>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_fresh_render_targets: Option<NativeFreshRenderTargets>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_quiet_tail_episodes: Option<NativeQuietTailEpisodes>,
+}
+
+impl Serialize for OverlayPresentationSnapshot {
+    fn serialize<T>(&self, serializer: T) -> Result<T::Ok, T::Error>
+    where
+        T: serde::Serializer,
+    {
+        let targets = self
+            .native_fresh_render_generations
+            .as_ref()
+            .and_then(|generations| {
+                (generations.self_target.is_some() || generations.peer_target.is_some()).then(
+                    || NativeFreshRenderTargets {
+                        self_target: generations.self_target.clone(),
+                        peer: generations.peer_target.clone(),
+                    },
+                )
+            });
+        OverlayPresentationSnapshotWire {
+            revision: self.revision,
+            calibration: self.calibration.clone(),
+            blocks: self.blocks.clone(),
+            native_fresh_render_generations: self.native_fresh_render_generations.clone(),
+            native_fresh_render_targets: targets,
+            native_quiet_tail_episodes: self
+                .native_fresh_render_generations
+                .as_ref()
+                .and_then(|generations| generations.quiet_tail_episodes.clone()),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OverlayPresentationSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = OverlayPresentationSnapshotWire::deserialize(deserializer)?;
+        let mut generations = wire.native_fresh_render_generations;
+        if let (Some(generations), Some(targets)) =
+            (&mut generations, wire.native_fresh_render_targets)
+        {
+            generations.self_target = targets.self_target;
+            generations.peer_target = targets.peer;
+        }
+        if let Some(generations) = &mut generations {
+            generations.quiet_tail_episodes = wire.native_quiet_tail_episodes;
+        }
+        Ok(Self {
+            revision: wire.revision,
+            calibration: wire.calibration,
+            blocks: wire.blocks,
+            native_fresh_render_generations: generations,
+        })
+    }
 }
 
 pub type OverlayCalibration = OverlayPresentationCalibration;
@@ -306,6 +419,10 @@ impl OverlayState {
         &self.snapshot.blocks
     }
 
+    pub fn native_fresh_render_generations(&self) -> Option<&NativeFreshRenderGenerations> {
+        self.snapshot.native_fresh_render_generations.as_ref()
+    }
+
     pub fn scene(&self) -> &OverlayScene {
         &self.scene
     }
@@ -334,9 +451,83 @@ fn default_secondary_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
-        OverlayPresentationSnapshot, OverlayState,
+        NativeFreshRenderGenerations, OverlayPresentationBlock, OverlayPresentationBlockVariant,
+        OverlayPresentationCalibration, OverlayPresentationSnapshot, OverlayState,
     };
+    use serde_json::json;
+
+    #[test]
+    fn native_fresh_render_generations_are_legacy_safe_and_round_trip() {
+        let legacy: OverlayPresentationSnapshot = serde_json::from_value(json!({})).unwrap();
+        assert!(legacy.native_fresh_render_generations.is_none());
+
+        let snapshot: OverlayPresentationSnapshot = serde_json::from_value(json!({
+            "native_fresh_render_generations": {"self": 2, "peer": 7}
+        }))
+        .unwrap();
+        assert_eq!(
+            snapshot.native_fresh_render_generations,
+            Some(NativeFreshRenderGenerations {
+                self_generation: Some(2),
+                peer: Some(7),
+                self_target: None,
+                peer_target: None,
+                quiet_tail_episodes: None,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap()["native_fresh_render_generations"],
+            json!({"self": 2, "peer": 7})
+        );
+    }
+
+    #[test]
+    fn native_fresh_render_targets_are_optional_and_bound_to_generations() {
+        let snapshot: OverlayPresentationSnapshot = serde_json::from_value(json!({
+            "native_fresh_render_generations": {"self": 3, "peer": 4},
+            "native_fresh_render_targets": {"self": "self:synthetic-a", "peer": "peer:synthetic-b"}
+        }))
+        .unwrap();
+        let generations = snapshot.native_fresh_render_generations.as_ref().unwrap();
+        assert_eq!(generations.self_target.as_deref(), Some("self:synthetic-a"));
+        assert_eq!(generations.peer_target.as_deref(), Some("peer:synthetic-b"));
+        let value = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(
+            value["native_fresh_render_targets"],
+            json!({"self": "self:synthetic-a", "peer": "peer:synthetic-b"})
+        );
+    }
+
+    #[test]
+    fn native_fresh_render_generations_reject_negative_values_and_are_non_visual() {
+        assert!(
+            serde_json::from_value::<OverlayPresentationSnapshot>(json!({
+                "native_fresh_render_generations": {"self": -1}
+            }))
+            .is_err()
+        );
+        assert!(serde_json::from_str::<OverlayPresentationSnapshot>(
+            r#"{"native_fresh_render_generations":{"peer":18446744073709551616}}"#
+        )
+        .is_err());
+        let mut state = OverlayState::default();
+        let first: OverlayPresentationSnapshot = serde_json::from_value(json!({
+            "revision": 1,
+            "native_fresh_render_generations": {"self": 1}
+        }))
+        .unwrap();
+        let second: OverlayPresentationSnapshot = serde_json::from_value(json!({
+            "revision": 2,
+            "native_fresh_render_generations": {"self": 2, "peer": 1}
+        }))
+        .unwrap();
+        assert!(!state.apply_snapshot(&first));
+        assert!(!state.apply_snapshot(&second));
+        assert_eq!(
+            state.native_fresh_render_generations(),
+            second.native_fresh_render_generations.as_ref()
+        );
+    }
 
     fn block(id: &str) -> OverlayPresentationBlock {
         OverlayPresentationBlock {
@@ -363,6 +554,7 @@ mod tests {
         assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
             revision: 1,
             calibration: OverlayPresentationCalibration::default(),
+            native_fresh_render_generations: None,
             blocks: vec![block("self:1")],
         }));
 
@@ -376,6 +568,7 @@ mod tests {
         let snapshot = OverlayPresentationSnapshot {
             revision: 2,
             calibration: OverlayPresentationCalibration::default(),
+            native_fresh_render_generations: None,
             blocks: vec![],
         };
         let mut state = OverlayState::default();

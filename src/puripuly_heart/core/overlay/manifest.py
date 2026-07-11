@@ -65,7 +65,10 @@ class OverlayLaunchManifest:
             joined = ", ".join(sorted(extra_fields))
             raise ValueError(f"overlay manifest contains unsupported runtime fields: {joined}")
 
-        required_fields = _MANIFEST_FIELDS - {"logging_mode", "diagnostics_enabled"}
+        required_fields = _MANIFEST_FIELDS - {
+            "logging_mode",
+            "diagnostics_enabled",
+        }
         missing_fields = [field for field in required_fields if field not in data]
         if missing_fields:
             joined = ", ".join(sorted(missing_fields))

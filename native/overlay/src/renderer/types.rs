@@ -37,6 +37,8 @@ pub(crate) const TEXT_OUTLINE_OFFSETS_PX: [(f32, f32); 4] =
 pub enum CaptionRenderError {
     #[error("renderer init failed: {0}")]
     Init(String),
+    #[error("hardware device failed: {0}")]
+    HardwareDevice(String),
     #[error("renderer draw failed: {0}")]
     Draw(String),
 }

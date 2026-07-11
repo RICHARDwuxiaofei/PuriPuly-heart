@@ -1,9 +1,11 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 #[cfg(windows)]
 use std::mem::ManuallyDrop;
+use std::sync::Arc;
 #[cfg(windows)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 #[cfg(windows)]
 use windows::core::{Interface, PCWSTR};
@@ -23,14 +25,15 @@ use windows::Win32::Graphics::Direct2D::{
 };
 #[cfg(windows)]
 use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_10_1,
-    D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
+    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_10_0,
+    D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 #[cfg(windows)]
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Query, ID3D11Texture2D,
+    D3D11_ASYNC_GETDATA_DONOTFLUSH, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_QUERY_DESC, D3D11_QUERY_EVENT, D3D11_SDK_VERSION,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
 };
 #[cfg(windows)]
 use windows::Win32::Graphics::DirectWrite::{
@@ -44,8 +47,10 @@ use windows::Win32::Graphics::DirectWrite::{
 #[cfg(windows)]
 use windows::Win32::Graphics::Dxgi::{
     Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
-    IDXGIDevice, IDXGISurface,
+    IDXGIAdapter, IDXGIDevice, IDXGISurface,
 };
+#[cfg(windows)]
+use windows_core::BOOL;
 #[cfg(windows)]
 use windows_numerics::{Matrix3x2, Vector2};
 
@@ -74,6 +79,38 @@ use super::types::{
     DamageBand, RenderDiagnostics, ResolvedFrameLayout, StyleBucketSourceCount,
     TextStyleDescriptor,
 };
+use crate::openvr::OpenVrOutputAdapter;
+use crate::presentation::{
+    AdapterIdentity, AdapterMatch, PresentationBackend, ReadinessCancellation, ReadinessOutcome,
+};
+
+#[cfg(windows)]
+const GPU_READINESS_TIMEOUT: Duration = Duration::from_millis(50);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GpuReadinessProbe {
+    Ready,
+    Pending,
+    Failed,
+}
+
+async fn resolve_bounded_gpu_readiness(
+    cancellation: &ReadinessCancellation,
+    mut timed_out: impl FnMut() -> bool,
+    mut poll: impl FnMut() -> GpuReadinessProbe,
+) -> ReadinessOutcome {
+    loop {
+        if cancellation.is_cancelled() {
+            return ReadinessOutcome::Cancelled;
+        }
+        match poll() {
+            GpuReadinessProbe::Ready => return ReadinessOutcome::Ready,
+            GpuReadinessProbe::Failed => return ReadinessOutcome::Failed,
+            GpuReadinessProbe::Pending if timed_out() => return ReadinessOutcome::TimedOut,
+            GpuReadinessProbe::Pending => tokio::task::yield_now().await,
+        }
+    }
+}
 
 #[cfg(windows)]
 const DEBUG_OVERLAY_DAMAGE_BOTTOM_PX: f32 = 112.0;
@@ -134,6 +171,13 @@ pub struct CaptionRenderer {
     policy: CaptionLayoutPolicy,
     presentation: RefCell<CaptionPresentation>,
     backend: RefCell<RenderBackend>,
+    openvr_adapter_identity: AdapterIdentity,
+    test_readiness_pending_yields: Cell<usize>,
+    test_readiness_terminal_outcome: Cell<Option<ReadinessOutcome>>,
+    test_readiness_call_count: Cell<usize>,
+    test_readiness_pending_on_call: Cell<Option<(usize, usize)>>,
+    test_readiness_terminal_on_call: Cell<Option<(usize, ReadinessOutcome)>>,
+    test_readiness_started_on_call: RefCell<Option<(usize, Arc<Notify>)>>,
 }
 
 impl CaptionRenderer {
@@ -143,6 +187,24 @@ impl CaptionRenderer {
 
     pub fn new_for_test() -> Result<Self, CaptionRenderError> {
         Self::with_policy(CaptionLayoutPolicy::default(), BackendMode::Test)
+    }
+
+    pub fn new_for_openvr(
+        output_adapter: &OpenVrOutputAdapter,
+    ) -> Result<Self, CaptionRenderError> {
+        let renderer = Self::with_policy_and_adapter(
+            CaptionLayoutPolicy::default(),
+            BackendMode::Runtime,
+            Some(output_adapter),
+        )?;
+        if matches!(output_adapter.identity(), AdapterIdentity::DxgiLuid { .. })
+            && renderer.adapter_match(output_adapter.identity()) != AdapterMatch::Match
+        {
+            return Err(CaptionRenderError::HardwareDevice(
+                "renderer adapter does not match OpenVR output adapter".into(),
+            ));
+        }
+        Ok(renderer)
     }
 
     pub fn render_empty_frame(&self) -> Result<RenderedFrame, CaptionRenderError> {
@@ -184,21 +246,153 @@ impl CaptionRenderer {
         policy: CaptionLayoutPolicy,
         backend_mode: BackendMode,
     ) -> Result<Self, CaptionRenderError> {
+        Self::with_policy_and_adapter(policy, backend_mode, None)
+    }
+
+    fn with_policy_and_adapter(
+        policy: CaptionLayoutPolicy,
+        backend_mode: BackendMode,
+        output_adapter: Option<&OpenVrOutputAdapter>,
+    ) -> Result<Self, CaptionRenderError> {
         Ok(Self {
             policy,
             presentation: RefCell::new(CaptionPresentation::default()),
+            openvr_adapter_identity: output_adapter
+                .map(OpenVrOutputAdapter::requested_identity)
+                .unwrap_or(match backend_mode {
+                    BackendMode::Runtime => AdapterIdentity::Unavailable,
+                    BackendMode::Test => AdapterIdentity::Test,
+                }),
             backend: RefCell::new(match backend_mode {
-                BackendMode::Runtime => RenderBackend::new_runtime()?,
+                BackendMode::Runtime => RenderBackend::new_runtime(output_adapter)?,
                 BackendMode::Test => RenderBackend::new_test()?,
             }),
+            test_readiness_pending_yields: Cell::new(0),
+            test_readiness_terminal_outcome: Cell::new(None),
+            test_readiness_call_count: Cell::new(0),
+            test_readiness_pending_on_call: Cell::new(None),
+            test_readiness_terminal_on_call: Cell::new(None),
+            test_readiness_started_on_call: RefCell::new(None),
         })
     }
 
     pub fn set_presentation(&self, presentation: CaptionPresentation) {
         self.presentation.replace(presentation);
     }
+
+    pub fn presentation_backend(&self) -> PresentationBackend {
+        self.backend.borrow().presentation_backend()
+    }
+
+    pub fn adapter_identity(&self) -> AdapterIdentity {
+        self.backend.borrow().adapter_identity()
+    }
+
+    pub fn openvr_adapter_identity(&self) -> AdapterIdentity {
+        self.openvr_adapter_identity
+    }
+
+    pub fn adapter_match(&self, openvr_adapter: AdapterIdentity) -> AdapterMatch {
+        match (openvr_adapter, self.adapter_identity()) {
+            (
+                AdapterIdentity::DxgiLuid {
+                    high: a_high,
+                    low: a_low,
+                },
+                AdapterIdentity::DxgiLuid {
+                    high: b_high,
+                    low: b_low,
+                },
+            ) => {
+                if a_high == b_high && a_low == b_low {
+                    AdapterMatch::Match
+                } else {
+                    AdapterMatch::Mismatch
+                }
+            }
+            (AdapterIdentity::Test, AdapterIdentity::Test) => AdapterMatch::Match,
+            _ => AdapterMatch::Unavailable,
+        }
+    }
+
+    pub async fn prepare_frame_for_submission(
+        &self,
+        cancellation: &ReadinessCancellation,
+    ) -> ReadinessOutcome {
+        let call = self.test_readiness_call_count.get() + 1;
+        self.test_readiness_call_count.set(call);
+        let readiness_started = self
+            .test_readiness_started_on_call
+            .borrow()
+            .as_ref()
+            .filter(|(target_call, _)| *target_call == call)
+            .map(|(_, notify)| notify.clone());
+        if let Some(readiness_started) = readiness_started {
+            self.test_readiness_started_on_call.borrow_mut().take();
+            readiness_started.notify_one();
+        }
+        if let Some((target_call, yields)) = self.test_readiness_pending_on_call.get() {
+            if call == target_call {
+                self.test_readiness_pending_yields.set(yields);
+                self.test_readiness_pending_on_call.set(None);
+            }
+        }
+        if let Some((target_call, outcome)) = self.test_readiness_terminal_on_call.get() {
+            if call == target_call {
+                self.test_readiness_terminal_outcome.set(Some(outcome));
+                self.test_readiness_terminal_on_call.set(None);
+            }
+        }
+        while self.test_readiness_pending_yields.get() > 0 {
+            if cancellation.is_cancelled() {
+                self.test_readiness_pending_yields.set(0);
+                return ReadinessOutcome::Cancelled;
+            }
+            self.test_readiness_pending_yields
+                .set(self.test_readiness_pending_yields.get() - 1);
+            tokio::task::yield_now().await;
+        }
+        if let Some(outcome) = self.test_readiness_terminal_outcome.take() {
+            return outcome;
+        }
+        self.backend
+            .borrow()
+            .prepare_frame_for_submission(cancellation)
+            .await
+    }
+
+    pub fn set_test_readiness_pending_yields(&self, yields: usize) {
+        self.test_readiness_pending_yields.set(yields);
+    }
+
+    #[doc(hidden)]
+    pub fn set_test_readiness_pending_yields_on_call(&self, call: usize, yields: usize) {
+        self.test_readiness_pending_on_call
+            .set(Some((call, yields)));
+    }
+
+    #[doc(hidden)]
+    pub fn set_test_readiness_started_notify_on_call(&self, call: usize, notify: Arc<Notify>) {
+        self.test_readiness_started_on_call
+            .replace(Some((call, notify)));
+    }
+
+    #[doc(hidden)]
+    pub fn set_test_readiness_terminal_outcome_on_call(
+        &self,
+        call: usize,
+        outcome: ReadinessOutcome,
+    ) {
+        self.test_readiness_terminal_on_call
+            .set(Some((call, outcome)));
+    }
+
+    pub fn set_test_readiness_terminal_outcome(&self, outcome: ReadinessOutcome) {
+        self.test_readiness_terminal_outcome.set(Some(outcome));
+    }
 }
 
+#[derive(Clone, Copy)]
 enum BackendMode {
     Runtime,
     Test,
@@ -303,10 +497,12 @@ enum RenderBackend {
 }
 
 impl RenderBackend {
-    fn new_runtime() -> Result<Self, CaptionRenderError> {
+    fn new_runtime(
+        output_adapter: Option<&OpenVrOutputAdapter>,
+    ) -> Result<Self, CaptionRenderError> {
         #[cfg(windows)]
         {
-            return WindowsCaptionRenderer::new().map(Self::Windows);
+            return WindowsCaptionRenderer::new(output_adapter).map(Self::Windows);
         }
 
         #[cfg(not(windows))]
@@ -320,7 +516,7 @@ impl RenderBackend {
     fn new_test() -> Result<Self, CaptionRenderError> {
         #[cfg(windows)]
         {
-            return WindowsCaptionRenderer::new().map(Self::Windows);
+            return WindowsCaptionRenderer::new(None).map(Self::Windows);
         }
 
         #[cfg(not(windows))]
@@ -350,6 +546,38 @@ impl RenderBackend {
                     policy.resolve_blocks_for_presentation(blocks, width, height, presentation);
                 renderer.render(layout, debug_overlay)
             }
+        }
+    }
+
+    fn presentation_backend(&self) -> PresentationBackend {
+        match self {
+            #[cfg(windows)]
+            Self::Windows(renderer) => renderer.presentation_backend,
+            #[cfg(not(windows))]
+            Self::Test(_) => PresentationBackend::Test,
+        }
+    }
+
+    fn adapter_identity(&self) -> AdapterIdentity {
+        match self {
+            #[cfg(windows)]
+            Self::Windows(renderer) => renderer.adapter_identity,
+            #[cfg(not(windows))]
+            Self::Test(_) => AdapterIdentity::Test,
+        }
+    }
+
+    async fn prepare_frame_for_submission(
+        &self,
+        cancellation: &ReadinessCancellation,
+    ) -> ReadinessOutcome {
+        match self {
+            #[cfg(windows)]
+            Self::Windows(renderer) => renderer.prepare_frame_for_submission(cancellation).await,
+            #[cfg(not(windows))]
+            Self::Test(_) if cancellation.is_cancelled() => ReadinessOutcome::Cancelled,
+            #[cfg(not(windows))]
+            Self::Test(_) => ReadinessOutcome::Ready,
         }
     }
 }
@@ -416,13 +644,17 @@ struct WindowsCaptionRenderer {
     font_warmup_attempts: u32,
     font_warmup_failures: u32,
     _d3d_device: ID3D11Device,
+    d3d_context: ID3D11DeviceContext,
+    presentation_backend: PresentationBackend,
+    adapter_identity: AdapterIdentity,
 }
 
 #[cfg(windows)]
 impl WindowsCaptionRenderer {
-    fn new() -> Result<Self, CaptionRenderError> {
+    fn new(output_adapter: Option<&OpenVrOutputAdapter>) -> Result<Self, CaptionRenderError> {
         let renderer_init_started = Instant::now();
-        let (device, _context) = create_d3d_device()?;
+        let (device, d3d_context, presentation_backend) = create_d3d_device(output_adapter)?;
+        let adapter_identity = renderer_adapter_identity(&device)?;
         let d2d_factory = create_d2d_factory()?;
         let dwrite_factory = create_dwrite_factory()?;
         let factory2: IDWriteFactory2 = dwrite_factory
@@ -513,6 +745,9 @@ impl WindowsCaptionRenderer {
             font_warmup_attempts: 0,
             font_warmup_failures: 0,
             _d3d_device: device,
+            d3d_context,
+            presentation_backend,
+            adapter_identity,
         };
         let warmup_stats = renderer.warm_up_cjk_fonts();
         renderer.font_warmup_attempts = warmup_stats.attempts;
@@ -523,6 +758,54 @@ impl WindowsCaptionRenderer {
             warmup_stats.elapsed_ms
         );
         Ok(renderer)
+    }
+
+    async fn prepare_frame_for_submission(
+        &self,
+        cancellation: &ReadinessCancellation,
+    ) -> ReadinessOutcome {
+        if cancellation.is_cancelled() {
+            return ReadinessOutcome::Cancelled;
+        }
+        let description = D3D11_QUERY_DESC {
+            Query: D3D11_QUERY_EVENT,
+            MiscFlags: 0,
+        };
+        let mut query: Option<ID3D11Query> = None;
+        if unsafe { self._d3d_device.CreateQuery(&description, Some(&mut query)) }.is_err() {
+            return ReadinessOutcome::Failed;
+        }
+        let Some(query) = query else {
+            return ReadinessOutcome::Failed;
+        };
+        unsafe {
+            self.d3d_context.End(&query);
+            self.d3d_context.Flush();
+        }
+        let deadline = Instant::now() + GPU_READINESS_TIMEOUT;
+        resolve_bounded_gpu_readiness(
+            cancellation,
+            || Instant::now() >= deadline,
+            || {
+                let mut ready = BOOL::default();
+                let result = unsafe {
+                    self.d3d_context.GetData(
+                        &query,
+                        Some((&mut ready as *mut BOOL).cast()),
+                        std::mem::size_of::<BOOL>() as u32,
+                        D3D11_ASYNC_GETDATA_DONOTFLUSH.0 as u32,
+                    )
+                };
+                if result.is_err() {
+                    return GpuReadinessProbe::Failed;
+                }
+                if ready.as_bool() {
+                    return GpuReadinessProbe::Ready;
+                }
+                GpuReadinessProbe::Pending
+            },
+        )
+        .await
     }
 
     fn warm_up_cjk_fonts(&self) -> FontWarmupStats {
@@ -537,13 +820,13 @@ impl WindowsCaptionRenderer {
         for (language, sample) in CJK_WARMUP_SAMPLES {
             for (role, font_size_px) in sizes {
                 attempts += 1;
-                if let Err(error) =
+                if let Err(_error) =
                     self.warm_up_cjk_text_format_layout(language, sample, role, font_size_px)
                 {
                     failures += 1;
                     eprintln!(
-                        "[overlay][WARN] cjk_font_warmup_failure language={} role={} font_size_px={:.2} error={}",
-                        language, role, font_size_px, error
+                        "[overlay][WARN] renderer_diagnostic stage=cjk_font_warmup outcome=failure reason=directwrite_operation_failed language={} role={} font_size_px={:.2}",
+                        language, role, font_size_px
                     );
                 }
             }
@@ -1081,7 +1364,7 @@ impl WindowsCaptionRenderer {
                 }
                 layout
             }
-            Err(error) => {
+            Err(_error) => {
                 diagnostics.heuristic_layout_fallback_count += 1;
                 if first_cjk_layout_diagnostic_outcome(
                     cjk_layout_started.as_ref(),
@@ -1091,13 +1374,14 @@ impl WindowsCaptionRenderer {
                 {
                     if let Some(started) = cjk_layout_started.as_ref() {
                         eprintln!(
-                            "[overlay][DIAG] first_cjk_layout_failure_ms={} error={error}",
+                            "[overlay][DIAG] renderer_diagnostic stage=first_cjk_layout outcome=failure reason=directwrite_layout_failed elapsed_ms={}",
                             started.elapsed().as_millis()
                         );
                     }
                 }
                 eprintln!(
-                    "[overlay][WARN] catastrophic_directwrite_layout_failure stage=layout_cache error={error}"
+                    "{}",
+                    format_renderer_failure_diagnostic("layout_cache", "directwrite_layout_failed")
                 );
                 policy.resolve_blocks_for_presentation(blocks, width, height, presentation)
             }
@@ -1280,13 +1564,11 @@ impl WindowsCaptionRenderer {
         self.frame_text_format_cache_misses += 1;
 
         eprintln!(
-            "[overlay][DIAG] text_format_cache_miss style_key={:?} font_size_key={} resolved_bucket={:?} source={:?} family={} locale={} cache_size_before={}",
+            "[overlay][DIAG] renderer_diagnostic stage=text_format_cache outcome=miss style_key={:?} font_size_key={} resolved_bucket={:?} source={:?} cache_size_before={}",
             resolved_style.style_key,
             font_size_key,
             resolved_style.bucket,
             resolved_style.source,
-            resolved_style.family_name,
-            resolved_style.locale,
             self.caches.text_format_cache.len()
         );
         let (text_format, actual_style_key) = self.create_text_format_for_resolved_style(
@@ -1339,8 +1621,7 @@ impl WindowsCaptionRenderer {
         ) {
             TextFormatCollectionRoute::FallbackToSystem => {
                 eprintln!(
-                    "[overlay][WARN] bundled_font_collection_missing_before_text_format family={} locale={}",
-                    resolved_style.family_name, resolved_style.locale
+                    "[overlay][WARN] renderer_diagnostic stage=text_format_resolution outcome=fallback reason=bundled_collection_unavailable"
                 );
                 let fallback_style = fallback_resolved_text_style_for_bucket_locale(
                     resolved_style.bucket,
@@ -1395,10 +1676,9 @@ impl WindowsCaptionRenderer {
         };
         let text_format = match create_result {
             Ok(text_format) => text_format,
-            Err(error) if resolved_style.source != FontSource::SystemFallbackSentinel => {
+            Err(_error) if resolved_style.source != FontSource::SystemFallbackSentinel => {
                 eprintln!(
-                    "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
-                    resolved_style.family_name, resolved_style.locale, error
+                    "[overlay][WARN] renderer_diagnostic stage=text_format_resolution outcome=fallback reason=style_resolution_failed"
                 );
                 let fallback = FontResolver::style_resolution_failure_fallback_for_bucket_locale(
                     resolved_style.bucket,
@@ -1538,20 +1818,18 @@ impl WindowsCaptionRenderer {
             let family = match self.find_font_family(family_name) {
                 Ok(Some(family)) => family,
                 Ok(None) => continue,
-                Err(error) => {
+                Err(_error) => {
                     eprintln!(
-                        "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
-                        family_name, requested_style.locale, error
+                        "[overlay][WARN] renderer_diagnostic stage=font_family_resolution outcome=fallback reason=family_lookup_failed"
                     );
                     break;
                 }
             };
             let Some(weight) = (match resolve_family_weight(&family, policy) {
                 Ok(weight) => weight,
-                Err(error) => {
+                Err(_error) => {
                     eprintln!(
-                        "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
-                        family_name, requested_style.locale, error
+                        "[overlay][WARN] renderer_diagnostic stage=font_weight_resolution outcome=fallback reason=weight_lookup_failed"
                     );
                     break;
                 }
@@ -1626,6 +1904,11 @@ fn d2d_color(color: (f32, f32, f32, f32)) -> D2D1_COLOR_F {
 }
 
 #[cfg(windows)]
+fn format_renderer_failure_diagnostic(stage: &'static str, reason: &'static str) -> String {
+    format!("[overlay][WARN] renderer_diagnostic stage={stage} outcome=failure reason={reason}")
+}
+
+#[cfg(windows)]
 fn create_dwrite_factory() -> Result<IDWriteFactory, CaptionRenderError> {
     unsafe {
         DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
@@ -1643,8 +1926,8 @@ fn initialize_bundled_font_collection(
         Ok(path) => path,
         Err(error) => {
             let reason = format!("resolve bundled font runtime path: {error}");
-            eprintln!("[overlay][WARN] bundled_font_unavailable {reason}");
-            log_font_bundle_load(started, "unavailable", &reason);
+            eprintln!("[overlay][WARN] renderer_diagnostic stage=font_bundle_load outcome=unavailable reason=path_resolution_failed");
+            log_font_bundle_load(started, "unavailable", "path_resolution_failed");
             return (
                 font_resolver_with_bundle_unavailable(reason, ui_language_hint),
                 None,
@@ -1653,8 +1936,7 @@ fn initialize_bundled_font_collection(
     };
     match WindowsBundledFontCollection::load_with_factory(factory, &path) {
         Ok(collection) => {
-            let detail = collection.path().display().to_string();
-            log_font_bundle_load(started, "available", &detail);
+            log_font_bundle_load(started, "available", "loaded");
             (
                 font_resolver_with_bundle_available(ui_language_hint),
                 Some(collection),
@@ -1662,8 +1944,8 @@ fn initialize_bundled_font_collection(
         }
         Err(error) => {
             let reason = format!("{} ({})", path.display(), error);
-            eprintln!("[overlay][WARN] bundled_font_unavailable {reason}");
-            log_font_bundle_load(started, "unavailable", &reason);
+            eprintln!("[overlay][WARN] renderer_diagnostic stage=font_bundle_load outcome=unavailable reason=collection_load_failed");
+            log_font_bundle_load(started, "unavailable", "collection_load_failed");
             (
                 font_resolver_with_bundle_unavailable(reason, ui_language_hint),
                 None,
@@ -1673,12 +1955,12 @@ fn initialize_bundled_font_collection(
 }
 
 #[cfg(windows)]
-fn log_font_bundle_load(started: Instant, status: &str, detail: &str) {
+fn log_font_bundle_load(started: Instant, status: &str, reason: &str) {
     eprintln!(
-        "[overlay][DIAG] font_bundle_load_ms={} status={} detail={}",
+        "[overlay][DIAG] renderer_diagnostic stage=font_bundle_load elapsed_ms={} status={} reason={}",
         started.elapsed().as_millis(),
         status,
-        detail
+        reason
     );
 }
 
@@ -1792,7 +2074,9 @@ fn create_d2d_factory() -> Result<ID2D1Factory1, CaptionRenderError> {
 }
 
 #[cfg(windows)]
-fn create_d3d_device() -> Result<(ID3D11Device, ID3D11DeviceContext), CaptionRenderError> {
+fn create_d3d_device(
+    output_adapter: Option<&OpenVrOutputAdapter>,
+) -> Result<(ID3D11Device, ID3D11DeviceContext, PresentationBackend), CaptionRenderError> {
     let feature_levels = [
         D3D_FEATURE_LEVEL_11_1,
         D3D_FEATURE_LEVEL_11_0,
@@ -1800,12 +2084,19 @@ fn create_d3d_device() -> Result<(ID3D11Device, ID3D11DeviceContext), CaptionRen
         D3D_FEATURE_LEVEL_10_0,
     ];
 
-    create_d3d_device_for_driver(D3D_DRIVER_TYPE_HARDWARE, &feature_levels)
-        .or_else(|_| create_d3d_device_for_driver(D3D_DRIVER_TYPE_WARP, &feature_levels))
+    let adapter = output_adapter.and_then(OpenVrOutputAdapter::adapter);
+    let driver_type = if adapter.is_some() {
+        D3D_DRIVER_TYPE_UNKNOWN
+    } else {
+        D3D_DRIVER_TYPE_HARDWARE
+    };
+    create_d3d_device_for_driver(adapter, driver_type, &feature_levels)
+        .map(|(device, context)| (device, context, PresentationBackend::D3d11Hardware))
 }
 
 #[cfg(windows)]
 fn create_d3d_device_for_driver(
+    adapter: Option<&IDXGIAdapter>,
     driver_type: windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE,
     feature_levels: &[windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL],
 ) -> Result<(ID3D11Device, ID3D11DeviceContext), CaptionRenderError> {
@@ -1814,7 +2105,7 @@ fn create_d3d_device_for_driver(
 
     unsafe {
         D3D11CreateDevice(
-            None,
+            adapter,
             driver_type,
             HMODULE::default(),
             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
@@ -1824,13 +2115,29 @@ fn create_d3d_device_for_driver(
             None,
             Some(&mut context),
         )
-        .map_err(|error| CaptionRenderError::Init(error.to_string()))?;
+        .map_err(|_| CaptionRenderError::HardwareDevice("D3D11 device creation failed".into()))?;
     }
 
-    let device = device.ok_or_else(|| CaptionRenderError::Init("d3d device missing".into()))?;
-    let context =
-        context.ok_or_else(|| CaptionRenderError::Init("d3d device context missing".into()))?;
+    let device =
+        device.ok_or_else(|| CaptionRenderError::HardwareDevice("D3D11 device missing".into()))?;
+    let context = context
+        .ok_or_else(|| CaptionRenderError::HardwareDevice("D3D11 context missing".into()))?;
     Ok((device, context))
+}
+
+#[cfg(windows)]
+fn renderer_adapter_identity(device: &ID3D11Device) -> Result<AdapterIdentity, CaptionRenderError> {
+    let dxgi_device: IDXGIDevice = device
+        .cast()
+        .map_err(|_| CaptionRenderError::Init("renderer adapter identity unavailable".into()))?;
+    let adapter = unsafe { dxgi_device.GetAdapter() }
+        .map_err(|_| CaptionRenderError::Init("renderer adapter identity unavailable".into()))?;
+    let description = unsafe { adapter.GetDesc() }
+        .map_err(|_| CaptionRenderError::Init("renderer adapter identity unavailable".into()))?;
+    Ok(AdapterIdentity::DxgiLuid {
+        high: description.AdapterLuid.HighPart,
+        low: description.AdapterLuid.LowPart,
+    })
 }
 
 #[cfg(windows)]
@@ -1904,6 +2211,9 @@ fn prefix_render_error(stage: &str, error: CaptionRenderError) -> CaptionRenderE
     match error {
         CaptionRenderError::Init(message) => {
             CaptionRenderError::Init(format!("{stage}: {message}"))
+        }
+        CaptionRenderError::HardwareDevice(message) => {
+            CaptionRenderError::HardwareDevice(format!("{stage}: {message}"))
         }
         CaptionRenderError::Draw(message) => {
             CaptionRenderError::Draw(format!("{stage}: {message}"))
@@ -2094,18 +2404,87 @@ fn bounds_intersect_damage_band(bounds: BlockBounds, damage_band: DamageBand) ->
 
 #[cfg(test)]
 mod tests {
-    use super::prepare_layout_for_render;
+    #[cfg(windows)]
+    use super::format_renderer_failure_diagnostic;
+    use super::{prepare_layout_for_render, resolve_bounded_gpu_readiness, GpuReadinessProbe};
+    use crate::presentation::{ReadinessCancellation, ReadinessOutcome};
     use crate::renderer::{
         BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
         CaptionPresentation, FontLanguageBucket, FontResolver, FontSource, LayoutCacheKey,
         LineRole, ResolvedBlockLayout, ResolvedFrameLayout, ResolvedLineLayout, TextStyleKey,
         VisualBounds,
     };
+    use std::cell::Cell;
+    #[cfg(windows)]
+    use std::time::Duration;
 
     fn style_key(language: &str) -> TextStyleKey {
         FontResolver::with_bundle_available()
             .resolve(Some(language), "漢字")
             .style_key()
+    }
+
+    #[tokio::test]
+    async fn bounded_gpu_readiness_has_terminal_ready_timeout_cancelled_and_failed_outcomes() {
+        let cancellation = ReadinessCancellation::default();
+        let pending_polls = Cell::new(0usize);
+        assert_eq!(
+            resolve_bounded_gpu_readiness(
+                &cancellation,
+                || false,
+                || {
+                    pending_polls.set(pending_polls.get() + 1);
+                    if pending_polls.get() < 3 {
+                        GpuReadinessProbe::Pending
+                    } else {
+                        GpuReadinessProbe::Ready
+                    }
+                }
+            )
+            .await,
+            ReadinessOutcome::Ready
+        );
+        assert_eq!(pending_polls.get(), 3);
+        assert_eq!(
+            resolve_bounded_gpu_readiness(&cancellation, || true, || GpuReadinessProbe::Pending)
+                .await,
+            ReadinessOutcome::TimedOut
+        );
+        let live_cancellation = ReadinessCancellation::default();
+        let cancel_handle = live_cancellation.clone();
+        let (outcome, ()) = tokio::join!(
+            resolve_bounded_gpu_readiness(
+                &live_cancellation,
+                || false,
+                || GpuReadinessProbe::Pending
+            ),
+            async move {
+                tokio::task::yield_now().await;
+                cancel_handle.cancel();
+            }
+        );
+        assert_eq!(outcome, ReadinessOutcome::Cancelled);
+        assert_eq!(
+            resolve_bounded_gpu_readiness(&cancellation, || false, || GpuReadinessProbe::Failed)
+                .await,
+            ReadinessOutcome::Failed
+        );
+        #[cfg(windows)]
+        assert_eq!(super::GPU_READINESS_TIMEOUT, Duration::from_millis(50));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn renderer_failure_diagnostic_contains_only_allowlisted_categories() {
+        let line = format_renderer_failure_diagnostic("layout_cache", "directwrite_layout_failed");
+
+        assert_eq!(
+            line,
+            "[overlay][WARN] renderer_diagnostic stage=layout_cache outcome=failure reason=directwrite_layout_failed"
+        );
+        for prohibited in ["error=", "path=", "family=", "locale=", "stack", "C:\\"] {
+            assert!(!line.contains(prohibited));
+        }
     }
 
     fn layout_key(seed: &str) -> LayoutCacheKey {
@@ -2277,7 +2656,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn line_cache_key_and_text_format_key_share_resolved_style_identity() {
-        let renderer = super::WindowsCaptionRenderer::new()
+        let renderer = super::WindowsCaptionRenderer::new(None)
             .expect("Windows caption renderer should initialize for style-key test");
         let policy = CaptionLayoutPolicy::default();
         let layout = policy
@@ -2310,7 +2689,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn line_text_format_cache_key_uses_measured_line_style_without_reresolving_text() {
-        let renderer = super::WindowsCaptionRenderer::new()
+        let renderer = super::WindowsCaptionRenderer::new(None)
             .expect("Windows caption renderer should initialize for style-key test");
         let policy = CaptionLayoutPolicy::default();
         let resolved_line_style =

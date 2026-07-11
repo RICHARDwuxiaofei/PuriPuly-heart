@@ -5,10 +5,79 @@ from uuid import uuid4
 import pytest
 
 from puripuly_heart.core.overlay.protocol import (
+    U64_MAX,
+    NativeFreshRenderGenerations,
+    NativeFreshRenderTargets,
+    NativeQuietTailEpisode,
+    NativeQuietTailEpisodes,
     OverlayPresentationBlock,
     OverlayPresentationCalibration,
     OverlayPresentationSnapshot,
 )
+
+
+def test_native_quiet_tail_episodes_are_optional_runtime_only_facts() -> None:
+    legacy = OverlayPresentationSnapshot.from_dict({"revision": 1, "blocks": []})
+    assert legacy.native_quiet_tail_episodes is None
+    snapshot = OverlayPresentationSnapshot(
+        native_quiet_tail_episodes=NativeQuietTailEpisodes(
+            self=NativeQuietTailEpisode(phase="final", generation=4),
+            peer=NativeQuietTailEpisode(phase="stream", generation=9),
+        )
+    )
+    assert OverlayPresentationSnapshot.from_dict(snapshot.to_dict()) == snapshot
+    with pytest.raises(ValueError):
+        NativeQuietTailEpisode(phase="unknown", generation=1)
+
+
+def test_native_fresh_render_generations_are_optional_and_round_trip_independently() -> None:
+    legacy = OverlayPresentationSnapshot.from_dict({"revision": 1, "blocks": []})
+    assert legacy.native_fresh_render_generations is None
+    assert "native_fresh_render_generations" not in legacy.to_dict()
+
+    snapshot = OverlayPresentationSnapshot(
+        native_fresh_render_generations=NativeFreshRenderGenerations(self=3, peer=8)
+    )
+    assert OverlayPresentationSnapshot.from_dict(snapshot.to_dict()) == snapshot
+    assert (
+        "native_fresh_render_generations"
+        not in OverlayPresentationSnapshot(
+            native_fresh_render_generations=NativeFreshRenderGenerations()
+        ).to_dict()
+    )
+    maximum = NativeFreshRenderGenerations(self=U64_MAX, peer=0)
+    assert NativeFreshRenderGenerations.from_dict(maximum.to_dict()) == maximum
+
+
+def test_native_fresh_render_targets_are_optional_and_backward_compatible() -> None:
+    legacy = OverlayPresentationSnapshot.from_dict({"revision": 1, "blocks": []})
+    assert legacy.native_fresh_render_targets is None
+    snapshot = OverlayPresentationSnapshot(
+        native_fresh_render_targets=NativeFreshRenderTargets(
+            self="self:synthetic-a",
+            peer="peer:synthetic-b",
+        )
+    )
+    assert OverlayPresentationSnapshot.from_dict(snapshot.to_dict()) == snapshot
+    with pytest.raises(ValueError):
+        NativeFreshRenderTargets.from_dict({"self": " "})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [-1, U64_MAX + 1, True, 1.5, "1"],
+)
+def test_native_fresh_render_generations_reject_invalid_values(value: object) -> None:
+    with pytest.raises(ValueError):
+        OverlayPresentationSnapshot.from_dict({"native_fresh_render_generations": {"self": value}})
+
+
+@pytest.mark.parametrize("value", [-1, U64_MAX + 1, True, 1.5, "1"])
+def test_native_fresh_render_generations_reject_invalid_direct_values(value: object) -> None:
+    with pytest.raises(ValueError):
+        NativeFreshRenderGenerations(peer=value)  # type: ignore[arg-type]
+
+
 from puripuly_heart.core.overlay.sink import (
     OverlayEventAdapter,
     PeerActiveUpdate,

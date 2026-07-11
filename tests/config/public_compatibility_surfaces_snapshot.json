@@ -559,7 +559,9 @@
         "--config",
         "{manifest_path}"
       ],
-      "explicit_env_overrides": [],
+      "explicit_env_overrides": [
+        "PURIPULY_OVERLAY_QUIET_TAIL_PROFILE"
+      ],
       "manifest_temp_prefix": "puripuly-overlay-",
       "manifest_temp_suffix": ".json",
       "ready_event_type": "overlay_ready",

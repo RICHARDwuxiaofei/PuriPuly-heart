@@ -5,6 +5,60 @@ use serde::{Deserialize, Serialize};
 use crate::logging::OverlayLoggingMode;
 use crate::runtime::StartupError;
 
+pub const QUIET_TAIL_PROFILE_ENV: &str = "PURIPULY_OVERLAY_QUIET_TAIL_PROFILE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuietTailProfile {
+    P05,
+    P10,
+    P15,
+    P20,
+    NoRetry,
+    OneRetry,
+}
+
+impl Default for QuietTailProfile {
+    fn default() -> Self {
+        Self::P05
+    }
+}
+
+impl QuietTailProfile {
+    pub fn max_final_opportunities(self) -> u32 {
+        match self {
+            Self::P05 => 5,
+            Self::P10 => 10,
+            Self::P15 => 15,
+            Self::P20 => 20,
+            Self::NoRetry => 0,
+            Self::OneRetry => 1,
+        }
+    }
+
+    pub fn scheduling_wall(self) -> std::time::Duration {
+        std::time::Duration::from_millis(match self {
+            Self::P05 => 500,
+            Self::P10 => 1000,
+            Self::P15 => 1500,
+            Self::P20 => 2000,
+            Self::NoRetry => 0,
+            Self::OneRetry => 2000,
+        })
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::P05 => "p05",
+            Self::P10 => "p10",
+            Self::P15 => "p15",
+            Self::P20 => "p20",
+            Self::NoRetry => "no_retry",
+            Self::OneRetry => "one_retry",
+        }
+    }
+}
+
 pub const EXPECTED_CONTRACT_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -69,6 +123,34 @@ impl TryFrom<OverlayManifestSerde> for OverlayManifest {
             locale: raw.locale,
             logging_mode,
         })
+    }
+}
+
+pub fn resolve_quiet_tail_profile_from_env() -> Result<QuietTailProfile, StartupError> {
+    resolve_quiet_tail_profile(std::env::var_os(QUIET_TAIL_PROFILE_ENV).as_deref())
+}
+
+pub fn resolve_quiet_tail_profile(
+    value: Option<&std::ffi::OsStr>,
+) -> Result<QuietTailProfile, StartupError> {
+    let Some(value) = value else {
+        return Ok(QuietTailProfile::P05);
+    };
+    let Some(value) = value.to_str() else {
+        return Err(StartupError::Manifest(
+            "quiet tail profile environment value is invalid".to_string(),
+        ));
+    };
+    match value {
+        "p05" => Ok(QuietTailProfile::P05),
+        "p10" => Ok(QuietTailProfile::P10),
+        "p15" => Ok(QuietTailProfile::P15),
+        "p20" => Ok(QuietTailProfile::P20),
+        "no_retry" => Ok(QuietTailProfile::NoRetry),
+        "one_retry" => Ok(QuietTailProfile::OneRetry),
+        _ => Err(StartupError::Manifest(
+            "quiet tail profile environment value is unsupported".to_string(),
+        )),
     }
 }
 

@@ -272,6 +272,7 @@ class OverlayRuntimeHandle:
             )
             try:
                 if emit_shutdown:
+                    await self._attempt(failures, self._mark_process_shutdown_requested)
                     await self._attempt(failures, self._broadcast_shutdown_with_grace)
                 await self._cancel_owned_tasks(failures)
                 await self._close_presenter(
@@ -377,6 +378,14 @@ class OverlayRuntimeHandle:
             await result
         if self._shutdown_grace_s > 0:
             await asyncio.sleep(self._shutdown_grace_s)
+
+    def _mark_process_shutdown_requested(self) -> None:
+        manager = self._process_manager
+        if manager is None:
+            return
+        mark_shutdown_requested = getattr(manager, "mark_shutdown_requested", None)
+        if callable(mark_shutdown_requested):
+            mark_shutdown_requested()
 
     def _detach_hub_overlay_ingress(
         self,

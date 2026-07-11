@@ -1,0 +1,144 @@
+version: 1
+evidence_ref: vr-overlay-quiet-tail-profile-selection
+recorded_at: 2026-07-12
+source:
+  bundle_sha256: eda96ce61e97c63af60145e39c8f967ebac4b5a8157b8b68e2c84d78c78a6527
+  prd_sha256: bd23681724a419131f4475d109e2089e91c7f591a1bd4716b854fbb0f9642b7b
+candidate:
+  commit: 58880bfab5580968a245dca1d5fdb1a6df1df0fc
+  executable_sha256: 0ee9135d3fb6ed2e7ab9fde506b4471756f681d158222df2ad180877e64e8501
+  profile_transport: child-only PURIPULY_OVERLAY_QUIET_TAIL_PROFILE environment value
+preserved_checkpoint:
+  commit: 92eff4229021189b7e9a82288cfc4eb6d260e838
+environment:
+  platform: Windows
+  runtime: SteamVR Home
+  vr_application_load: not_run
+  hmd_identity: same historically affected local HMD used for Phase-1 rapid-final stale/N-1 comparison
+  hmd_model: not_recorded
+  openvr_adapter_luid: {high: 0, low: 65045}
+  renderer_adapter_luid: {high: 0, low: 65045}
+  adapter_match: match
+profiles:
+  P05:
+    cadence_ms: 100
+    scheduling_wall_ms: 500
+    maximum_final_logical_opportunities: 5
+    physical_submits: 26
+    self_final_completed: 4
+    peer_final_completed: 4
+    mixed_self_completed: 4
+    mixed_peer_completed: 4
+    stream_completed_across_six_generations: 3
+    dropped_frames: 0
+    compositor_mis_presented_max: 0
+    submit_duration_us_mean: 833.909
+    compositor_total_render_gpu_ms_mean: 5.39
+    log: C:/Users/salee/AppData/Local/Temp/opencode/iw-qtail-final-p05.log
+    log_sha256: 6b4fc02179c7d8a3003b7bc72656466833e2c9076b26a357d10b7d8c4c9ceb43
+  P10:
+    cadence_ms: 100
+    scheduling_wall_ms: 1000
+    maximum_final_logical_opportunities: 10
+    physical_submits: 42
+    self_final_completed: 9
+    peer_final_completed: 9
+    mixed_self_completed: 9
+    mixed_peer_completed: 9
+    stream_completed_across_six_generations: 4
+    dropped_frames: 0
+    compositor_mis_presented_max: 0
+    submit_duration_us_mean: 1076.64
+    compositor_total_render_gpu_ms_mean: 7.726
+    log: C:/Users/salee/AppData/Local/Temp/opencode/iw-qtail-final-p10.log
+    log_sha256: 1ea78ae5dfc443c2ada1463cf533ed7ae1845b7058b810632756f67be1e3e986
+  P15:
+    cadence_ms: 100
+    scheduling_wall_ms: 1500
+    maximum_final_logical_opportunities: 15
+    physical_submits: 54
+    self_final_completed: 13
+    peer_final_completed: 13
+    mixed_self_completed: 13
+    mixed_peer_completed: 13
+    stream_completed_across_six_generations: 4
+    dropped_frames: 0
+    compositor_mis_presented_max: 0
+    submit_duration_us_mean: 954.727
+    compositor_total_render_gpu_ms_mean: 5.77857
+    log: C:/Users/salee/AppData/Local/Temp/opencode/iw-qtail-final-p15.log
+    log_sha256: d3287f38c4f4df241730291ef94348dd4c7d785afe9333c86f6be46de66f3927
+  P20:
+    cadence_ms: 100
+    scheduling_wall_ms: 2000
+    maximum_final_logical_opportunities: 20
+    physical_submits: 69
+    self_final_completed: 18
+    peer_final_completed: 18
+    mixed_self_completed: 18
+    mixed_peer_completed: 18
+    stream_completed_across_six_generations: 4
+    dropped_frames: 0
+    compositor_mis_presented_max: 2
+    submit_duration_us_mean: 1526.36
+    compositor_total_render_gpu_ms_mean: 7.43375
+    log: C:/Users/salee/AppData/Local/Temp/opencode/iw-qtail-final-p20.log
+    log_sha256: a6929890c63bd4c3817cfddb6434df4711116c8b109d297462db7395d2cb9275
+profile_scenarios:
+  - SELF final
+  - six-generation PEER stream with one non-replenishing four-opportunity episode
+  - PEER final
+  - simultaneous SELF and PEER final
+  - hide
+  - graceful shutdown
+fallback:
+  correction_history:
+    initial_result: new manifest profile key was rejected by preserved old Native as manifest_invalid; candidate held and evidence not accepted
+    initial_failed_log: C:/Users/salee/AppData/Local/Temp/opencode/iw-qtail-old-native-fallback.log
+    initial_failed_log_sha256: dc977c50cc2da183f043ea531d6650aa372ad2dd2b45746c58e956b4a9dad7b1
+    repair_commit: 58880bfab5580968a245dca1d5fdb1a6df1df0fc
+    repair: restored the legacy manifest shape and moved runtime profile selection to isolated child environment state
+  python_commit: 58880bfab5580968a245dca1d5fdb1a6df1df0fc
+  native_commit: 92eff4229021189b7e9a82288cfc4eb6d260e838
+  native_capability_confirmed: false
+  python_self_owner: true
+  python_peer_owner: true
+  manager_ready: connected
+  physical_submits: 41
+  final_observation: SELF original and Translation secondary remained visible without stale/N-1, missing content, or flicker
+  log: C:/Users/salee/AppData/Local/Temp/opencode/iw-qtail-old-native-fallback-explained.log
+  log_sha256: a29026378eaca6074470a34668024a3ae3f8a0a5aca3dfaea826a2a0577a4955
+manual_hmd_observation:
+  observer: user
+  P05: normal final persistence and hide; no stale/N-1, missing content, or flicker
+  P10: normal final persistence and hide; no stale/N-1, missing content, or flicker
+  P15: normal final persistence and hide; no stale/N-1, missing content, or flicker
+  P20: normal final persistence and hide; no stale/N-1, missing content, or flicker
+  fallback: old Native compatibility fallback displayed and retained SELF original plus Translation secondary normally
+  claim_boundary: observations apply only to this build or identified old-Native fallback pairing, this local affected HMD, SteamVR Home, and the recorded synthetic scenarios
+comparison:
+  stream_bound: later PEER stream generations did not replenish the four-opportunity episode after exhaustion
+  coalescing: mixed SELF and PEER final opportunities shared physical attempts while retaining both logical completions
+  profile_work: physical submits increased monotonically from 26 to 42 to 54 to 69 as the authorized wall increased
+  sampled_regression: all profiles had zero sampled dropped frames; cumulative compositor mis-presented maxima were P05=0, P10=0, P15=0, and P20=2 and are not overlay-attributable
+  selected_profile: P05
+  selection_reason: P05 is the shortest authorized profile and preserved the recorded affected-HMD final-state, stream, mixed-channel, visibility, hide, restart, fallback, and shutdown behavior while performing the least physical work
+route:
+  decision: advance
+  dd_001: select P05 as the candidate product runtime default
+  dd_002: retain four stream opportunities and five P05 final opportunities at 100 ms
+  dd_003: no pivot opened because the shortest profile passed bounded evidence
+  dd_004: unresolved; no integration into vnext is authorized
+  selected_default_commit: e6dc26e505832693ee5b952e3268811948c6af47
+  selected_default_executable_sha256: f9440891fb6eb3da44ec0e579a726f196d00060a798d145d331a551d94d45231
+  selected_default_windows_release_build: passed in 27.81 seconds
+  terminal_restart_repair_commit: 92a2999ee91bf43eb7d91c36cdf81b5f92df4e07
+  terminal_restart_repair_executable_sha256: fe7b8dfcdcf41eb19668abc17b4dfb7d0ed93cdd6ed7ef83a80f361d15385216
+  terminal_restart_repair: preserved Presenter restart force-restores conservative ownership before capability renegotiation and retains exact target continuity across capable and missing-capability routes
+  next_action: await separate DD-004 integration authorization for the isolated P05 candidate
+limitations:
+  - SteamVR Home only; no VRChat or other application load was run.
+  - HMD model was not recorded.
+  - Compositor timing and mis-presented counters are not overlay-attributable or physical-HMD acknowledgement.
+  - Profile comparison used explicit runtime-only controls on commit 58880bf; commit e6dc26e applies the reviewed P05 default without changing the compared scheduler implementation.
+  - Terminal review found and held a preserved-Presenter restart ownership defect; commit 92a2999 repairs it with target-bearing manager/controller/Presenter regression coverage.

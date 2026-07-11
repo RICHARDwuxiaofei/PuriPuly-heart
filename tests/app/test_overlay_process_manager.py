@@ -24,6 +24,52 @@ from puripuly_heart.core.overlay.process import (
 )
 
 
+@pytest.mark.asyncio
+async def test_default_runner_passes_p05_product_default_in_child_env_without_mutating_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_spawn(*command: str, **kwargs: object) -> object:
+        captured["command"] = command
+        captured.update(kwargs)
+        return SimpleNamespace(stdout=None, stderr=None)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    monkeypatch.delenv(process_module.QUIET_TAIL_PROFILE_ENV, raising=False)
+    runner = DefaultOverlayProcessRunner()
+    await runner.spawn(tmp_path / "overlay.exe", tmp_path / "manifest.json")
+    child_env = captured["env"]
+    assert isinstance(child_env, dict)
+    assert child_env[process_module.QUIET_TAIL_PROFILE_ENV] == "p05"
+    assert process_module.QUIET_TAIL_PROFILE_ENV not in os.environ
+
+
+@pytest.mark.asyncio
+async def test_default_runner_passes_explicit_p20_in_child_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_spawn(*command: str, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return SimpleNamespace(stdout=None, stderr=None)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    runner = DefaultOverlayProcessRunner(quiet_tail_profile="p20")
+    await runner.spawn(tmp_path / "overlay.exe", tmp_path / "manifest.json")
+    child_env = captured["env"]
+    assert isinstance(child_env, dict)
+    assert child_env[process_module.QUIET_TAIL_PROFILE_ENV] == "p20"
+
+
+def test_new_manifest_serialization_omits_runtime_profile() -> None:
+    payload = _overlay_manifest().to_dict()
+    assert "quiet_tail_profile" not in payload
+
+
 @dataclass(slots=True)
 class FakeOverlayManagedProcess(OverlayManagedProcess):
     ready_event_delay_ms: int | None = None
@@ -413,6 +459,18 @@ async def test_overlay_process_manager_prefers_explicit_startup_error_event_over
 
 
 @pytest.mark.asyncio
+async def test_overlay_process_manager_maps_profile_startup_event_to_manifest_invalid() -> None:
+    manager = OverlayProcessManager(
+        process_runner=FakeProcessRunner(startup_error="manifest_invalid", exit_code=1)
+    )
+
+    await manager.start()
+
+    assert manager.state == "failed"
+    assert manager.failure_reason == "manifest_invalid"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure_reason",
     [
@@ -459,6 +517,59 @@ async def test_overlay_process_manager_maps_post_ready_exit_to_runtime_crashed_w
     assert manager.state == "failed"
     assert manager.failure_reason == "runtime_crashed"
     assert manager.restart_scheduled is False
+    assert manager._manifest_path is None
+
+
+@pytest.mark.asyncio
+async def test_overlay_process_manager_treats_expected_connected_zero_exit_as_graceful(
+    tmp_path: Path,
+) -> None:
+    runner = FakeProcessRunner(ready_event_delay_ms=0)
+    manager = OverlayProcessManager(
+        process_runner=runner,
+        diagnostics_dir=tmp_path,
+    )
+
+    await manager.start()
+    assert manager.state == "connected"
+    manager.mark_shutdown_requested()
+    assert runner.last_process is not None
+    runner.last_process._exit_future.set_result(0)
+    assert manager._monitor_task is not None
+    await manager._monitor_task
+
+    assert manager.state == "stopping"
+    assert manager.failure_reason is None
+    assert manager._failure_dumped is False
+    assert manager._process is None
+    assert manager._manifest_path is None
+
+    await manager.stop()
+
+    assert manager.state == "off"
+
+
+@pytest.mark.asyncio
+async def test_overlay_process_manager_treats_unexpected_connected_zero_exit_as_crash(
+    tmp_path: Path,
+) -> None:
+    runner = FakeProcessRunner(ready_event_delay_ms=0)
+    manager = OverlayProcessManager(
+        process_runner=runner,
+        diagnostics_dir=tmp_path,
+    )
+
+    await manager.start()
+    assert manager.state == "connected"
+    assert runner.last_process is not None
+    runner.last_process._exit_future.set_result(0)
+    assert manager._monitor_task is not None
+    await manager._monitor_task
+
+    assert manager.state == "failed"
+    assert manager.failure_reason == "runtime_crashed"
+    assert manager._failure_dumped is True
+    assert manager._process is None
     assert manager._manifest_path is None
 
 
@@ -1008,7 +1119,7 @@ async def test_overlay_process_manager_maps_post_ready_runtime_error_to_failure_
 
 
 @pytest.mark.asyncio
-async def test_overlay_process_manager_accepts_overlay_ready_from_bridge_messages() -> None:
+async def test_overlay_process_manager_does_not_accept_overlay_ready_from_bridge_messages() -> None:
     bridge_messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
     manager = OverlayProcessManager(
         process_runner=FakeProcessRunner(),
@@ -1023,8 +1134,9 @@ async def test_overlay_process_manager_accepts_overlay_ready_from_bridge_message
     publisher = asyncio.create_task(publish_ready())
     try:
         await manager.start()
-        assert manager.state == "connected"
-        assert manager.failure_reason is None
+        assert manager.state == "failed"
+        assert manager.failure_reason == "startup_timeout"
+        assert manager.native_retry_owner_confirmed is False
     finally:
         publisher.cancel()
         await asyncio.gather(publisher, return_exceptions=True)
@@ -1417,3 +1529,103 @@ async def test_overlay_process_manager_dump_marks_startup_phase_for_pre_ready_ex
     assert summary["phase"] == "startup"
     assert summary["exit_code"] == 21
     assert summary["failure_reason"] == "renderer_init_failed"
+
+
+@pytest.mark.asyncio
+async def test_retry_ownership_capability_is_conservative_and_renegotiable() -> None:
+    changes: list[bool] = []
+
+    async def ownership_changed(confirmed: bool) -> None:
+        changes.append(confirmed)
+
+    manager = OverlayProcessManager(retry_ownership_changed=ownership_changed)
+    supported = {
+        "type": "overlay_ready",
+        "capabilities": {"native_presentation_retry": {"version": 1, "ownership": "exclusive"}},
+    }
+    assert await manager._handle_lifecycle_event(supported, allow_ready=True) == "ready"
+    assert manager.native_retry_owner_confirmed is True
+    assert await manager._handle_lifecycle_event(supported, allow_ready=False) == "ignored"
+    assert changes == [True]
+    assert manager.native_retry_owner_confirmed is True
+
+    for payload in (
+        {"type": "overlay_ready"},
+        {"type": "overlay_ready", "capabilities": []},
+        {
+            "type": "overlay_ready",
+            "capabilities": {"native_presentation_retry": {"version": 2, "ownership": "exclusive"}},
+        },
+        {
+            "type": "overlay_ready",
+            "capabilities": {
+                "native_presentation_retry": {"version": True, "ownership": "exclusive"}
+            },
+        },
+        {
+            "type": "overlay_ready",
+            "capabilities": {
+                "native_presentation_retry": {"version": 1.0, "ownership": "exclusive"}
+            },
+        },
+    ):
+        await manager._handle_lifecycle_event(payload, allow_ready=True)
+        assert manager.native_retry_owner_confirmed is False
+
+    await manager._handle_lifecycle_event(supported, allow_ready=True)
+    assert manager.native_retry_owner_confirmed is True
+    await manager._fail("runtime_crashed", terminate_process=False)
+    assert manager.native_retry_owner_confirmed is False
+    assert changes == [True, False, True, False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["stop", "fail"])
+async def test_retry_fallback_waits_for_process_termination(operation: str) -> None:
+    termination_started = asyncio.Event()
+    release_termination = asyncio.Event()
+    ownership_changes: list[bool] = []
+
+    class BlockingProcess:
+        async def terminate(self) -> None:
+            termination_started.set()
+            await release_termination.wait()
+
+    async def ownership_changed(confirmed: bool) -> None:
+        ownership_changes.append(confirmed)
+
+    manager = OverlayProcessManager(retry_ownership_changed=ownership_changed)
+    manager._process = BlockingProcess()  # type: ignore[assignment]
+    manager.native_retry_owner_confirmed = True
+    manager.state = "connected"
+    task = asyncio.create_task(
+        manager.stop() if operation == "stop" else manager._fail("runtime_crashed")
+    )
+    await termination_started.wait()
+    assert manager.native_retry_owner_confirmed is True
+    assert ownership_changes == []
+    release_termination.set()
+    await task
+    assert manager.native_retry_owner_confirmed is False
+    assert ownership_changes == [False]
+    assert manager._process is None
+
+
+@pytest.mark.asyncio
+async def test_start_force_notifies_new_listener_when_manager_state_is_already_false() -> None:
+    changes: list[bool] = []
+
+    async def ownership_changed(confirmed: bool) -> None:
+        changes.append(confirmed)
+
+    runner = FakeProcessRunner(ready_event_delay_ms=0)
+    manager = OverlayProcessManager(
+        process_runner=runner,
+        retry_ownership_changed=ownership_changed,
+        startup_timeout_ms=100,
+    )
+    assert manager.native_retry_owner_confirmed is False
+    await manager.start()
+    assert changes[0] is False
+    assert manager.state == "connected"
+    await manager.stop()

@@ -7,6 +7,9 @@ from typing import Protocol
 from uuid import UUID
 
 from puripuly_heart.core.overlay.protocol import (
+    NativeFreshRenderGenerations,
+    NativeFreshRenderTargets,
+    NativeQuietTailEpisodes,
     OverlayPresentationBlock,
     OverlayPresentationCalibration,
     OverlayPresentationSnapshot,
@@ -1097,11 +1100,17 @@ class OverlayPresentationState:
         revision: int,
         calibration: OverlayPresentationCalibration,
         rendered_entries: list[tuple[OverlayEntryKey, OverlayPresentationBlock]],
+        native_fresh_render_generations: NativeFreshRenderGenerations | None = None,
+        native_fresh_render_targets: NativeFreshRenderTargets | None = None,
+        native_quiet_tail_episodes: NativeQuietTailEpisodes | None = None,
     ) -> OverlayPresentationSnapshot:
         snapshot = OverlayPresentationSnapshot(
             revision=revision,
             calibration=calibration,
             blocks=[block for _, block in rendered_entries],
+            native_fresh_render_generations=native_fresh_render_generations,
+            native_fresh_render_targets=native_fresh_render_targets,
+            native_quiet_tail_episodes=native_quiet_tail_episodes,
         )
         self._snapshot = snapshot
         return snapshot

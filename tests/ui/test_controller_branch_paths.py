@@ -603,6 +603,7 @@ class FakeOverlayProcessManager:
         self.process_runner = _kwargs.get("process_runner")
         self.extra_kwargs = dict(_kwargs)
         self.renderer_events = _kwargs.get("renderer_events")
+        self.retry_ownership_changed = _kwargs.get("retry_ownership_changed")
         self.state = "off"
         self.failure_reason: str | None = None
         self.restart_scheduled = False
@@ -616,6 +617,8 @@ class FakeOverlayProcessManager:
 
     async def start(self) -> None:
         self.state = "starting"
+        if self.retry_ownership_changed is not None:
+            await self.retry_ownership_changed(False)
         await self._start_gate.wait()
         if self._start_failure_reason is not None:
             self.state = "failed"
@@ -634,6 +637,10 @@ class FakeOverlayProcessManager:
                 self.failure_reason = self._runtime_failure_reason
 
         self._monitor_task = asyncio.create_task(_monitor())
+
+    async def confirm_native_retry_ownership(self) -> None:
+        assert self.retry_ownership_changed is not None
+        await self.retry_ownership_changed(True)
 
     async def stop(self) -> None:
         self.stop_calls += 1
@@ -7847,7 +7854,7 @@ async def test_peer_translation_toggle_does_not_persist_transient_button_state(
 
 
 @pytest.mark.asyncio
-async def test_overlay_start_enables_peer_presentation_refresh_for_new_presenter(
+async def test_overlay_start_keeps_compatibility_refresh_until_vr_capability_is_confirmed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
@@ -7894,7 +7901,7 @@ async def test_desktop_overlay_start_disables_peer_presentation_refresh_for_new_
 
 
 @pytest.mark.asyncio
-async def test_overlay_start_product_enables_existing_peer_presentation_refresh_presenter(
+async def test_overlay_start_restores_compatibility_refresh_for_existing_presenter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
@@ -7924,6 +7931,114 @@ async def test_overlay_start_product_enables_existing_peer_presentation_refresh_
     assert _overlay_runtime(controller).presenter.self_presentation_refresh_burst is True
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_preserved_presenter_restart_renegotiates_one_retry_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    first_manager = FakeOverlayProcessManager.instances[0]
+    first_manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    presenter = _overlay_runtime(controller).presenter
+    assert isinstance(presenter, OverlayPresenter)
+    adapter = OverlayEventAdapter(clock=controller.clock)
+    target_id = uuid4()
+    target_key = ("peer", target_id)
+    target_identity = f"peer:{target_id}"
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=target_id,
+                channel="peer",
+                text="durable restart source",
+                is_final=True,
+                created_at=controller.clock.now(),
+            ),
+            source_language="en",
+            target_language="ko",
+        )
+    )
+    await presenter.emit(
+        adapter.translation_final(
+            utterance_id=target_id,
+            channel="peer",
+            text="durable restart target",
+            source_language="en",
+            target_language="ko",
+            applied_context_mode=None,
+        )
+    )
+    assert presenter._presentation_state.peer_presentation_refresh_target_key == target_key
+    assert presenter._peer_presentation_refresh_burst_task is not None
+    await first_manager.confirm_native_retry_ownership()
+    assert presenter.native_retry_trigger_emission is True
+    assert presenter.peer_presentation_refresh_burst is False
+    assert presenter.self_presentation_refresh_burst is False
+    first_native_snapshot = presenter.snapshot()
+    assert first_native_snapshot.native_fresh_render_generations.peer is not None
+    assert first_native_snapshot.native_fresh_render_targets.peer == target_identity
+    assert presenter._peer_presentation_refresh_burst_task is None
+
+    controller.overlay_state = "failed"
+    await controller._begin_overlay_start()
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 2)
+    second_manager = FakeOverlayProcessManager.instances[1]
+    restarted = _overlay_runtime(controller).presenter
+    assert restarted is presenter
+    assert presenter.native_retry_trigger_emission is False
+    assert presenter.peer_presentation_refresh_burst is True
+    assert presenter.self_presentation_refresh_burst is True
+    fallback_snapshot = presenter.snapshot()
+    assert fallback_snapshot.native_fresh_render_generations is None
+    assert fallback_snapshot.native_fresh_render_targets is None
+    assert presenter._presentation_state.peer_presentation_refresh_target_key == target_key
+    assert presenter._peer_presentation_refresh_burst_task is not None
+    second_manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    await second_manager.confirm_native_retry_ownership()
+    assert presenter.native_retry_trigger_emission is True
+    assert presenter.peer_presentation_refresh_burst is False
+    assert presenter.self_presentation_refresh_burst is False
+    second_native_snapshot = presenter.snapshot()
+    assert second_native_snapshot.native_fresh_render_generations.peer is not None
+    assert second_native_snapshot.native_fresh_render_targets.peer == target_identity
+    assert presenter._presentation_state.peer_presentation_refresh_target_key is None
+    assert presenter._peer_presentation_refresh_burst_task is None
+
+    controller.overlay_state = "failed"
+    await controller._begin_overlay_start()
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 3)
+    old_manager = FakeOverlayProcessManager.instances[2]
+    assert _overlay_runtime(controller).presenter is presenter
+    assert presenter.native_retry_trigger_emission is False
+    assert presenter.peer_presentation_refresh_burst is True
+    assert presenter.self_presentation_refresh_burst is True
+    old_fallback_snapshot = presenter.snapshot()
+    assert old_fallback_snapshot.native_fresh_render_generations is None
+    assert old_fallback_snapshot.native_fresh_render_targets is None
+    assert presenter._presentation_state.peer_presentation_refresh_target_key == target_key
+    assert presenter._peer_presentation_refresh_burst_task is not None
+    old_manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    await first_manager.confirm_native_retry_ownership()
+    assert presenter.native_retry_trigger_emission is False
+    assert presenter.peer_presentation_refresh_burst is True
+    assert presenter.self_presentation_refresh_burst is True
+    stale_snapshot = presenter.snapshot()
+    assert stale_snapshot.native_fresh_render_generations is None
+    assert stale_snapshot.native_fresh_render_targets is None
+    assert presenter._presentation_state.peer_presentation_refresh_target_key == target_key
+    assert presenter._peer_presentation_refresh_burst_task is not None
     await controller.set_overlay_enabled(False)
 
 
@@ -8058,6 +8173,7 @@ async def test_overlay_start_syncs_bridge_after_preserved_presenter_cleans_refre
 
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
     controller.hub = DummyHub()
     runtime = controller._new_overlay_runtime_handle()
     runtime.adopt_presenter(presenter)
@@ -8066,11 +8182,11 @@ async def test_overlay_start_syncs_bridge_after_preserved_presenter_cleans_refre
 
     bridge = CleaningDuringStartOverlayBridge.instances[0]
     assert bridge_start_released_burst is True
-    assert bridge.initial_snapshot is stale_snapshot
-    assert bridge.initial_snapshot.blocks[0].session_scope == "peer_presentation_refresh=1"
+    assert bridge.initial_snapshot is not stale_snapshot
+    assert bridge.initial_snapshot.blocks[0].session_scope is None
     assert presenter.snapshot().blocks[0].session_scope is None
     assert bridge.current_snapshot == presenter.snapshot()
-    assert bridge.snapshots[-1] == presenter.snapshot()
+    assert bridge.snapshots == []
 
     await controller._teardown_overlay_runtime(preserve_presenter_state=False)
 

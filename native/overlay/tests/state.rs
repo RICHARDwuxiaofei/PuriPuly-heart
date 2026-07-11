@@ -199,6 +199,7 @@ fn overlay_state_keeps_snapshot_blocks_in_order() {
     state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![
             slot_block("self:1", "self:1", 1, "self", "hello", "안녕", true),
             slot_block("peer:2", "peer:2", 2, "peer", "there", "원문", true),
@@ -217,10 +218,12 @@ fn overlay_state_snapshot_replaces_stale_blocks() {
     state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![block("self:1", "self", "hello", "", true)],
     });
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![block("peer:2", "peer", "there", "원문", false)],
@@ -246,6 +249,7 @@ fn overlay_state_tracks_latest_snapshot_calibration() {
             text_scale: 1.1,
             background_alpha: 0.4,
         },
+        native_fresh_render_generations: None,
         blocks: vec![],
     });
 
@@ -258,6 +262,7 @@ fn overlay_state_ignores_lower_revision_snapshots() {
     let mut state = OverlayState::default();
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 3,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![block("self:3", "self", "latest", "", true)],
@@ -266,6 +271,7 @@ fn overlay_state_ignores_lower_revision_snapshots() {
     assert!(!state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![block("peer:2", "peer", "stale", "", true)],
     }));
 
@@ -278,6 +284,7 @@ fn overlay_state_treats_equal_revision_snapshots_as_noop() {
     let mut state = OverlayState::default();
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 4,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![block("self:4", "self", "keep", "", true)],
@@ -286,6 +293,7 @@ fn overlay_state_treats_equal_revision_snapshots_as_noop() {
     assert!(!state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 4,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![block("peer:4", "peer", "ignore", "", true)],
     }));
 }
@@ -295,6 +303,7 @@ fn overlay_state_keeps_slot_two_anchor_when_slot_one_disappears() {
     let mut state = OverlayState::default();
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
@@ -306,6 +315,7 @@ fn overlay_state_keeps_slot_two_anchor_when_slot_one_disappears() {
     let second_top = state.scene().slots()[1].as_ref().unwrap().anchor_top_px;
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![slot_block("peer:2", "peer:2", 2, "peer", "two", "", true)],
@@ -323,6 +333,7 @@ fn overlay_state_promotes_matching_occupant_key_without_reassigning_slot() {
     let mut state = OverlayState::default();
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![OverlayPresentationBlock {
@@ -348,6 +359,7 @@ fn overlay_state_promotes_matching_occupant_key_without_reassigning_slot() {
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![slot_block(
             "self:merge-1",
             "self:merge-1",
@@ -372,6 +384,7 @@ fn overlay_state_promotes_active_peer_matching_occupant_key_without_reassigning_
     let mut state = OverlayState::default();
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![OverlayPresentationBlock {
@@ -394,6 +407,7 @@ fn overlay_state_promotes_active_peer_matching_occupant_key_without_reassigning_
     let original_entry_order = state.scene().slots()[0].as_ref().unwrap().slot_entry_order;
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![OverlayPresentationBlock {
@@ -429,6 +443,7 @@ fn overlay_state_fills_first_empty_slot_before_replacing_again() {
     let mut state = OverlayState::default();
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
@@ -440,10 +455,12 @@ fn overlay_state_fills_first_empty_slot_before_replacing_again() {
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
+        native_fresh_render_generations: None,
         blocks: vec![slot_block("peer:2", "peer:2", 2, "peer", "two", "", true)],
     }));
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
+        native_fresh_render_generations: None,
         revision: 3,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
