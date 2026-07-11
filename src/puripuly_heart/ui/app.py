@@ -9,6 +9,7 @@ from pathlib import Path
 
 import flet as ft
 
+from puripuly_heart.app.language_selection import LanguageSelectionChange
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
@@ -1067,11 +1068,7 @@ class TranslatorApp:
 
     def _on_language_change(
         self,
-        source_code: str,
-        target_code: str,
-        peer_source_code: str = "",
-        peer_target_code: str = "",
-        peer_source_mode: str = "manual",
+        change: LanguageSelectionChange,
     ) -> None:
         if self.controller.settings is None:
             return
@@ -1082,10 +1079,10 @@ class TranslatorApp:
         previous_peer_target_code = getattr(settings.languages, "peer_target_language", "")
         self._log_basic(
             "[Dashboard] Language change requested: "
-            f"source={previous_source_code}->{source_code} "
-            f"target={previous_target_code}->{target_code} "
-            f"peer_source={previous_peer_source_code}->{peer_source_code} "
-            f"peer_target={previous_peer_target_code}->{peer_target_code}"
+            f"source={previous_source_code}->{change.source_code} "
+            f"target={previous_target_code}->{change.target_code} "
+            f"peer_source={previous_peer_source_code}->{change.peer_source_code} "
+            f"peer_target={previous_peer_target_code}->{change.peer_target_code}"
         )
         self._log_detailed(
             f"[Dashboard] Language change detail: overlay_state={getattr(self, 'overlay_state', 'unknown')}"
@@ -1093,9 +1090,9 @@ class TranslatorApp:
 
         # Check STT provider compatibility and show warning if needed
         warning = None
-        if source_code != previous_source_code:
+        if change.source_code != previous_source_code:
             stt_provider = settings.provider.stt.value
-            warning = get_stt_compatibility_warning(source_code, stt_provider)
+            warning = get_stt_compatibility_warning(change.source_code, stt_provider)
         if warning:
             snackbar = ft.SnackBar(
                 ft.Text(t(warning.key, language=language_name(warning.language_code))),
@@ -1109,26 +1106,7 @@ class TranslatorApp:
             self.page.open(snackbar)
 
         async def _task():
-            if _callable_accepts_keyword(
-                self.controller.on_dashboard_language_change,
-                "peer_source_mode",
-            ):
-                await self.controller.on_dashboard_language_change(
-                    source_code=source_code,
-                    target_code=target_code,
-                    peer_source_code=peer_source_code,
-                    peer_target_code=peer_target_code,
-                    peer_source_mode=peer_source_mode,
-                )
-            else:
-                if peer_source_mode == "soniox_auto":
-                    raise TypeError("peer automatic source mode requires a mode-aware controller")
-                await self.controller.on_dashboard_language_change(
-                    source_code=source_code,
-                    target_code=target_code,
-                    peer_source_code=peer_source_code,
-                    peer_target_code=peer_target_code,
-                )
+            await self.controller.on_dashboard_language_change(change)
 
         self._queue_settings_mutation_task(_task)
 

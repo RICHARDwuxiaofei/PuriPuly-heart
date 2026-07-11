@@ -314,8 +314,8 @@ def test_dashboard_submit_and_language_selection_paths(monkeypatch: pytest.Monke
     sends: list[tuple[str, str]] = []
     lang_changes: list[tuple[str, str, str, str]] = []
     view.on_send_message = lambda source, text: sends.append((source, text))
-    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: lang_changes.append(
-        (src, tgt, peer_src, peer_tgt)
+    view.on_language_change = lambda change: lang_changes.append(
+        (change.source_code, change.target_code, change.peer_source_code, change.peer_target_code)
     )
 
     view._on_submit("hello")
@@ -348,8 +348,8 @@ def test_dashboard_tab_in_focused_message_input_swaps_self_languages_only(
 ) -> None:
     view = _make_dashboard(monkeypatch)
     changes: list[tuple[str, str, str, str]] = []
-    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: changes.append(
-        (src, tgt, peer_src, peer_tgt)
+    view.on_language_change = lambda change: changes.append(
+        (change.source_code, change.target_code, change.peer_source_code, change.peer_target_code)
     )
     view.set_languages_from_codes("ko", "en", "ja", "fr")
     view.display_card.set_input_focus_for_test(True)
@@ -371,8 +371,8 @@ def test_dashboard_tab_ignored_when_message_input_is_not_focused(
 ) -> None:
     view = _make_dashboard(monkeypatch)
     changes: list[tuple[str, str, str, str]] = []
-    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: changes.append(
-        (src, tgt, peer_src, peer_tgt)
+    view.on_language_change = lambda change: changes.append(
+        (change.source_code, change.target_code, change.peer_source_code, change.peer_target_code)
     )
     view.set_languages_from_codes("ko", "en", "ja", "fr")
     view.display_card.set_input_focus_for_test(False)
@@ -386,10 +386,12 @@ def test_dashboard_tab_ignored_when_message_input_is_not_focused(
     assert view.display_card.focus_calls == 0
 
 
-def test_dashboard_recent_languages_caps_and_notifies(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dashboard_recent_languages_are_included_in_language_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     view = _make_dashboard(monkeypatch)
-    persisted: list[tuple[list[str], list[str]]] = []
-    view.on_recent_languages_change = lambda src, tgt: persisted.append((list(src), list(tgt)))
+    changes = []
+    view.on_language_change = changes.append
 
     for idx in range(8):
         view._add_to_recent(f"s{idx}", is_source=True)
@@ -399,7 +401,9 @@ def test_dashboard_recent_languages_caps_and_notifies(monkeypatch: pytest.Monkey
     assert len(view._recent_target_langs) == 6
     assert view._recent_source_langs[0] == "s7"
     assert view._recent_source_langs[-1] == "s2"
-    assert persisted
+    view._notify_language_change()
+    assert changes[-1].recent_source_codes == tuple(view._recent_source_langs)
+    assert changes[-1].recent_target_codes == tuple(view._recent_target_langs)
 
 
 def test_dashboard_public_setters_update_components(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -587,8 +591,14 @@ def test_dashboard_automatic_peer_selection_preserves_manual_source_and_emits_au
 ) -> None:
     view = _make_dashboard(monkeypatch)
     changes: list[tuple[str, str, str, str, str]] = []
-    view.on_language_change = lambda src, tgt, peer_src, peer_tgt, peer_mode: changes.append(
-        (src, tgt, peer_src, peer_tgt, peer_mode)
+    view.on_language_change = lambda change: changes.append(
+        (
+            change.source_code,
+            change.target_code,
+            change.peer_source_code,
+            change.peer_target_code,
+            change.peer_source_mode,
+        )
     )
     view.set_languages_from_codes("ko", "en", "ja", "fr")
 
@@ -604,8 +614,8 @@ def test_dashboard_automatic_peer_callback_type_error_is_not_retried(
     view = _make_dashboard(monkeypatch)
     calls: list[tuple[str, ...]] = []
 
-    def fail_after_recording(*values: str) -> None:
-        calls.append(values)
+    def fail_after_recording(change) -> None:
+        calls.append((change,))
         raise TypeError("callback failure")
 
     view.on_language_change = fail_after_recording
@@ -614,22 +624,19 @@ def test_dashboard_automatic_peer_callback_type_error_is_not_retried(
         view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_SONIOX_AUTO)
 
     assert len(calls) == 1
-    assert calls[0][-1] == "soniox_auto"
+    assert calls[0][0].peer_source_mode == "soniox_auto"
 
 
-def test_dashboard_automatic_peer_selection_rejects_legacy_callback_without_invocation(
+def test_dashboard_automatic_peer_selection_emits_typed_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view = _make_dashboard(monkeypatch)
-    calls: list[tuple[str, str, str, str]] = []
-    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: calls.append(
-        (src, tgt, peer_src, peer_tgt)
-    )
+    calls = []
+    view.on_language_change = calls.append
 
-    with pytest.raises(TypeError, match="mode-aware callback"):
-        view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_SONIOX_AUTO)
+    view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_SONIOX_AUTO)
 
-    assert calls == []
+    assert calls[-1].peer_source_mode == "soniox_auto"
 
 
 def test_dashboard_peer_swap_keeps_automatic_mode_and_valid_languages(
@@ -637,8 +644,14 @@ def test_dashboard_peer_swap_keeps_automatic_mode_and_valid_languages(
 ) -> None:
     view = _make_dashboard(monkeypatch)
     changes: list[tuple[str, str, str, str, str]] = []
-    view.on_language_change = lambda src, tgt, peer_src, peer_tgt, peer_mode: changes.append(
-        (src, tgt, peer_src, peer_tgt, peer_mode)
+    view.on_language_change = lambda change: changes.append(
+        (
+            change.source_code,
+            change.target_code,
+            change.peer_source_code,
+            change.peer_target_code,
+            change.peer_source_mode,
+        )
     )
     view.set_languages_from_codes("ko", "en", "ja", "fr", "soniox_auto")
 
@@ -854,8 +867,8 @@ def test_dashboard_peer_source_selection_restores_follow_self_blank(
 ) -> None:
     view = _make_dashboard(monkeypatch)
     changes: list[tuple[str, str, str, str]] = []
-    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: changes.append(
-        (src, tgt, peer_src, peer_tgt)
+    view.on_language_change = lambda change: changes.append(
+        (change.source_code, change.target_code, change.peer_source_code, change.peer_target_code)
     )
     view.set_languages_from_codes("ko", "en", "ja", "fr")
 
@@ -873,8 +886,8 @@ def test_dashboard_peer_target_selection_restores_follow_self_blank(
 ) -> None:
     view = _make_dashboard(monkeypatch)
     changes: list[tuple[str, str, str, str]] = []
-    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: changes.append(
-        (src, tgt, peer_src, peer_tgt)
+    view.on_language_change = lambda change: changes.append(
+        (change.source_code, change.target_code, change.peer_source_code, change.peer_target_code)
     )
     view.set_languages_from_codes("ko", "en", "ja", "fr")
 
@@ -892,8 +905,8 @@ def test_dashboard_self_source_change_preserves_explicit_peer_override(
 ) -> None:
     view = _make_dashboard(monkeypatch)
     changes: list[tuple[str, str, str, str]] = []
-    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: changes.append(
-        (src, tgt, peer_src, peer_tgt)
+    view.on_language_change = lambda change: changes.append(
+        (change.source_code, change.target_code, change.peer_source_code, change.peer_target_code)
     )
     view.set_languages_from_codes("ko", "en", "ja", "fr")
 
@@ -912,8 +925,8 @@ def test_dashboard_peer_language_edits_share_controller_update_path(
 ) -> None:
     view = _make_dashboard(monkeypatch)
     changes: list[tuple[str, str, str, str]] = []
-    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: changes.append(
-        (src, tgt, peer_src, peer_tgt)
+    view.on_language_change = lambda change: changes.append(
+        (change.source_code, change.target_code, change.peer_source_code, change.peer_target_code)
     )
 
     view._on_peer_source_select("ja")
@@ -927,8 +940,8 @@ def test_dashboard_peer_swap_exchanges_source_and_target(
 ) -> None:
     view = _make_dashboard(monkeypatch)
     changes: list[tuple[str, str, str, str]] = []
-    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: changes.append(
-        (src, tgt, peer_src, peer_tgt)
+    view.on_language_change = lambda change: changes.append(
+        (change.source_code, change.target_code, change.peer_source_code, change.peer_target_code)
     )
     view.set_languages_from_codes("ko", "en", "ja", "fr")
 

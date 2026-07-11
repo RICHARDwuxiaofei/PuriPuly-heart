@@ -23,6 +23,7 @@ from typing import Any, Protocol, cast
 import flet as ft
 import numpy as np
 
+from puripuly_heart.app.language_selection import LanguageSelectionChange
 from puripuly_heart.app.ports.canonical_settings_persistence import (
     CanonicalSettingsPersistencePort,
 )
@@ -5307,22 +5308,19 @@ class GuiController:
 
     async def on_dashboard_language_change(
         self,
-        *,
-        source_code: str,
-        target_code: str,
-        peer_source_code: str = "",
-        peer_target_code: str = "",
-        peer_source_mode: str = "manual",
+        change: LanguageSelectionChange,
     ) -> None:
         if self.settings is None:
             return
 
         updated = copy.deepcopy(self.settings)
-        updated.languages.source_language = source_code
-        updated.languages.target_language = target_code
-        updated.languages.peer_source_mode = peer_source_mode
-        updated.languages.peer_source_language = peer_source_code
-        updated.languages.peer_target_language = peer_target_code
+        updated.languages.source_language = change.source_code
+        updated.languages.target_language = change.target_code
+        updated.languages.peer_source_mode = change.peer_source_mode
+        updated.languages.peer_source_language = change.peer_source_code
+        updated.languages.peer_target_language = change.peer_target_code
+        updated.languages.recent_source_languages = list(change.recent_source_codes)
+        updated.languages.recent_target_languages = list(change.recent_target_codes)
         self._begin_canonical_mutation(
             legacy_snapshot=self._canonical_legacy_projection_snapshot or self.settings
         )
@@ -9108,7 +9106,6 @@ class GuiController:
                 settings.languages.recent_source_languages,
                 settings.languages.recent_target_languages,
             )
-            dash.on_recent_languages_change = self._on_recent_languages_change
             dash.set_peer_auto_detect_available(
                 settings.provider.peer_stt == STTProviderName.SONIOX
             )
@@ -9123,34 +9120,6 @@ class GuiController:
                 view_settings.set_overlay_calibration(self.overlay_calibration)
 
         self._refresh_overlay_peer_consumers()
-
-    def _on_recent_languages_change(self, source: list[str], target: list[str]) -> None:
-        """Callback when recent languages change in dashboard."""
-        if self.settings is None:
-            return
-        next_settings = copy.deepcopy(self.settings)
-        next_settings.languages.recent_source_languages = list(source)
-        next_settings.languages.recent_target_languages = list(target)
-
-        async def _task() -> None:
-            await self.apply_settings(next_settings)
-
-        run_task = getattr(self.page, "run_task", None)
-        if callable(run_task):
-            try:
-                run_task(_task)
-                return
-            except Exception:
-                self.log_detailed(
-                    "[Settings] Recent language apply skipped reason=page_run_task_failed",
-                    level=logging.WARNING,
-                )
-                return
-
-        self.log_detailed(
-            "[Settings] Recent language apply skipped reason=page_run_task_unavailable",
-            level=logging.WARNING,
-        )
 
     @property
     def runtime_logging(self) -> RuntimeLoggingService:

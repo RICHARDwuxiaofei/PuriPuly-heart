@@ -21,6 +21,7 @@ pytest.importorskip("flet")
 from puripuly_heart.app.adapters import (
     settings_vnext_canonical_persistence as canonical_persistence_adapter_module,
 )
+from puripuly_heart.app.language_selection import LanguageSelectionChange
 from puripuly_heart.app.services import provider_runtime_apply as provider_runtime_apply_module
 from puripuly_heart.app.services import settings_mutation
 from puripuly_heart.config.audio_host_api import (
@@ -653,6 +654,27 @@ class FakeOverlayProcessManager:
 
 def _make_controller(*, app: object) -> GuiController:
     return GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+
+
+def _language_selection_change(
+    *,
+    source_code: str,
+    target_code: str,
+    peer_source_code: str = "",
+    peer_target_code: str = "",
+    peer_source_mode: str = "manual",
+    recent_source_codes: tuple[str, ...] = (),
+    recent_target_codes: tuple[str, ...] = (),
+) -> LanguageSelectionChange:
+    return LanguageSelectionChange(
+        source_code=source_code,
+        target_code=target_code,
+        peer_source_code=peer_source_code,
+        peer_target_code=peer_target_code,
+        peer_source_mode=peer_source_mode,
+        recent_source_codes=recent_source_codes,
+        recent_target_codes=recent_target_codes,
+    )
 
 
 def _managed_china_settings() -> AppSettings:
@@ -1777,92 +1799,8 @@ def test_sync_ui_from_settings_updates_dashboard_and_settings_view() -> None:
 
     assert dash.languages == ("ko", "en", "en", "ko")
     assert dash.recent_languages == (["ko", "ja"], ["en", "zh"])
-    assert dash.on_recent_languages_change is not None
+    assert dash.on_recent_languages_change is None
     assert settings_view.calls == [(settings, Path("settings.json"), False)]
-
-
-@pytest.mark.asyncio
-async def test_on_recent_languages_change_routes_order22_patch_via_page_run_task(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    page = SimpleNamespace(tasks=[])
-    page.run_task = lambda task: page.tasks.append(task)
-    controller = _make_controller(app=SimpleNamespace())
-    controller.page = page
-    controller.settings = settings
-    original_recent_source = list(settings.languages.recent_source_languages)
-    original_recent_target = list(settings.languages.recent_target_languages)
-    saves: list[tuple[Path, AppSettings]] = []
-    requests: list[settings_mutation.SettingsMutationRequest] = []
-
-    original_mutate = settings_mutation.SettingsMutationService.mutate
-
-    async def capture_mutate(self, request):
-        requests.append(request)
-        return await original_mutate(self, request)
-
-    def fake_save(path: Path, incoming: AppSettings) -> None:
-        saves.append((path, copy.deepcopy(incoming)))
-
-    monkeypatch.setattr(settings_mutation.SettingsMutationService, "mutate", capture_mutate)
-    monkeypatch.setattr(controller_module, "save_settings", fake_save)
-
-    controller._on_recent_languages_change(["ko", "fr"], ["en", "ja"])
-
-    assert settings.languages.recent_source_languages == original_recent_source
-    assert settings.languages.recent_target_languages == original_recent_target
-    assert saves == []
-    assert len(page.tasks) == 1
-
-    await page.tasks[0]()
-
-    assert len(requests) == 1
-    assert requests[0].reason == settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO
-    assert list(requests[0].values["languages.recent_source_languages"]) == ["ko", "fr"]
-    assert list(requests[0].values["languages.recent_target_languages"]) == ["en", "ja"]
-    assert len(saves) == 1
-    assert saves[0][0] == Path("settings.json")
-    assert saves[0][1].languages.recent_source_languages == ["ko", "fr"]
-    assert saves[0][1].languages.recent_target_languages == ["en", "ja"]
-    assert controller.settings.languages.recent_source_languages == ["ko", "fr"]
-    assert controller.settings.languages.recent_target_languages == ["en", "ja"]
-
-
-@pytest.mark.asyncio
-async def test_on_recent_languages_change_without_page_scheduler_skips_unowned_task(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    controller = _make_controller(app=SimpleNamespace())
-    controller.page = SimpleNamespace()
-    controller.settings = settings
-    controller._runtime_logging = RuntimeLoggingSpy()
-    apply_calls: list[AppSettings] = []
-    scheduled: list[object] = []
-
-    class FakeLoop:
-        def create_task(self, coro):
-            scheduled.append(coro)
-            coro.close()
-
-    async def record_apply_settings(self, incoming: AppSettings) -> None:
-        _ = self
-        apply_calls.append(incoming)
-
-    monkeypatch.setattr(GuiController, "apply_settings", record_apply_settings)
-    monkeypatch.setattr(controller_module.asyncio, "get_running_loop", lambda: FakeLoop())
-
-    controller._on_recent_languages_change(["ko", "fr"], ["en", "ja"])
-    await asyncio.sleep(0)
-
-    assert scheduled == []
-    assert apply_calls == []
-    assert settings.languages.recent_source_languages != ["ko", "fr"]
-    assert settings.languages.recent_target_languages != ["en", "ja"]
-    messages_seen = [message for _level, message in controller._runtime_logging.detailed_messages]
-    assert any("Recent language apply skipped" in message for message in messages_seen)
-    assert all("fr" not in message and "ja" not in message for message in messages_seen)
 
 
 @pytest.mark.asyncio
@@ -18433,10 +18371,14 @@ async def test_on_dashboard_language_change_routes_self_and_peer_updates_through
     monkeypatch.setattr(GuiController, "apply_settings", fake_apply_settings)
 
     await controller.on_dashboard_language_change(
-        source_code="fr",
-        target_code="de",
-        peer_source_code="",
-        peer_target_code="it",
+        _language_selection_change(
+            source_code="fr",
+            target_code="de",
+            peer_source_code="",
+            peer_target_code="it",
+            recent_source_codes=("fr",),
+            recent_target_codes=("de",),
+        )
     )
 
     assert controller.settings.languages.source_language == "ko"
@@ -18448,6 +18390,53 @@ async def test_on_dashboard_language_change_routes_self_and_peer_updates_through
     assert captured[0].languages.target_language == "de"
     assert captured[0].languages.peer_source_language == ""
     assert captured[0].languages.peer_target_language == "it"
+    assert captured[0].languages.recent_source_languages == ["fr"]
+    assert captured[0].languages.recent_target_languages == ["de"]
+
+
+@pytest.mark.asyncio
+async def test_dashboard_language_change_commits_languages_and_recents_in_one_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    requests: list[settings_mutation.SettingsMutationRequest] = []
+    saves: list[AppSettings] = []
+    original_mutate = settings_mutation.SettingsMutationService.mutate
+
+    async def capture_mutate(self, request):
+        requests.append(request)
+        return await original_mutate(self, request)
+
+    monkeypatch.setattr(settings_mutation.SettingsMutationService, "mutate", capture_mutate)
+    monkeypatch.setattr(
+        controller_module,
+        "save_settings",
+        lambda _path, settings: saves.append(copy.deepcopy(settings)),
+    )
+
+    await controller.on_dashboard_language_change(
+        _language_selection_change(
+            source_code="ja",
+            target_code="fr",
+            peer_source_code="en",
+            peer_target_code="ko",
+            recent_source_codes=("ja", "ko"),
+            recent_target_codes=("fr", "en"),
+        )
+    )
+
+    assert len(requests) == 1
+    assert requests[0].reason == settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO
+    assert requests[0].values["languages.source_language"] == "ja"
+    assert requests[0].values["languages.target_language"] == "fr"
+    assert list(requests[0].values["languages.recent_source_languages"]) == ["ja", "ko"]
+    assert list(requests[0].values["languages.recent_target_languages"]) == ["fr", "en"]
+    assert len(saves) == 1
+    assert saves[0].languages.source_language == "ja"
+    assert saves[0].languages.target_language == "fr"
+    assert saves[0].languages.recent_source_languages == ["ja", "ko"]
+    assert saves[0].languages.recent_target_languages == ["fr", "en"]
 
 
 @pytest.mark.asyncio
@@ -18466,10 +18455,12 @@ async def test_on_dashboard_language_change_preserves_explicit_peer_override_whe
     monkeypatch.setattr(GuiController, "apply_settings", fake_apply_settings)
 
     await controller.on_dashboard_language_change(
-        source_code="ja",
-        target_code="en",
-        peer_source_code="ja",
-        peer_target_code="fr",
+        _language_selection_change(
+            source_code="ja",
+            target_code="en",
+            peer_source_code="ja",
+            peer_target_code="fr",
+        )
     )
 
     assert len(captured) == 1
@@ -18494,11 +18485,13 @@ async def test_on_dashboard_language_change_persists_explicit_automatic_peer_mod
     monkeypatch.setattr(GuiController, "apply_settings", fake_apply_settings)
 
     await controller.on_dashboard_language_change(
-        source_code="ko",
-        target_code="en",
-        peer_source_code="ja",
-        peer_target_code="fr",
-        peer_source_mode="soniox_auto",
+        _language_selection_change(
+            source_code="ko",
+            target_code="en",
+            peer_source_code="ja",
+            peer_target_code="fr",
+            peer_source_mode="soniox_auto",
+        )
     )
 
     assert captured[0].languages.peer_source_language == "ja"
@@ -18543,10 +18536,12 @@ async def test_dashboard_peer_language_change_refreshes_peer_translation_pipelin
     )
 
     await controller.on_dashboard_language_change(
-        source_code="ko",
-        target_code="en",
-        peer_source_code="ja",
-        peer_target_code="fr",
+        _language_selection_change(
+            source_code="ko",
+            target_code="en",
+            peer_source_code="ja",
+            peer_target_code="fr",
+        )
     )
 
     assert refreshed == ["peer"]

@@ -1,8 +1,8 @@
-import inspect
 from typing import Callable
 
 import flet as ft
 
+from puripuly_heart.app.language_selection import LanguageSelectionChange
 from puripuly_heart.core.language import get_all_language_options
 from puripuly_heart.ui.components.display_card import DisplayCard
 from puripuly_heart.ui.components.glow import create_background_glow_stack
@@ -25,16 +25,6 @@ DASHBOARD_POWER_BUTTON_ICON_SIZE = 80
 DASHBOARD_POWER_BUTTON_LABEL_SIZE = 32
 OVERLAY_FAILURE_REASON_ONLY_NOTICE_REASONS = {"steamvr_not_running"}
 PEER_SOURCE_MODE_SONIOX_AUTO = "soniox_auto"
-
-
-def _accepts_positional_argument(callback: Callable[..., object], count: int) -> bool:
-    try:
-        inspect.signature(callback).bind(*([None] * count))
-    except TypeError:
-        return False
-    except ValueError:
-        return True
-    return True
 
 
 class DashboardView(ft.Column):
@@ -90,8 +80,7 @@ class DashboardView(ft.Column):
         self.on_toggle_overlay = None
         self.on_toggle_peer_translation = None
         self.on_retry_peer_process_capture = None
-        self.on_language_change = None
-        self.on_recent_languages_change = None  # For persistence
+        self.on_language_change: Callable[[LanguageSelectionChange], None] | None = None
         self.on_message_input_activity = None
         self.runtime_log_detailed: Callable[..., bool | None] | None = None
 
@@ -437,28 +426,20 @@ class DashboardView(ft.Column):
         recent.insert(0, lang_code)
         if len(recent) > 6:
             recent.pop()
-        if self.on_recent_languages_change:
-            self.on_recent_languages_change(self._recent_source_langs, self._recent_target_langs)
 
     def _notify_language_change(self):
         if self.on_language_change:
-            if _accepts_positional_argument(self.on_language_change, 5):
-                self.on_language_change(
-                    self._source_lang_code,
-                    self._target_lang_code,
-                    self._peer_source_lang_code,
-                    self._peer_target_lang_code,
-                    self._peer_source_mode,
+            self.on_language_change(
+                LanguageSelectionChange(
+                    source_code=self._source_lang_code,
+                    target_code=self._target_lang_code,
+                    peer_source_code=self._peer_source_lang_code,
+                    peer_target_code=self._peer_target_lang_code,
+                    peer_source_mode=self._peer_source_mode,
+                    recent_source_codes=tuple(self._recent_source_langs),
+                    recent_target_codes=tuple(self._recent_target_langs),
                 )
-            else:
-                if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO:
-                    raise TypeError("peer automatic source mode requires a mode-aware callback")
-                self.on_language_change(
-                    self._source_lang_code,
-                    self._target_lang_code,
-                    self._peer_source_lang_code,
-                    self._peer_target_lang_code,
-                )
+            )
 
     def _effective_peer_source_lang_code(self) -> str:
         if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO:

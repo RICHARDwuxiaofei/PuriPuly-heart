@@ -820,14 +820,8 @@ def test_stt_compatibility_snackbar_marks_launch_high_priority_feedback(
         provider=SimpleNamespace(stt=SimpleNamespace(value="deepgram")),
     )
 
-    async def fake_on_dashboard_language_change(
-        *,
-        source_code: str,
-        target_code: str,
-        peer_source_code: str,
-        peer_target_code: str,
-    ) -> None:
-        _ = (source_code, target_code, peer_source_code, peer_target_code)
+    async def fake_on_dashboard_language_change(change) -> None:
+        _ = change
 
     warning = SimpleNamespace(key="dashboard.warn_stt_key", language_code="ko")
     monkeypatch.setattr(
@@ -838,7 +832,17 @@ def test_stt_compatibility_snackbar_marks_launch_high_priority_feedback(
         on_dashboard_language_change=fake_on_dashboard_language_change,
     )
 
-    app._on_language_change("ja", "fr", "", "it")
+    app._on_language_change(
+        app_module.LanguageSelectionChange(
+            source_code="ja",
+            target_code="fr",
+            peer_source_code="",
+            peer_target_code="it",
+            peer_source_mode="manual",
+            recent_source_codes=("ja",),
+            recent_target_codes=("fr",),
+        )
+    )
 
     assert len(app.page.opened) == 1
     assert app._launch_feedback_conflicts_with_github_star_prompt() is True
