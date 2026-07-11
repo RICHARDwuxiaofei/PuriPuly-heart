@@ -60,6 +60,10 @@ gate_plans:
         work_refs:
           - verify-affected-hmd-profile-selection
         status: passed
+      - id: bounded-active-retry-adjustment-c1
+        work_refs:
+          - replace-quiet-postponement-with-bounded-active-retry
+        status: passed
   - gate_id: terminal-verification
     shape: whole_gate
     clusters:
@@ -143,8 +147,18 @@ checkpoints:
     verification: passed
     review: pass
     summary: Full automated, Windows-native, affected-HMD, profile, fallback, restart, target-continuity, lifecycle, privacy, compatibility, and semantic review passes for the isolated P05 candidate; DD-004 remains unresolved.
+  - id: bounded-active-retry-terminal-pass
+    gate_id: terminal-verification
+    cluster_id: terminal-verification-c1
+    decision: pass
+    commit: 0cba2fa5c00fb807af67c88eb212d7d6730934df
+    verification: passed
+    review: pass
+    summary: User-approved bounded active P05 replaces same-episode quiet postponement; full automation, deterministic generation-transfer preemption, affected-HMD 50 ms stream visibility, and independent terminal review pass.
 
 open_items:
+  - type: watchpoint
+    text: User-approved post-terminal override removes only same-episode quiet postponement; P05, 100 ms cadence, four stream opportunities, five final opportunities, coalescing, and all owner/target/lifecycle contracts remain fixed.
   - type: watchpoint
     text: Phase 1 must preserve the two-second envelope and checkpoint identity.
   - type: watchpoint
@@ -159,3 +173,6 @@ notes:
   - Capability/target integration and the accepted DD-002 design are recorded at .agents/evidence/vr-overlay-capability-target-integration.yaml.
   - Affected-HMD profile comparison, fallback correction history, P05 selection, and selected-default build identity are recorded at .agents/evidence/vr-overlay-quiet-tail-profile-selection.yaml.
   - Terminal review held on preserved-Presenter restart ownership, then passed after commit 92a2999 added the bounded repair and target-bearing production-surface regression coverage.
+  - After terminal closure, the user explicitly approved replacing pure quiet-tail postponement with bounded active retry and required direct orchestrator implementation plus review-agent review; prior terminal pass is superseded pending new evidence.
+  - The bounded active P05 implementation, automated verification, 50 ms affected-HMD run, build identity, and manual observation are recorded at .agents/evidence/vr-overlay-bounded-active-retry-adjustment.yaml.
+  - Independent terminal review held once for generation-transfer preemption and evidence capture, then passed after commit 0cba2fa added strict due transfer, deterministic synchronization, partial-budget coverage, corrected evidence, and final affected-HMD confirmation.
