@@ -1281,8 +1281,8 @@ impl FrameCycleOutcome {
 }
 
 pub const NATIVE_FRESH_RETRY_CADENCE: Duration = Duration::from_millis(100);
-pub const NATIVE_FRESH_RETRY_DEADLINE: Duration = Duration::from_secs(2);
-pub const NATIVE_FRESH_RETRY_MAX_COMPLETED: u32 = 20;
+pub const NATIVE_FRESH_RETRY_DEADLINE: Duration = Duration::from_millis(500);
+pub const NATIVE_FRESH_RETRY_MAX_COMPLETED: u32 = 5;
 pub const NATIVE_STREAM_RETRY_MAX_COMPLETED: u32 = 4;
 const NATIVE_FRESH_AUDIT_CAPACITY: usize = 128;
 
@@ -1419,7 +1419,7 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
             peer_accounting: None,
             self_ended_episode: None,
             peer_ended_episode: None,
-            retry_profile: "p20",
+            retry_profile: "p05",
             audit_started_at: Instant::now(),
             fresh_retry_audit: VecDeque::with_capacity(NATIVE_FRESH_AUDIT_CAPACITY),
             fresh_retry_audit_dropped: 0,
@@ -2807,7 +2807,7 @@ fn startup_error_from_preflight(error: OpenVrStartupPreflightError) -> StartupEr
 }
 
 pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
-    run_with_manifest_and_profile(manifest, QuietTailProfile::P20).await
+    run_with_manifest_and_profile(manifest, QuietTailProfile::P05).await
 }
 
 async fn run_with_manifest_and_profile(
@@ -3181,6 +3181,32 @@ mod tests {
     }
 
     #[test]
+    fn direct_native_owner_uses_and_reports_p05_defaults() {
+        let mut owner = NativePresentationOwner::new(
+            OverlayPresentationSnapshot::default(),
+            CaptionRenderer::new_for_test().unwrap(),
+            FakeOpenVr::default(),
+        );
+        assert_eq!(owner.retry_profile, "p05");
+        assert_eq!(owner.retry_policy.deadline, Duration::from_millis(500));
+        assert_eq!(owner.retry_policy.max_completed, 5);
+        owner
+            .runtime
+            .presentation_diagnostics
+            .accept_logical_revision(PresentationBackend::Test, 1, PresentationCauses::default());
+        assert_eq!(
+            owner
+                .runtime
+                .presentation_diagnostics
+                .records()
+                .back()
+                .unwrap()
+                .retry_profile,
+            "p05"
+        );
+    }
+
+    #[test]
     fn native_fresh_audit_drops_oldest_with_bounded_count() {
         let mut owner = NativePresentationOwner::new(
             OverlayPresentationSnapshot::default(),
@@ -3363,7 +3389,7 @@ mod tests {
         owner.reconcile_fresh_schedules(&logger).await.unwrap();
         let final_schedule = owner.peer_schedule.as_ref().unwrap();
         assert_eq!(final_schedule.completed, 0);
-        assert_eq!(final_schedule.max_completed, 20);
+        assert_eq!(final_schedule.max_completed, 5);
     }
 
     #[tokio::test]

@@ -20,7 +20,7 @@ pub enum QuietTailProfile {
 
 impl Default for QuietTailProfile {
     fn default() -> Self {
-        Self::P20
+        Self::P05
     }
 }
 
@@ -134,7 +134,7 @@ pub fn resolve_quiet_tail_profile(
     value: Option<&std::ffi::OsStr>,
 ) -> Result<QuietTailProfile, StartupError> {
     let Some(value) = value else {
-        return Ok(QuietTailProfile::P20);
+        return Ok(QuietTailProfile::P05);
     };
     let Some(value) = value.to_str() else {
         return Err(StartupError::Manifest(

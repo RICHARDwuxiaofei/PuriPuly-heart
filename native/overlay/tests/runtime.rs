@@ -27,8 +27,8 @@ use puripuly_heart_overlay::{
 #[test]
 fn native_fresh_retry_production_policy_matches_dd_002() {
     assert_eq!(NATIVE_FRESH_RETRY_CADENCE, Duration::from_millis(100));
-    assert_eq!(NATIVE_FRESH_RETRY_DEADLINE, Duration::from_secs(2));
-    assert_eq!(NATIVE_FRESH_RETRY_MAX_COMPLETED, 20);
+    assert_eq!(NATIVE_FRESH_RETRY_DEADLINE, Duration::from_millis(500));
+    assert_eq!(NATIVE_FRESH_RETRY_MAX_COMPLETED, 5);
     assert_ne!(u64::MAX, 0);
 }
 
@@ -51,7 +51,7 @@ fn quiet_tail_profiles_have_exact_walls_and_opportunity_maxima() {
 }
 
 #[test]
-fn old_manifest_json_without_quiet_tail_profile_defaults_to_p20() {
+fn old_manifest_json_without_quiet_tail_profile_uses_product_default_p05() {
     let path = unique_temp_file("legacy-profile", "json");
     std::fs::write(
         &path,
@@ -74,7 +74,7 @@ fn old_manifest_json_without_quiet_tail_profile_defaults_to_p20() {
     load_manifest(&path).unwrap();
     assert_eq!(
         resolve_quiet_tail_profile(None).unwrap(),
-        QuietTailProfile::P20
+        QuietTailProfile::P05
     );
     std::fs::remove_file(path).unwrap();
 }
@@ -1162,7 +1162,7 @@ async fn runtime_correlates_allowlisted_presentation_stages_without_payload_data
     assert!(records[1].cpu_render_us.is_some());
     assert!(records[2].readiness_us.is_some());
     assert!(records[4].submission_return_us.is_some());
-    assert_eq!(records[4].retry_profile, "p20");
+    assert_eq!(records[4].retry_profile, "p05");
     assert!(!records[4].candidate_build_identity.is_empty());
     assert!(records[4].candidate_build_identity.len() <= 64);
     assert_eq!(records[4].environment_identity, "not_recorded");

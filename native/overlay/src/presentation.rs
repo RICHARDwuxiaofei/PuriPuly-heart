@@ -363,7 +363,7 @@ impl PresentationDiagnostics {
             openvr_adapter_identity: AdapterIdentity::NotObservedStageOne,
             renderer_adapter_identity: AdapterIdentity::NotObservedStageOne,
             adapter_match: AdapterMatch::Unavailable,
-            retry_profile: "p20",
+            retry_profile: "p05",
         }
     }
 
@@ -743,9 +743,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_presentation_record_uses_selected_non_p20_profile() {
+    fn default_presentation_diagnostics_report_p05() {
         let mut diagnostics = PresentationDiagnostics::new();
-        diagnostics.configure_retry_profile("p05");
         diagnostics.accept_logical_revision(
             PresentationBackend::Test,
             1,

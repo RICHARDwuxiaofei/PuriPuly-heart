@@ -25,7 +25,7 @@ from puripuly_heart.core.overlay.process import (
 
 
 @pytest.mark.asyncio
-async def test_default_runner_passes_profile_in_child_env_without_mutating_parent(
+async def test_default_runner_passes_p05_product_default_in_child_env_without_mutating_parent(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -38,12 +38,31 @@ async def test_default_runner_passes_profile_in_child_env_without_mutating_paren
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
     monkeypatch.delenv(process_module.QUIET_TAIL_PROFILE_ENV, raising=False)
-    runner = DefaultOverlayProcessRunner(quiet_tail_profile="p05")
+    runner = DefaultOverlayProcessRunner()
     await runner.spawn(tmp_path / "overlay.exe", tmp_path / "manifest.json")
     child_env = captured["env"]
     assert isinstance(child_env, dict)
     assert child_env[process_module.QUIET_TAIL_PROFILE_ENV] == "p05"
     assert process_module.QUIET_TAIL_PROFILE_ENV not in os.environ
+
+
+@pytest.mark.asyncio
+async def test_default_runner_passes_explicit_p20_in_child_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_spawn(*command: str, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return SimpleNamespace(stdout=None, stderr=None)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    runner = DefaultOverlayProcessRunner(quiet_tail_profile="p20")
+    await runner.spawn(tmp_path / "overlay.exe", tmp_path / "manifest.json")
+    child_env = captured["env"]
+    assert isinstance(child_env, dict)
+    assert child_env[process_module.QUIET_TAIL_PROFILE_ENV] == "p20"
 
 
 def test_new_manifest_serialization_omits_runtime_profile() -> None:

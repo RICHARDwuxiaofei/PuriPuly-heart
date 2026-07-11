@@ -218,7 +218,7 @@ class _AsyncioOverlayProcess:
 class DefaultOverlayProcessRunner:
     executable_path: Path | None = None
     task_factory: Any | None = None
-    quiet_tail_profile: str = "p20"
+    quiet_tail_profile: str = "p05"
 
     def set_quiet_tail_profile(self, profile: str) -> None:
         self.quiet_tail_profile = profile
@@ -469,7 +469,7 @@ class OverlayProcessManager:
     log_dir: str = "logs"
     log_level: str = "INFO"
     logging_mode: str = "basic"
-    quiet_tail_profile: str = "p20"
+    quiet_tail_profile: str = "p05"
     renderer_events: asyncio.Queue[dict[str, object]] | None = None
     overlay_instance_id: str = field(default_factory=lambda: f"overlay-{uuid4()}")
     diagnostics_dir: Path = field(default_factory=default_overlay_diagnostics_dir)

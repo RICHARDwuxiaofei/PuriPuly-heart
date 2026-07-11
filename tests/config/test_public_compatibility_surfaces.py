@@ -1317,7 +1317,7 @@ async def test_overlay_startup_contract_snapshot_matches_python_runners_and_mani
         captured_command = tuple(args)
         captured_stdio = (stdout, stderr)
         assert env is not None
-        assert env[overlay_process_module.QUIET_TAIL_PROFILE_ENV] == "p20"
+        assert env[overlay_process_module.QUIET_TAIL_PROFILE_ENV] == "p05"
         return FakeSubprocess()
 
     monkeypatch.setattr(
