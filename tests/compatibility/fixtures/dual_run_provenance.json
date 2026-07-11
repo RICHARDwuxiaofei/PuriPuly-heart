@@ -33,6 +33,8 @@
         "src/puripuly_heart/config/resolved.py",
         "src/puripuly_heart/config/settings_vnext/compat.py",
         "src/puripuly_heart/config/settings_vnext/serialization.py",
+        "src/puripuly_heart/core/orchestrator/channel_runtime.py",
+        "src/puripuly_heart/core/orchestrator/hub.py",
         "src/puripuly_heart/core/runtime/provider_handle.py",
         "src/puripuly_heart/core/runtime/self_audio.py",
         "src/puripuly_heart/core/stt/controller.py",
@@ -41,8 +43,8 @@
         "src/puripuly_heart/ui/app.py",
         "src/puripuly_heart/ui/controller.py"
       ],
-      "production_source_sha256": "ec7a93e55109e3397b125e71837bd67d63b0e7e76ada0399d7671177984329b9",
-      "source_delta_sha256": "196456a82f4a51e854de1a176fa7da3ce2f6431e2ddaf99046cd804a2b1d1778"
+      "production_source_sha256": "bf6a5f6236d13f5a94f0e788e9e4a8bd002269bf6200bad9f3930fa6a529ff93",
+      "source_delta_sha256": "ab084257567a7c1e48ef06dd445e6cbf54a70b33ea46fdeb1fdf76a38e46a88d"
     },
     "repair_base": "b4ace2631793aa1a1e384c0440b8ec7f315559ae"
   },

@@ -895,7 +895,7 @@ class TestContextLogging:
             integrated_context_enabled=True,
             peer_translation_enabled=True,
         )
-        hub.llm = FakeLLMProvider(response_text="OK")
+        await hub.replace_llm_provider(FakeLLMProvider(response_text="OK"))
         hub.source_language = "en"
         hub.target_language = "ko"
         transcript = Transcript(

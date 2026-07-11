@@ -1640,7 +1640,7 @@ async def test_closed_parent_rejects_late_duplicate_final_without_child_output()
     )
     first_peer_turn_id = next(iter(hub.peer_runtime.utterances))
 
-    hub.llm = llm
+    await hub.replace_llm_provider(llm)
     hub.clock.advance(0.01)
     await hub._handle_stt_event(
         STTFinalEvent(

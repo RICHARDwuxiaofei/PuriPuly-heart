@@ -236,12 +236,6 @@ async def test_reset_runtime_state_clears_both_channel_runtimes() -> None:
     peer_id = uuid4()
     self_task = asyncio.create_task(asyncio.sleep(60.0))
     peer_task = asyncio.create_task(asyncio.sleep(60.0))
-    self_stt_task = asyncio.create_task(asyncio.sleep(60.0))
-    peer_stt_task = asyncio.create_task(asyncio.sleep(60.0))
-
-    hub.self_runtime.stt_task = self_stt_task
-    hub.peer_runtime.stt_task = peer_stt_task
-
     hub.self_runtime.translation_tasks[self_id] = self_task
     hub.peer_runtime.translation_tasks[peer_id] = peer_task
     hub.self_runtime.get_or_create_bundle(self_id)
@@ -294,13 +288,37 @@ async def test_reset_runtime_state_clears_both_channel_runtimes() -> None:
         assert hub.peer_runtime.stt_task is None
         assert hub._stt_task is None
     finally:
-        for task in (self_task, peer_task, self_stt_task, peer_stt_task):
+        for task in (self_task, peer_task):
             if not task.done():
                 task.cancel()
         await asyncio.gather(
             self_task,
             peer_task,
-            self_stt_task,
-            peer_stt_task,
             return_exceptions=True,
         )
+
+
+def test_standalone_channel_runtime_keeps_local_provider_and_task_state() -> None:
+    provider = object()
+    runtime = ChannelRuntime(channel="self", stt=provider)
+
+    runtime.stt = None
+    runtime.stt_task = None
+
+    assert runtime.stt is None
+    assert runtime.stt_task is None
+
+
+@pytest.mark.asyncio
+async def test_standalone_reset_clears_local_stt_task() -> None:
+    task = asyncio.create_task(asyncio.sleep(60.0))
+    runtime = ChannelRuntime(channel="self", stt_task=task)
+
+    try:
+        await runtime.reset_runtime_state()
+
+        assert runtime.stt_task is None
+        assert task.done() is False
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

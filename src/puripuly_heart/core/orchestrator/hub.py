@@ -256,7 +256,7 @@ class ClientHub:
             merge_buffer=self._merge_buffer,
             alias_target=self,
         )
-        self.peer_runtime = ChannelRuntime(channel="peer", stt=self.peer_stt)
+        self.peer_runtime = ChannelRuntime(channel="peer", stt=self.peer_stt, alias_target=self)
         self.peer_final_runs = PeerFinalRunsLifecycleOwner(
             on_child_created=self._on_peer_final_run_child_created,
             on_child_started=self._on_peer_final_run_child_started,
@@ -290,6 +290,15 @@ class ClientHub:
             provider=self.llm,
             state_changed=self._sync_provider_runtime_aliases,
         )
+        object.__setattr__(self, "stt", None)
+        object.__setattr__(self, "peer_stt", None)
+        object.__setattr__(self, "llm", None)
+        object.__setattr__(self, "_stt_task", None)
+        object.__setattr__(self, "_peer_stt_task", None)
+        object.__setattr__(self.self_runtime, "stt", None)
+        object.__setattr__(self.self_runtime, "stt_task", None)
+        object.__setattr__(self.peer_runtime, "stt", None)
+        object.__setattr__(self.peer_runtime, "stt_task", None)
         self.context_resolver = ContextResolver(
             clock=self.clock,
             local_time_window_s=self.context_time_window_s,
@@ -302,6 +311,20 @@ class ClientHub:
         self._sync_self_runtime_aliases()
 
     def __setattr__(self, name: str, value: object) -> None:
+        if name in {"stt", "peer_stt", "llm", "_stt_task", "_peer_stt_task"}:
+            handle_name = {
+                "stt": "_self_stt_provider_runtime",
+                "peer_stt": "_peer_stt_provider_runtime",
+                "llm": "_llm_provider_runtime",
+                "_stt_task": "_self_stt_provider_runtime",
+                "_peer_stt_task": "_peer_stt_provider_runtime",
+            }[name]
+            try:
+                object.__getattribute__(self, handle_name)
+            except AttributeError:
+                pass
+            else:
+                raise AttributeError(f"{name} is derived from the provider runtime handle")
         object.__setattr__(self, name, value)
         if name in {
             "clock",
@@ -344,8 +367,6 @@ class ClientHub:
                 output_runtime = None
             if output_runtime is not None:
                 output_runtime.chatbox = value  # type: ignore[assignment]
-        if name in {"stt", "peer_stt", "llm"}:
-            self._attach_provider_assignment(name, value)
         runtime_field = _SELF_RUNTIME_FIELDS.get(name)
         if runtime_field is None:
             return
@@ -355,6 +376,25 @@ class ClientHub:
             return
         object.__setattr__(runtime, runtime_field, value)
 
+    def __getattribute__(self, name: str) -> object:
+        handle_name = {
+            "stt": "_self_stt_provider_runtime",
+            "peer_stt": "_peer_stt_provider_runtime",
+            "llm": "_llm_provider_runtime",
+            "_stt_task": "_self_stt_provider_runtime",
+            "_peer_stt_task": "_peer_stt_provider_runtime",
+        }.get(name)
+        if handle_name is not None:
+            try:
+                handle = object.__getattribute__(self, handle_name)
+            except AttributeError:
+                pass
+            else:
+                if name in {"_stt_task", "_peer_stt_task"}:
+                    return handle.event_task
+                return handle.provider
+        return object.__getattribute__(self, name)
+
     @property
     def provider_runtime_handles(self) -> dict[str, ProviderRuntimeHandle]:
         return {
@@ -363,34 +403,10 @@ class ClientHub:
             "llm": self._llm_provider_runtime,
         }
 
-    def _attach_provider_assignment(self, name: str, value: object) -> None:
-        try:
-            if name == "stt":
-                handle = object.__getattribute__(self, "_self_stt_provider_runtime")
-            elif name == "peer_stt":
-                handle = object.__getattribute__(self, "_peer_stt_provider_runtime")
-            else:
-                handle = object.__getattribute__(self, "_llm_provider_runtime")
-        except AttributeError:
-            return
-        if handle.provider is not value:
-            handle.attach_provider_reference(value)
-
     def _sync_provider_runtime_aliases(self, _handle: ProviderRuntimeHandle | None = None) -> None:
-        object.__setattr__(self, "stt", self._self_stt_provider_runtime.provider)
-        object.__setattr__(self, "peer_stt", self._peer_stt_provider_runtime.provider)
-        object.__setattr__(self, "llm", self._llm_provider_runtime.provider)
-        object.__setattr__(self, "_stt_task", self._self_stt_provider_runtime.event_task)
-        object.__setattr__(self, "_peer_stt_task", self._peer_stt_provider_runtime.event_task)
-        if hasattr(self, "self_runtime"):
-            self.self_runtime.stt = self.stt
-            self.self_runtime.stt_task = self._stt_task
-        if hasattr(self, "peer_runtime"):
-            self.peer_runtime.stt = self.peer_stt
-            self.peer_runtime.stt_task = self._peer_stt_task
+        return
 
     def _sync_self_runtime_aliases(self) -> None:
-        self._stt_task = self.self_runtime.stt_task
         self._utterances = self.self_runtime.utterances
         self._translation_tasks = self.self_runtime.translation_tasks
         self._utterance_sources = self.self_runtime.utterance_sources

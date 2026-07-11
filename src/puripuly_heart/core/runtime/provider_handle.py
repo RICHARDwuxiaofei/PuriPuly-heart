@@ -89,13 +89,6 @@ class ProviderRuntimeHandle:
             "late_callback_rule": self.late_callback_rule,
         }
 
-    def attach_provider_reference(self, provider: object | None) -> None:
-        """Synchronize a compatibility field assignment without closing resources."""
-
-        self._provider = provider
-        self._closed = False
-        self._notify_state_changed()
-
     async def start(self) -> None:
         async with self._lock:
             self._running = True

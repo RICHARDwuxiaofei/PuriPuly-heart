@@ -82,9 +82,34 @@ class ChannelRuntime:
     def __post_init__(self) -> None:
         _validate_channel(self.channel)
 
+    def __getattribute__(self, name: str) -> object:
+        if name in {"stt", "stt_task"}:
+            alias_target = object.__getattribute__(self, "alias_target")
+            if alias_target is not None:
+                channel = object.__getattribute__(self, "channel")
+                handle_name = (
+                    "_self_stt_provider_runtime"
+                    if channel == "self"
+                    else "_peer_stt_provider_runtime"
+                )
+                try:
+                    handle = object.__getattribute__(alias_target, handle_name)
+                except AttributeError:
+                    pass
+                else:
+                    return handle.provider if name == "stt" else handle.event_task
+        return object.__getattribute__(self, name)
+
     def __setattr__(self, name: str, value: object) -> None:
+        if name in {"stt", "stt_task"}:
+            try:
+                alias_target = object.__getattribute__(self, "alias_target")
+            except AttributeError:
+                alias_target = None
+            if alias_target is not None:
+                raise AttributeError(f"{name} is derived from the provider runtime handle")
         object.__setattr__(self, name, value)
-        if name == "alias_target":
+        if name in {"alias_target", "stt", "stt_task"}:
             return
         alias_target = getattr(self, "alias_target", None)
         if alias_target is None:
@@ -202,5 +227,6 @@ class ChannelRuntime:
         self.utterance_sources.clear()
         self.utterance_start_times.clear()
         self.translation_history.clear()
+        if self.alias_target is None:
+            self.stt_task = None
         self.speech_ended_ids.clear()
-        self.stt_task = None
