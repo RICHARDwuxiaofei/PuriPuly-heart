@@ -709,9 +709,9 @@ async def test_presenter_hidden_translation_final_without_visible_change_is_not_
 
         await presenter.emit(translation_event)
 
-        assert presenter.snapshot().revision == previous_snapshot.revision + 1
-        assert len(bridge.snapshots) == snapshot_count_before_translation + 1
-        assert presenter.snapshot().native_fresh_render_generations.self == 2
+        assert presenter.snapshot() == previous_snapshot
+        assert len(bridge.snapshots) == snapshot_count_before_translation
+        assert presenter.snapshot().native_fresh_render_generations.self == 1
         assert (
             presenter._self_presentation_refresh_request_key_for_event(
                 translation_event,
@@ -5683,9 +5683,9 @@ async def test_presenter_hidden_self_translation_metadata_update_does_not_bump_r
         )
     )
 
-    assert presenter.snapshot().revision == snapshot_before_metadata.revision + 1
-    assert len(bridge.snapshots) == snapshot_count_before_metadata + 1
-    assert presenter.snapshot().native_fresh_render_generations.self == 3
+    assert presenter.snapshot() == snapshot_before_metadata
+    assert len(bridge.snapshots) == snapshot_count_before_metadata
+    assert presenter.snapshot().native_fresh_render_generations.self == 2
     assert presenter.snapshot().blocks[0].secondary_enabled is False
 
 

@@ -795,6 +795,7 @@ class OverlayPresenter(OverlaySink):
             fresh_render_event,
             event_changed=event_changed,
             rendered_entries=rendered_entries,
+            previous_snapshot=previous_snapshot,
         )
         previous_rendered_signature = self._presentation_state.rendered_blocks_signature(
             previous_snapshot.blocks
@@ -1160,6 +1161,7 @@ class OverlayPresenter(OverlaySink):
         *,
         event_changed: bool,
         rendered_entries: list[tuple[tuple[str, UUID], OverlayPresentationBlock]],
+        previous_snapshot: OverlayPresentationSnapshot,
     ) -> str | None:
         if event is None or event.utterance_id is None:
             return None
@@ -1184,6 +1186,21 @@ class OverlayPresenter(OverlaySink):
             if rendered_key != key:
                 continue
             if block.block_variant == "finalized" and block.primary_text.strip():
+                if event.channel == "self":
+                    previous_block = self._refreshable_self_block_in_snapshot(
+                        previous_snapshot,
+                        key,
+                    )
+                    previous_signature = (
+                        self._presentation_state.visible_block_content_signature(previous_block)
+                        if previous_block is not None
+                        else None
+                    )
+                    current_signature = self._presentation_state.visible_block_content_signature(
+                        block
+                    )
+                    if previous_signature == current_signature:
+                        return None
                 return event.channel
         return None
 

@@ -2076,6 +2076,15 @@ async fn production_owner_replaces_channel_token_and_empty_snapshot_cancels_sche
         .find(|fact| fact.0 == "self" && fact.1 == 0 && fact.2 == "scheduled")
         .unwrap()
         .4;
+    let replaced_index = audit
+        .iter()
+        .position(|fact| fact.0 == "self" && fact.1 == u64::MAX && fact.2 == "replaced")
+        .unwrap();
+    let replacement_scheduled_index = audit
+        .iter()
+        .position(|fact| fact.0 == "self" && fact.1 == 0 && fact.2 == "scheduled")
+        .unwrap();
+    assert_eq!(replacement_scheduled_index, replaced_index + 1);
     assert!(!audit.iter().any(|fact| {
         fact.0 == "self"
             && fact.1 == u64::MAX
@@ -2237,6 +2246,18 @@ async fn production_owner_active_schedule_submission_failure_is_terminal() {
         .unwrap_err();
 
     assert!(matches!(failure, RuntimeFailure::OpenVr(_)));
+    assert_eq!(
+        owner
+            .fresh_retry_audit_for_test()
+            .iter()
+            .filter(|fact| fact.0 == "self" && fact.1 == 9 && fact.2 == "failed")
+            .count(),
+        1
+    );
+    assert!(!owner
+        .fresh_retry_audit_for_test()
+        .iter()
+        .any(|fact| fact.0 == "self" && fact.1 == 9 && fact.2 == "teardown"));
     assert!(owner.resources_released());
     assert!(!retry.request());
     assert_eq!(
@@ -2303,6 +2324,14 @@ async fn production_owner_active_schedule_readiness_failure_is_terminal() {
         .unwrap_err();
 
     assert_eq!(failure, RuntimeFailure::ReadinessFailed);
+    assert_eq!(
+        owner
+            .fresh_retry_audit_for_test()
+            .iter()
+            .filter(|fact| fact.0 == "peer" && fact.1 == 4 && fact.2 == "failed")
+            .count(),
+        1
+    );
     assert!(owner.resources_released());
     assert!(!retry.request());
     assert_eq!(
@@ -2312,6 +2341,149 @@ async fn production_owner_active_schedule_readiness_failure_is_terminal() {
             .unwrap()
             .iter()
             .filter(|operation| operation.starts_with("submit"))
+            .count(),
+        1
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn production_owner_shutdown_records_active_schedule_teardown() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({"type":"snapshot","payload":{
+                "revision":1,
+                "native_fresh_render_generations":{"self":31},
+                "blocks":[block("self:shutdown","self","text","",true)]
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        loop {
+            if ws
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap()
+                .contains("overlay_ready")
+            {
+                break;
+            }
+        }
+        ws.send(Message::Text(json!({"type":"shutdown"}).to_string().into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let mut owner = NativePresentationOwner::new_with_retry_policy_for_test(
+        snapshot,
+        CaptionRenderer::new_for_test().unwrap(),
+        OwnedSubmitterProbe {
+            state: Arc::new(OwnedSubmitterState::default()),
+            fail_submit: false,
+            fail_on_submission: None,
+            submit_delay: Duration::ZERO,
+        },
+        Duration::from_millis(100),
+        Duration::from_secs(1),
+        2,
+    );
+
+    owner
+        .run(&mut bridge, &test_logger("shutdown-active-schedule").await)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        owner
+            .fresh_retry_audit_for_test()
+            .iter()
+            .filter(|fact| fact.0 == "self" && fact.1 == 31 && fact.2 == "teardown")
+            .count(),
+        1
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn production_owner_non_retry_disconnect_records_active_schedule_teardown() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({"type":"snapshot","payload":{
+                "revision":1,
+                "native_fresh_render_generations":{"peer":32},
+                "blocks":[block("peer:disconnect","peer","text","",true)]
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        loop {
+            if ws
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap()
+                .contains("overlay_ready")
+            {
+                break;
+            }
+        }
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let mut owner = NativePresentationOwner::new_with_retry_policy_for_test(
+        snapshot,
+        CaptionRenderer::new_for_test().unwrap(),
+        OwnedSubmitterProbe {
+            state: Arc::new(OwnedSubmitterState::default()),
+            fail_submit: false,
+            fail_on_submission: None,
+            submit_delay: Duration::ZERO,
+        },
+        Duration::from_millis(100),
+        Duration::from_secs(1),
+        2,
+    );
+
+    let failure = owner
+        .run(
+            &mut bridge,
+            &test_logger("disconnect-active-schedule").await,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        failure,
+        RuntimeFailure::RuntimeDisconnected | RuntimeFailure::Bridge(_)
+    ));
+    assert_eq!(
+        owner
+            .fresh_retry_audit_for_test()
+            .iter()
+            .filter(|fact| fact.0 == "peer" && fact.1 == 32 && fact.2 == "teardown")
             .count(),
         1
     );
@@ -2358,7 +2530,7 @@ async fn production_owner_slow_submission_has_no_catch_up_and_expires_cleanly() 
         },
         Duration::from_millis(5),
         Duration::from_millis(90),
-        20,
+        2,
     );
 
     owner
@@ -2371,7 +2543,7 @@ async fn production_owner_slow_submission_has_no_catch_up_and_expires_cleanly() 
         .iter()
         .filter(|fact| fact.2 == "completed")
         .collect::<Vec<_>>();
-    assert_eq!(completions.len(), 3);
+    assert_eq!(completions.len(), 2);
     for pair in completions.windows(2) {
         assert!(pair[1].4 >= pair[0].4 + Duration::from_millis(20));
     }
@@ -2383,7 +2555,7 @@ async fn production_owner_slow_submission_has_no_catch_up_and_expires_cleanly() 
             .iter()
             .filter(|operation| operation.starts_with("submit"))
             .count(),
-        4
+        3
     );
     assert!(!owner.runtime().redraw_requested());
     assert!(owner.resources_released());

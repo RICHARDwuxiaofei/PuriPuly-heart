@@ -1423,7 +1423,11 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
                     deadline: now + self.retry_policy.deadline,
                     next_due: now + self.retry_policy.cadence,
                 };
-                *schedule = Some(next);
+                let replaced = schedule.replace(next);
+                if let Some(replaced) = replaced {
+                    self.record_fresh_retry(logger, replaced, "replaced")
+                        .await?;
+                }
                 self.record_fresh_retry(logger, next, "scheduled").await?;
             }
         }
@@ -1469,14 +1473,30 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
             return Ok(FrameCycleOutcome::NoWork);
         }
         self.runtime.request_native_presentation_retry();
-        let outcome = {
+        let attempt = {
             let renderer = self.renderer.as_ref().expect("active renderer");
             let openvr = self.openvr.as_mut().expect("active OpenVR session");
             self.runtime
                 .submit_frame_if_needed_with_timing(
                     renderer, openvr, bridge, logger, None, None, true,
                 )
-                .await?
+                .await
+        };
+        let outcome = match attempt {
+            Ok(outcome) => outcome,
+            Err(primary_failure) => {
+                let active = match channel {
+                    FreshRetryChannel::SelfChannel => self.self_schedule.take(),
+                    FreshRetryChannel::Peer => self.peer_schedule.take(),
+                };
+                if let Some(active) =
+                    active.filter(|active| active.trigger_generation == schedule.trigger_generation)
+                {
+                    self.push_fresh_retry_audit(active, "failed");
+                    let _ = log_fresh_retry(logger, active, "failed", self.retry_policy).await;
+                }
+                return Err(primary_failure);
+            }
         };
         let audit = {
             let slot = match channel {
@@ -1608,8 +1628,12 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
     fn teardown(&mut self) {
         self.retry_sender = None;
         self.retry_receiver.close();
-        self.self_schedule = None;
-        self.peer_schedule = None;
+        if let Some(schedule) = self.self_schedule.take() {
+            self.push_fresh_retry_audit(schedule, "teardown");
+        }
+        if let Some(schedule) = self.peer_schedule.take() {
+            self.push_fresh_retry_audit(schedule, "teardown");
+        }
         self.runtime.shutdown_presentation();
         if let Some(openvr) = self.openvr.as_mut() {
             let _ = openvr.set_overlay_visible(false);
