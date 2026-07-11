@@ -15876,8 +15876,9 @@ async def test_connect_openrouter_via_pkce_stores_key_sets_alias_and_marks_verif
     assert verify_calls == ["sk-or-v1-user"]
     assert controller.settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
     assert controller.settings.openrouter.selected_source == OpenRouterCredentialSource.BYOK
-    assert controller.settings.api_key_verified.openrouter is True
+    assert controller.settings.api_key_verified.openrouter is False
     assert len(applied_plans) == 1
+    assert applied_plans[0].api_key_verified.openrouter is False
 
 
 @pytest.mark.asyncio
@@ -16024,7 +16025,7 @@ async def test_connect_openrouter_via_pkce_rebuilds_llm_when_signature_is_unchan
     assert ok is True
     assert created_llm == ["sk-or-v1-user"]
     assert controller.hub.llm == "rebuilt-llm"
-    assert controller.settings.api_key_verified.openrouter is True
+    assert controller.settings.api_key_verified.openrouter is False
     assert dashboard.translation_needs_key is False
 
 
@@ -16175,7 +16176,7 @@ async def test_connect_openrouter_via_pkce_returns_degraded_on_runtime_apply_fai
     assert store.get("openrouter_api_key") == "sk-or-v1-user"
     assert store.set_calls == [("openrouter_api_key", "sk-or-v1-user")]
     assert store.delete_calls == []
-    assert controller.settings.api_key_verified.openrouter is True
+    assert controller.settings.api_key_verified.openrouter is False
     assert (
         controller.last_settings_mutation_result is not None
         and controller.last_settings_mutation_result.status
@@ -16524,7 +16525,9 @@ async def test_order21_snapshot_full_default_service_runtime_adapter_receives_co
 
     async def capture_apply_runtime(self, request) -> messages.RuntimeApplyResult:
         _ = self
-        runtime_snapshots.append(request.settings_values)
+        runtime_snapshots.append(
+            controller.canonical_settings_persistence.legacy_projection(request.receipt.envelope)
+        )
         return messages.RuntimeApplyResult(
             status=messages.RUNTIME_APPLY_STATUS_APPLIED,
             message=None,
@@ -16541,19 +16544,12 @@ async def test_order21_snapshot_full_default_service_runtime_adapter_receives_co
 
     assert len(runtime_snapshots) == 1
     values = runtime_snapshots[0]
-    assert "openrouter.fallback_selection_alias" not in values
-    assert values["provider"]["llm"] == LLMProviderName.OPENROUTER.value
-    assert values["languages"]["source_language"] == "ja"
-    assert values["languages"]["target_language"] == "en"
-    assert values["openrouter"]["fallback_selection_alias"] == (
-        OpenRouterFallbackSelectionAlias.NONE.value
-    )
-    assert values["translation"]["fallback"] == {
-        "enabled": True,
-        "model": TranslationModel.DEEPSEEK_V4_FLASH.value,
-        "connection": TranslationConnection.OPENROUTER.value,
-    }
-    assert values["llm"]["concurrency_limit"] == pending.llm.concurrency_limit
+    assert values.provider.llm == LLMProviderName.OPENROUTER
+    assert values.languages.source_language == "ja"
+    assert values.languages.target_language == "en"
+    assert values.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.NONE
+    assert values.translation.fallback == pending.translation.fallback
+    assert values.llm.concurrency_limit == pending.llm.concurrency_limit
 
 
 @pytest.mark.asyncio

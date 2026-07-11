@@ -28,6 +28,7 @@ from puripuly_heart.core.messages import (
     DIAGNOSTIC_VISIBILITY_BASIC,
     RUNTIME_APPLY_STATUS_APPLIED,
     TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED,
+    TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
     DiagnosticFieldValue,
@@ -101,7 +102,7 @@ class OpenRouterPkceHandoffService:
             request=request,
             verification_result=verification_result,
         )
-        local_commit_result = await self.secret_transaction.set_provider_secret(
+        local_commit_outcome = await self.secret_transaction.set_provider_secret_with_receipt(
             SecretSetRequest(
                 secret_key=request.secret_key,
                 secret_value=request.transient_api_key,
@@ -111,13 +112,20 @@ class OpenRouterPkceHandoffService:
                 correlation_id=request.correlation_id,
             )
         )
+        local_commit_result = local_commit_outcome.transaction_result
         if local_commit_result.status != TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
             return local_commit_result
+        if local_commit_outcome.receipt is None:
+            return TransactionResult(
+                status=TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED,
+                message=local_commit_result.message,
+                diagnostics=local_commit_result.diagnostics,
+            )
 
         try:
             runtime_result = await self.runtime_apply.apply_runtime(
                 RuntimeApplyRequest(
-                    settings_values=settings_values,
+                    receipt=local_commit_outcome.receipt,
                     reason=request.reason,
                     correlation_id=request.correlation_id,
                 )

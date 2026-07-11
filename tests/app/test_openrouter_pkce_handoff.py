@@ -15,6 +15,7 @@ from puripuly_heart.app.ports import (
     secret_store,
     settings_repository,
 )
+from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core import messages
 
 SERVICE_MODULE = "puripuly_heart.app.services.openrouter_pkce_handoff"
@@ -162,6 +163,7 @@ class RecordingSettingsRepository:
         events: list[tuple[str, str]] | None = None,
     ) -> None:
         self.result = result
+        self.returned_result = result
         self.events = events if events is not None else []
         self.saved_requests: list[settings_repository.SettingsCommitRequest] = []
 
@@ -174,6 +176,21 @@ class RecordingSettingsRepository:
     ) -> settings_repository.SettingsCommitResult:
         self.events.append(("save", request.reason or ""))
         self.saved_requests.append(request)
+        if self.result.succeeded and self.result.receipt is None:
+            self.returned_result = settings_repository.SettingsCommitResult(
+                succeeded=self.result.succeeded,
+                snapshot=self.result.snapshot,
+                message=self.result.message,
+                diagnostics=self.result.diagnostics,
+                receipt=settings_repository.SettingsCommitReceipt(
+                    AppSettingsVNext(),
+                    self.result.snapshot.revision if self.result.snapshot is not None else "r2",
+                    request.reason,
+                    request.correlation_id,
+                ),
+            )
+            return self.returned_result
+        self.returned_result = self.result
         return self.result
 
 
@@ -624,13 +641,7 @@ async def test_success_verifies_saves_secret_and_settings_then_applies_runtime()
     assert "api_key" not in evidence
     runtime_request = _only_item(runtime.requests, label="runtime apply requests")
     _assert_no_raw_secret_values(runtime_request, label="runtime apply request")
-    assert runtime_request.settings_values["intent"]["translation"]["connection"] == "byok"  # type: ignore[index]
-    assert (
-        _provider_verification_entry(
-            runtime_request.settings_values, "openrouter", label="runtime apply request"
-        )
-        == entry
-    )
+    assert runtime_request.receipt is repository.returned_result.receipt
 
 
 @pytest.mark.asyncio
@@ -676,7 +687,7 @@ async def test_success_preserves_existing_nested_operational_state_payloads() ->
     }
     assert _provider_verification_entry(saved_request.values, "openrouter")["status"] == "verified"
     runtime_request = _only_item(runtime.requests, label="runtime apply requests")
-    assert runtime_request.settings_values == saved_request.values
+    assert runtime_request.receipt is repository.returned_result.receipt
     assert "openrouter" not in existing_settings_values["state"]["provider_verification"]
 
 
@@ -731,7 +742,7 @@ async def test_success_replaces_existing_same_provider_verification_entry() -> N
         pytest.fail("verification evidence details should be a mapping")
     assert "stale_evidence" not in evidence
     runtime_request = _only_item(runtime.requests, label="runtime apply requests")
-    assert runtime_request.settings_values == saved_request.values
+    assert runtime_request.receipt is repository.returned_result.receipt
 
 
 @pytest.mark.asyncio

@@ -204,7 +204,11 @@ class SettingsMutationService:
                 correlation_id=request.correlation_id,
             )
         )
-        if not commit_result.succeeded or commit_result.snapshot is None:
+        if (
+            not commit_result.succeeded
+            or commit_result.snapshot is None
+            or commit_result.receipt is None
+        ):
             return TransactionResult(
                 status=TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED,
                 message=commit_result.message,
@@ -224,7 +228,7 @@ class SettingsMutationService:
         try:
             runtime_result = await self.runtime_apply.apply_runtime(
                 RuntimeApplyRequest(
-                    settings_values=snapshot.values,
+                    receipt=commit_result.receipt,
                     reason=request.reason,
                     correlation_id=request.correlation_id,
                 )

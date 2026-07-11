@@ -14,6 +14,7 @@ from puripuly_heart.app.ports.provider_verifier import (
 )
 from puripuly_heart.app.ports.secret_store import SecretSnapshot, SecretStorePort
 from puripuly_heart.app.ports.settings_repository import (
+    SettingsCommitReceipt,
     SettingsCommitRequest,
     SettingsRepositoryPort,
 )
@@ -122,6 +123,12 @@ class DashboardNeedsKeySnapshotPublisher(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class SecretSettingsTransactionOutcome:
+    transaction_result: TransactionResult
+    receipt: SettingsCommitReceipt | None
+
+
+@dataclass(frozen=True, slots=True)
 class SecretSettingsTransaction:
     secret_store: SecretStorePort
     settings_repository: SettingsRepositoryPort
@@ -129,13 +136,21 @@ class SecretSettingsTransaction:
     provider_verifier: ProviderVerifierPort | None = None
 
     async def set_provider_secret(self, request: SecretSetRequest) -> TransactionResult:
+        return (await self.set_provider_secret_with_receipt(request)).transaction_result
+
+    async def set_provider_secret_with_receipt(
+        self, request: SecretSetRequest
+    ) -> SecretSettingsTransactionOutcome:
         try:
             snapshot = await self.secret_store.snapshot_secret(request.secret_key)
         except Exception:
-            return _secret_write_failed_result(
-                secret_key=request.secret_key,
-                action="set",
-                operation="snapshot_secret",
+            return SecretSettingsTransactionOutcome(
+                _secret_write_failed_result(
+                    secret_key=request.secret_key,
+                    action="set",
+                    operation="snapshot_secret",
+                ),
+                None,
             )
 
         try:
@@ -144,20 +159,26 @@ class SecretSettingsTransaction:
                 request.secret_value,
             )
         except Exception:
-            return _secret_write_failed_result(
-                secret_key=request.secret_key,
-                action="set",
-                operation="set_secret",
+            return SecretSettingsTransactionOutcome(
+                _secret_write_failed_result(
+                    secret_key=request.secret_key,
+                    action="set",
+                    operation="set_secret",
+                ),
+                None,
             )
 
         if not write_result.succeeded:
-            return _secret_write_failed_result(
-                secret_key=request.secret_key,
-                action="set",
-                operation="set_secret",
+            return SecretSettingsTransactionOutcome(
+                _secret_write_failed_result(
+                    secret_key=request.secret_key,
+                    action="set",
+                    operation="set_secret",
+                ),
+                None,
             )
 
-        return await self._commit_settings_or_restore_secret(
+        return await self._commit_settings_or_restore_secret_with_receipt(
             request=request,
             snapshot=snapshot,
             action="set",
@@ -311,6 +332,19 @@ class SecretSettingsTransaction:
         snapshot: SecretSnapshot,
         action: str,
     ) -> TransactionResult:
+        return (
+            await self._commit_settings_or_restore_secret_with_receipt(
+                request=request, snapshot=snapshot, action=action
+            )
+        ).transaction_result
+
+    async def _commit_settings_or_restore_secret_with_receipt(
+        self,
+        *,
+        request: SecretSetRequest | SecretClearRequest,
+        snapshot: SecretSnapshot,
+        action: str,
+    ) -> SecretSettingsTransactionOutcome:
         try:
             expected_revision = request.expected_settings_revision
             if expected_revision is None:
@@ -324,28 +358,41 @@ class SecretSettingsTransaction:
                 )
             )
         except Exception:
-            return await self._restore_after_settings_commit_failure(
-                snapshot=snapshot,
-                action=action,
-                commit_message=None,
+            return SecretSettingsTransactionOutcome(
+                await self._restore_after_settings_commit_failure(
+                    snapshot=snapshot,
+                    action=action,
+                    commit_message=None,
+                ),
+                None,
             )
 
-        if commit_result.succeeded and commit_result.snapshot is not None:
+        if (
+            commit_result.succeeded
+            and commit_result.snapshot is not None
+            and commit_result.receipt is not None
+        ):
             await self._publish_dashboard_needs_key_snapshot(
                 request.dashboard_needs_key,
                 settings_revision=commit_result.snapshot.revision,
                 correlation_id=request.correlation_id,
             )
-            return TransactionResult(
-                status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
-                message=commit_result.message,
-                diagnostics=commit_result.diagnostics,
+            return SecretSettingsTransactionOutcome(
+                TransactionResult(
+                    status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
+                    message=commit_result.message,
+                    diagnostics=commit_result.diagnostics,
+                ),
+                commit_result.receipt,
             )
 
-        return await self._restore_after_settings_commit_failure(
-            snapshot=snapshot,
-            action=action,
-            commit_message=commit_result.message,
+        return SecretSettingsTransactionOutcome(
+            await self._restore_after_settings_commit_failure(
+                snapshot=snapshot,
+                action=action,
+                commit_message=commit_result.message,
+            ),
+            None,
         )
 
     async def _restore_after_settings_commit_failure(
@@ -578,4 +625,5 @@ __all__ = [
     "SecretClearRequest",
     "SecretSetRequest",
     "SecretSettingsTransaction",
+    "SecretSettingsTransactionOutcome",
 ]

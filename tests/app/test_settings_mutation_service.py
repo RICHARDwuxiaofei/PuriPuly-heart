@@ -4,7 +4,7 @@ import ast
 import importlib
 import inspect
 from collections.abc import Mapping
-from dataclasses import FrozenInstanceError, dataclass, field, fields, is_dataclass
+from dataclasses import FrozenInstanceError, dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from typing import get_type_hints
 
@@ -37,6 +37,7 @@ FORBIDDEN_SERVICE_IMPORT_PREFIXES = (
 class RecordingSettingsRepository:
     result: settings_repository.SettingsCommitResult
     saved_requests: list[settings_repository.SettingsCommitRequest] = field(default_factory=list)
+    returned_result: settings_repository.SettingsCommitResult | None = None
 
     async def load(self) -> settings_repository.SettingsSnapshot:
         raise AssertionError("SettingsMutationService should not load in these scenarios")
@@ -54,6 +55,18 @@ class RecordingSettingsRepository:
         request: settings_repository.SettingsCommitRequest,
     ) -> settings_repository.SettingsCommitResult:
         self.saved_requests.append(request)
+        if self.result.succeeded and self.result.receipt is None:
+            self.returned_result = replace(
+                self.result,
+                receipt=settings_repository.SettingsCommitReceipt(
+                    AppSettingsVNext(),
+                    self.result.snapshot.revision if self.result.snapshot is not None else "r2",
+                    request.reason,
+                    request.correlation_id,
+                ),
+            )
+            return self.returned_result
+        self.returned_result = self.result
         return self.result
 
 
@@ -466,11 +479,12 @@ async def test_commit_success_with_runtime_applied_publishes_snapshot_and_runtim
     assert snapshot_publisher.publications == [(committed_snapshot, "corr-2")]
     assert runtime.requests == [
         runtime_apply.RuntimeApplyRequest(
-            settings_values=committed_snapshot.values,
+            receipt=runtime.requests[0].receipt,
             reason="user_patch",
             correlation_id="corr-2",
         )
     ]
+    assert runtime.requests[0].receipt is repository.returned_result.receipt
     assert runtime_result_publisher.publications == [(runtime_result, "corr-2")]
 
 
@@ -527,7 +541,7 @@ async def test_commit_success_with_runtime_degraded_or_failed_returns_degraded_t
     )
     assert runtime.requests == [
         runtime_apply.RuntimeApplyRequest(
-            settings_values=committed_snapshot.values,
+            receipt=runtime.requests[0].receipt,
             reason="user_patch",
             correlation_id="corr-3",
         )
@@ -586,7 +600,7 @@ async def test_snapshot_publisher_failure_still_applies_runtime_and_returns_runt
     assert snapshot_publisher.publications == [(committed_snapshot, "corr-snapshot-publisher")]
     assert runtime.requests == [
         runtime_apply.RuntimeApplyRequest(
-            settings_values=committed_snapshot.values,
+            receipt=runtime.requests[0].receipt,
             reason="user_patch",
             correlation_id="corr-snapshot-publisher",
         )
@@ -642,7 +656,7 @@ async def test_runtime_result_publisher_failure_returns_known_runtime_result() -
     assert snapshot_publisher.publications == [(committed_snapshot, "corr-runtime-publisher")]
     assert runtime.requests == [
         runtime_apply.RuntimeApplyRequest(
-            settings_values=committed_snapshot.values,
+            receipt=runtime.requests[0].receipt,
             reason="user_patch",
             correlation_id="corr-runtime-publisher",
         )
@@ -708,7 +722,7 @@ async def test_runtime_apply_exception_returns_controlled_degraded_result_withou
     assert snapshot_publisher.publications == [(committed_snapshot, "corr-runtime-exception")]
     assert runtime.requests == [
         runtime_apply.RuntimeApplyRequest(
-            settings_values=committed_snapshot.values,
+            receipt=runtime.requests[0].receipt,
             reason="user_patch",
             correlation_id="corr-runtime-exception",
         )
@@ -757,7 +771,7 @@ async def test_commit_success_message_and_diagnostics_are_runtime_fallbacks() ->
     )
     assert runtime.requests == [
         runtime_apply.RuntimeApplyRequest(
-            settings_values=committed_snapshot.values,
+            receipt=runtime.requests[0].receipt,
             reason="user_patch",
             correlation_id="corr-fallback",
         )

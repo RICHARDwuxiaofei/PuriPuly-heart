@@ -638,7 +638,7 @@ class _ControllerSettingsPatchRepository:
         elif "state" in request.values or "intent" in request.values:
             _apply_managed_pending_delivery_ack_patch(next_settings, request.values)
         else:
-            next_settings = copy.deepcopy(self.base_settings or legacy_baseline)
+            next_settings = copy.deepcopy(self.committed_settings)
         outer_mutation_depth = self.controller._canonical_mutation_depth
         if self.controller._canonical_persistence_port_enabled:
             self.controller.vnext_settings = current_receipt.envelope
@@ -8823,7 +8823,6 @@ class GuiController:
         updated.openrouter.llm_model = OpenRouterLLMModel(profile.openrouter_model)
         updated.api_key_verified.openrouter = True
 
-        plan = self._build_provider_runtime_apply_plan(updated, force_rebuild_llm=True)
         secret_store = create_secret_store(self.settings.secrets, config_path=self.config_path)
         secret_store_port = _ControllerSecretStorePortAdapter(secret_store)
         settings_repository = _ControllerSettingsPatchRepository(
@@ -8836,15 +8835,7 @@ class GuiController:
             secret_store=secret_store_port,
             settings_repository=settings_repository,
         )
-        runtime_apply_port = _ControllerProviderRuntimeApply(
-            controller=self,
-            settings=updated,
-            plan=plan,
-            surface="openrouter_pkce",
-            operation="openrouter_pkce_runtime_apply",
-        )
-
-        commit_result = await transaction.set_provider_secret(
+        commit_outcome = await transaction.set_provider_secret_with_receipt(
             SecretSetRequest(
                 secret_key=OPENROUTER_BYOK_API_KEY_SECRET,
                 secret_value=result.api_key,
@@ -8854,6 +8845,7 @@ class GuiController:
                 correlation_id=None,
             )
         )
+        commit_result = commit_outcome.transaction_result
         if commit_result.status != TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
             self._show_short_message("openrouter.pkce.failed")
             self._log_error("OpenRouter PKCE settings commit failed")
@@ -8862,9 +8854,26 @@ class GuiController:
             self._complete_canonical_mutation()
             return False
 
+        if commit_outcome.receipt is None:
+            self._complete_canonical_mutation()
+            return False
+        committed_settings = self.canonical_settings_persistence.legacy_projection(
+            commit_outcome.receipt.envelope
+        )
+        plan = self._build_provider_runtime_apply_plan(
+            committed_settings,
+            force_rebuild_llm=True,
+        )
+        runtime_apply_port = _ControllerProviderRuntimeApply(
+            controller=self,
+            settings=committed_settings,
+            plan=plan,
+            surface="openrouter_pkce",
+            operation="openrouter_pkce_runtime_apply",
+        )
         runtime_result = await runtime_apply_port.apply_runtime(
             RuntimeApplyRequest(
-                settings_values=_settings_snapshot_values(updated),
+                receipt=commit_outcome.receipt,
                 reason="openrouter_pkce",
                 correlation_id=None,
             )

@@ -15,9 +15,11 @@
         "src/puripuly_heart/app/adapters/settings_vnext_canonical_persistence.py",
         "src/puripuly_heart/app/ports/canonical_settings_persistence.py",
         "src/puripuly_heart/app/ports/canonical_state_repository.py",
+        "src/puripuly_heart/app/ports/runtime_apply.py",
         "src/puripuly_heart/app/ports/settings_repository.py",
         "src/puripuly_heart/app/services/canonical_state_repositories.py",
         "src/puripuly_heart/app/services/managed_connection_auth.py",
+        "src/puripuly_heart/app/services/openrouter_pkce_handoff.py",
         "src/puripuly_heart/app/services/secret_settings_transaction.py",
         "src/puripuly_heart/app/services/settings_mutation.py",
         "src/puripuly_heart/app/services/telemetry_operational_state.py",
@@ -33,8 +35,8 @@
         "src/puripuly_heart/ui/app.py",
         "src/puripuly_heart/ui/controller.py"
       ],
-      "production_source_sha256": "ed70b58ae48f0d53e98c1c6ec39fb68fdc756be943d310eb520a505dd010a009",
-      "source_delta_sha256": "f612c8234ee60d3d74e846734b27ece74c9e7665caf53dddf8b0a63ddc52fec9"
+      "production_source_sha256": "3d7fb1c17c783acdba4d8153ce245df5a7816e3a98783a43905a7a7ea1e7b080",
+      "source_delta_sha256": "2298560d4a1dfbfd1d3b4d2fdbf888d800112dede8b2b9967c4baf5275ba17cb"
     },
     "repair_base": "b4ace2631793aa1a1e384c0440b8ec7f315559ae"
   },
