@@ -1637,3 +1637,14 @@ def test_settings_runtime_confinement_guard_flags_qualified_to_legacy_dict_usage
         "src/puripuly_heart/app/services/example.py",
         "to_legacy_dict",
     ) in violation_keys
+
+
+def test_resolved_runtime_resource_transaction_has_no_ui_dependency() -> None:
+    for relative_path in (
+        "src/puripuly_heart/app/ports/runtime_resources.py",
+        "src/puripuly_heart/app/services/resolved_runtime_adapter.py",
+    ):
+        source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        assert "puripuly_heart.ui" not in source
+        assert "GuiController" not in source
+        assert "AppSettings" not in source
