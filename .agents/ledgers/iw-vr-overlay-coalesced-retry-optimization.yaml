@@ -80,6 +80,7 @@ checkpoints:
     gate_id: evidence-foundation
     cluster_id: evidence-foundation-c2
     decision: pass
+    commit: d8bf29968583677602d72033ec3be74f76b81b87
     verification: passed
     review: pass
     summary: Behavior-neutral bounded diagnostics establish causal physical-attempt evidence under the unchanged P20 envelope; HMD and environment observations remain explicitly unrecorded.
