@@ -941,7 +941,8 @@
       "surface": "puripuly_heart.app.adapters provider verifier adapter",
       "classification": "internal_adapter_implementation_contract",
       "modules": [
-        "puripuly_heart.app.adapters.provider_verifier"
+        "puripuly_heart.app.adapters.provider_verifier",
+        "puripuly_heart.app.adapters.resolved_runtime_resource_factory"
       ],
       "rationale": "ProviderVerifierAdapter is an app adapter implementation of the provider-verifier port; the adapter class is importable for wiring/tests but is not an external public compatibility facade."
     },
