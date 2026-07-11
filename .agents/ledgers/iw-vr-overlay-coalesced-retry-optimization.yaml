@@ -8,11 +8,10 @@ selected_input:
 
 current:
   gate_id: coalesced-presentation
-  cluster_id: coalesced-presentation-c1
+  cluster_id: coalesced-presentation-c2
   work_refs:
-    - coordinate-coalesced-physical-presentation
-    - preserve-repeated-work-equivalence
-  next_action: continue
+    - verify-phase-one-coalescing-equivalence
+  next_action: review
 
 gate_plans:
   - gate_id: evidence-foundation
@@ -33,11 +32,11 @@ gate_plans:
         work_refs:
           - coordinate-coalesced-physical-presentation
           - preserve-repeated-work-equivalence
-        status: in_progress
+        status: passed
       - id: coalesced-presentation-c2
         work_refs:
           - verify-phase-one-coalescing-equivalence
-        status: pending
+        status: in_progress
   - gate_id: capability-and-target-contract
     shape: split
     clusters:

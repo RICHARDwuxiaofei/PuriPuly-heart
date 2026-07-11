@@ -102,6 +102,7 @@ pub enum PresentationCauseKind {
     SceneUpdate,
     RuntimeControl,
     ExternalRetry,
+    ActiveRetryIntent,
     NativeFreshRetry,
 }
 
@@ -125,6 +126,8 @@ pub struct PresentationCauses {
     scene_update_generation: Option<u64>,
     runtime_control: bool,
     external_retry: bool,
+    active_self_retry_generation: Option<u64>,
+    active_peer_retry_generation: Option<u64>,
     self_retry_generation: Option<u64>,
     peer_retry_generation: Option<u64>,
 }
@@ -138,6 +141,14 @@ impl PresentationCauses {
             }
             (PresentationCauseKind::RuntimeControl, _) => self.runtime_control = true,
             (PresentationCauseKind::ExternalRetry, _) => self.external_retry = true,
+            (
+                PresentationCauseKind::ActiveRetryIntent,
+                Some(PresentationCauseChannel::SelfChannel),
+            ) => self.active_self_retry_generation = cause.trigger_generation,
+            (PresentationCauseKind::ActiveRetryIntent, Some(PresentationCauseChannel::Peer)) => {
+                self.active_peer_retry_generation = cause.trigger_generation
+            }
+            (PresentationCauseKind::ActiveRetryIntent, None) => {}
             (
                 PresentationCauseKind::NativeFreshRetry,
                 Some(PresentationCauseChannel::SelfChannel),
@@ -155,8 +166,45 @@ impl PresentationCauses {
         }
     }
 
+    pub fn remove(&mut self, cause: PresentationCause) {
+        match (cause.kind, cause.channel) {
+            (
+                PresentationCauseKind::ActiveRetryIntent,
+                Some(PresentationCauseChannel::SelfChannel),
+            ) if self.active_self_retry_generation == cause.trigger_generation => {
+                self.active_self_retry_generation = None
+            }
+            (PresentationCauseKind::ActiveRetryIntent, Some(PresentationCauseChannel::Peer))
+                if self.active_peer_retry_generation == cause.trigger_generation =>
+            {
+                self.active_peer_retry_generation = None
+            }
+            _ => {}
+        }
+    }
+
+    pub fn contains(&self, cause: PresentationCause) -> bool {
+        match (cause.kind, cause.channel) {
+            (
+                PresentationCauseKind::ActiveRetryIntent,
+                Some(PresentationCauseChannel::SelfChannel),
+            ) => self.active_self_retry_generation == cause.trigger_generation,
+            (PresentationCauseKind::ActiveRetryIntent, Some(PresentationCauseChannel::Peer)) => {
+                self.active_peer_retry_generation == cause.trigger_generation
+            }
+            (
+                PresentationCauseKind::NativeFreshRetry,
+                Some(PresentationCauseChannel::SelfChannel),
+            ) => self.self_retry_generation == cause.trigger_generation,
+            (PresentationCauseKind::NativeFreshRetry, Some(PresentationCauseChannel::Peer)) => {
+                self.peer_retry_generation == cause.trigger_generation
+            }
+            _ => false,
+        }
+    }
+
     pub fn to_vec(self) -> Vec<PresentationCause> {
-        let mut causes = Vec::with_capacity(6);
+        let mut causes = Vec::with_capacity(8);
         for (present, kind) in [
             (self.startup, PresentationCauseKind::Startup),
             (self.runtime_control, PresentationCauseKind::RuntimeControl),
@@ -176,6 +224,24 @@ impl PresentationCauses {
                 channel: None,
                 trigger_generation: Some(trigger_generation),
             });
+        }
+        for (channel, trigger_generation) in [
+            (
+                PresentationCauseChannel::SelfChannel,
+                self.active_self_retry_generation,
+            ),
+            (
+                PresentationCauseChannel::Peer,
+                self.active_peer_retry_generation,
+            ),
+        ] {
+            if let Some(trigger_generation) = trigger_generation {
+                causes.push(PresentationCause {
+                    kind: PresentationCauseKind::ActiveRetryIntent,
+                    channel: Some(channel),
+                    trigger_generation: Some(trigger_generation),
+                });
+            }
         }
         for (channel, trigger_generation) in [
             (

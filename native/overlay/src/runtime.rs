@@ -584,6 +584,7 @@ impl PresentationRuntime {
         self.presentation_diagnostics.shutdown();
         self.last_presentation_correlation = None;
         self.last_presentation_backend = None;
+        self.pending_presentation_causes = PresentationCauses::default();
     }
 
     pub async fn emit_ready(
@@ -1225,6 +1226,11 @@ impl PresentationRuntime {
     pub fn presentation_diagnostics(&self) -> &PresentationDiagnostics {
         &self.presentation_diagnostics
     }
+
+    #[doc(hidden)]
+    pub fn pending_presentation_causes_for_test(&self) -> Vec<PresentationCause> {
+        self.pending_presentation_causes.to_vec()
+    }
 }
 
 fn duration_us(duration: Duration) -> u64 {
@@ -1297,13 +1303,25 @@ impl FreshRetryChannel {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct NativeFreshSchedule {
     channel: FreshRetryChannel,
     trigger_generation: u64,
+    required_scene_generation: u64,
+    target_identity: String,
     completed: u32,
     deadline: Instant,
     next_due: Instant,
+}
+
+impl NativeFreshSchedule {
+    fn same_intent(&self, other: &Self) -> bool {
+        self.channel == other.channel
+            && self.trigger_generation == other.trigger_generation
+            && self.required_scene_generation == other.required_scene_generation
+            && self.target_identity == other.target_identity
+            && self.deadline == other.deadline
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1338,6 +1356,7 @@ pub struct NativePresentationOwner<S: OverlayFrameSubmitter> {
     audit_started_at: Instant,
     fresh_retry_audit: VecDeque<NativeFreshAuditFact>,
     fresh_retry_audit_dropped: u64,
+    successful_attempt_audit: VecDeque<PresentationCorrelation>,
 }
 
 impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
@@ -1361,6 +1380,7 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
             audit_started_at: Instant::now(),
             fresh_retry_audit: VecDeque::with_capacity(NATIVE_FRESH_AUDIT_CAPACITY),
             fresh_retry_audit_dropped: 0,
+            successful_attempt_audit: VecDeque::with_capacity(NATIVE_FRESH_AUDIT_CAPACITY),
         }
     }
 
@@ -1423,13 +1443,35 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
         self.fresh_retry_audit_dropped
     }
 
+    #[doc(hidden)]
+    pub fn successful_attempt_audit_for_test(&self) -> Vec<PresentationCorrelation> {
+        self.successful_attempt_audit.iter().copied().collect()
+    }
+
+    fn capture_successful_attempt(&mut self) {
+        let Some(correlation) = self.runtime.last_presentation_correlation else {
+            return;
+        };
+        if self
+            .successful_attempt_audit
+            .back()
+            .is_some_and(|previous| previous.submission_attempt == correlation.submission_attempt)
+        {
+            return;
+        }
+        if self.successful_attempt_audit.len() == NATIVE_FRESH_AUDIT_CAPACITY {
+            self.successful_attempt_audit.pop_front();
+        }
+        self.successful_attempt_audit.push_back(correlation);
+    }
+
     async fn record_fresh_retry(
         &mut self,
         logger: &OverlayLogger,
         schedule: NativeFreshSchedule,
         outcome: &'static str,
     ) -> Result<(), RuntimeFailure> {
-        self.push_fresh_retry_audit(schedule, outcome);
+        self.push_fresh_retry_audit(schedule.clone(), outcome);
         log_fresh_retry(logger, schedule, outcome, self.retry_policy).await
     }
 
@@ -1470,11 +1512,22 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
         }
     }
 
-    fn channel_has_target(&self, channel: FreshRetryChannel) -> bool {
-        self.runtime.state().blocks().iter().any(|block| {
-            block.channel == channel.name()
-                && block.block_variant == OverlayPresentationBlockVariant::Finalized
-                && !block.primary_text.trim().is_empty()
+    fn channel_target_identity(&self, channel: FreshRetryChannel) -> Option<String> {
+        let mut occupant_keys = self
+            .runtime
+            .state()
+            .blocks()
+            .iter()
+            .filter(|block| {
+                block.channel == channel.name()
+                    && block.block_variant == OverlayPresentationBlockVariant::Finalized
+                    && !block.primary_text.trim().is_empty()
+            })
+            .map(|block| block.occupant_key.as_str())
+            .collect::<Vec<_>>();
+        occupant_keys.sort_unstable();
+        (!occupant_keys.is_empty()).then(|| {
+            serde_json::to_string(&occupant_keys).expect("runtime target identity serializes")
         })
     }
 
@@ -1484,18 +1537,26 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
     ) -> Result<(), RuntimeFailure> {
         for channel in [FreshRetryChannel::SelfChannel, FreshRetryChannel::Peer] {
             let generation = self.channel_generation(channel);
+            let target_identity = self.channel_target_identity(channel);
+            let current_schedule = match channel {
+                FreshRetryChannel::SelfChannel => self.self_schedule.as_ref(),
+                FreshRetryChannel::Peer => self.peer_schedule.as_ref(),
+            };
             let observed = match channel {
                 FreshRetryChannel::SelfChannel => &mut self.observed_self_generation,
                 FreshRetryChannel::Peer => &mut self.observed_peer_generation,
             };
-            let changed = generation.is_some() && generation != *observed;
+            let changed = generation.is_some()
+                && (generation != *observed
+                    || current_schedule.is_some_and(|schedule| {
+                        target_identity.as_ref() != Some(&schedule.target_identity)
+                    }));
             *observed = generation;
-            let has_target = self.channel_has_target(channel);
             let schedule = match channel {
                 FreshRetryChannel::SelfChannel => &mut self.self_schedule,
                 FreshRetryChannel::Peer => &mut self.peer_schedule,
             };
-            if !has_target || generation.is_none() {
+            if target_identity.is_none() || generation.is_none() {
                 if let Some(cancelled) = schedule.take() {
                     self.record_fresh_retry(logger, cancelled, "cancelled")
                         .await?;
@@ -1507,11 +1568,13 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
                 let next = NativeFreshSchedule {
                     channel,
                     trigger_generation: generation.expect("checked generation"),
+                    required_scene_generation: self.runtime.state().snapshot().revision,
+                    target_identity: target_identity.expect("checked target identity"),
                     completed: 0,
                     deadline: now + self.retry_policy.deadline,
                     next_due: now + self.retry_policy.cadence,
                 };
-                let replaced = schedule.replace(next);
+                let replaced = schedule.replace(next.clone());
                 if let Some(replaced) = replaced {
                     self.record_fresh_retry(logger, replaced, "replaced")
                         .await?;
@@ -1523,45 +1586,105 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
     }
 
     fn next_fresh_due(&self) -> Option<Instant> {
-        [self.self_schedule, self.peer_schedule]
+        [self.self_schedule.clone(), self.peer_schedule.clone()]
             .into_iter()
             .flatten()
             .map(|schedule| schedule.next_due)
             .min()
     }
 
-    fn due_fresh_channel(&self, now: Instant) -> Option<FreshRetryChannel> {
-        [self.self_schedule, self.peer_schedule]
+    fn due_fresh_channels(&self, now: Instant) -> Vec<FreshRetryChannel> {
+        [self.self_schedule.clone(), self.peer_schedule.clone()]
             .into_iter()
             .flatten()
             .filter(|schedule| schedule.next_due <= now)
-            .min_by_key(|schedule| schedule.next_due)
             .map(|schedule| schedule.channel)
+            .collect()
+    }
+
+    fn active_fresh_schedules(&self, now: Instant) -> Vec<NativeFreshSchedule> {
+        [self.self_schedule.clone(), self.peer_schedule.clone()]
+            .into_iter()
+            .flatten()
+            .filter(|schedule| now < schedule.deadline)
+            .collect()
+    }
+
+    fn remove_temporary_intent_causes(&mut self, schedules: &[NativeFreshSchedule]) {
+        for schedule in schedules {
+            self.runtime
+                .pending_presentation_causes
+                .remove(Self::intent_cause(
+                    schedule,
+                    PresentationCauseKind::ActiveRetryIntent,
+                ));
+        }
+    }
+
+    fn intent_cause(
+        schedule: &NativeFreshSchedule,
+        kind: PresentationCauseKind,
+    ) -> PresentationCause {
+        PresentationCause {
+            kind,
+            channel: Some(match schedule.channel {
+                FreshRetryChannel::SelfChannel => PresentationCauseChannel::SelfChannel,
+                FreshRetryChannel::Peer => PresentationCauseChannel::Peer,
+            }),
+            trigger_generation: Some(schedule.trigger_generation),
+        }
+    }
+
+    fn submission_covers_schedule(
+        correlation: PresentationCorrelation,
+        active: &NativeFreshSchedule,
+        captured: &NativeFreshSchedule,
+        cause_kind: PresentationCauseKind,
+        current_generation: Option<u64>,
+        current_target_identity: Option<&str>,
+    ) -> bool {
+        active.same_intent(captured)
+            && correlation
+                .logical_causes
+                .contains(Self::intent_cause(captured, cause_kind))
+            && current_target_identity == Some(active.target_identity.as_str())
+            && current_generation == Some(active.trigger_generation)
+            && correlation.scene_generation >= active.required_scene_generation
     }
 
     async fn run_due_fresh_attempt(
         &mut self,
-        channel: FreshRetryChannel,
+        channels: Vec<FreshRetryChannel>,
         bridge: &mut BridgeClient,
         logger: &OverlayLogger,
     ) -> Result<FrameCycleOutcome, RuntimeFailure> {
-        let current = match channel {
-            FreshRetryChannel::SelfChannel => self.self_schedule,
-            FreshRetryChannel::Peer => self.peer_schedule,
-        };
-        let Some(schedule) = current else {
-            return Ok(FrameCycleOutcome::NoWork);
-        };
-        if Instant::now() >= schedule.deadline {
-            match channel {
-                FreshRetryChannel::SelfChannel => self.self_schedule = None,
-                FreshRetryChannel::Peer => self.peer_schedule = None,
+        let now = Instant::now();
+        let mut due = Vec::new();
+        for channel in channels {
+            let schedule = match channel {
+                FreshRetryChannel::SelfChannel => self.self_schedule.clone(),
+                FreshRetryChannel::Peer => self.peer_schedule.clone(),
+            };
+            let Some(schedule) = schedule else {
+                continue;
+            };
+            if now >= schedule.deadline {
+                match channel {
+                    FreshRetryChannel::SelfChannel => self.self_schedule = None,
+                    FreshRetryChannel::Peer => self.peer_schedule = None,
+                }
+                self.record_fresh_retry(logger, schedule, "expired").await?;
+            } else {
+                due.push(schedule);
             }
-            self.record_fresh_retry(logger, schedule, "expired").await?;
+        }
+        if due.is_empty() {
             return Ok(FrameCycleOutcome::NoWork);
         }
-        self.runtime
-            .request_fresh_presentation_retry(channel, schedule.trigger_generation);
+        for schedule in &due {
+            self.runtime
+                .request_fresh_presentation_retry(schedule.channel, schedule.trigger_generation);
+        }
         let attempt = {
             let renderer = self.renderer.as_ref().expect("active renderer");
             let openvr = self.openvr.as_mut().expect("active OpenVR session");
@@ -1574,57 +1697,91 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
         let outcome = match attempt {
             Ok(outcome) => outcome,
             Err(primary_failure) => {
-                let active = match channel {
-                    FreshRetryChannel::SelfChannel => self.self_schedule.take(),
-                    FreshRetryChannel::Peer => self.peer_schedule.take(),
-                };
-                if let Some(active) =
-                    active.filter(|active| active.trigger_generation == schedule.trigger_generation)
-                {
-                    self.push_fresh_retry_audit(active, "failed");
-                    let _ = log_fresh_retry(logger, active, "failed", self.retry_policy).await;
+                for schedule in due {
+                    let active = match schedule.channel {
+                        FreshRetryChannel::SelfChannel => self.self_schedule.take(),
+                        FreshRetryChannel::Peer => self.peer_schedule.take(),
+                    };
+                    if let Some(active) = active.filter(|active| active.same_intent(&schedule)) {
+                        self.push_fresh_retry_audit(active.clone(), "failed");
+                        let _ = log_fresh_retry(logger, active, "failed", self.retry_policy).await;
+                    }
                 }
                 return Err(primary_failure);
             }
         };
-        let audit = {
+        match &outcome {
+            FrameCycleOutcome::Submitted => {
+                self.capture_successful_attempt();
+                self.satisfy_schedules_from_last_submission(
+                    logger,
+                    &due,
+                    PresentationCauseKind::NativeFreshRetry,
+                )
+                .await?;
+            }
+            FrameCycleOutcome::Preempted(_) => {
+                for schedule in due {
+                    let slot = match schedule.channel {
+                        FreshRetryChannel::SelfChannel => &mut self.self_schedule,
+                        FreshRetryChannel::Peer => &mut self.peer_schedule,
+                    };
+                    if let Some(active) =
+                        slot.as_mut().filter(|active| active.same_intent(&schedule))
+                    {
+                        active.next_due = Instant::now() + self.retry_policy.cadence;
+                        let fact = active.clone();
+                        self.record_fresh_retry(logger, fact, "preempted").await?;
+                    }
+                }
+            }
+            FrameCycleOutcome::NoWork => {}
+        }
+        Ok(outcome)
+    }
+
+    async fn satisfy_schedules_from_last_submission(
+        &mut self,
+        logger: &OverlayLogger,
+        captured_schedules: &[NativeFreshSchedule],
+        cause_kind: PresentationCauseKind,
+    ) -> Result<(), RuntimeFailure> {
+        let Some(correlation) = self.runtime.last_presentation_correlation else {
+            return Ok(());
+        };
+        for captured in captured_schedules {
+            let channel = captured.channel;
+            let current_generation = self.channel_generation(channel);
+            let current_target_identity = self.channel_target_identity(channel);
             let slot = match channel {
                 FreshRetryChannel::SelfChannel => &mut self.self_schedule,
                 FreshRetryChannel::Peer => &mut self.peer_schedule,
             };
-            if !slot
-                .as_ref()
-                .is_some_and(|active| active.trigger_generation == schedule.trigger_generation)
-            {
-                None
-            } else {
-                match &outcome {
-                    FrameCycleOutcome::Submitted => {
-                        let active = slot.as_mut().expect("same active schedule");
-                        active.completed += 1;
-                        let completed = *active;
-                        if active.completed >= self.retry_policy.max_completed
-                            || Instant::now() >= active.deadline
-                        {
-                            *slot = None;
-                        } else {
-                            active.next_due = Instant::now() + self.retry_policy.cadence;
-                        }
-                        Some((completed, "completed"))
-                    }
-                    FrameCycleOutcome::Preempted(_) => {
-                        let active = slot.as_mut().expect("same active schedule");
-                        active.next_due = Instant::now() + self.retry_policy.cadence;
-                        Some((*active, "preempted"))
-                    }
-                    FrameCycleOutcome::NoWork => None,
-                }
+            let Some(active) = slot.as_mut() else {
+                continue;
+            };
+            if !Self::submission_covers_schedule(
+                correlation,
+                active,
+                captured,
+                cause_kind,
+                current_generation,
+                current_target_identity.as_deref(),
+            ) {
+                continue;
             }
-        };
-        if let Some((fact, outcome_name)) = audit {
-            self.record_fresh_retry(logger, fact, outcome_name).await?;
+            active.completed += 1;
+            active.next_due = Instant::now() + self.retry_policy.cadence;
+            let completed = active.clone();
+            if active.completed >= self.retry_policy.max_completed
+                || Instant::now() >= active.deadline
+            {
+                *slot = None;
+            }
+            self.record_fresh_retry(logger, completed, "completed")
+                .await?;
         }
-        Ok(outcome)
+        Ok(())
     }
 
     pub async fn run(
@@ -1647,6 +1804,7 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
             self.teardown();
             return Ok(());
         }
+        self.capture_successful_attempt();
         let reconcile_result = self.reconcile_fresh_schedules(logger).await;
         self.finish_initial_reconcile(reconcile_result)?;
 
@@ -1669,8 +1827,9 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
                 tokio::select! {
                     biased;
                     _ = sleep_until(self.next_fresh_due().unwrap_or_else(Instant::now)), if self.next_fresh_due().is_some() => {
-                        if let Some(channel) = self.due_fresh_channel(Instant::now()) {
-                            let outcome = self.run_due_fresh_attempt(channel, bridge, logger).await?;
+                        let channels = self.due_fresh_channels(Instant::now());
+                        if !channels.is_empty() {
+                            let outcome = self.run_due_fresh_attempt(channels, bridge, logger).await?;
                             pending_message = outcome.pending_message();
                         }
                         None
@@ -1679,15 +1838,37 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
                         if retry.is_none() {
                             return Ok(());
                         }
+                        let captured_schedules = self.active_fresh_schedules(Instant::now());
+                        for schedule in &captured_schedules {
+                            self.runtime.pending_presentation_causes.insert(Self::intent_cause(
+                                schedule,
+                                PresentationCauseKind::ActiveRetryIntent,
+                            ));
+                        }
                         self.runtime.request_native_presentation_retry();
                         let renderer = self.renderer.as_ref().expect("active renderer");
                         let openvr = self.openvr.as_mut().expect("active OpenVR session");
-                        pending_message = self.runtime
+                        let outcome = self.runtime
                             .submit_frame_if_needed_with_timing(
                                 renderer, openvr, bridge, logger, None, None, true,
                             )
-                            .await?
-                            .pending_message();
+                            .await?;
+                        if matches!(&outcome, FrameCycleOutcome::Submitted) {
+                            self.capture_successful_attempt();
+                            self.satisfy_schedules_from_last_submission(
+                                logger,
+                                &captured_schedules,
+                                PresentationCauseKind::ActiveRetryIntent,
+                            ).await?;
+                        } else {
+                            for schedule in captured_schedules {
+                                self.runtime.pending_presentation_causes.remove(Self::intent_cause(
+                                    &schedule,
+                                    PresentationCauseKind::ActiveRetryIntent,
+                                ));
+                            }
+                        }
+                        pending_message = outcome.pending_message();
                         None
                     }
                     _ = sleep_until(hide_deadline.unwrap_or_else(Instant::now)), if hide_deadline.is_some() => {
@@ -1699,17 +1880,48 @@ impl<S: OverlayFrameSubmitter> NativePresentationOwner<S> {
                 }
             };
             if let Some(message) = message {
+                let previous_submission = self.runtime.last_presentation_correlation;
+                let captured_schedules = self.active_fresh_schedules(Instant::now());
+                for schedule in &captured_schedules {
+                    self.runtime
+                        .pending_presentation_causes
+                        .insert(Self::intent_cause(
+                            schedule,
+                            PresentationCauseKind::ActiveRetryIntent,
+                        ));
+                }
                 let renderer = self.renderer.as_ref().expect("active renderer");
                 let openvr = self.openvr.as_mut().expect("active OpenVR session");
-                let (continue_running, preempted_message) = self
+                let handled = self
                     .runtime
                     .handle_bridge_message(message, renderer, openvr, bridge, logger)
-                    .await?;
+                    .await;
+                let (continue_running, preempted_message) = match handled {
+                    Ok(handled) => handled,
+                    Err(error) => {
+                        self.remove_temporary_intent_causes(&captured_schedules);
+                        return Err(error);
+                    }
+                };
                 if !continue_running {
+                    self.remove_temporary_intent_causes(&captured_schedules);
                     return Ok(());
                 }
                 pending_message = preempted_message;
                 self.reconcile_fresh_schedules(logger).await?;
+                if self.runtime.last_presentation_correlation != previous_submission
+                    && self.runtime.last_presentation_correlation.is_some()
+                {
+                    self.capture_successful_attempt();
+                    self.satisfy_schedules_from_last_submission(
+                        logger,
+                        &captured_schedules,
+                        PresentationCauseKind::ActiveRetryIntent,
+                    )
+                    .await?;
+                } else {
+                    self.remove_temporary_intent_causes(&captured_schedules);
+                }
             }
         }
     }
@@ -2686,8 +2898,8 @@ mod tests {
         OverlayFrameSubmitter,
     };
     use crate::presentation::{
-        PresentationBackend, PresentationCauseChannel, PresentationCauseKind, PresentationCauses,
-        PresentationOutcome, PresentationStage,
+        PresentationBackend, PresentationCause, PresentationCauseChannel, PresentationCauseKind,
+        PresentationCauses, PresentationCorrelation, PresentationOutcome, PresentationStage,
     };
     use crate::renderer::{
         CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
@@ -2724,6 +2936,8 @@ mod tests {
                 NativeFreshSchedule {
                     channel: FreshRetryChannel::SelfChannel,
                     trigger_generation: generation,
+                    required_scene_generation: generation,
+                    target_identity: "[\"target\"]".into(),
                     completed: 0,
                     deadline: now,
                     next_due: now,
@@ -2737,6 +2951,133 @@ mod tests {
         assert_eq!(
             owner.fresh_retry_audit.front().unwrap().trigger_generation,
             1
+        );
+    }
+
+    fn schedule(
+        channel: FreshRetryChannel,
+        trigger_generation: u64,
+        required_scene_generation: u64,
+        now: Instant,
+    ) -> NativeFreshSchedule {
+        NativeFreshSchedule {
+            channel,
+            trigger_generation,
+            required_scene_generation,
+            target_identity: "[\"target\"]".into(),
+            completed: 0,
+            deadline: now + Duration::from_secs(2),
+            next_due: now + Duration::from_millis(100),
+        }
+    }
+
+    fn correlation_for(
+        schedule: &NativeFreshSchedule,
+        scene_generation: u64,
+        kind: PresentationCauseKind,
+    ) -> PresentationCorrelation {
+        let mut logical_causes = PresentationCauses::default();
+        logical_causes.insert(PresentationCause {
+            kind,
+            channel: Some(match schedule.channel {
+                FreshRetryChannel::SelfChannel => PresentationCauseChannel::SelfChannel,
+                FreshRetryChannel::Peer => PresentationCauseChannel::Peer,
+            }),
+            trigger_generation: Some(schedule.trigger_generation),
+        });
+        PresentationCorrelation {
+            logical_revision: 1,
+            render_generation: 1,
+            submission_attempt: 1,
+            scene_generation,
+            logical_causes,
+        }
+    }
+
+    #[test]
+    fn normal_submission_requires_exact_captured_intent_and_causal_scene() {
+        let now = Instant::now();
+        let captured = schedule(FreshRetryChannel::SelfChannel, 7, 11, now);
+        let correlation = correlation_for(&captured, 11, PresentationCauseKind::ActiveRetryIntent);
+        assert!(
+            NativePresentationOwner::<FakeOpenVr>::submission_covers_schedule(
+                correlation,
+                &captured,
+                &captured,
+                PresentationCauseKind::ActiveRetryIntent,
+                Some(7),
+                Some("[\"target\"]"),
+            )
+        );
+
+        let replacement = schedule(FreshRetryChannel::SelfChannel, 8, 12, now);
+        assert!(
+            !NativePresentationOwner::<FakeOpenVr>::submission_covers_schedule(
+                correlation,
+                &replacement,
+                &captured,
+                PresentationCauseKind::ActiveRetryIntent,
+                Some(8),
+                Some("[\"target\"]"),
+            )
+        );
+        assert!(
+            !NativePresentationOwner::<FakeOpenVr>::submission_covers_schedule(
+                correlation_for(&captured, 10, PresentationCauseKind::ActiveRetryIntent),
+                &captured,
+                &captured,
+                PresentationCauseKind::ActiveRetryIntent,
+                Some(7),
+                Some("[\"target\"]"),
+            )
+        );
+        assert!(
+            !NativePresentationOwner::<FakeOpenVr>::submission_covers_schedule(
+                correlation,
+                &captured,
+                &captured,
+                PresentationCauseKind::ActiveRetryIntent,
+                Some(7),
+                None,
+            )
+        );
+        assert!(
+            !NativePresentationOwner::<FakeOpenVr>::submission_covers_schedule(
+                correlation,
+                &captured,
+                &captured,
+                PresentationCauseKind::ActiveRetryIntent,
+                Some(7),
+                Some("[\"different-target\"]"),
+            )
+        );
+    }
+
+    #[test]
+    fn retry_submission_satisfies_only_included_schedule_identity() {
+        let now = Instant::now();
+        let due_self = schedule(FreshRetryChannel::SelfChannel, 3, 20, now);
+        let staggered_peer = schedule(FreshRetryChannel::Peer, 4, 20, now);
+        let correlation = correlation_for(&due_self, 20, PresentationCauseKind::NativeFreshRetry);
+        assert!(
+            NativePresentationOwner::<FakeOpenVr>::submission_covers_schedule(
+                correlation,
+                &due_self,
+                &due_self,
+                PresentationCauseKind::NativeFreshRetry,
+                Some(3),
+                Some("[\"target\"]"),
+            )
+        );
+        assert!(
+            !NativePresentationOwner::<FakeOpenVr>::submission_covers_schedule(
+                correlation,
+                &staggered_peer,
+                &staggered_peer,
+                PresentationCauseKind::NativeFreshRetry,
+                Some(4),
+                Some("[\"target\"]"),
+            )
         );
     }
 

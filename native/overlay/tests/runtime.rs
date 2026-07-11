@@ -16,10 +16,11 @@ use puripuly_heart_overlay::{
     CaptionBlock, CaptionChannel, CaptionRenderer, FakeOpenVr, NativePresentationOwner,
     OpenVrError, OverlayBridgeEvent, OverlayFrameSubmitter, OverlayLoggingMode, OverlayManifest,
     OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
-    OverlayPresentationSnapshot, OverlayRuntime, PresentationBackend, PresentationOutcome,
-    PresentationStage, PresentationStrategy, ReadinessOutcome, RenderedFrame, RuntimeFailure,
-    StartupError, EXPECTED_CONTRACT_VERSION, NATIVE_FRESH_RETRY_CADENCE,
-    NATIVE_FRESH_RETRY_DEADLINE, NATIVE_FRESH_RETRY_MAX_COMPLETED,
+    OverlayPresentationSnapshot, OverlayRuntime, PresentationBackend, PresentationCause,
+    PresentationCauseChannel, PresentationCauseKind, PresentationOutcome, PresentationStage,
+    PresentationStrategy, ReadinessOutcome, RenderedFrame, RuntimeFailure, StartupError,
+    EXPECTED_CONTRACT_VERSION, NATIVE_FRESH_RETRY_CADENCE, NATIVE_FRESH_RETRY_DEADLINE,
+    NATIVE_FRESH_RETRY_MAX_COMPLETED,
 };
 
 #[test]
@@ -1972,7 +1973,7 @@ async fn production_owner_runs_independent_self_and_peer_fresh_schedules_to_exac
         .iter()
         .filter(|operation| operation.starts_with("submit"))
         .count();
-    assert_eq!(submits, 5);
+    assert_eq!(submits, 3);
     let audit = owner.fresh_retry_audit_for_test();
     let scheduled_self = audit
         .iter()
@@ -1996,7 +1997,521 @@ async fn production_owner_runs_independent_self_and_peer_fresh_schedules_to_exac
             ("peer", 0, 2),
         ]
     );
+    let coalesced = owner
+        .successful_attempt_audit_for_test()
+        .into_iter()
+        .filter(|attempt| {
+            attempt.logical_causes.contains(PresentationCause {
+                kind: PresentationCauseKind::NativeFreshRetry,
+                channel: Some(PresentationCauseChannel::SelfChannel),
+                trigger_generation: Some(u64::MAX),
+            }) && attempt.logical_causes.contains(PresentationCause {
+                kind: PresentationCauseKind::NativeFreshRetry,
+                channel: Some(PresentationCauseChannel::Peer),
+                trigger_generation: Some(0),
+            })
+        })
+        .count();
+    assert_eq!(coalesced, 2);
     assert!(owner.resources_released());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn production_owner_staggered_due_channels_keep_non_due_intent_pending() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let state = Arc::new(OwnedSubmitterState::default());
+    let server_state = state.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({"type":"snapshot","payload":{
+                "revision":1,"native_fresh_render_generations":{"self":1},
+                "blocks":[block("self:stagger","self","self","",true),block("peer:stagger","peer","peer","",true)]
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        loop {
+            if ws
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap()
+                .contains("overlay_ready")
+            {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        ws.send(Message::Text(json!({"type":"snapshot","payload":{
+            "revision":2,"native_fresh_render_generations":{"self":1,"peer":2},
+            "blocks":[block("self:stagger","self","self","",true),block("peer:stagger","peer","peer","",true)]
+        }}).to_string().into())).await.unwrap();
+        while server_state
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| op.starts_with("submit"))
+            .count()
+            < 2
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        while server_state
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| op.starts_with("submit"))
+            .count()
+            < 3
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        ws.send(Message::Text(json!({"type":"shutdown"}).to_string().into()))
+            .await
+            .unwrap();
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let mut owner = NativePresentationOwner::new_with_retry_policy_for_test(
+        snapshot,
+        CaptionRenderer::new_for_test().unwrap(),
+        OwnedSubmitterProbe {
+            state: state.clone(),
+            fail_submit: false,
+            fail_on_submission: None,
+            submit_delay: Duration::ZERO,
+        },
+        Duration::from_millis(20),
+        Duration::from_millis(100),
+        1,
+    );
+    owner
+        .run(&mut bridge, &test_logger("staggered-due-owner").await)
+        .await
+        .unwrap();
+    let attempts = owner.successful_attempt_audit_for_test();
+    let self_attempt = attempts
+        .iter()
+        .find(|attempt| {
+            attempt.logical_causes.contains(PresentationCause {
+                kind: PresentationCauseKind::NativeFreshRetry,
+                channel: Some(PresentationCauseChannel::SelfChannel),
+                trigger_generation: Some(1),
+            })
+        })
+        .unwrap();
+    assert!(!self_attempt.logical_causes.contains(PresentationCause {
+        kind: PresentationCauseKind::NativeFreshRetry,
+        channel: Some(PresentationCauseChannel::Peer),
+        trigger_generation: Some(2),
+    }));
+    assert!(attempts.iter().any(
+        |attempt| attempt.logical_causes.contains(PresentationCause {
+            kind: PresentationCauseKind::NativeFreshRetry,
+            channel: Some(PresentationCauseChannel::Peer),
+            trigger_generation: Some(2),
+        })
+    ));
+    let audit = owner.fresh_retry_audit_for_test();
+    let peer_scheduled = audit
+        .iter()
+        .position(|fact| fact.0 == "peer" && fact.2 == "scheduled")
+        .unwrap();
+    let self_completed = audit
+        .iter()
+        .position(|fact| fact.0 == "self" && fact.2 == "completed")
+        .unwrap();
+    let peer_completed = audit
+        .iter()
+        .position(|fact| fact.0 == "peer" && fact.2 == "completed")
+        .unwrap();
+    assert!(peer_scheduled < self_completed);
+    assert!(self_completed < peer_completed);
+    assert_eq!(
+        state
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| op.starts_with("submit"))
+            .count(),
+        3
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn production_owner_stale_scene_cannot_satisfy_newer_schedule() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let state = Arc::new(OwnedSubmitterState::default());
+    let server_state = state.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({"type":"snapshot","payload":{
+                "revision":1,"native_fresh_render_generations":{"self":1},
+                "blocks":[block("self:stale","self","one","",true)]
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        loop {
+            if ws
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap()
+                .contains("overlay_ready")
+            {
+                break;
+            }
+        }
+        ws.send(Message::Text(
+            json!({"type":"snapshot","payload":{
+                "revision":2,"native_fresh_render_generations":{"self":2},
+                "blocks":[block("self:stale","self","one","",true)]
+            }})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            server_state
+                .operations
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|op| op.starts_with("submit"))
+                .count(),
+            1
+        );
+        while server_state
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| op.starts_with("submit"))
+            .count()
+            < 2
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        ws.send(Message::Text(json!({"type":"shutdown"}).to_string().into()))
+            .await
+            .unwrap();
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let mut owner = NativePresentationOwner::new_with_retry_policy_for_test(
+        snapshot,
+        CaptionRenderer::new_for_test().unwrap(),
+        OwnedSubmitterProbe {
+            state: state.clone(),
+            fail_submit: false,
+            fail_on_submission: None,
+            submit_delay: Duration::ZERO,
+        },
+        Duration::from_millis(50),
+        Duration::from_millis(100),
+        1,
+    );
+    owner
+        .run(&mut bridge, &test_logger("stale-scene-owner").await)
+        .await
+        .unwrap();
+    let audit = owner.fresh_retry_audit_for_test();
+    assert!(!audit
+        .iter()
+        .any(|fact| fact.1 == 1 && fact.2 == "completed"));
+    let generation_two_scheduled = audit
+        .iter()
+        .position(|fact| fact.1 == 2 && fact.2 == "scheduled")
+        .unwrap();
+    let generation_two_completed = audit
+        .iter()
+        .position(|fact| fact.1 == 2 && fact.2 == "completed")
+        .unwrap();
+    assert!(generation_two_scheduled < generation_two_completed);
+    assert!(!owner
+        .successful_attempt_audit_for_test()
+        .iter()
+        .any(|attempt| attempt.scene_generation == 1
+            && attempt.logical_causes.contains(PresentationCause {
+                kind: PresentationCauseKind::NativeFreshRetry,
+                channel: Some(PresentationCauseChannel::SelfChannel),
+                trigger_generation: Some(2),
+            })));
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|fact| fact.1 == 2 && fact.2 == "completed")
+            .count(),
+        1
+    );
+    assert!(owner
+        .successful_attempt_audit_for_test()
+        .iter()
+        .any(|attempt| {
+            attempt.scene_generation == 2
+                && attempt.logical_causes.contains(PresentationCause {
+                    kind: PresentationCauseKind::NativeFreshRetry,
+                    channel: Some(PresentationCauseChannel::SelfChannel),
+                    trigger_generation: Some(2),
+                })
+        }));
+    assert_eq!(
+        state
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| op.starts_with("submit"))
+            .count(),
+        2
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn production_owner_self_cancellation_leaves_peer_schedule_completing() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(json!({"type":"snapshot","payload":{"revision":1,
+            "native_fresh_render_generations":{"self":1,"peer":2},"blocks":[
+                block("self:cancel-one","self","self","",true),block("peer:continue","peer","peer","",true)]}}).to_string().into())).await.unwrap();
+        loop {
+            if ws
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap()
+                .contains("overlay_ready")
+            {
+                break;
+            }
+        }
+        ws.send(Message::Text(json!({"type":"snapshot","payload":{"revision":2,
+            "native_fresh_render_generations":{"self":1,"peer":2},"blocks":[block("peer:continue","peer","peer","",true)]}}).to_string().into())).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        ws.send(Message::Text(json!({"type":"shutdown"}).to_string().into()))
+            .await
+            .unwrap();
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let state = Arc::new(OwnedSubmitterState::default());
+    let mut owner = NativePresentationOwner::new_with_retry_policy_for_test(
+        snapshot,
+        CaptionRenderer::new_for_test().unwrap(),
+        OwnedSubmitterProbe {
+            state: state.clone(),
+            fail_submit: false,
+            fail_on_submission: None,
+            submit_delay: Duration::ZERO,
+        },
+        Duration::from_millis(10),
+        Duration::from_millis(100),
+        1,
+    );
+    owner
+        .run(&mut bridge, &test_logger("independent-cancel-owner").await)
+        .await
+        .unwrap();
+    let audit = owner.fresh_retry_audit_for_test();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|fact| fact.0 == "self" && fact.2 == "cancelled")
+            .count(),
+        1
+    );
+    assert!(!audit
+        .iter()
+        .any(|fact| fact.0 == "self" && fact.2 == "completed"));
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|fact| fact.0 == "peer" && fact.2 == "completed")
+            .count(),
+        1
+    );
+    assert!(owner
+        .successful_attempt_audit_for_test()
+        .iter()
+        .any(
+            |attempt| attempt.logical_causes.contains(PresentationCause {
+                kind: PresentationCauseKind::ActiveRetryIntent,
+                channel: Some(PresentationCauseChannel::Peer),
+                trigger_generation: Some(2),
+            })
+        ));
+    assert_eq!(
+        state
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| op.starts_with("submit"))
+            .count(),
+        2
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn production_owner_coalesced_two_channel_submission_failure_bounds_both() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(json!({"type":"snapshot","payload":{"revision":1,
+            "native_fresh_render_generations":{"self":1,"peer":2},"blocks":[
+                block("self:fail-both","self","self","",true),block("peer:fail-both","peer","peer","",true)]}}).to_string().into())).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let state = Arc::new(OwnedSubmitterState::default());
+    let mut owner = NativePresentationOwner::new_with_retry_policy_for_test(
+        snapshot,
+        CaptionRenderer::new_for_test().unwrap(),
+        OwnedSubmitterProbe {
+            state: state.clone(),
+            fail_submit: false,
+            fail_on_submission: Some(2),
+            submit_delay: Duration::ZERO,
+        },
+        Duration::from_millis(5),
+        Duration::from_millis(100),
+        1,
+    );
+    assert!(matches!(
+        owner
+            .run(&mut bridge, &test_logger("coalesced-failure-owner").await)
+            .await
+            .unwrap_err(),
+        RuntimeFailure::OpenVr(_)
+    ));
+    let audit = owner.fresh_retry_audit_for_test();
+    assert_eq!(audit.iter().filter(|fact| fact.2 == "failed").count(), 2);
+    assert_eq!(audit.iter().filter(|fact| fact.2 == "completed").count(), 0);
+    assert_eq!(
+        state
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| op.starts_with("submit"))
+            .count(),
+        2
+    );
+    assert!(owner.resources_released());
+    assert!(owner
+        .runtime()
+        .pending_presentation_causes_for_test()
+        .is_empty());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn production_owner_coalesced_two_channel_shutdown_tears_down_both() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(json!({"type":"snapshot","payload":{"revision":1,
+            "native_fresh_render_generations":{"self":1,"peer":2},"blocks":[
+                block("self:stop-both","self","self","",true),block("peer:stop-both","peer","peer","",true)]}}).to_string().into())).await.unwrap();
+        loop {
+            if ws
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap()
+                .contains("overlay_ready")
+            {
+                break;
+            }
+        }
+        ws.send(Message::Text(json!({"type":"shutdown"}).to_string().into()))
+            .await
+            .unwrap();
+    });
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{address}");
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let state = Arc::new(OwnedSubmitterState::default());
+    let mut owner = NativePresentationOwner::new_with_retry_policy_for_test(
+        snapshot,
+        CaptionRenderer::new_for_test().unwrap(),
+        OwnedSubmitterProbe {
+            state: state.clone(),
+            fail_submit: false,
+            fail_on_submission: None,
+            submit_delay: Duration::ZERO,
+        },
+        Duration::from_millis(100),
+        Duration::from_secs(1),
+        2,
+    );
+    owner
+        .run(&mut bridge, &test_logger("coalesced-shutdown-owner").await)
+        .await
+        .unwrap();
+    let audit = owner.fresh_retry_audit_for_test();
+    assert_eq!(audit.iter().filter(|fact| fact.2 == "teardown").count(), 2);
+    assert_eq!(audit.iter().filter(|fact| fact.2 == "completed").count(), 0);
+    assert_eq!(
+        state
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| op.starts_with("submit"))
+            .count(),
+        1
+    );
+    assert!(owner.resources_released());
+    assert!(owner
+        .runtime()
+        .pending_presentation_causes_for_test()
+        .is_empty());
     server.await.unwrap();
 }
 
@@ -2019,12 +2534,24 @@ async fn production_owner_replaces_channel_token_and_empty_snapshot_cancels_sche
         ))
         .await
         .unwrap();
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        loop {
+            if ws
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap()
+                .contains("overlay_ready")
+            {
+                break;
+            }
+        }
         ws.send(Message::Text(
             json!({"type":"snapshot","payload":{
                 "revision":2,
-                "native_fresh_render_generations":{"self":0},
-                "blocks":[block("self:replace","self","two","",true)]
+                "native_fresh_render_generations":{"self":u64::MAX},
+                "blocks":[block("self:new-target","self","two","",true)]
             }})
             .to_string()
             .into(),
@@ -2035,7 +2562,7 @@ async fn production_owner_replaces_channel_token_and_empty_snapshot_cancels_sche
         ws.send(Message::Text(
             json!({"type":"snapshot","payload":{
                 "revision":3,
-                "native_fresh_render_generations":{"self":0},
+                "native_fresh_render_generations":{"self":u64::MAX},
                 "blocks":[]
             }})
             .to_string()
@@ -2086,19 +2613,24 @@ async fn production_owner_replaces_channel_token_and_empty_snapshot_cancels_sche
         .filter(|operation| operation.starts_with("submit"))
         .count();
     let audit = owner.fresh_retry_audit_for_test();
-    let replacement_scheduled_at = audit
+    let scheduled = audit
         .iter()
-        .find(|fact| fact.0 == "self" && fact.1 == 0 && fact.2 == "scheduled")
-        .unwrap()
-        .4;
+        .enumerate()
+        .filter(|(_, fact)| fact.0 == "self" && fact.1 == u64::MAX && fact.2 == "scheduled")
+        .collect::<Vec<_>>();
+    assert_eq!(scheduled.len(), 2);
+    let replacement_scheduled_at = scheduled[1].1 .4;
     let replaced_index = audit
         .iter()
         .position(|fact| fact.0 == "self" && fact.1 == u64::MAX && fact.2 == "replaced")
         .unwrap();
     let replacement_scheduled_index = audit
         .iter()
-        .position(|fact| fact.0 == "self" && fact.1 == 0 && fact.2 == "scheduled")
-        .unwrap();
+        .enumerate()
+        .filter(|(_, fact)| fact.0 == "self" && fact.1 == u64::MAX && fact.2 == "scheduled")
+        .nth(1)
+        .unwrap()
+        .0;
     assert_eq!(replacement_scheduled_index, replaced_index + 1);
     assert!(!audit.iter().any(|fact| {
         fact.0 == "self"
@@ -2108,9 +2640,14 @@ async fn production_owner_replaces_channel_token_and_empty_snapshot_cancels_sche
     }));
     assert!(audit
         .iter()
-        .any(|fact| fact.0 == "self" && fact.1 == 0 && fact.2 == "cancelled"));
-    let completed_count = audit.iter().filter(|fact| fact.2 == "completed").count();
-    assert_eq!(submit_count, 3 + completed_count);
+        .any(|fact| fact.0 == "self" && fact.1 == u64::MAX && fact.2 == "cancelled"));
+    assert!(!audit.iter().any(|fact| {
+        fact.0 == "self"
+            && fact.1 == u64::MAX
+            && fact.2 == "completed"
+            && fact.4 > replacement_scheduled_at
+    }));
+    assert_eq!(submit_count, 3);
     server.await.unwrap();
 }
 
@@ -2196,7 +2733,20 @@ async fn production_owner_preemption_rebases_unchanged_token_after_pending_snaps
         .find(|fact| fact.0 == "self" && fact.1 == 7 && fact.2 == "completed")
         .unwrap();
     assert_eq!(completed.3, 1);
-    assert!(completed.4 >= preempted.4 + Duration::from_millis(20));
+    let normal_completion = owner
+        .successful_attempt_audit_for_test()
+        .into_iter()
+        .find(|attempt| {
+            attempt.scene_generation == 2
+                && attempt.logical_causes.contains(PresentationCause {
+                    kind: PresentationCauseKind::ActiveRetryIntent,
+                    channel: Some(PresentationCauseChannel::SelfChannel),
+                    trigger_generation: Some(7),
+                })
+        })
+        .unwrap();
+    assert_eq!(normal_completion.scene_generation, 2);
+    assert!(completed.4 >= preempted.4);
     assert_eq!(owner.runtime().state().snapshot().revision, 2);
     assert_eq!(owner.runtime().state().blocks()[0].primary_text, "two");
     assert_eq!(
@@ -2207,7 +2757,7 @@ async fn production_owner_preemption_rebases_unchanged_token_after_pending_snaps
             .iter()
             .filter(|operation| operation.starts_with("submit"))
             .count(),
-        3
+        2
     );
     server.await.unwrap();
 }
@@ -2231,7 +2781,7 @@ async fn production_owner_active_schedule_submission_failure_is_terminal() {
         ))
         .await
         .unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(800)).await;
     });
     let mut manifest = test_manifest();
     manifest.bridge_url = format!("ws://{address}");
@@ -2307,7 +2857,7 @@ async fn production_owner_active_schedule_readiness_failure_is_terminal() {
         ))
         .await
         .unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(800)).await;
     });
     let mut manifest = test_manifest();
     manifest.bridge_url = format!("ws://{address}");
@@ -2359,6 +2909,10 @@ async fn production_owner_active_schedule_readiness_failure_is_terminal() {
             .count(),
         1
     );
+    assert!(owner
+        .runtime()
+        .pending_presentation_causes_for_test()
+        .is_empty());
     server.await.unwrap();
 }
 
@@ -2429,6 +2983,10 @@ async fn production_owner_shutdown_records_active_schedule_teardown() {
             .count(),
         1
     );
+    assert!(owner
+        .runtime()
+        .pending_presentation_causes_for_test()
+        .is_empty());
     server.await.unwrap();
 }
 
@@ -2524,7 +3082,7 @@ async fn production_owner_slow_submission_has_no_catch_up_and_expires_cleanly() 
         ))
         .await
         .unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(800)).await;
         ws.send(Message::Text(json!({"type":"shutdown"}).to_string().into()))
             .await
             .unwrap();
@@ -2544,7 +3102,7 @@ async fn production_owner_slow_submission_has_no_catch_up_and_expires_cleanly() 
             submit_delay: Duration::from_millis(20),
         },
         Duration::from_millis(5),
-        Duration::from_millis(90),
+        Duration::from_millis(200),
         2,
     );
 
@@ -2560,7 +3118,7 @@ async fn production_owner_slow_submission_has_no_catch_up_and_expires_cleanly() 
         .collect::<Vec<_>>();
     assert_eq!(completions.len(), 2);
     for pair in completions.windows(2) {
-        assert!(pair[1].4 >= pair[0].4 + Duration::from_millis(20));
+        assert!(pair[1].4 >= pair[0].4 + Duration::from_millis(25));
     }
     assert_eq!(
         state
