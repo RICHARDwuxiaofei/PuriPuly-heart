@@ -4600,6 +4600,63 @@ async def test_mapping_valued_dotted_patches_reach_receipt_disk_and_projection(
         assert projection.stt.custom_terms == custom_terms
 
 
+@pytest.mark.asyncio
+async def test_managed_ack_clear_patch_preserves_authoritative_claim_sources(
+    tmp_path: Path,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.config_path = tmp_path / "settings.json"
+    controller.settings = AppSettings()
+    canonical = AppSettingsVNext()
+    canonical = replace(
+        canonical,
+        state=replace(
+            canonical.state,
+            managed_connection=replace(
+                canonical.state.managed_connection,
+                local_managed_claim_sources=("discord",),
+                pending_delivery_ack_source="discord",
+                pending_delivery_ack_delivery_id="delivery-1",
+                pending_delivery_ack_managed_credential_ref="managed-ref-1",
+            ),
+        ),
+    )
+    controller.vnext_settings = canonical
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    assert save_vnext_settings(controller.config_path, canonical).ok
+    repository = controller_module._ControllerSettingsPatchRepository(
+        controller=controller,
+        committed_settings=controller.settings,
+    )
+    previous = await repository.load_receipt()
+
+    result = await repository.save(
+        controller_module.SettingsCommitRequest(
+            values={
+                "state": {
+                    "managed_connection": {
+                        "pending_delivery_ack_source": None,
+                        "pending_delivery_ack_delivery_id": None,
+                        "pending_delivery_ack_managed_credential_ref": None,
+                        "pending_delivery_ack_expires_at": None,
+                    }
+                }
+            },
+            expected_revision=previous.revision,
+            reason="managed_connection_auth",
+            correlation_id="corr-managed-auth",
+        )
+    )
+
+    assert result.succeeded and result.receipt is not None
+    managed = result.receipt.envelope.state.managed_connection
+    assert managed.local_managed_claim_sources == ("discord",)
+    assert managed.pending_delivery_ack_source is None
+    disk = await repository.load_receipt()
+    assert disk.envelope.state.managed_connection.local_managed_claim_sources == ("discord",)
+
+
 def test_nested_canonical_completion_keeps_outer_rollback_snapshot() -> None:
     controller = _make_controller(app=SimpleNamespace())
     legacy = AppSettings()

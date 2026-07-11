@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from types import MappingProxyType
 
 from puripuly_heart.app.ports._settings_values import freeze_settings_values
@@ -24,6 +25,7 @@ from puripuly_heart.app.ports.managed_identity import (
 )
 from puripuly_heart.app.ports.secret_store import SecretStorePort, SecretWriteResult
 from puripuly_heart.app.ports.settings_repository import (
+    SettingsCommitReceipt,
     SettingsCommitRequest,
     SettingsRepositoryPort,
 )
@@ -33,10 +35,10 @@ from puripuly_heart.app.services.managed_auth_claims import (
     OPENROUTER_MANAGED_USER_ID_SECRET,
     OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
     ManagedAuthClaimGuard,
+    normalize_managed_claim_sources,
 )
 from puripuly_heart.app.services.managed_key_delivery_ack import (
     ManagedKeyDeliveryAckTokenStoreError,
-    clear_pending_ack_in_settings_values,
     secret_key_for_ack_source,
     store_pending_ack_in_settings_values,
 )
@@ -90,6 +92,12 @@ class ManagedConnectionAuthRequest:
     def __post_init__(self) -> None:
         object.__setattr__(self, "settings_values", freeze_settings_values(self.settings_values))
         object.__setattr__(self, "broker_metadata", _freeze_fields(self.broker_metadata))
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedSettingsCommitOutcome:
+    transaction_result: TransactionResult
+    receipt: SettingsCommitReceipt | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,8 +156,11 @@ class ManagedConnectionAuthService:
                 message=broker_result.message,
             )
 
-        settings_values = request.settings_values
-        commit_result: TransactionResult | None = None
+        settings_values = _settings_values_with_post_broker_managed_state(
+            request.settings_values,
+            self.claim_guard.managed_state if self.claim_guard is not None else None,
+        )
+        commit_outcome: ManagedSettingsCommitOutcome | None = None
         if broker_result.delivery_ack is not None:
             try:
                 settings_values = await store_pending_ack_in_settings_values(
@@ -169,13 +180,14 @@ class ManagedConnectionAuthService:
                     diagnostics_present=broker_result.diagnostics is not None,
                     message=broker_result.message,
                 )
-            commit_result = await self._commit_settings(
+            commit_outcome = await self._commit_settings(
                 request=request,
                 broker_result=broker_result,
                 settings_values=settings_values,
                 secret_message=None,
                 secret_diagnostics_present=False,
             )
+            commit_result = commit_outcome.transaction_result
             if commit_result.status != TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
                 return commit_result
 
@@ -197,16 +209,19 @@ class ManagedConnectionAuthService:
         )
 
         if broker_result.delivery_ack is None:
-            commit_result = await self._commit_settings(
+            commit_outcome = await self._commit_settings(
                 request=request,
                 broker_result=broker_result,
                 settings_values=settings_values,
                 secret_message=secret_write_result.message,
                 secret_diagnostics_present=secret_write_result.diagnostics is not None,
             )
+            commit_result = commit_outcome.transaction_result
             if commit_result.status != TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
                 return commit_result
-        assert commit_result is not None
+        assert commit_outcome is not None
+        assert commit_outcome.receipt is not None
+        commit_result = commit_outcome.transaction_result
 
         if broker_result.delivery_ack is not None:
             ack_result = await self.broker_client.acknowledge_managed_key_delivery(
@@ -244,14 +259,16 @@ class ManagedConnectionAuthService:
                     diagnostics_present=clear_result.diagnostics is not None,
                     message=clear_result.message or commit_result.message,
                 )
-            cleared_values = clear_pending_ack_in_settings_values(settings_values)
-            clear_commit = await self._commit_settings(
+            cleared_values = _pending_ack_clear_patch(commit_outcome.receipt)
+            clear_outcome = await self._commit_settings(
                 request=request,
                 broker_result=broker_result,
                 settings_values=cleared_values,
                 secret_message=commit_result.message,
                 secret_diagnostics_present=commit_result.diagnostics is not None,
+                preceding_receipt=commit_outcome.receipt,
             )
+            clear_commit = clear_outcome.transaction_result
             if clear_commit.status != TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
                 try:
                     restore_result = await self.secret_store.set_secret(
@@ -270,12 +287,14 @@ class ManagedConnectionAuthService:
                     diagnostics_present=clear_commit.diagnostics is not None,
                     message=clear_commit.message or commit_result.message,
                 )
+            commit_outcome = clear_outcome
             commit_result = clear_commit
 
-        claim_persist_result = self._record_successful_claim_after_commit(
+        claim_persist_result = await self._record_successful_claim_after_commit(
             request=request,
             broker_result=broker_result,
             message=commit_result.message,
+            preceding_receipt=commit_outcome.receipt,
         )
         if claim_persist_result is not None:
             return claim_persist_result
@@ -447,9 +466,14 @@ class ManagedConnectionAuthService:
         settings_values: Mapping[str, object],
         secret_message: UserMessageRef | None,
         secret_diagnostics_present: bool,
-    ) -> TransactionResult:
+        preceding_receipt: SettingsCommitReceipt | None = None,
+    ) -> ManagedSettingsCommitOutcome:
         try:
-            expected_revision = request.expected_settings_revision
+            expected_revision = (
+                preceding_receipt.revision
+                if preceding_receipt is not None
+                else request.expected_settings_revision
+            )
             if expected_revision is None:
                 expected_revision = (await self.settings_repository.load_receipt()).revision
             settings_commit_result = await self.settings_repository.save(
@@ -461,52 +485,65 @@ class ManagedConnectionAuthService:
                 )
             )
         except Exception:
-            return _remote_active_local_missing_result(
-                request=request,
-                broker_result=broker_result,
-                operation="commit_settings",
-                code="remote_active_local_settings_commit_failed",
-                phase="local_settings_commit",
-                secret_write_succeeded=True,
-                settings_commit_succeeded=False,
-                diagnostics_present=False,
-                message=secret_message,
+            return ManagedSettingsCommitOutcome(
+                _remote_active_local_missing_result(
+                    request=request,
+                    broker_result=broker_result,
+                    operation="commit_settings",
+                    code="remote_active_local_settings_commit_failed",
+                    phase="local_settings_commit",
+                    secret_write_succeeded=True,
+                    settings_commit_succeeded=False,
+                    diagnostics_present=False,
+                    message=secret_message,
+                ),
+                None,
             )
 
-        if not settings_commit_result.succeeded or settings_commit_result.snapshot is None:
-            return _remote_active_local_missing_result(
-                request=request,
-                broker_result=broker_result,
-                operation="commit_settings",
-                code="remote_active_local_settings_commit_failed",
-                phase="local_settings_commit",
-                secret_write_succeeded=True,
-                settings_commit_succeeded=False,
-                diagnostics_present=settings_commit_result.diagnostics is not None,
+        if (
+            not settings_commit_result.succeeded
+            or settings_commit_result.snapshot is None
+            or settings_commit_result.receipt is None
+        ):
+            return ManagedSettingsCommitOutcome(
+                _remote_active_local_missing_result(
+                    request=request,
+                    broker_result=broker_result,
+                    operation="commit_settings",
+                    code="remote_active_local_settings_commit_failed",
+                    phase="local_settings_commit",
+                    secret_write_succeeded=True,
+                    settings_commit_succeeded=False,
+                    diagnostics_present=settings_commit_result.diagnostics is not None,
+                    message=settings_commit_result.message or secret_message,
+                ),
+                None,
+            )
+
+        return ManagedSettingsCommitOutcome(
+            TransactionResult(
+                status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
                 message=settings_commit_result.message or secret_message,
-            )
-
-        return TransactionResult(
-            status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
-            message=settings_commit_result.message or secret_message,
-            diagnostics=(
-                settings_commit_result.diagnostics
-                if settings_commit_result.diagnostics is not None
-                else (
-                    _metadata_diagnostics(
-                        operation="commit_settings",
-                        code="settings_commit_succeeded_after_managed_issue",
-                        fields={
-                            "phase": "local_settings_commit",
-                            "secret_write_succeeded": True,
-                            "settings_commit_succeeded": True,
-                            "secret_diagnostics_present": secret_diagnostics_present,
-                        },
+                diagnostics=(
+                    settings_commit_result.diagnostics
+                    if settings_commit_result.diagnostics is not None
+                    else (
+                        _metadata_diagnostics(
+                            operation="commit_settings",
+                            code="settings_commit_succeeded_after_managed_issue",
+                            fields={
+                                "phase": "local_settings_commit",
+                                "secret_write_succeeded": True,
+                                "settings_commit_succeeded": True,
+                                "secret_diagnostics_present": secret_diagnostics_present,
+                            },
+                        )
+                        if secret_diagnostics_present
+                        else None
                     )
-                    if secret_diagnostics_present
-                    else None
-                )
+                ),
             ),
+            settings_commit_result.receipt,
         )
 
     async def _store_managed_user_identifier(
@@ -544,19 +581,40 @@ class ManagedConnectionAuthService:
             except Exception:
                 pass
 
-    def _record_successful_claim_after_commit(
+    async def _record_successful_claim_after_commit(
         self,
         *,
         request: ManagedConnectionAuthRequest,
         broker_result: BrokerIssueResult,
         message: UserMessageRef | None,
+        preceding_receipt: SettingsCommitReceipt,
     ) -> TransactionResult | None:
         if self.claim_guard is None:
             return None
+        prior_claim_sources = self.claim_guard.managed_state.local_managed_claim_sources
+        authoritative_claim_sources = normalize_managed_claim_sources(
+            preceding_receipt.envelope.state.managed_connection.local_managed_claim_sources
+        )
         self.claim_guard.record_success(MANAGED_AUTH_CLAIM_SOURCE_DISCORD)
-        try:
-            self.claim_guard.managed_state.persist()
-        except Exception:
+        if MANAGED_AUTH_CLAIM_SOURCE_DISCORD in authoritative_claim_sources:
+            return None
+        claim_values = asdict(preceding_receipt.envelope)
+        claim_values["state"]["managed_connection"]["local_managed_claim_sources"] = list(
+            self.claim_guard.managed_state.local_managed_claim_sources
+        )
+        claim_outcome = await self._commit_settings(
+            request=request,
+            broker_result=broker_result,
+            settings_values=claim_values,
+            secret_message=message,
+            secret_diagnostics_present=False,
+            preceding_receipt=preceding_receipt,
+        )
+        if (
+            claim_outcome.transaction_result.status
+            != TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+        ):
+            self.claim_guard.managed_state.local_managed_claim_sources = prior_claim_sources
             return _remote_active_local_missing_result(
                 request=request,
                 broker_result=broker_result,
@@ -566,9 +624,69 @@ class ManagedConnectionAuthService:
                 secret_write_succeeded=True,
                 settings_commit_succeeded=True,
                 diagnostics_present=False,
-                message=message,
+                message=claim_outcome.transaction_result.message or message,
             )
         return None
+
+
+def _settings_values_with_post_broker_managed_state(
+    settings_values: Mapping[str, object],
+    managed_state: object | None,
+) -> Mapping[str, object]:
+    if managed_state is None:
+        return settings_values
+    values = _mutable_settings_values(settings_values)
+    state = values.setdefault("state", {})
+    if not isinstance(state, dict):
+        return settings_values
+    managed = state.setdefault("managed_connection", {})
+    if not isinstance(managed, dict):
+        return settings_values
+    for field_name in (
+        "release_token",
+        "release_token_expires_at",
+        "verified_hardware_hash",
+        "verified_hardware_hash_salt_version",
+        "active_managed_credential_ref",
+        "active_managed_expires_at",
+        "founder_letter_seen_credential_ref",
+        "referral_id",
+        "local_managed_claim_sources",
+    ):
+        managed[field_name] = copy.deepcopy(getattr(managed_state, field_name, None))
+    managed["local_managed_claim_sources"] = list(
+        normalize_managed_claim_sources(managed["local_managed_claim_sources"])
+    )
+    return values
+
+
+def _mutable_settings_values(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _mutable_settings_values(nested) for key, nested in value.items()}
+    if isinstance(value, tuple | list):
+        return [_mutable_settings_values(item) for item in value]
+    return copy.deepcopy(value)
+
+
+def _pending_ack_clear_patch(receipt: SettingsCommitReceipt) -> Mapping[str, object]:
+    managed = receipt.envelope.state.managed_connection
+    if (
+        managed.pending_delivery_ack_source is None
+        and managed.pending_delivery_ack_delivery_id is None
+        and managed.pending_delivery_ack_managed_credential_ref is None
+        and managed.pending_delivery_ack_expires_at is None
+    ):
+        return {}
+    return {
+        "state": {
+            "managed_connection": {
+                "pending_delivery_ack_source": None,
+                "pending_delivery_ack_delivery_id": None,
+                "pending_delivery_ack_managed_credential_ref": None,
+                "pending_delivery_ack_expires_at": None,
+            }
+        }
+    }
 
 
 def _normalized_settings_key(key: str) -> str:
