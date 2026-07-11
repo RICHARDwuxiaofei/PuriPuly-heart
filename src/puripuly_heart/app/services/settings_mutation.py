@@ -229,8 +229,6 @@ class SettingsMutationService:
             runtime_result = await self.runtime_apply.apply_runtime(
                 RuntimeApplyRequest(
                     receipt=commit_result.receipt,
-                    reason=request.reason,
-                    correlation_id=request.correlation_id,
                 )
             )
         except Exception:

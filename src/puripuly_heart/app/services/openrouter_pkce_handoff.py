@@ -126,8 +126,6 @@ class OpenRouterPkceHandoffService:
             runtime_result = await self.runtime_apply.apply_runtime(
                 RuntimeApplyRequest(
                     receipt=local_commit_outcome.receipt,
-                    reason=request.reason,
-                    correlation_id=request.correlation_id,
                 )
             )
         except Exception:

@@ -137,8 +137,6 @@ def test_settings_value_dtos_deep_freeze_nested_payloads() -> None:
         receipt=settings_repository.SettingsCommitReceipt(
             AppSettingsVNext(), "settings-r1", "settings_commit", "corr-1"
         ),
-        reason="settings_commit",
-        correlation_id="corr-1",
     )
 
     values["provider"]["aliases"].append("qwen")
@@ -251,8 +249,6 @@ def test_secret_broker_provider_and_runtime_ports_expose_service_result_seams() 
         receipt=importlib.import_module(
             "puripuly_heart.app.ports.settings_repository"
         ).SettingsCommitReceipt(AppSettingsVNext(), "settings-r1", "settings_commit", "corr-1"),
-        reason="settings_commit",
-        correlation_id="corr-1",
     )
 
     for dto in (

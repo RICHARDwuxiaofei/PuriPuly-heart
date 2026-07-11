@@ -480,8 +480,6 @@ async def test_commit_success_with_runtime_applied_publishes_snapshot_and_runtim
     assert runtime.requests == [
         runtime_apply.RuntimeApplyRequest(
             receipt=runtime.requests[0].receipt,
-            reason="user_patch",
-            correlation_id="corr-2",
         )
     ]
     assert runtime.requests[0].receipt is repository.returned_result.receipt
@@ -542,8 +540,6 @@ async def test_commit_success_with_runtime_degraded_or_failed_returns_degraded_t
     assert runtime.requests == [
         runtime_apply.RuntimeApplyRequest(
             receipt=runtime.requests[0].receipt,
-            reason="user_patch",
-            correlation_id="corr-3",
         )
     ]
     assert snapshot_publisher.publications == [(committed_snapshot, "corr-3")]
@@ -601,8 +597,6 @@ async def test_snapshot_publisher_failure_still_applies_runtime_and_returns_runt
     assert runtime.requests == [
         runtime_apply.RuntimeApplyRequest(
             receipt=runtime.requests[0].receipt,
-            reason="user_patch",
-            correlation_id="corr-snapshot-publisher",
         )
     ]
     assert runtime_result_publisher.publications == [(runtime_result, "corr-snapshot-publisher")]
@@ -657,8 +651,6 @@ async def test_runtime_result_publisher_failure_returns_known_runtime_result() -
     assert runtime.requests == [
         runtime_apply.RuntimeApplyRequest(
             receipt=runtime.requests[0].receipt,
-            reason="user_patch",
-            correlation_id="corr-runtime-publisher",
         )
     ]
     assert runtime_result_publisher.publications == [(runtime_result, "corr-runtime-publisher")]
@@ -723,8 +715,6 @@ async def test_runtime_apply_exception_returns_controlled_degraded_result_withou
     assert runtime.requests == [
         runtime_apply.RuntimeApplyRequest(
             receipt=runtime.requests[0].receipt,
-            reason="user_patch",
-            correlation_id="corr-runtime-exception",
         )
     ]
     assert runtime_result_publisher.publications == []
@@ -772,8 +762,6 @@ async def test_commit_success_message_and_diagnostics_are_runtime_fallbacks() ->
     assert runtime.requests == [
         runtime_apply.RuntimeApplyRequest(
             receipt=runtime.requests[0].receipt,
-            reason="user_patch",
-            correlation_id="corr-fallback",
         )
     ]
 

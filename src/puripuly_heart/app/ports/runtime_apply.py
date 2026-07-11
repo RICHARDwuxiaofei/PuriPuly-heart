@@ -10,8 +10,18 @@ from puripuly_heart.core.messages import RuntimeApplyResult
 @dataclass(frozen=True, slots=True)
 class RuntimeApplyRequest:
     receipt: SettingsCommitReceipt
-    reason: str | None
-    correlation_id: str | None
+
+    @property
+    def revision(self) -> str:
+        return self.receipt.revision
+
+    @property
+    def reason(self) -> str | None:
+        return self.receipt.reason
+
+    @property
+    def correlation_id(self) -> str | None:
+        return self.receipt.correlation_id
 
 
 class RuntimeApplyPort(Protocol):

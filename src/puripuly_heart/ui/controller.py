@@ -8874,8 +8874,6 @@ class GuiController:
         runtime_result = await runtime_apply_port.apply_runtime(
             RuntimeApplyRequest(
                 receipt=commit_outcome.receipt,
-                reason="openrouter_pkce",
-                correlation_id=None,
             )
         )
         if runtime_result.status == RUNTIME_APPLY_STATUS_APPLIED:

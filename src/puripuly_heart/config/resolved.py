@@ -320,7 +320,16 @@ class ResolvedRuntimePolicy:
         object.__setattr__(self, "policy_options", _freeze_option_mapping(self.policy_options))
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedApplicationRuntimeConfig:
+    llm: ResolvedLLMConfig
+    self_stt: ResolvedSTTConfig
+    peer_stt: ResolvedSTTConfig
+    overlay: ResolvedOverlayConfig
+
+
 __all__ = [
+    "ResolvedApplicationRuntimeConfig",
     "CREDENTIAL_SOURCE_MANAGED",
     "CREDENTIAL_SOURCE_NONE",
     "CREDENTIAL_SOURCE_SECRET_STORE",
