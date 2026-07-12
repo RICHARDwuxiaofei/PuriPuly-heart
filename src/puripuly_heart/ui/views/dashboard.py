@@ -631,12 +631,16 @@ class DashboardView(ft.Column):
             return None, None
 
         notice_key_by_status = {
+            "starting": "dashboard.local_stt_notice_starting",
+            "start_failed": "dashboard.local_stt_notice_start_failed",
             "missing": "dashboard.local_stt_notice_missing",
             "invalid": "dashboard.local_stt_notice_invalid",
             "downloading": "dashboard.local_stt_notice_downloading",
             "download_failed": "dashboard.local_stt_notice_download_failed",
         }
         tone_by_status = {
+            "starting": "info",
+            "start_failed": "error",
             "missing": "warning",
             "invalid": "warning",
             "downloading": "info",

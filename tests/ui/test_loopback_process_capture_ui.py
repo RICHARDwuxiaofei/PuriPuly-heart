@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
+import threading
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +15,7 @@ from puripuly_heart.config.process_capture_resolution import (
     ProcessCaptureTargetUnavailableError,
 )
 from puripuly_heart.config.resolved import ResolvedDesktopAudioCaptureTarget
-from puripuly_heart.config.settings import AppSettings
+from puripuly_heart.config.settings import AppSettings, STTProviderName
 from puripuly_heart.config.settings_vnext.facade import load_settings, save_settings_with_result
 from puripuly_heart.config.settings_vnext.schema import ProcessCaptureTargetIntent
 from puripuly_heart.core.runtime.peer_channel import (
@@ -80,6 +82,361 @@ def test_process_warning_i18n_keys_have_locale_parity() -> None:
     for key in PROCESS_WARNING_KEYS:
         for locale, keys in bundles.items():
             assert key in keys, f"{locale} missing {key}"
+
+
+def test_activation_starting_i18n_keys_have_locale_parity() -> None:
+    keys = (
+        "settings.peer_translation.status.starting",
+        "dashboard.local_stt_notice_starting",
+        "dashboard.local_stt_notice_start_failed",
+    )
+    bundles = {locale: _load_locale_keys(locale) for locale in ("en", "ko", "ja", "zh-CN")}
+    for key in keys:
+        assert all(key in locale_keys for locale_keys in bundles.values())
+
+
+def test_peer_contract_exposes_starting_before_readiness() -> None:
+    contract = build_overlay_peer_consumer_contract(
+        overlay_intent_enabled=True,
+        overlay_state="connected",
+        overlay_failure_reason=None,
+        peer_intent_enabled=True,
+        peer_effective_enabled=False,
+        peer_activation_starting=True,
+    )
+    assert contract.peer.state == "starting"
+    assert contract.peer.status_text == t("settings.peer_translation.status.starting")
+
+
+@pytest.mark.asyncio
+async def test_process_identity_resolution_is_fresh_and_does_not_block_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = GuiController(page=SimpleNamespace(), app=SimpleNamespace(), config_path=Path("x"))
+    target = ResolvedDesktopAudioCaptureTarget(
+        kind="process",
+        process_kind="vrchat",
+        executable_identity=r"c:\vrchat\vrchat.exe",
+    )
+    config = SimpleNamespace(
+        capture_target=target,
+        backend=SimpleNamespace(sample_rate_hz=16000),
+    )
+    calls: list[int] = []
+    release = threading.Event()
+
+    class Resolver:
+        def __init__(self, *, snapshots):  # noqa: ANN001
+            _ = snapshots
+
+        def resolve_for_start(self, _target):  # noqa: ANN001
+            calls.append(threading.get_ident())
+            release.wait(timeout=1)
+            return SimpleNamespace(identity=object(), unavailable_reason=None)
+
+    monkeypatch.setattr(controller_module, "ProcessCaptureResolver", Resolver)
+    monkeypatch.setattr(
+        GuiController,
+        "_create_process_peer_audio_source",
+        lambda _self, _config, *, resolution: resolution.identity,
+    )
+    activation = asyncio.create_task(
+        controller._create_peer_audio_source_from_runtime_config(config)
+    )
+    await asyncio.sleep(0)
+    heartbeat = False
+    await asyncio.sleep(0)
+    heartbeat = True
+    release.set()
+    assert await activation is not None
+    assert heartbeat is True
+    assert len(calls) == 1
+    assert calls[0] != threading.get_ident()
+
+
+@pytest.mark.asyncio
+async def test_idle_process_preparation_is_bounded_once_and_best_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued: list[object] = []
+    controller = GuiController(
+        page=SimpleNamespace(run_task=lambda callback: queued.append(callback)),
+        app=SimpleNamespace(),
+        config_path=Path("x"),
+    )
+    calls = 0
+
+    class FailingSnapshots:
+        def snapshots(self):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("cold enumeration failed")
+
+    monkeypatch.setattr(controller_module, "PsutilCurrentUserProcessSnapshots", FailingSnapshots)
+    controller._schedule_process_discovery_idle_preparation()
+    controller._schedule_process_discovery_idle_preparation()
+    assert len(queued) == 1
+    await queued[0]()
+    assert calls == 1
+
+    fresh_resolutions = 0
+
+    class FreshResolver:
+        def __init__(self, *, snapshots):  # noqa: ANN001
+            _ = snapshots
+
+        def resolve_for_start(self, _target):  # noqa: ANN001
+            nonlocal fresh_resolutions
+            fresh_resolutions += 1
+            return SimpleNamespace(identity=object(), unavailable_reason=None)
+
+    target = ResolvedDesktopAudioCaptureTarget(
+        kind="process",
+        process_kind="vrchat",
+        executable_identity=r"c:\vrchat\vrchat.exe",
+    )
+    monkeypatch.setattr(controller_module, "ProcessCaptureResolver", FreshResolver)
+    monkeypatch.setattr(
+        GuiController,
+        "_create_process_peer_audio_source",
+        lambda _self, _config, *, resolution: resolution.identity,
+    )
+    await controller._create_peer_audio_source_from_runtime_config(
+        SimpleNamespace(capture_target=target, backend=SimpleNamespace(sample_rate_hz=16000))
+    )
+    assert calls == 1
+    assert fresh_resolutions == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_enabled", [False, True])
+async def test_peer_starting_is_published_before_delayed_readiness_and_latest_intent_wins(
+    monkeypatch: pytest.MonkeyPatch,
+    final_enabled: bool,
+) -> None:
+    contracts = []
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(
+            refresh_overlay_peer_contract=lambda: contracts.append(
+                controller.build_overlay_peer_consumer_contract()
+            )
+        ),
+        config_path=Path("x"),
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    controller.settings.ui.peer_translation_eula_accepted = True
+    controller.settings.ui.overlay_enabled = True
+    controller.overlay_state = "connected"
+    controller.hub = SimpleNamespace(
+        peer_stt=None, peer_translation_enabled=False, integrated_context_enabled=False
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_ready(_self) -> bool:  # noqa: ANN001
+        entered.set()
+        await release.wait()
+        return True
+
+    async def no_refresh(_self) -> None:  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(GuiController, "_ensure_peer_local_stt_ready", delayed_ready)
+    monkeypatch.setattr(GuiController, "_refresh_overlay_runtime_dependencies", no_refresh)
+    enabling = asyncio.create_task(controller.set_peer_translation_enabled(True))
+    await entered.wait()
+    assert contracts[-1].peer.state == "starting"
+    await controller.set_peer_translation_enabled(False)
+    latest = None
+    if final_enabled:
+        latest = asyncio.create_task(controller.set_peer_translation_enabled(True))
+        await asyncio.sleep(0)
+        assert contracts[-1].peer.state == "starting"
+    release.set()
+    await asyncio.gather(enabling, *([latest] if latest is not None else []))
+    assert controller.settings.ui.peer_translation_enabled is final_enabled
+    assert controller._peer_activation_starting is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_enabled", [False, True])
+async def test_self_delayed_local_qwen_latest_intent_owns_microphone_start(
+    monkeypatch: pytest.MonkeyPatch,
+    final_enabled: bool,
+) -> None:
+    controller = GuiController(page=SimpleNamespace(), app=SimpleNamespace(), config_path=Path("x"))
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN
+    controller.hub = SimpleNamespace(stt=object(), mark_promo_eligible=lambda: None)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    starts: list[int] = []
+
+    async def delayed_ready(_self) -> bool:  # noqa: ANN001
+        entered.set()
+        await release.wait()
+        return True
+
+    async def start(_self) -> bool:  # noqa: ANN001
+        starts.append(controller._stt_activation_generation)
+        controller._mic_task = SimpleNamespace()
+        return True
+
+    async def stop(_self) -> None:  # noqa: ANN001
+        controller._mic_task = None
+
+    monkeypatch.setattr(GuiController, "_ensure_local_stt_ready", delayed_ready)
+    monkeypatch.setattr(GuiController, "_start_mic_loop", start)
+    monkeypatch.setattr(GuiController, "_stop_mic_loop", stop)
+    first_on = asyncio.create_task(controller.set_stt_enabled(True))
+    await entered.wait()
+    off = asyncio.create_task(controller.set_stt_enabled(False))
+    latest = None
+    if final_enabled:
+        latest = asyncio.create_task(controller.set_stt_enabled(True))
+    heartbeat = asyncio.create_task(asyncio.sleep(0, result=True))
+    assert await heartbeat is True
+    release.set()
+    await asyncio.gather(first_on, off, *([latest] if latest is not None else []))
+    assert bool(starts) is final_enabled
+    assert controller._stt_desired is final_enabled
+
+
+@pytest.mark.asyncio
+async def test_self_microphone_start_failure_becomes_effective_off_failure_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = SimpleNamespace(
+        enabled=[],
+        notices=[],
+        set_stt_enabled=lambda enabled: dash.enabled.append(enabled),
+        set_local_stt_notice=lambda status, percent=None: dash.notices.append((status, percent)),
+    )
+    controller = GuiController(
+        page=SimpleNamespace(), app=SimpleNamespace(view_dashboard=dash), config_path=Path("x")
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN
+    controller.hub = SimpleNamespace(stt=object(), mark_promo_eligible=lambda: None)
+    monkeypatch.setattr(
+        GuiController, "_ensure_local_stt_ready", lambda self: asyncio.sleep(0, result=True)
+    )
+    monkeypatch.setattr(
+        GuiController, "_start_mic_loop", lambda self: asyncio.sleep(0, result=False)
+    )
+    await controller.set_stt_enabled(True)
+    assert controller._stt_desired is False
+    assert controller._stt_activation_failed is True
+    assert dash.enabled[-1] is False
+    assert dash.notices[-1][0] == "start_failed"
+
+
+@pytest.mark.asyncio
+async def test_stale_self_start_failure_cannot_disable_latest_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = SimpleNamespace(
+        enabled=[],
+        notices=[],
+        set_stt_enabled=lambda enabled: dash.enabled.append(enabled),
+        set_local_stt_notice=lambda status, percent=None: dash.notices.append((status, percent)),
+    )
+    controller = GuiController(
+        page=SimpleNamespace(), app=SimpleNamespace(view_dashboard=dash), config_path=Path("x")
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN
+    controller.hub = SimpleNamespace(stt=object(), mark_promo_eligible=lambda: None)
+    first_started = asyncio.Event()
+    release_failure = asyncio.Event()
+    starts = 0
+
+    async def ready(_self) -> bool:  # noqa: ANN001
+        return True
+
+    async def start(_self) -> bool:  # noqa: ANN001
+        nonlocal starts
+        starts += 1
+        if starts == 1:
+            first_started.set()
+            await release_failure.wait()
+            return False
+        controller._mic_task = SimpleNamespace()
+        return True
+
+    async def stop(_self) -> None:  # noqa: ANN001
+        controller._mic_task = None
+
+    monkeypatch.setattr(GuiController, "_ensure_local_stt_ready", ready)
+    monkeypatch.setattr(GuiController, "_start_mic_loop", start)
+    monkeypatch.setattr(GuiController, "_stop_mic_loop", stop)
+    stale = asyncio.create_task(controller.set_stt_enabled(True))
+    await first_started.wait()
+    latest = asyncio.create_task(controller.set_stt_enabled(True))
+    await asyncio.sleep(0)
+    release_failure.set()
+    await asyncio.gather(stale, latest)
+    assert controller._stt_desired is True
+    assert controller._stt_activation_failed is False
+    assert controller._stt_activation_starting is False
+    assert dash.enabled == []
+
+
+@pytest.mark.asyncio
+async def test_peer_post_readiness_runtime_completion_cannot_publish_after_supersession(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    disclosures: list[str] = []
+    controller = GuiController(page=SimpleNamespace(), app=SimpleNamespace(), config_path=Path("x"))
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.SONIOX
+    controller.settings.ui.peer_translation_eula_accepted = True
+    controller.settings.ui.overlay_enabled = True
+    controller.overlay_state = "connected"
+    controller.hub = SimpleNamespace(
+        peer_stt=object(),
+        peer_translation_enabled=False,
+        integrated_context_enabled=False,
+        enqueue_peer_translation_disclosure=disclosures.append,
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    policy_calls: list[bool] = []
+
+    class Runtime:
+        async def apply_policy(self, *, config, desired_active):  # noqa: ANN001
+            _ = config
+            policy_calls.append(desired_active)
+            if desired_active:
+                entered.set()
+                await release.wait()
+
+    controller._peer_runtime = Runtime()  # type: ignore[assignment]
+    monkeypatch.setattr(
+        GuiController, "_ensure_peer_local_stt_ready", lambda self: asyncio.sleep(0, result=True)
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_peer_runtime_should_be_active",
+        lambda self, settings: settings.ui.peer_translation_enabled,
+    )
+    enabling = asyncio.create_task(controller.set_peer_translation_enabled(True))
+    await entered.wait()
+    controller._peer_activation_generation += 1
+    controller.settings.ui.peer_translation_enabled = False
+    controller._peer_activation_starting = False
+    await controller._peer_runtime.apply_policy(
+        config=controller._build_peer_runtime_config(controller.settings),
+        desired_active=False,
+    )
+    release.set()
+    await enabling
+    assert policy_calls == [True, False]
+    assert controller.settings.ui.peer_translation_enabled is False
+    assert controller.hub.peer_translation_enabled is False
+    assert disclosures == []
 
 
 def test_settings_modal_renders_process_section_before_device_and_hides_descriptions() -> None:
@@ -691,7 +1048,7 @@ async def test_failed_process_warning_survives_unrelated_draft_apply_without_dev
 
     monkeypatch.setattr(controller_module, "ProcessCaptureResolver", UnavailableResolver)
     with pytest.raises(ProcessCaptureTargetUnavailableError):
-        controller._create_peer_audio_source_from_runtime_config(config)
+        await controller._create_peer_audio_source_from_runtime_config(config)
 
 
 @pytest.mark.asyncio

@@ -4610,7 +4610,7 @@ async def test_set_peer_translation_enabled_routes_through_controller_runtime_ru
     assert controller.settings.ui.integrated_context_enabled is True
     assert controller.settings.ui.integrated_context_bootstrapped is False
     assert controller.overlay_state == "starting"
-    assert refresh_calls == ["refresh", "refresh"]
+    assert refresh_calls == ["refresh", "refresh", "refresh"]
 
     contract = controller.build_overlay_peer_consumer_contract()
     assert contract is not None
@@ -5307,13 +5307,14 @@ async def test_create_peer_audio_source_from_runtime_config_uses_desktop_loopbac
         lambda *args, **kwargs: FakePeerSource(),
     )
 
-    source = controller._create_peer_audio_source_from_runtime_config(config)
+    source = await controller._create_peer_audio_source_from_runtime_config(config)
 
     assert isinstance(source, FakePeerSource)
     assert opened == [{"device_name": config.output_device}]
 
 
-def test_create_peer_audio_source_from_runtime_config_routes_process_to_strict_source(
+@pytest.mark.asyncio
+async def test_create_peer_audio_source_from_runtime_config_routes_process_to_strict_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
@@ -5357,7 +5358,7 @@ def test_create_peer_audio_source_from_runtime_config_routes_process_to_strict_s
     )
     monkeypatch.setattr(controller_module, "DesktopPeerPipeline", lambda **kwargs: kwargs)
 
-    source = controller._create_peer_audio_source_from_runtime_config(config)
+    source = await controller._create_peer_audio_source_from_runtime_config(config)
 
     assert created["identity"] is identity
     assert "watcher" in created
@@ -5365,7 +5366,8 @@ def test_create_peer_audio_source_from_runtime_config_routes_process_to_strict_s
     assert getattr(source["source"], "source", None) is not None
 
 
-def test_create_peer_audio_source_logs_loopback_resolution(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_create_peer_audio_source_logs_loopback_resolution(monkeypatch) -> None:
     class FakeLoopbackSource:
         resolved_device_name = "Default Speakers [Loopback]"
         resolved_device_index = 10
@@ -5414,7 +5416,7 @@ def test_create_peer_audio_source_logs_loopback_resolution(monkeypatch) -> None:
         runtime_signature=(),
     )
 
-    controller._create_peer_audio_source_from_runtime_config(config)
+    await controller._create_peer_audio_source_from_runtime_config(config)
 
     messages = [message for _level, message in controller._runtime_logging.detailed_messages]
     pipeline_source = created["pipeline_kwargs"]["source"]  # type: ignore[index]
@@ -5428,7 +5430,8 @@ def test_create_peer_audio_source_logs_loopback_resolution(monkeypatch) -> None:
     assert any("used_default_fallback=True" in message for message in messages)
 
 
-def test_create_peer_audio_source_wires_capture_fault_provider(
+@pytest.mark.asyncio
+async def test_create_peer_audio_source_wires_capture_fault_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeLoopbackSource:
@@ -5466,7 +5469,7 @@ def test_create_peer_audio_source_wires_capture_fault_provider(
         runtime_signature=(),
     )
 
-    controller._create_peer_audio_source_from_runtime_config(config)
+    await controller._create_peer_audio_source_from_runtime_config(config)
 
     wrapped_source = created["pipeline_kwargs"]["source"]  # type: ignore[index]
     provider = getattr(wrapped_source, "fault_profile_provider")

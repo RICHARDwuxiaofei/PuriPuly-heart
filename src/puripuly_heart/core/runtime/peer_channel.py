@@ -104,7 +104,7 @@ class PeerChannelRuntime:
             [PeerRuntimeConfig, Callable[[Exception], Awaitable[None]]],
             Awaitable[object] | object,
         ],
-        source_factory: Callable[[PeerRuntimeConfig], object],
+        source_factory: Callable[[PeerRuntimeConfig], Awaitable[object] | object],
         vad_factory: Callable[[PeerRuntimeConfig, Path], object],
         vad_model_resolver: Callable[[], Path],
         run_audio_loop: Callable[..., Awaitable[None]],
@@ -273,6 +273,8 @@ class PeerChannelRuntime:
         source = None
         try:
             source = self._source_factory(config)
+            if inspect.isawaitable(source):
+                source = await source
             model_path = self._vad_model_resolver()
             vad = self._vad_factory(config, model_path)
         except Exception as exc:

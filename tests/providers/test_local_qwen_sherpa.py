@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
+import threading
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -20,6 +22,61 @@ from puripuly_heart.providers.stt.local_qwen_sherpa import (
     LocalQwenSherpaLoadError,
     LocalQwenSherpaSTTBackend,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["self", "peer"])
+@pytest.mark.parametrize("stage", ["validation", "recognizer", "inference"])
+async def test_local_qwen_synchronous_heavy_stage_runs_inside_to_thread_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+    channel: str,
+    stage: str,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    worker_threads: list[int] = []
+
+    def blocked() -> None:
+        worker_threads.append(threading.get_ident())
+        entered.set()
+        release.wait(timeout=2)
+
+    backend = LocalQwenSherpaSTTBackend(model_dir=Path("/models/qwen"), stream_label=channel)
+    monkeypatch.setattr(local_qwen_module, "validate_local_stt_runtime_ready", lambda _path: None)
+    monkeypatch.setattr(LocalQwenSherpaSTTBackend, "_create_recognizer", lambda self: object())
+    if stage == "validation":
+        monkeypatch.setattr(
+            local_qwen_module,
+            "validate_local_stt_runtime_ready",
+            lambda _path: blocked(),
+        )
+        operation = asyncio.create_task(backend.open_session())
+    elif stage == "recognizer":
+        monkeypatch.setattr(
+            LocalQwenSherpaSTTBackend,
+            "_create_recognizer",
+            lambda self: blocked() or object(),
+        )
+        operation = asyncio.create_task(backend.open_session())
+    else:
+        backend._recognizer = object()
+        monkeypatch.setattr(
+            LocalQwenSherpaSTTBackend,
+            "_decode_f32_sync",
+            lambda self, recognizer, samples: blocked() or "text",
+        )
+        operation = asyncio.create_task(backend.decode_f32(np.zeros(160, dtype=np.float32)))
+
+    assert await asyncio.to_thread(entered.wait, 1)
+    heartbeat = False
+    await asyncio.sleep(0)
+    heartbeat = True
+    release.set()
+    result = await operation
+    if stage != "inference":
+        await result.close()
+    assert heartbeat is True
+    assert worker_threads and worker_threads[0] != threading.get_ident()
 
 
 def test_local_qwen_backend_uses_thread_count_3_by_default() -> None:
