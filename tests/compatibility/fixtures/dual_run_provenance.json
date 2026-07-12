@@ -40,6 +40,7 @@
         "src/puripuly_heart/app/services/openrouter_pkce_owner.py",
         "src/puripuly_heart/app/services/overlay_osc_application_runtime.py",
         "src/puripuly_heart/app/services/post_commit_runtime.py",
+        "src/puripuly_heart/app/services/provider_runtime_apply.py",
         "src/puripuly_heart/app/services/resolved_runtime_adapter.py",
         "src/puripuly_heart/app/services/runtime_activation.py",
         "src/puripuly_heart/app/services/secret_settings_transaction.py",
@@ -70,8 +71,8 @@
         "src/puripuly_heart/ui/app.py",
         "src/puripuly_heart/ui/controller.py"
       ],
-        "production_source_sha256": "487d994421b620f51a1e42cb873b6ed2643940a0cd488f5bbd6160dac6f560e9",
-        "source_delta_sha256": "ca188497dba7d5b8272d36d139ab9134acaf585c8b10382b7ca52db32839b79a"
+        "production_source_sha256": "f2ef756c4c9ab7bff6a21a7fb253ab7dbed113d758e452c1d4e6a1c8d4c4812d",
+        "source_delta_sha256": "13c3459107202a4e031bf4ad5fa6e9d25850cb1d6b3fa2238563dad35504d473"
     },
     "repair_base": "b4ace2631793aa1a1e384c0440b8ec7f315559ae"
   },

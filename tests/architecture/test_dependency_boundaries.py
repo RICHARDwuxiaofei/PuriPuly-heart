@@ -1657,3 +1657,53 @@ def test_resolved_runtime_resource_transaction_has_no_ui_dependency() -> None:
         assert "puripuly_heart.ui" not in source
         assert "GuiController" not in source
         assert "AppSettings" not in source
+
+
+def test_retired_controller_runtime_apply_adapters_do_not_return_as_aliases() -> None:
+    path = SOURCE_PACKAGE_ROOT / "app" / "services" / "provider_runtime_apply.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    definitions = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert "_ControllerProviderRuntimeApply" not in definitions
+    assert "_ControllerOverlayOscOutputRuntimeApply" not in definitions
+    assert not {
+        name
+        for name in definitions
+        if name.endswith(("ProviderRuntimeApply", "OverlayOscOutputRuntimeApply"))
+    }
+
+
+def test_c3_retained_controller_runtime_apply_paths_remain_explicit() -> None:
+    path = SOURCE_PACKAGE_ROOT / "app" / "services" / "provider_runtime_apply.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    definitions = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert {
+        "_ControllerNoopRuntimeApply",
+        "_ControllerSttLanguageAudioRuntimeApply",
+        "_ControllerUiPromptClipboardStateRuntimeApply",
+        "_provider_runtime_apply_unavailable_result",
+        "_stt_language_audio_runtime_unavailable_result",
+    } <= definitions
+
+    controller = ast.parse(
+        (SOURCE_PACKAGE_ROOT / "ui" / "controller.py").read_text(encoding="utf-8")
+    )
+    controller_definitions = {
+        node.name
+        for node in ast.walk(controller)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert {
+        "_apply_settings_direct",
+        "_apply_providers_direct",
+        "_apply_provider_runtime_plan",
+        "_build_provider_runtime_apply_plan",
+        "_sync_signature_caches",
+    } <= controller_definitions
