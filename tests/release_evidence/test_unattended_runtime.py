@@ -8,12 +8,15 @@ from pathlib import Path
 
 import pytest
 
+from puripuly_heart.core.lifecycle import LifecycleScope, start_lifecycle_task
 from puripuly_heart.release_evidence.unattended_runtime import (
     QWEN_BASELINE_METRICS,
     QWEN_STAGES,
     REQUIRED_STAGES,
     ProductSourceProbeError,
     _active_peer_publication_gate,
+    _evidence_scope,
+    _EvidenceDiagnosticsSink,
     _peer_generation_probe,
     _product_process_source_probe,
     compare_baseline,
@@ -21,6 +24,7 @@ from puripuly_heart.release_evidence.unattended_runtime import (
     map_process_report,
     new_report,
     run_deterministic,
+    run_local_qwen,
     validate_report,
 )
 
@@ -160,6 +164,98 @@ async def test_correlated_product_source_overlap_drop_and_stale_suppression() ->
     assert peer_facts["attempted"] == 1
     assert peer_facts["published"] == 0
     assert runtime.loop_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["decode", "monitor"])
+async def test_scoped_task_failure_keeps_original_error_and_records_safe_diagnostic(
+    owner: str,
+) -> None:
+    sink = _EvidenceDiagnosticsSink()
+    scope = _evidence_scope(f"evidence-{owner}-failure", sink)
+
+    async def fail() -> None:
+        raise RuntimeError(f"raw {owner} payload")
+
+    task = start_lifecycle_task(scope, fail(), name=owner)
+    with pytest.raises(RuntimeError, match=f"raw {owner} payload"):
+        await task
+    await scope.close()
+
+    assert sink.classifications
+    assert all("payload" not in classification for classification in sink.classifications)
+
+
+@pytest.mark.asyncio
+async def test_qwen_cancellation_while_decode_blocked_closes_backend_source_and_scopes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from puripuly_heart.core.audio.process_source import ProcessAudioCaptureSource
+    from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaSTTBackend
+
+    closed = {"backend": 0, "source": 0, "scope": 0}
+    supersede_started = asyncio.Event()
+
+    monkeypatch.setattr(
+        "puripuly_heart.core.local_stt_assets.validate_local_stt_runtime_ready",
+        lambda _path: None,
+    )
+
+    async def ensure(self):  # noqa: ANN001
+        self._recognizer = object()
+        return self._recognizer
+
+    def decode(self, recognizer, samples):  # noqa: ANN001
+        return ""
+
+    async def close_backend(self):  # noqa: ANN001
+        closed["backend"] += 1
+        self._recognizer = None
+
+    original_source_close = ProcessAudioCaptureSource.close
+    original_scope_close = LifecycleScope.close
+
+    async def close_source(self):  # noqa: ANN001
+        await original_source_close(self)
+        closed["source"] += 1
+
+    async def close_scope(self):  # noqa: ANN001
+        await original_scope_close(self)
+        closed["scope"] += 1
+
+    monkeypatch.setattr(LocalQwenSherpaSTTBackend, "_ensure_recognizer", ensure)
+    monkeypatch.setattr(LocalQwenSherpaSTTBackend, "_decode_f32_sync", decode)
+    monkeypatch.setattr(LocalQwenSherpaSTTBackend, "close", close_backend)
+    monkeypatch.setattr(ProcessAudioCaptureSource, "close", close_source)
+    monkeypatch.setattr(LifecycleScope, "close", close_scope)
+
+    async def publish() -> None:
+        return None
+
+    async def blocked_supersede() -> None:
+        supersede_started.set()
+        await asyncio.Event().wait()
+
+    fake_runtime = type("Runtime", (), {"loop_task": None})()
+    monkeypatch.setattr(
+        "puripuly_heart.release_evidence.unattended_runtime._active_peer_publication_gate",
+        lambda: (
+            publish,
+            blocked_supersede,
+            fake_runtime,
+            {"generation_before": 0, "attempted": 0, "published": 0},
+        ),
+    )
+
+    task = asyncio.create_task(run_local_qwen(tmp_path))
+    await asyncio.wait_for(supersede_started.wait(), timeout=2.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert closed["backend"] == 1
+    assert closed["source"] == 1
+    assert closed["scope"] >= 1
 
 
 @pytest.mark.asyncio

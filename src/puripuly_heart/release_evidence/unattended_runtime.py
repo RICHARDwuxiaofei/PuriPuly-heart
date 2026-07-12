@@ -17,6 +17,8 @@ from typing import Any
 
 import numpy as np
 
+from puripuly_heart.core.lifecycle import LifecycleScope, start_lifecycle_task
+
 SCHEMA = "puripuly-heart.unattended-runtime-evidence.v2"
 STATUSES = {"passed", "failed", "blocked"}
 REQUIRED_STAGES = (
@@ -54,6 +56,20 @@ class ProductSourceProbeError(RuntimeError):
         super().__init__(stage)
         self.stage = stage
         self.facts = facts
+
+
+class _EvidenceDiagnosticsSink:
+    def __init__(self) -> None:
+        self.classifications: list[str] = []
+
+    async def emit_diagnostic(self, event: Any) -> None:
+        diagnostics = getattr(event, "diagnostics", None)
+        code = getattr(diagnostics, "code", "lifecycle_task_failed")
+        self.classifications.append(str(code)[:80])
+
+
+def _evidence_scope(name: str, sink: _EvidenceDiagnosticsSink | None = None) -> LifecycleScope:
+    return LifecycleScope(name, diagnostics_sink=sink or _EvidenceDiagnosticsSink())
 
 
 async def _product_process_source_probe(
@@ -142,20 +158,26 @@ async def _product_process_source_probe(
             facts["submitted"] += 1
         else:
             product_frame = await anext(source.frames())
-            consumer_task = asyncio.create_task(consumer(product_frame.samples))
-            if wait_inflight is not None:
-                in_flight = await wait_inflight()
-                if in_flight is False:
-                    raise TimeoutError("consumer_inflight_timeout")
-                facts["overlap_observed"] = not consumer_task.done()
-            capture.on_data(frame, 16)
-            capture.on_data(frame, 16)
-            facts["submitted"] += 2
-            if supersede is not None:
-                await supersede()
-            if release_inflight is not None:
-                release_inflight()
-            await consumer_task
+            scope = _evidence_scope("evidence-product-source")
+            try:
+                consumer_task = start_lifecycle_task(
+                    scope, consumer(product_frame.samples), name="consumer"
+                )
+                if wait_inflight is not None:
+                    in_flight = await wait_inflight()
+                    if in_flight is False:
+                        raise TimeoutError("consumer_inflight_timeout")
+                    facts["overlap_observed"] = not consumer_task.done()
+                capture.on_data(frame, 16)
+                capture.on_data(frame, 16)
+                facts["submitted"] += 2
+                if supersede is not None:
+                    await supersede()
+                if release_inflight is not None:
+                    release_inflight()
+                await consumer_task
+            finally:
+                await scope.close()
             facts["consumed"] = 1
         facts["dropped"] = source.queue_drop_count
         facts["queue_size_before_close"] = source._queue.sync_q.qsize()
@@ -410,13 +432,17 @@ async def run_deterministic() -> dict[str, Any]:
         except asyncio.QueueFull:
             dropped += 1
 
-    tasks = [
-        asyncio.create_task(delayed_item(1, "stale", 0.001)),
-        asyncio.create_task(delayed_item(2, "current-a", 0.002)),
-        asyncio.create_task(delayed_item(2, "current-b", 0.003)),
-    ]
-    generation = 2
-    await asyncio.gather(*tasks)
+    scope = _evidence_scope("evidence-deterministic")
+    try:
+        tasks = [
+            start_lifecycle_task(scope, delayed_item(1, "stale", 0.001), name="stale"),
+            start_lifecycle_task(scope, delayed_item(2, "current-a", 0.002), name="current-a"),
+            start_lifecycle_task(scope, delayed_item(2, "current-b", 0.003), name="current-b"),
+        ]
+        generation = 2
+        await asyncio.gather(*tasks)
+    finally:
+        await scope.close()
     while not queue.empty():
         item_generation, _value = queue.get_nowait()
         if item_generation != generation:
@@ -499,6 +525,7 @@ async def run_local_qwen(model_dir: Path) -> dict[str, Any]:
     process = psutil.Process()
     rss_before = process.memory_info().rss
     threads_before = process.num_threads()
+    cancellation: asyncio.CancelledError | None = None
     try:
         started = time.perf_counter()
         await backend._ensure_recognizer()
@@ -539,13 +566,18 @@ async def run_local_qwen(model_dir: Path) -> dict[str, Any]:
             decode_ms = (completed_at - entered_at) * 1000.0
             return generation, wait_ms, decode_ms
 
-        decode_tasks = [
-            asyncio.create_task(timed_decode(decode_generation)),
-            asyncio.create_task(timed_decode(decode_generation)),
-        ]
-        await asyncio.sleep(0)
-        decode_generation += 1
-        decoded = await asyncio.gather(*decode_tasks)
+        scope = _evidence_scope("evidence-qwen-decodes")
+        try:
+            decode_tasks = [
+                start_lifecycle_task(scope, timed_decode(decode_generation), name="decode-first"),
+                start_lifecycle_task(scope, timed_decode(decode_generation), name="decode-second"),
+            ]
+            await asyncio.sleep(0)
+            decode_generation += 1
+            await asyncio.gather(*decode_tasks)
+        finally:
+            await scope.close()
+        decoded = [task.result() for task in decode_tasks]
         stale_rejected = sum(generation != decode_generation for generation, _, _ in decoded)
         waits = [wait_ms for _, wait_ms, _ in decoded]
         decodes = [decode_ms for _, _, decode_ms in decoded]
@@ -609,6 +641,8 @@ async def run_local_qwen(model_dir: Path) -> dict[str, Any]:
             after_bytes=rss_after,
             delta_bytes=max(0, rss_after - rss_before),
         )
+    except asyncio.CancelledError as exc:
+        cancellation = exc
     except Exception as exc:
         pending = next(
             (name for name in ("load", "inference") if stages[name]["status"] == "blocked"),
@@ -658,6 +692,8 @@ async def run_local_qwen(model_dir: Path) -> dict[str, Any]:
         stages["cleanup"] = _stage(
             "failed", _safe_classification("cleanup", exc), recognizer_released=False
         )
+    if cancellation is not None:
+        raise cancellation
     _finalize(report)
     return report
 
@@ -897,12 +933,18 @@ async def run_process(evidence_path: Path, thresholds_path: Path) -> dict[str, A
                 )
                 await asyncio.sleep(0.01)
 
-        monitor_task = asyncio.create_task(monitor())
-        activation_started = time.perf_counter()
-        code = await run(native_path, thresholds_path)
-        activation_ms = (time.perf_counter() - activation_started) * 1000.0
-        monitoring = False
-        await monitor_task
+        scope = _evidence_scope("evidence-process-monitor")
+        try:
+            monitor_task = start_lifecycle_task(scope, monitor(), name="host-sampler")
+            activation_started = time.perf_counter()
+            try:
+                code = await run(native_path, thresholds_path)
+                activation_ms = (time.perf_counter() - activation_started) * 1000.0
+            finally:
+                monitoring = False
+            await monitor_task
+        finally:
+            await scope.close()
         native = json.loads(native_path.read_text(encoding="utf-8"))
         children_after = len(process.children(recursive=True))
         threads_after = process.num_threads()
