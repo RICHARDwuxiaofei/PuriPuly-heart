@@ -5,6 +5,7 @@ import itertools
 import pytest
 
 from puripuly_heart.app.ports.application_settings import (
+    CaptureTargetValue,
     ClearSecretCommand,
     DesktopOverlayValue,
     GithubStarClickedCommand,
@@ -65,6 +66,7 @@ def _valid_value(field: SettingsField):  # noqa: ANN202
         ),
         CodecKind.CALIBRATION: OverlayCalibrationValue(),
         CodecKind.DESKTOP_OVERLAY: DesktopOverlayValue(),
+        CodecKind.CAPTURE_TARGET: CaptureTargetValue(),
     }[codec.kind]
 
 
@@ -142,6 +144,8 @@ def _canonical_default_value(field: SettingsField):  # noqa: ANN202
             value.position.y,
             value.visual.background_alpha,
         )
+    if codec.kind == CodecKind.CAPTURE_TARGET:
+        return CaptureTargetValue()
     value = _at_path(intent, codec.canonical_paths[0])
     if codec.kind == CodecKind.STRING_MAP:
         return StringMapValue(tuple(value.items()))
@@ -158,8 +162,8 @@ def _canonical_default_value(field: SettingsField):  # noqa: ANN202
 
 def test_all_79_paths_are_unique_and_canonical_defaults_round_trip() -> None:
     paths = [path for codec in FIELD_CODECS.values() for path in codec.canonical_paths]
-    assert len(paths) == 79
-    assert len(set(paths)) == 79
+    assert len(paths) == 80
+    assert len(set(paths)) == 80
     for field, codec in FIELD_CODECS.items():
         encoded = codec.encode(_canonical_default_value(field))
         assert codec.encode(codec.decode(tuple(value for _, value in encoded))) == encoded

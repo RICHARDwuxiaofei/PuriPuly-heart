@@ -48,6 +48,7 @@ class SettingsField(str, Enum):
     AUDIO_INPUT_HOST_API = "audio.input_host_api"
     AUDIO_INPUT_DEVICE = "audio.input_device"
     DESKTOP_AUDIO_OUTPUT_DEVICE = "desktop_audio.output_device"
+    DESKTOP_AUDIO_CAPTURE_TARGET = "desktop_audio.capture_target"
     DESKTOP_VAD_THRESHOLD = "desktop_audio.vad_speech_threshold"
     DESKTOP_VAD_HANGOVER_MS = "desktop_audio.vad_hangover_ms"
     DESKTOP_VAD_PRE_ROLL_MS = "desktop_audio.vad_pre_roll_ms"
@@ -220,6 +221,38 @@ class DesktopOverlayValue:
             raise ValueError("desktop alpha must be in 0..1")
 
 
+@dataclass(frozen=True, slots=True)
+class CaptureTargetValue:
+    kind: str = "default_output_device"
+    device_name: str | None = None
+    process_kind: str | None = None
+    executable_identity: str | None = None
+    discord_channel: str | None = None
+
+    def __post_init__(self) -> None:
+        from puripuly_heart.config.settings_vnext.schema import (
+            CaptureTargetIntent,
+            ProcessCaptureTargetIntent,
+        )
+
+        if self.kind == "default_output_device":
+            CaptureTargetIntent.default_output_device()
+        elif self.kind == "named_output_device":
+            CaptureTargetIntent.named_output_device(self.device_name or "")
+        elif self.kind == "process":
+            if self.process_kind == "discord":
+                process = ProcessCaptureTargetIntent.discord(self.discord_channel or "")
+            elif self.process_kind == "vrchat":
+                process = ProcessCaptureTargetIntent.vrchat(self.executable_identity or "")
+            else:
+                process = ProcessCaptureTargetIntent.generic_executable(
+                    self.executable_identity or ""
+                )
+            CaptureTargetIntent.process_target(process)
+        else:
+            raise ValueError("unsupported capture target kind")
+
+
 SettingValue: TypeAlias = (
     str
     | int
@@ -233,6 +266,7 @@ SettingValue: TypeAlias = (
     | TranslationFallbackValue
     | OverlayCalibrationValue
     | DesktopOverlayValue
+    | CaptureTargetValue
 )
 
 
@@ -253,6 +287,7 @@ def _is_deeply_immutable_setting_value(value: SettingValue) -> bool:
             TranslationFallbackValue,
             OverlayCalibrationValue,
             DesktopOverlayValue,
+            CaptureTargetValue,
         ),
     )
 

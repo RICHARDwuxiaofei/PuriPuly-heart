@@ -462,6 +462,9 @@ class CanonicalCommandComposition:
             None,
         )
 
+    async def resolve_secret_value(self, key: str) -> str | None:
+        return await self.secret_commands.resolve_secret_value(key)
+
     async def execute_surface_intent_delta(
         self,
         *,

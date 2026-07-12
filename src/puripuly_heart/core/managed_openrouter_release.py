@@ -429,6 +429,8 @@ class ManagedOpenRouterReleaseService:
         repr=False,
     )
     _closed: bool = field(init=False, default=False, repr=False)
+    current_trial_remaining_percent: int | None = field(init=False, default=None)
+    current_pass_status: TalkTogetherPassStatus | None = field(init=False, default=None)
 
     def __post_init__(self, hardware_hash_provider: HardwareFingerprintProvider | None) -> None:
         self._legacy_hardware_hash_provider = hardware_hash_provider
@@ -613,6 +615,7 @@ class ManagedOpenRouterReleaseService:
             latest_referral_id = normalize_owned_referral_id(self.managed_state.referral_id)
             pass_status = getattr(status_response, "pass_status", None)
             if returned_referral_id is None:
+                self.current_pass_status = None
                 return ManagedOpenRouterStatusRefreshResult(
                     referral_id=latest_referral_id,
                     pass_status=None,
@@ -621,6 +624,7 @@ class ManagedOpenRouterReleaseService:
             if latest_referral_id != observed_referral_id:
                 if pass_status is not None and pass_status.pass_id != latest_referral_id:
                     pass_status = None
+                self.current_pass_status = pass_status
                 return ManagedOpenRouterStatusRefreshResult(
                     referral_id=latest_referral_id,
                     pass_status=pass_status,
@@ -641,6 +645,7 @@ class ManagedOpenRouterReleaseService:
             final_referral_id = normalize_owned_referral_id(self.managed_state.referral_id)
             if pass_status is not None and pass_status.pass_id != final_referral_id:
                 pass_status = None
+            self.current_pass_status = pass_status
             return ManagedOpenRouterStatusRefreshResult(
                 referral_id=final_referral_id,
                 pass_status=pass_status,
@@ -649,6 +654,29 @@ class ManagedOpenRouterReleaseService:
         finally:
             if current_task is not None:
                 self._status_refresh_tasks.discard(current_task)
+
+    async def refresh_presentation_state(self, provider_verifier) -> None:  # noqa: ANN001
+        status = await self.refresh_managed_status()
+        self.current_pass_status = status.pass_status
+        resolution = resolve_openrouter_credentials(
+            self._credential_runtime_config(), secrets=self.secrets
+        )
+        if resolution.api_key is None or provider_verifier is None:
+            self.current_trial_remaining_percent = None
+            return
+        metadata = await provider_verifier.fetch_openrouter_key_metadata(resolution.api_key)
+        if (
+            metadata is None
+            or metadata.limit_usd is None
+            or metadata.remaining_usd is None
+            or metadata.limit_usd <= 0
+        ):
+            self.current_trial_remaining_percent = None
+            return
+        self.current_trial_remaining_percent = max(
+            0,
+            min(100, round((metadata.remaining_usd / metadata.limit_usd) * 100)),
+        )
 
     async def _retry_pending_delivery_ack_if_needed(
         self,

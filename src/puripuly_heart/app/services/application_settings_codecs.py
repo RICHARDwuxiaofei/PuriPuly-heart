@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import Final
 
 from puripuly_heart.app.ports.application_settings import (
+    CaptureTargetValue,
     DesktopOverlayValue,
     GithubStarClickedCommand,
     GithubStarEligibleLaunchCountCommand,
@@ -60,6 +61,7 @@ class CodecKind(str, Enum):
     FALLBACK = "fallback"
     CALIBRATION = "calibration"
     DESKTOP_OVERLAY = "desktop_overlay"
+    CAPTURE_TARGET = "capture_target"
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +82,32 @@ class FieldCodec:
             return tuple(zip(self.canonical_paths, _calibration_leaves(normalized), strict=True))
         if self.kind == CodecKind.DESKTOP_OVERLAY:
             return tuple(zip(self.canonical_paths, _desktop_leaves(normalized), strict=True))
+        if self.kind == CodecKind.CAPTURE_TARGET:
+            from puripuly_heart.config.settings_vnext.schema import (
+                CaptureTargetIntent,
+                ProcessCaptureTargetIntent,
+            )
+
+            assert isinstance(normalized, CaptureTargetValue)
+            if normalized.kind == "default_output_device":
+                target = CaptureTargetIntent.default_output_device()
+            elif normalized.kind == "named_output_device":
+                target = CaptureTargetIntent.named_output_device(normalized.device_name or "")
+            elif normalized.process_kind == "discord":
+                target = CaptureTargetIntent.process_target(
+                    ProcessCaptureTargetIntent.discord(normalized.discord_channel or "")
+                )
+            elif normalized.process_kind == "vrchat":
+                target = CaptureTargetIntent.process_target(
+                    ProcessCaptureTargetIntent.vrchat(normalized.executable_identity or "")
+                )
+            else:
+                target = CaptureTargetIntent.process_target(
+                    ProcessCaptureTargetIntent.generic_executable(
+                        normalized.executable_identity or ""
+                    )
+                )
+            return ((self.canonical_paths[0], target),)  # type: ignore[return-value]
         return ((self.canonical_paths[0], normalized),)
 
     def decode(self, leaves: tuple[SettingValue, ...]) -> SettingValue:
@@ -91,6 +119,16 @@ class FieldCodec:
             return OverlayCalibrationValue(*leaves)
         if self.kind == CodecKind.DESKTOP_OVERLAY:
             return DesktopOverlayValue(str(leaves[0]), leaves[1], leaves[2], float(leaves[3]))
+        if self.kind == CodecKind.CAPTURE_TARGET:
+            target = leaves[0]
+            process = target.process  # type: ignore[union-attr]
+            return CaptureTargetValue(
+                kind=target.kind,  # type: ignore[union-attr]
+                device_name=target.device_name,  # type: ignore[union-attr]
+                process_kind=None if process is None else process.kind,
+                executable_identity=None if process is None else process.executable_identity,
+                discord_channel=None if process is None else process.discord_channel,
+            )
         return self.normalize(leaves[0])
 
     def normalize(self, value: SettingValue) -> SettingValue:
@@ -156,6 +194,10 @@ class FieldCodec:
             from puripuly_heart.config.settings_vnext.schema import LocalLLMIntent
 
             LocalLLMIntent(extra_body={entry.key: entry.value for entry in value.entries})
+            normalized = value
+        elif self.kind == CodecKind.CAPTURE_TARGET:
+            if not isinstance(value, CaptureTargetValue):
+                raise TypeError("expected CaptureTargetValue")
             normalized = value
         else:
             normalized = _validate_composite(self.kind, value)
@@ -433,6 +475,14 @@ _TEXT_PATHS = {
     SettingsField.SYSTEM_PROMPT: (U, ("prompts", "system_prompt")),
 }
 _CODECS.extend(_codec(field, owner, path) for field, (owner, path) in _TEXT_PATHS.items())
+_CODECS.append(
+    _codec(
+        SettingsField.DESKTOP_AUDIO_CAPTURE_TARGET,
+        S,
+        ("desktop_audio", "capture_target"),
+        CodecKind.CAPTURE_TARGET,
+    )
+)
 _EMPTY_TEXT_PATHS = {
     SettingsField.AUDIO_INPUT_DEVICE: (S, ("audio", "input_device")),
     SettingsField.DESKTOP_AUDIO_OUTPUT_DEVICE: (S, ("desktop_audio", "output_device")),

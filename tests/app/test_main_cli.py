@@ -113,7 +113,11 @@ def _install_async_gui_harness(monkeypatch, tmp_path, calls, *, on_main_gui=None
         wiring_composition,
         "create_application_runtime_production_composition",
         lambda *_args, **_kwargs: SimpleNamespace(
-            runtime_host=runtime, canonical_commands=object()
+            runtime_host=runtime,
+            canonical_commands=object(),
+            start=runtime.start,
+            shutdown=runtime.shutdown,
+            close=runtime.shutdown,
         ),
     )
     monkeypatch.setattr(
@@ -328,7 +332,11 @@ def test_main_owns_gui_lifecycle_start_disconnect_and_awaited_stop(monkeypatch, 
         wiring_composition,
         "create_application_runtime_production_composition",
         lambda *_args, **_kwargs: SimpleNamespace(
-            runtime_host=runtime, canonical_commands=object()
+            runtime_host=runtime,
+            canonical_commands=object(),
+            start=runtime.start,
+            shutdown=runtime.shutdown,
+            close=runtime.shutdown,
         ),
     )
     monkeypatch.setattr(
@@ -439,7 +447,11 @@ def test_main_closes_constructed_resources_when_flet_swallows_construction_failu
         wiring_composition,
         "create_application_runtime_production_composition",
         lambda *_args, **_kwargs: SimpleNamespace(
-            runtime_host=runtime, canonical_commands=object()
+            runtime_host=runtime,
+            canonical_commands=object(),
+            start=runtime.start,
+            shutdown=runtime.shutdown,
+            close=runtime.shutdown,
         ),
     )
     monkeypatch.setattr(

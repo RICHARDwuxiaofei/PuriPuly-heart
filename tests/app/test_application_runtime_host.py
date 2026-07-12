@@ -557,6 +557,100 @@ def _host(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("unavailable", "expected"),
+    [
+        ("no_process", "process_not_found"),
+        ("access_denied", "process_access_denied"),
+        ("ineligible", "process_ineligible"),
+    ],
+)
+async def test_peer_capture_retry_uses_authoritative_config_and_maps_diagnostics(
+    unavailable, expected
+) -> None:
+    from puripuly_heart.config.settings_vnext.schema import (
+        CaptureTargetIntent,
+        ProcessCaptureTargetIntent,
+    )
+    from puripuly_heart.core.runtime.peer_channel import (
+        PeerRuntimeDiagnostic,
+        PeerRuntimeFailureReason,
+    )
+
+    settings = AppSettingsVNext()
+    settings = replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            desktop_audio=replace(
+                settings.intent.desktop_audio,
+                capture_target=CaptureTargetIntent.process_target(
+                    ProcessCaptureTargetIntent.vrchat(r"C:\VRChat\VRChat.exe")
+                ),
+            ),
+        ),
+    )
+    receipt = SettingsCommitReceipt(settings, "capture-r1", "capture", None)
+    host, _hub, peer, _transactions = _host([], receipt)
+    observed = []
+    peer.last_failure = PeerRuntimeDiagnostic(
+        PeerRuntimeFailureReason.PROCESS_TARGET_UNAVAILABLE,
+        "process",
+        unavailable,
+    )
+
+    async def retry_process_capture(*, config):
+        observed.append(config)
+        return False
+
+    peer.retry_process_capture = retry_process_capture
+    result = await host.retry_peer_process_capture()
+    assert result.reason.value == expected
+    assert result.canonical_revision == "capture-r1"
+    assert observed[0].capture_target.executable_identity.casefold().endswith("vrchat.exe")
+    assert peer.last_failure is not None
+
+
+@pytest.mark.asyncio
+async def test_peer_capture_retry_success_uses_runtime_owner_clear_and_never_routes_chatbox() -> (
+    None
+):
+    from puripuly_heart.config.settings_vnext.schema import (
+        CaptureTargetIntent,
+        ProcessCaptureTargetIntent,
+    )
+
+    settings = AppSettingsVNext()
+    settings = replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            desktop_audio=replace(
+                settings.intent.desktop_audio,
+                capture_target=CaptureTargetIntent.process_target(
+                    ProcessCaptureTargetIntent.vrchat(r"C:\VRChat\VRChat.exe")
+                ),
+            ),
+        ),
+    )
+    host, _hub, peer, _transactions = _host(
+        [], SettingsCommitReceipt(settings, "capture-r2", "capture", None)
+    )
+    peer.last_failure = object()
+
+    async def retry_process_capture(*, config):
+        _ = config
+        peer.last_failure = None
+        return True
+
+    peer.retry_process_capture = retry_process_capture
+    result = await host.retry_peer_process_capture()
+    assert result.reason.value == "success"
+    assert peer.last_failure is None
+    assert not hasattr(peer, "chatbox")
+
+
+@pytest.mark.asyncio
 async def test_local_qwen_reenable_reuses_retained_production_provider_before_idle_expiry() -> None:
     events: list[str] = []
     receipt = SettingsCommitReceipt(AppSettingsVNext(), "local-qwen", "toggle", None)

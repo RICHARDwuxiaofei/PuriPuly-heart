@@ -957,6 +957,9 @@
         "puripuly_heart.app.adapters.openrouter_pkce_production",
         "puripuly_heart.app.adapters.post_commit_provider_activation",
         "puripuly_heart.app.adapters.resolved_runtime_resource_factory"
+        ,"puripuly_heart.app.adapters.ui_settings_interactions"
+        ,"puripuly_heart.app.adapters.microphone_test_source"
+        ,"puripuly_heart.app.adapters.audio_device_query"
       ],
       "rationale": "ProviderVerifierAdapter is an app adapter implementation of the provider-verifier port; the adapter class is importable for wiring/tests but is not an external public compatibility facade."
     },

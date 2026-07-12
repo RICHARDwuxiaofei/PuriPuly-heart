@@ -170,6 +170,33 @@ class ApplicationRuntimeProductionComposition:
     canonical_commands: object
     secrets: object
     persistence: object
+    ui_settings: object
+
+    async def start(self, *, auto_flush_osc: bool = True) -> None:
+        await self.ui_settings.start()
+        try:
+            await self.runtime_host.start(auto_flush_osc=auto_flush_osc)
+        except BaseException:
+            await self.ui_settings.close()
+            raise
+
+    async def close(self) -> None:
+        failures: list[BaseException] = []
+        try:
+            await self.ui_settings.close()
+        except BaseException as exc:
+            failures.append(exc)
+        try:
+            await self.runtime_host.shutdown()
+        except BaseException as exc:
+            failures.append(exc)
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise BaseExceptionGroup("application runtime composition shutdown failed", failures)
+
+    async def shutdown(self) -> None:
+        await self.close()
 
 
 def create_application_runtime_host(
@@ -229,11 +256,53 @@ def create_application_runtime_production_composition(
         secrets=secrets,
     )
     runtime_host.bind_canonical_commands(canonical_commands)
+    from puripuly_heart.app.adapters.audio_device_query import ProductionAudioDeviceQuery
+    from puripuly_heart.app.adapters.microphone_test_source import (
+        ProductionMicrophoneTestSourceFactory,
+    )
+    from puripuly_heart.app.adapters.ui_settings_interactions import (
+        ProductionUiSettingsInteractions,
+    )
+    from puripuly_heart.app.services.canonical_secret_commands import UI_SETTINGS_SECRET_KEYS
+    from puripuly_heart.app.services.microphone_test import (
+        ApplicationMicrophoneTestService,
+    )
+    from puripuly_heart.app.services.telemetry_operational_state import (
+        TelemetryOperationalStateOwner,
+    )
+    from puripuly_heart.app.services.ui_settings import create_ui_settings_application
+    from puripuly_heart.core.runtime.mic_test import MicTestRuntime
+
+    microphone_runtime = MicTestRuntime()
+    microphone = ApplicationMicrophoneTestService(
+        settings_queries=canonical_commands.settings_queries,
+        runtime=microphone_runtime,
+        source_factory=ProductionMicrophoneTestSourceFactory(),
+    )
+    telemetry_owner = TelemetryOperationalStateOwner(
+        create_canonical_state_repositories(state_path).unit_of_work
+    )
+    ui_settings = create_ui_settings_application(
+        canonical_commands=canonical_commands,
+        interactions=ProductionUiSettingsInteractions(
+            canonical_commands,
+            provider_verifier=create_provider_verifier(),
+            runtime_host=runtime_host,
+            telemetry_owner=telemetry_owner,
+            overlay=overlay_runtime,
+            microphone=microphone,
+            persistence=persistence,
+            owned_services=(microphone,),
+            audio_devices=ProductionAudioDeviceQuery(),
+        ),
+        secret_keys=UI_SETTINGS_SECRET_KEYS,
+    )
     return ApplicationRuntimeProductionComposition(
         runtime_host=runtime_host,
         canonical_commands=canonical_commands,
         secrets=secrets,
         persistence=persistence,
+        ui_settings=ui_settings,
     )
 
 

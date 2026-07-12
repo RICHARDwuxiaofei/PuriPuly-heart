@@ -421,6 +421,54 @@ class ApplicationRuntimeHost:
             return RuntimeApplyResult(RUNTIME_APPLY_STATUS_FAILED, None, None)
         return await self._runtime_composition.resume_peer_stt(receipt)
 
+    async def retry_peer_process_capture(self):  # noqa: ANN201
+        from puripuly_heart.app.ports.ui_settings import (
+            CaptureDiagnosticReason,
+            CaptureRetryResult,
+            CaptureRetryStatus,
+        )
+        from puripuly_heart.core.runtime.peer_channel import PeerRuntimeConfig
+
+        receipt = await self._committed_settings.load_receipt()
+        peer = self._resolver.resolve(receipt).peer_stt
+        config = PeerRuntimeConfig(
+            backend=peer,
+            output_device=peer.output_device or "",
+            vad_threshold=peer.vad_speech_threshold,
+            vad_hangover_ms=peer.vad_hangover_ms,
+            vad_pre_roll_ms=peer.vad_pre_roll_ms,
+            provider_signature=(peer.provider, peer.credential, peer.provider_options),
+            runtime_signature=(peer,),
+            capture_target=peer.capture_target,
+        )
+        runtime = self._require_parts().peer_runtime
+        if config.capture_target.kind != "process":
+            return CaptureRetryResult(
+                CaptureRetryStatus.NOT_APPLICABLE,
+                CaptureDiagnosticReason.NOT_APPLICABLE,
+                receipt.revision,
+            )
+        succeeded = await runtime.retry_process_capture(config=config)
+        diagnostic = runtime.last_failure
+        if succeeded:
+            return CaptureRetryResult(
+                CaptureRetryStatus.SUCCEEDED,
+                CaptureDiagnosticReason.SUCCESS,
+                receipt.revision,
+            )
+        if diagnostic is None:
+            return CaptureRetryResult(
+                CaptureRetryStatus.NOT_APPLICABLE,
+                CaptureDiagnosticReason.NOT_APPLICABLE,
+                receipt.revision,
+            )
+        return CaptureRetryResult(
+            CaptureRetryStatus.FAILED,
+            _capture_diagnostic_reason(diagnostic),
+            receipt.revision,
+            diagnostic.process_unavailable_reason,
+        )
+
     async def rebuild(self) -> object | None:
         receipt = await self._committed_settings.load_receipt()
         installed = await self._install_available(receipt, ("self_stt",))
@@ -565,6 +613,25 @@ class ApplicationRuntimeHost:
         if self._parts is None:
             raise RuntimeError("application runtime is closed")
         return self._parts
+
+
+def _capture_diagnostic_reason(diagnostic):  # noqa: ANN001, ANN202
+    from puripuly_heart.app.ports.ui_settings import CaptureDiagnosticReason
+    from puripuly_heart.core.runtime.peer_channel import PeerRuntimeFailureReason
+
+    if diagnostic.reason is PeerRuntimeFailureReason.PROCESS_TARGET_UNAVAILABLE:
+        return {
+            "no_process": CaptureDiagnosticReason.PROCESS_NOT_FOUND,
+            "access_denied": CaptureDiagnosticReason.PROCESS_ACCESS_DENIED,
+            "ineligible": CaptureDiagnosticReason.PROCESS_INELIGIBLE,
+        }.get(diagnostic.process_unavailable_reason, CaptureDiagnosticReason.TARGET_UNAVAILABLE)
+    return {
+        PeerRuntimeFailureReason.PROCESS_SETUP_FAILED: CaptureDiagnosticReason.SETUP_FAILURE,
+        PeerRuntimeFailureReason.PROCESS_TARGET_EXITED: CaptureDiagnosticReason.TARGET_EXITED,
+        PeerRuntimeFailureReason.PROCESS_SOURCE_FAILED: CaptureDiagnosticReason.SOURCE_FAILURE,
+        PeerRuntimeFailureReason.PROCESS_PROVIDER_FAILED: CaptureDiagnosticReason.PROVIDER_FAILURE,
+        PeerRuntimeFailureReason.PEER_RUNTIME_FAILED: CaptureDiagnosticReason.RUNTIME_FAILURE,
+    }[diagnostic.reason]
 
 
 __all__ = ["ApplicationRuntimeHost", "ApplicationRuntimeParts"]

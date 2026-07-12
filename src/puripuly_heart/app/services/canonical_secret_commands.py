@@ -41,6 +41,18 @@ _SECRET_KEY_FALLBACKS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
     ),
 }
+UI_SETTINGS_SECRET_KEYS = (
+    "google_api_key",
+    "openrouter_api_key",
+    "deepseek_api_key",
+    "deepgram_api_key",
+    "soniox_api_key",
+    "alibaba_api_key_beijing",
+    "alibaba_api_key_singapore",
+    "alibaba_api_key",
+    "local_llm_api_key",
+    "cerebras_api_key",
+)
 
 
 def _fingerprint_revision(value: str) -> str:
@@ -161,6 +173,21 @@ class CanonicalSecretCommandService(SecretCommandPort, SecretQueryPort):
             revision=None,
             source=SecretSourceStatus.NONE,
         )
+
+    async def resolve_secret_value(self, key: str) -> str | None:
+        read = await self.secret_store.get_secret(key)
+        if read.value:
+            return read.value
+        legacy_keys, env_vars = self._fallbacks(key)
+        for legacy_key in legacy_keys:
+            legacy = await self.secret_store.get_secret(legacy_key)
+            if legacy.value:
+                return legacy.value
+        for env_var in env_vars:
+            value = os.getenv(env_var)
+            if value:
+                return value
+        return None
 
 
 @dataclass(slots=True)

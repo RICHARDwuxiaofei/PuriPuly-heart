@@ -1,14 +1,17 @@
 {
-  "provenance": {
-    "source_manifest_sha256": "9a0b36b6cbc9f525f00b34205f84395cc34fbd85ddfa977f9bbd79fe799372e0"
-  },
   "fallback_triggers": {
     "primary_error": {
-      "calls": ["primary_error", "fallback_after_error"],
+      "calls": [
+        "primary_error",
+        "fallback_after_error"
+      ],
       "result": "fallback_after_error"
     },
     "timeout": {
-      "calls": ["primary_slow", "fallback_after_timeout"],
+      "calls": [
+        "primary_slow",
+        "fallback_after_timeout"
+      ],
       "result": "fallback_after_timeout"
     }
   },
@@ -30,6 +33,9 @@
   "prompt_routing": {
     "cerebras": "SHARED_TRANSLATION",
     "unknown": ""
+  },
+  "provenance": {
+    "source_manifest_sha256": "944267d695541351a8b2c3ef6a8ff4792d5fa5d1554b29317c3871612f1d942b"
   },
   "settings_defaults": {
     "connection": "managed",

@@ -165,8 +165,7 @@ async def _run_gui_async(
                 audio_gate=composition.audio_gate,
                 overlay_runtime=composition.runtime,
             ),
-            close_name="shutdown",
-            owned_resource=lambda result: result.runtime_host,
+            close_name="close",
         )
         application_runtime_host = runtime_composition.runtime_host
         application_adapters = construction_scope.construct(
