@@ -91,6 +91,12 @@ class SettingsVNextCanonicalPersistenceAdapter:
     def legacy_projection(self, settings: AppSettingsVNext) -> object:
         return from_dict(to_legacy_dict(settings))
 
+    def values_for(self, settings: AppSettingsVNext) -> Mapping[str, object]:
+        return serialization.to_dict(settings)
+
+    def envelope_from_values(self, values: Mapping[str, object]) -> AppSettingsVNext:
+        return serialization.from_dict(_mutable_settings_values(values))
+
     def receipt_for(
         self,
         settings: AppSettingsVNext,
@@ -183,3 +189,14 @@ def _receipt(
         f"sha256:{hashlib.sha256(serialization.to_json_text(settings).encode('utf-8')).hexdigest()}"
     )
     return SettingsCommitReceipt(settings, revision, reason, correlation_id)
+
+
+def _mutable_settings_values(values: Mapping[str, object]) -> dict[str, Any]:
+    def copy_value(value: object) -> Any:
+        if isinstance(value, Mapping):
+            return {str(key): copy_value(nested) for key, nested in value.items()}
+        if isinstance(value, tuple | list):
+            return [copy_value(item) for item in value]
+        return copy.deepcopy(value)
+
+    return {str(key): copy_value(value) for key, value in values.items()}

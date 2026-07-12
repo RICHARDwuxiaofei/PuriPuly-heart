@@ -954,6 +954,7 @@
       "modules": [
         "puripuly_heart.app.adapters.provider_verifier",
         "puripuly_heart.app.adapters.application_runtime_production",
+        "puripuly_heart.app.adapters.openrouter_pkce_production",
         "puripuly_heart.app.adapters.post_commit_provider_activation",
         "puripuly_heart.app.adapters.resolved_runtime_resource_factory"
       ],

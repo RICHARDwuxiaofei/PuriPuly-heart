@@ -109,6 +109,8 @@ class ApplicationRuntimeHost:
         runtime_logging: object | None = None,
         audio_hooks: object | None = None,
         initial_translation_enabled: bool = False,
+        openrouter_pkce: object | None = None,
+        dashboard_projection: object | None = None,
     ) -> None:
         self._parts: ApplicationRuntimeParts | None = parts
         self._runtime_composition = runtime_composition
@@ -124,6 +126,8 @@ class ApplicationRuntimeHost:
         self._composition_closed = False
         self._shutdown = False
         self._translation_desired = initial_translation_enabled
+        self._openrouter_pkce = openrouter_pkce
+        self._dashboard_projection = dashboard_projection
 
     @property
     def parts(self) -> ApplicationRuntimeParts | None:
@@ -179,6 +183,11 @@ class ApplicationRuntimeHost:
         output = None if owner is None else owner.callback_output
         if output is not None and callable(handler):
             output.subscribe(handler)
+
+    def subscribe_dashboard_runtime_facts(self, handler: object) -> None:
+        subscribe = getattr(self._dashboard_projection, "subscribe_dashboard", None)
+        if callable(subscribe) and callable(handler):
+            subscribe(handler)
 
     async def start(self, *, auto_flush_osc: bool = True) -> None:
         if self._started:
@@ -306,16 +315,31 @@ class ApplicationRuntimeHost:
         before: SettingsCommitReceipt | None,
         after: SettingsCommitReceipt,
         surface: str,
+        cause: str = "settings_surface",
         operational: RuntimeOperationalSnapshot,
     ):
         return await self._runtime_composition.surface_transactions.apply_surface_runtime(
             before=before,
             after=after,
             provenance=RuntimeMutationProvenance(
-                surface, "settings_surface", after.reason, after.correlation_id
+                surface, cause, after.reason, after.correlation_id
             ),
             operational=operational,
         )
+
+    async def execute_openrouter_pkce(self, command: object):  # noqa: ANN201
+        owner = self._openrouter_pkce
+        if owner is None:
+            raise RuntimeError("OpenRouter PKCE is not configured")
+        return await owner.execute(command)
+
+    def openrouter_pkce_active(self) -> bool:
+        return bool(self._openrouter_pkce and self._openrouter_pkce.active)
+
+    def bind_openrouter_pkce(self, owner: object) -> None:
+        if self._openrouter_pkce is not None:
+            raise RuntimeError("OpenRouter PKCE owner is already bound")
+        self._openrouter_pkce = owner
 
     async def shutdown(self) -> None:
         if self._shutdown:
@@ -324,6 +348,11 @@ class ApplicationRuntimeHost:
         if parts is None:
             return
         failures: list[BaseException] = []
+        if self._openrouter_pkce is not None:
+            try:
+                await self._openrouter_pkce.close()
+            except BaseException as exc:
+                failures.append(exc)
         for attribute, owner in (
             ("_self_closed", parts.self_stt),
             ("_peer_closed", parts.peer_runtime),

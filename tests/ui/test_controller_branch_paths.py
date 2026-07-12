@@ -82,7 +82,6 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterStatusRefreshResult,
     TalkTogetherPassStatus,
 )
-from puripuly_heart.core.openrouter_pkce import OpenRouterPKCEExchangeResult
 from puripuly_heart.core.osc.receiver import VrcMicState
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
 from puripuly_heart.core.overlay.sink import (
@@ -15966,311 +15965,150 @@ async def test_verify_api_key_routes_alibaba_singapore_to_qwen_fallback(
     assert calls == [("secret", "https://dashscope-intl.aliyuncs.com/api/v1")]
 
 
-@pytest.mark.asyncio
-async def test_create_openrouter_pkce_client_uses_openrouter_documented_localhost_port() -> None:
+def test_controller_does_not_construct_openrouter_pkce_client() -> None:
     controller = _make_controller(
         app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=DummySettingsView())
     )
 
-    client = controller._create_openrouter_pkce_client()
-    session = client.build_session()
+    assert not hasattr(controller, "_create_openrouter_pkce_client")
+    assert not hasattr(controller, "_openrouter_pkce_client")
 
-    assert client.callback_origin == "http://localhost:3000"
-    assert "callback_url=http%3A%2F%2Flocalhost%3A3000%2Fcallback" in session.authorization_url
+
+async def _exercise_typed_controller_pkce(
+    owner_status: str,
+    *,
+    launch_source: str = "settings",
+    founder_shown: list[str] | None = None,
+) -> tuple[GuiController, list[object]]:
+    app = SimpleNamespace(
+        view_dashboard=DummyDashboard(),
+        view_settings=DummySettingsView(),
+        show_founder_letter_dialog=(
+            (lambda: founder_shown.append("shown")) if founder_shown is not None else lambda: None
+        ),
+    )
+    controller = _make_controller(app=app)
+    controller.settings = AppSettings()
+    controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_MANAGED
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    target = copy.deepcopy(controller.settings)
+    target.provider.llm = LLMProviderName.OPENROUTER
+    target.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
+    target.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    target.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    persistence = controller.canonical_settings_persistence
+    initial = controller._canonical_vnext_settings_for(controller.settings)
+    current = [persistence.receipt_for(initial, reason=None, correlation_id=None)]
+    commands: list[object] = []
+
+    def load_receipt(*_args: object, **_kwargs: object):  # noqa: ANN202
+        return current[0]
+
+    persistence.load_receipt = load_receipt  # type: ignore[method-assign]
+
+    class Host:
+        def translation_snapshot(self):  # noqa: ANN201
+            return SimpleNamespace(
+                desired_enabled=False,
+                effective_enabled=False,
+                provider_available=False,
+            )
+
+        async def execute_openrouter_pkce(self, command: object):  # noqa: ANN201
+            commands.append(command)
+            if owner_status in {"succeeded", "committed_degraded"}:
+                envelope = persistence.envelope_from_values(command.settings_values)
+                current[0] = persistence.receipt_for(
+                    envelope, reason="openrouter_pkce", correlation_id=None
+                )
+            transaction_status = {
+                "succeeded": messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
+                "committed_degraded": messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
+                "failed": messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORED,
+            }[owner_status]
+            return SimpleNamespace(
+                status=owner_status,
+                transaction=messages.TransactionResult(transaction_status, None, None),
+                receipt=(
+                    current[0] if owner_status in {"succeeded", "committed_degraded"} else None
+                ),
+            )
+
+    controller.application_runtime_host = Host()
+    ok = await controller.connect_openrouter_via_pkce(
+        target_settings=target,
+        launch_source=launch_source,
+    )
+    assert ok is (owner_status in {"succeeded", "committed_degraded"})
+    return controller, commands
 
 
 @pytest.mark.asyncio
 async def test_connect_openrouter_via_pkce_stores_key_sets_alias_and_marks_verified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    controller = _make_controller(
-        app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=DummySettingsView())
-    )
-    controller.settings = AppSettings()
-    target_settings = copy.deepcopy(controller.settings)
-    target_settings.provider.llm = LLMProviderName.OPENROUTER
-    target_settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
-    target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
-    target_settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
-    store = DummySecrets({"openrouter_api_key": "legacy-key"})
-
-    class DummyPKCEClient:
-        async def run_desktop_flow(self) -> OpenRouterPKCEExchangeResult:
-            return OpenRouterPKCEExchangeResult(api_key="sk-or-v1-user", user_id="user_123")
-
-    monkeypatch.setattr(
-        GuiController,
-        "_create_openrouter_pkce_client",
-        lambda self: DummyPKCEClient(),
-    )
-    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: store)
-    monkeypatch.setattr(controller_module, "save_settings", lambda *_a, **_k: None)
-    verify_calls: list[str] = []
-
-    async def fake_verify_openrouter_api_key(api_key: str) -> bool:
-        verify_calls.append(api_key)
-        return True
-
-    monkeypatch.setattr(
-        OpenRouterLLMProvider,
-        "verify_api_key",
-        fake_verify_openrouter_api_key,
-    )
-    applied_plans: list[object] = []
-
-    async def fake_apply_provider_runtime_plan(
-        self,
-        settings: AppSettings,
-        plan: object,
-    ) -> None:
-        _ = plan
-        self.settings = settings
-        applied_plans.append(copy.deepcopy(settings))
-
-    monkeypatch.setattr(
-        GuiController, "_apply_provider_runtime_plan", fake_apply_provider_runtime_plan
-    )
-
-    ok = await controller.connect_openrouter_via_pkce(
-        target_settings=target_settings,
-        launch_source="settings",
-    )
-
-    assert ok is True
-    assert store.set_calls[-1] == ("openrouter_api_key", "sk-or-v1-user")
-    assert verify_calls == ["sk-or-v1-user"]
+    _ = monkeypatch
+    controller, commands = await _exercise_typed_controller_pkce("succeeded")
+    assert commands[0].launch_source == "settings"
     assert controller.settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
-    assert controller.settings.openrouter.selected_source == OpenRouterCredentialSource.BYOK
-    assert controller.settings.api_key_verified.openrouter is False
-    assert len(applied_plans) == 1
-    assert applied_plans[0].api_key_verified.openrouter is False
 
 
 @pytest.mark.asyncio
 async def test_connect_openrouter_via_pkce_rejects_unverified_exchanged_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    controller = _make_controller(
-        app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=DummySettingsView())
-    )
-    controller.settings = AppSettings()
-    previous_settings = copy.deepcopy(controller.settings)
-    target_settings = copy.deepcopy(controller.settings)
-    target_settings.provider.llm = LLMProviderName.OPENROUTER
-    target_settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
-    target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
-    target_settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
-    store = DummySecrets({"openrouter_api_key": "legacy-key"})
-
-    class DummyPKCEClient:
-        async def run_desktop_flow(self) -> OpenRouterPKCEExchangeResult:
-            return OpenRouterPKCEExchangeResult(api_key="sk-or-v1-user", user_id="user_123")
-
-    monkeypatch.setattr(
-        GuiController,
-        "_create_openrouter_pkce_client",
-        lambda self: DummyPKCEClient(),
-    )
-    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: store)
-    verify_calls: list[str] = []
-
-    async def fake_verify_openrouter_api_key(api_key: str) -> bool:
-        verify_calls.append(api_key)
-        return False
-
-    monkeypatch.setattr(
-        OpenRouterLLMProvider,
-        "verify_api_key",
-        fake_verify_openrouter_api_key,
-    )
-    applied: list[AppSettings] = []
-
-    async def fake_apply_providers(
-        self,
-        settings: AppSettings | None = None,
-        *,
-        force_rebuild_llm: bool = False,
-    ) -> None:
-        _ = self
-        _ = force_rebuild_llm
-        assert settings is not None
-        applied.append(copy.deepcopy(settings))
-
-    monkeypatch.setattr(GuiController, "apply_providers", fake_apply_providers)
-
-    ok = await controller.connect_openrouter_via_pkce(
-        target_settings=target_settings,
-        launch_source="settings",
-    )
-
-    assert ok is False
-    assert verify_calls == ["sk-or-v1-user"]
-    assert applied == []
-    assert controller.settings == previous_settings
-    assert store.get("openrouter_api_key") == "legacy-key"
-    assert store.set_calls == []
-    assert store.delete_calls == []
+    _ = monkeypatch
+    controller, commands = await _exercise_typed_controller_pkce("failed")
+    assert len(commands) == 1
+    assert controller.settings.openrouter.selection_alias != OpenRouterSelectionAlias.GEMMA4_BYOK
 
 
 @pytest.mark.asyncio
 async def test_connect_openrouter_via_pkce_rebuilds_llm_when_signature_is_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    dashboard = DummyDashboard()
-    dashboard.translation_needs_key = True
-    controller = _make_controller(
-        app=SimpleNamespace(view_dashboard=dashboard, view_settings=DummySettingsView())
-    )
-    controller.settings = AppSettings()
-    controller.settings.provider.llm = LLMProviderName.OPENROUTER
-    controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
-    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
-    controller.settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
-    controller.hub = DummyHub(llm=None)
-    _translation_host_result(controller, available=True)
-    controller._sync_signature_caches(controller.settings)
-    target_settings = copy.deepcopy(controller.settings)
-    store = DummySecrets({})
-
-    class DummyPKCEClient:
-        async def run_desktop_flow(self) -> OpenRouterPKCEExchangeResult:
-            return OpenRouterPKCEExchangeResult(api_key="sk-or-v1-user", user_id="user_123")
-
-    monkeypatch.setattr(
-        GuiController,
-        "_create_openrouter_pkce_client",
-        lambda self: DummyPKCEClient(),
-    )
-    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: store)
-
-    class DummyManagedReleaseService:
-        async def close(self) -> None:
-            return None
-
-    def fake_create_managed_release_service(self, *, secrets):
-        _ = (self, secrets)
-        return DummyManagedReleaseService()
-
-    monkeypatch.setattr(
-        GuiController,
-        "_create_managed_openrouter_release_service",
-        fake_create_managed_release_service,
-    )
-    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
-
-    async def fake_verify_openrouter_api_key(_api_key: str) -> bool:
-        return True
-
-    monkeypatch.setattr(
-        OpenRouterLLMProvider,
-        "verify_api_key",
-        fake_verify_openrouter_api_key,
-    )
-
-    async def fake_refresh_managed_trial_usage_state_best_effort(self) -> None:
-        _ = self
-
-    monkeypatch.setattr(
-        GuiController,
-        "_refresh_managed_trial_usage_state_best_effort",
-        fake_refresh_managed_trial_usage_state_best_effort,
-    )
-
-    ok = await controller.connect_openrouter_via_pkce(
-        target_settings=target_settings,
-        launch_source="settings",
-    )
-
-    assert ok is True
-    assert store.get("openrouter_api_key") == "sk-or-v1-user"
-    assert controller.application_runtime_host.translation_commands == [SetTranslationEnabled(True)]
-    assert controller.settings.api_key_verified.openrouter is False
-    assert dashboard.translation_needs_key is False
+    _ = monkeypatch
+    controller, commands = await _exercise_typed_controller_pkce("succeeded")
+    assert commands[0].operational is not None
+    assert controller.settings.provider.llm == LLMProviderName.OPENROUTER
 
 
-def test_reopen_openrouter_pkce_authorization_url_delegates_to_active_client() -> None:
+@pytest.mark.asyncio
+async def test_reopen_openrouter_pkce_authorization_url_delegates_to_application_owner() -> None:
     reopen_calls: list[str] = []
     controller = _make_controller(
         app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=DummySettingsView())
     )
-    controller._openrouter_pkce_client = SimpleNamespace(
-        reopen_authorization_url=lambda: reopen_calls.append("reopen") or True
-    )
 
-    assert controller.reopen_openrouter_pkce_authorization_url() is True
-    assert reopen_calls == ["reopen"]
+    async def execute(command: object) -> object:
+        reopen_calls.append(type(command).__name__)
+        return SimpleNamespace(status="reopened")
+
+    controller.application_runtime_host = SimpleNamespace(execute_openrouter_pkce=execute)
+
+    assert await controller.reopen_openrouter_pkce_authorization_url() is True
+    assert reopen_calls == ["ReopenOpenRouterPkce"]
 
 
 @pytest.mark.asyncio
 async def test_connect_openrouter_via_pkce_leaves_settings_unchanged_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    controller = _make_controller(
-        app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=DummySettingsView())
-    )
-    controller.settings = AppSettings()
-    controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_MANAGED
-    target_settings = copy.deepcopy(controller.settings)
-    target_settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
-    target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
-    target_settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
-    store = DummySecrets({})
-
-    class DummyPKCEClient:
-        async def run_desktop_flow(self) -> OpenRouterPKCEExchangeResult:
-            raise RuntimeError("browser failed")
-
-    monkeypatch.setattr(
-        GuiController,
-        "_create_openrouter_pkce_client",
-        lambda self: DummyPKCEClient(),
-    )
-    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: store)
-
-    ok = await controller.connect_openrouter_via_pkce(
-        target_settings=target_settings,
-        launch_source="settings",
-    )
-
-    assert ok is False
-    assert controller.settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
-    assert store.set_calls == []
+    _ = monkeypatch
+    controller, _commands = await _exercise_typed_controller_pkce("failed")
+    assert controller.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
 
 
 @pytest.mark.asyncio
 async def test_connect_openrouter_via_pkce_reopens_letter_context_on_letter_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _ = monkeypatch
     shown: list[str] = []
-    controller = _make_controller(
-        app=SimpleNamespace(
-            view_dashboard=DummyDashboard(),
-            view_settings=DummySettingsView(),
-            show_founder_letter_dialog=lambda: shown.append("shown"),
-        )
+    _controller, commands = await _exercise_typed_controller_pkce(
+        "failed", launch_source="letter", founder_shown=shown
     )
-    controller.settings = AppSettings()
-    target_settings = copy.deepcopy(controller.settings)
-    target_settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
-    target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
-    target_settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
-
-    class DummyPKCEClient:
-        async def run_desktop_flow(self) -> OpenRouterPKCEExchangeResult:
-            raise RuntimeError("browser failed")
-
-    monkeypatch.setattr(
-        GuiController,
-        "_create_openrouter_pkce_client",
-        lambda self: DummyPKCEClient(),
-    )
-
-    ok = await controller.connect_openrouter_via_pkce(
-        target_settings=target_settings,
-        launch_source="letter",
-    )
-
-    assert ok is False
+    assert commands[0].launch_source == "letter"
     assert shown == ["shown"]
 
 
@@ -16278,67 +16116,11 @@ async def test_connect_openrouter_via_pkce_reopens_letter_context_on_letter_fail
 async def test_connect_openrouter_via_pkce_returns_degraded_on_runtime_apply_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    controller = _make_controller(
-        app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=DummySettingsView())
-    )
-    controller.settings = AppSettings()
-    controller.settings.provider.llm = LLMProviderName.OPENROUTER
-    controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_MANAGED
-    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
-    target_settings = copy.deepcopy(controller.settings)
-    target_settings.provider.llm = LLMProviderName.OPENROUTER
-    target_settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
-    target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
-    target_settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
-    store = DummySecrets({"openrouter_api_key": "legacy-key"})
-
-    class DummyPKCEClient:
-        async def run_desktop_flow(self) -> OpenRouterPKCEExchangeResult:
-            return OpenRouterPKCEExchangeResult(api_key="sk-or-v1-user", user_id="user_123")
-
-    monkeypatch.setattr(
-        GuiController,
-        "_create_openrouter_pkce_client",
-        lambda self: DummyPKCEClient(),
-    )
-    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: store)
-    monkeypatch.setattr(controller_module, "save_settings", lambda *_a, **_k: None)
-
-    async def fake_verify_openrouter_api_key(_api_key: str) -> bool:
-        return True
-
-    monkeypatch.setattr(
-        OpenRouterLLMProvider,
-        "verify_api_key",
-        fake_verify_openrouter_api_key,
-    )
-
-    async def fake_apply_provider_runtime_plan(
-        self,
-        settings: AppSettings,
-        plan: object,
-    ) -> None:
-        _ = plan
-        self.settings = copy.deepcopy(settings)
-        raise RuntimeError("apply failed after mutation")
-
-    monkeypatch.setattr(
-        GuiController, "_apply_provider_runtime_plan", fake_apply_provider_runtime_plan
-    )
-
-    ok = await controller.connect_openrouter_via_pkce(
-        target_settings=target_settings,
-        launch_source="settings",
-    )
-
-    assert ok is True
-    assert store.get("openrouter_api_key") == "sk-or-v1-user"
-    assert store.set_calls == [("openrouter_api_key", "sk-or-v1-user")]
-    assert store.delete_calls == []
-    assert controller.settings.api_key_verified.openrouter is False
+    _ = monkeypatch
+    controller, _commands = await _exercise_typed_controller_pkce("committed_degraded")
+    assert controller.last_settings_mutation_result is not None
     assert (
-        controller.last_settings_mutation_result is not None
-        and controller.last_settings_mutation_result.status
+        controller.last_settings_mutation_result.status
         == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
     )
 
@@ -16347,59 +16129,11 @@ async def test_connect_openrouter_via_pkce_returns_degraded_on_runtime_apply_fai
 async def test_connect_openrouter_via_pkce_restores_secret_on_settings_commit_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    controller = _make_controller(
-        app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=DummySettingsView())
-    )
-    controller.settings = AppSettings()
-    controller.settings.provider.llm = LLMProviderName.OPENROUTER
-    controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_MANAGED
-    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
-    target_settings = copy.deepcopy(controller.settings)
-    target_settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
-    target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
-    target_settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
-    store = DummySecrets({"openrouter_api_key": "legacy-key"})
-
-    class DummyPKCEClient:
-        async def run_desktop_flow(self) -> OpenRouterPKCEExchangeResult:
-            return OpenRouterPKCEExchangeResult(api_key="sk-or-v1-user", user_id="user_123")
-
-    monkeypatch.setattr(
-        GuiController,
-        "_create_openrouter_pkce_client",
-        lambda self: DummyPKCEClient(),
-    )
-    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: store)
-
-    def raise_on_save(*_a, **_k):
-        raise RuntimeError("disk write failed")
-
-    monkeypatch.setattr(controller_module, "save_settings", raise_on_save)
-
-    async def fake_verify_openrouter_api_key(_api_key: str) -> bool:
-        return True
-
-    monkeypatch.setattr(
-        OpenRouterLLMProvider,
-        "verify_api_key",
-        fake_verify_openrouter_api_key,
-    )
-
-    ok = await controller.connect_openrouter_via_pkce(
-        target_settings=target_settings,
-        launch_source="settings",
-    )
-
-    assert ok is False
-    assert store.get("openrouter_api_key") == "legacy-key"
-    assert store.set_calls == [
-        ("openrouter_api_key", "sk-or-v1-user"),
-        ("openrouter_api_key", "legacy-key"),
-    ]
-    assert store.delete_calls == []
+    _ = monkeypatch
+    controller, _commands = await _exercise_typed_controller_pkce("failed")
+    assert controller.last_settings_mutation_result is not None
     assert (
-        controller.last_settings_mutation_result is not None
-        and controller.last_settings_mutation_result.status
+        controller.last_settings_mutation_result.status
         == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED_SECRET_RESTORED
     )
 

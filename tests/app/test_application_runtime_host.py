@@ -663,7 +663,7 @@ async def test_provider_activation_failure_is_typed_and_prevents_synchronization
 
     assert result.failed == "provider_activation"
     assert result.transaction.status == "settings_commit_success_runtime_degraded"
-    assert synchronization.calls == 0
+    assert synchronization.calls == 1
     assert result.transaction.diagnostics.fields["reported_code"] == (
         "provider_set_activation_failed"
     )

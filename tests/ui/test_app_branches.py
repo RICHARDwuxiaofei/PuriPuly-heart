@@ -2964,7 +2964,8 @@ def test_on_request_openrouter_pkce_uses_settings_mutation_queue(
     assert len(queued) == 1
 
 
-def test_on_request_openrouter_pkce_reopens_existing_auth_url_while_flow_active(
+@pytest.mark.asyncio
+async def test_on_request_openrouter_pkce_reopens_existing_auth_url_while_flow_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = TranslatorApp.__new__(TranslatorApp)
@@ -2977,12 +2978,20 @@ def test_on_request_openrouter_pkce_reopens_existing_auth_url_while_flow_active(
         _ = (target_settings, launch_source)
         return False
 
+    active = [False]
+
+    async def reopen() -> bool:
+        reopen_calls.append("reopen")
+        return True
+
     app.controller = SimpleNamespace(
         connect_openrouter_via_pkce=fake_connect_openrouter_via_pkce,
-        reopen_openrouter_pkce_authorization_url=lambda: reopen_calls.append("reopen") or True,
+        reopen_openrouter_pkce_authorization_url=reopen,
+        openrouter_pkce_active=lambda: active[0],
         settings=AppSettings(),
         config_path=Path("settings.json"),
     )
+    app.page = DummyPage()
     app.view_settings = SimpleNamespace(
         refresh_after_openrouter_pkce_success=lambda *_args, **_kwargs: None,
         load_from_settings=lambda *_args, **_kwargs: None,
@@ -2991,9 +3000,11 @@ def test_on_request_openrouter_pkce_reopens_existing_auth_url_while_flow_active(
     monkeypatch.setattr(app, "_queue_settings_mutation_task", queued.append)
 
     app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+    active[0] = True
     app._on_request_openrouter_pkce(target_settings, launch_source="settings")
 
     assert len(queued) == 1
+    await app.page.tasks[0]()
     assert reopen_calls == ["reopen"]
 
 
@@ -3012,12 +3023,19 @@ async def test_on_request_openrouter_pkce_ignores_duplicate_while_flow_active(
         pkce_calls.append(launch_source)
         return False
 
+    active = [False]
+
+    async def reopen() -> bool:
+        return False
+
     app.controller = SimpleNamespace(
         connect_openrouter_via_pkce=fake_connect_openrouter_via_pkce,
-        reopen_openrouter_pkce_authorization_url=lambda: False,
+        reopen_openrouter_pkce_authorization_url=reopen,
+        openrouter_pkce_active=lambda: active[0],
         settings=AppSettings(),
         config_path=Path("settings.json"),
     )
+    app.page = DummyPage()
     app.view_settings = SimpleNamespace(
         refresh_after_openrouter_pkce_success=lambda *_args, **_kwargs: None,
         load_from_settings=lambda *_args, **_kwargs: None,
@@ -3026,12 +3044,14 @@ async def test_on_request_openrouter_pkce_ignores_duplicate_while_flow_active(
     monkeypatch.setattr(app, "_queue_settings_mutation_task", queued.append)
 
     app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+    active[0] = True
     app._on_request_openrouter_pkce(target_settings, launch_source="settings")
 
     assert len(queued) == 1
     await queued[0]()
     assert pkce_calls == ["settings"]
 
+    active[0] = False
     app._on_request_openrouter_pkce(target_settings, launch_source="settings")
 
     assert len(queued) == 2

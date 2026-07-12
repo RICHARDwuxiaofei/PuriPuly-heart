@@ -54,7 +54,7 @@ _SURFACE_RESPONSIBILITIES: dict[str, tuple[str, ...]] = {
         "prompt_clipboard",
         "dashboard_retry_facts",
     ),
-    "openrouter_pkce": ("dashboard_retry_facts",),
+    "openrouter_pkce": ("translation_policy", "dashboard_retry_facts"),
     "managed_legacy": ("dashboard_retry_facts",),
 }
 _SYNC_OPERATION = {
@@ -188,8 +188,10 @@ class PostCommitRuntimeTransactionOwner:
                 plan.request, plan.providers
             )
         except Exception:
+            await self._publish_reconciliation_dashboard(plan, completed)
             return _failed_execution(plan, operations, completed, "provider_activation", None)
         if provider_result.status != RUNTIME_APPLY_STATUS_APPLIED:
+            await self._publish_reconciliation_dashboard(plan, completed)
             return _failed_execution(
                 plan, operations, completed, "provider_activation", provider_result
             )
@@ -219,6 +221,30 @@ class PostCommitRuntimeTransactionOwner:
             skipped=(),
             reconciliation_required=False,
         )
+
+    async def _publish_reconciliation_dashboard(
+        self,
+        plan: PostCommitRuntimePlan,
+        completed: list[RuntimeOperation],
+    ) -> None:
+        directive = next(
+            (item for item in plan.synchronization if item.operation == "dashboard_retry_facts"),
+            None,
+        )
+        if directive is None:
+            return
+        try:
+            result = await self.synchronization.synchronize_runtime(
+                plan.request,
+                directive,
+                before=plan.before,
+                after=plan.after,
+                operational=plan.operational,
+            )
+        except Exception:
+            return
+        if result.status == RUNTIME_APPLY_STATUS_APPLIED:
+            completed.append("dashboard_retry_facts")
 
 
 def _provider_action(
@@ -358,7 +384,9 @@ def _failed_execution(
     result: RuntimeApplyResult | None,
 ) -> PostCommitRuntimeExecutionResult:
     failed_index = operations.index(failed)
-    skipped = operations[failed_index + 1 :]
+    skipped = tuple(
+        operation for operation in operations[failed_index + 1 :] if operation not in completed
+    )
     operation = (
         "apply_provider_runtime" if failed == "provider_activation" else _SYNC_OPERATION[failed]
     )

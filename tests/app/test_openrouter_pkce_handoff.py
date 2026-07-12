@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import hashlib
 import importlib
 from collections.abc import Mapping
@@ -917,8 +918,8 @@ async def test_runtime_apply_non_applied_status_is_degraded_without_rollback(
     )
     _assert_no_items(store.restores, label="secret restores")
     assert result.diagnostics is not None
-    assert result.diagnostics.component == "openrouter_pkce_handoff"
-    assert result.diagnostics.operation == "runtime_apply"
+    assert result.diagnostics.component == "runtime_apply_adapter"
+    assert result.diagnostics.operation == "apply_runtime"
     assert result.diagnostics.code == "runtime_apply_degraded"
     assert result.diagnostics.content_policy == messages.CONTENT_POLICY_METADATA_ONLY
     assert result.diagnostics.fields["runtime_status"] == runtime_status
@@ -963,3 +964,82 @@ async def test_runtime_apply_exception_is_degraded_without_rollback_or_raw_excep
     assert result.diagnostics.code == "runtime_apply_exception"
     assert result.diagnostics.content_policy == messages.CONTENT_POLICY_METADATA_ONLY
     assert "runtime failed after local commit" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_settings_save_restores_previous_secret() -> None:
+    events: list[tuple[str, str]] = []
+
+    class CancellingRepository(RecordingSettingsRepository):
+        async def save(self, request):  # noqa: ANN001, ANN201
+            self.events.append(("save", request.reason or ""))
+            raise asyncio.CancelledError
+
+    verifier = RecordingProviderVerifier(_verification_result(), events=events)
+    store = RecordingSecretStore({"openrouter_api_key": RAW_PREVIOUS_SECRET}, events=events)
+    repository = CancellingRepository(_commit_success(), events=events)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _service(
+            verifier=verifier,
+            store=store,
+            repository=repository,
+            runtime=RecordingRuntimeApply(events=events),
+        ).complete_handoff(_request())
+
+    assert events == [
+        ("verify", "openrouter"),
+        ("snapshot", "openrouter_api_key"),
+        ("set", "openrouter_api_key"),
+        ("save", "openrouter_pkce_handoff"),
+        ("restore", "openrouter_api_key"),
+    ]
+    _assert_secret_value_matches(
+        store.secrets["openrouter_api_key"],
+        RAW_PREVIOUS_SECRET,
+        label="restored cancellation secret",
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_secret_write_restores_previous_secret() -> None:
+    class CancellingStore(RecordingSecretStore):
+        async def set_secret(self, key: str, value: str):  # noqa: ANN201
+            self.secrets[key] = value
+            self.events.append(("set", key))
+            raise asyncio.CancelledError
+
+    events: list[tuple[str, str]] = []
+    store = CancellingStore({"openrouter_api_key": RAW_PREVIOUS_SECRET}, events=events)
+    with pytest.raises(asyncio.CancelledError):
+        await _service(
+            verifier=RecordingProviderVerifier(_verification_result(), events=events),
+            store=store,
+            repository=RecordingSettingsRepository(_commit_success(), events=events),
+            runtime=RecordingRuntimeApply(events=events),
+        ).complete_handoff(_request())
+    assert events[-1] == ("restore", "openrouter_api_key")
+    _assert_secret_value_matches(
+        store.secrets["openrouter_api_key"],
+        RAW_PREVIOUS_SECRET,
+        label="restored post-write cancellation secret",
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_commit_is_committed_degraded_with_exact_receipt() -> None:
+    class CancellingRuntime(RecordingRuntimeApply):
+        async def apply_runtime(self, request):  # noqa: ANN001, ANN201
+            self.requests.append(request)
+            raise asyncio.CancelledError
+
+    repository = RecordingSettingsRepository(_commit_success())
+    result = await _service(
+        verifier=RecordingProviderVerifier(_verification_result()),
+        store=RecordingSecretStore({"openrouter_api_key": RAW_PREVIOUS_SECRET}),
+        repository=repository,
+        runtime=CancellingRuntime(),
+    ).complete_handoff(_request())
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.receipt is repository.returned_result.receipt
+    assert result.reconciliation_required is True

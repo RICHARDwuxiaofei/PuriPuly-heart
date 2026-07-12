@@ -120,7 +120,7 @@ class Sync:
             "ui_prompt_clipboard_state",
             ("locale_ui_projection", "prompt_clipboard", "dashboard_retry_facts"),
         ),
-        ("openrouter_pkce", ("dashboard_retry_facts",)),
+        ("openrouter_pkce", ("translation_policy", "dashboard_retry_facts")),
     ],
 )
 def test_a_d_surface_responsibility_matrix_is_mandatory_and_deterministic(

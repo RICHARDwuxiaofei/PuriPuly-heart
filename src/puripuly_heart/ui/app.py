@@ -165,7 +165,6 @@ class TranslatorApp:
         self.overlay_peer_contract = None
         self.debug_ui_preview = bool(debug_ui_preview)
         self.debug_preview_panel: DebugPreviewPanel | None = None
-        self._openrouter_pkce_request_active = False
         self._oauth_runtime = OAuthRuntime()
         self._discord_managed_auth_generation = 0
         self._discord_managed_auth_cancelled = False
@@ -1292,43 +1291,40 @@ class TranslatorApp:
         *,
         launch_source: str = "settings",
     ) -> None:
-        if getattr(self, "_openrouter_pkce_request_active", False):
+        active_state = getattr(self.controller, "openrouter_pkce_active", None)
+        if callable(active_state) and active_state():
             reopen_authorization_url = getattr(
                 self.controller,
                 "reopen_openrouter_pkce_authorization_url",
                 None,
             )
             if callable(reopen_authorization_url):
-                reopen_authorization_url()
+                self.page.run_task(reopen_authorization_url)
             return
-        self._openrouter_pkce_request_active = True
 
         async def _task() -> None:
-            try:
-                ok = await self.controller.connect_openrouter_via_pkce(
-                    target_settings=target_settings,
-                    launch_source=launch_source,
+            ok = await self.controller.connect_openrouter_via_pkce(
+                target_settings=target_settings,
+                launch_source=launch_source,
+            )
+            if ok:
+                refresh_after_openrouter_pkce_success = getattr(
+                    self.view_settings,
+                    "refresh_after_openrouter_pkce_success",
+                    None,
                 )
-                if ok:
-                    refresh_after_openrouter_pkce_success = getattr(
-                        self.view_settings,
-                        "refresh_after_openrouter_pkce_success",
-                        None,
+                if callable(refresh_after_openrouter_pkce_success):
+                    refresh_after_openrouter_pkce_success(
+                        self.controller.settings,
+                        config_path=self.controller.config_path,
                     )
-                    if callable(refresh_after_openrouter_pkce_success):
-                        refresh_after_openrouter_pkce_success(
-                            self.controller.settings,
-                            config_path=self.controller.config_path,
-                        )
-                    else:
-                        self.view_settings.load_from_settings(
-                            self.controller.settings,
-                            config_path=self.controller.config_path,
-                            preserve_custom_vocab_draft=True,
-                        )
-                    self._show_snackbar(t("openrouter.pkce.connected"), COLOR_SUCCESS)
-            finally:
-                self._openrouter_pkce_request_active = False
+                else:
+                    self.view_settings.load_from_settings(
+                        self.controller.settings,
+                        config_path=self.controller.config_path,
+                        preserve_custom_vocab_draft=True,
+                    )
+                self._show_snackbar(t("openrouter.pkce.connected"), COLOR_SUCCESS)
 
         self._queue_settings_mutation_task(_task)
 

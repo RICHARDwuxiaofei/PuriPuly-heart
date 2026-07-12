@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -143,7 +144,9 @@ class SecretSettingsTransaction:
     ) -> SecretSettingsTransactionOutcome:
         try:
             snapshot = await self.secret_store.snapshot_secret(request.secret_key)
-        except Exception:
+        except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return SecretSettingsTransactionOutcome(
                 _secret_write_failed_result(
                     secret_key=request.secret_key,
@@ -158,13 +161,16 @@ class SecretSettingsTransaction:
                 request.secret_key,
                 request.secret_value,
             )
-        except Exception:
+        except BaseException as exc:
+            compensation = await self._restore_after_settings_commit_failure(
+                snapshot=snapshot,
+                action="set",
+                commit_message=None,
+            )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return SecretSettingsTransactionOutcome(
-                _secret_write_failed_result(
-                    secret_key=request.secret_key,
-                    action="set",
-                    operation="set_secret",
-                ),
+                compensation,
                 None,
             )
 
@@ -187,7 +193,9 @@ class SecretSettingsTransaction:
     async def clear_provider_secret(self, request: SecretClearRequest) -> TransactionResult:
         try:
             snapshot = await self.secret_store.snapshot_secret(request.secret_key)
-        except Exception:
+        except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return _secret_write_failed_result(
                 secret_key=request.secret_key,
                 action="clear",
@@ -196,12 +204,15 @@ class SecretSettingsTransaction:
 
         try:
             write_result = await self.secret_store.clear_secret(request.secret_key)
-        except Exception:
-            return _secret_write_failed_result(
-                secret_key=request.secret_key,
+        except BaseException as exc:
+            compensation = await self._restore_after_settings_commit_failure(
+                snapshot=snapshot,
                 action="clear",
-                operation="clear_secret",
+                commit_message=None,
             )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return compensation
 
         if not write_result.succeeded:
             return _secret_write_failed_result(
@@ -357,15 +368,15 @@ class SecretSettingsTransaction:
                     correlation_id=request.correlation_id,
                 )
             )
-        except Exception:
-            return SecretSettingsTransactionOutcome(
-                await self._restore_after_settings_commit_failure(
-                    snapshot=snapshot,
-                    action=action,
-                    commit_message=None,
-                ),
-                None,
+        except BaseException as exc:
+            compensation = await self._restore_after_settings_commit_failure(
+                snapshot=snapshot,
+                action=action,
+                commit_message=None,
             )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return SecretSettingsTransactionOutcome(compensation, None)
 
         if (
             commit_result.succeeded
@@ -405,7 +416,7 @@ class SecretSettingsTransaction:
         try:
             restore_result = await self.secret_store.restore_secret(snapshot)
             restore_succeeded = restore_result.succeeded
-        except Exception:
+        except BaseException:
             restore_succeeded = False
 
         if restore_succeeded:
@@ -447,7 +458,7 @@ class SecretSettingsTransaction:
                 replace(snapshot, settings_revision=settings_revision),
                 correlation_id=correlation_id,
             )
-        except Exception:
+        except BaseException:
             pass
 
 

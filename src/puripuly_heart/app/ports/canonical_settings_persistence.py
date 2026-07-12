@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol, TypeVar, runtime_checkable
 
@@ -44,6 +45,10 @@ class CanonicalSettingsPersistencePort(Protocol[LegacySettingsT, CanonicalSettin
     ) -> SettingsCommitReceipt: ...
 
     def legacy_projection(self, settings: CanonicalSettingsT) -> LegacySettingsT: ...
+
+    def values_for(self, settings: CanonicalSettingsT) -> Mapping[str, object]: ...
+
+    def envelope_from_values(self, values: Mapping[str, object]) -> CanonicalSettingsT: ...
 
     def receipt_for(
         self,

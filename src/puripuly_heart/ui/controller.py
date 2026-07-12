@@ -62,9 +62,13 @@ from puripuly_heart.app.services.managed_connection_auth import (
     ManagedConnectionAuthRequest,
     ManagedConnectionAuthService,
 )
+from puripuly_heart.app.services.openrouter_pkce_owner import (
+    OpenRouterPkceResult,
+    ReopenOpenRouterPkce,
+    StartOpenRouterPkce,
+)
 from puripuly_heart.app.services.provider_runtime_apply import (
     _ControllerNoopRuntimeApply,
-    _ControllerProviderRuntimeApply,
     _ControllerSttLanguageAudioRuntimeApply,
     _ControllerUiPromptClipboardStateRuntimeApply,
     _overlay_osc_output_runtime_degraded_transaction_result,
@@ -82,10 +86,6 @@ from puripuly_heart.app.services.provider_runtime_apply import (
     _ui_prompt_clipboard_state_save_failed_transaction_result,
 )
 from puripuly_heart.app.services.qq_managed_auth import QqManagedAuthRequest, QqManagedAuthService
-from puripuly_heart.app.services.secret_settings_transaction import (
-    SecretSetRequest,
-    SecretSettingsTransaction,
-)
 from puripuly_heart.app.services.settings_mutation import (
     OverlayOscOutputSettingsMutation,
     SettingsMutationService,
@@ -199,7 +199,6 @@ from puripuly_heart.core.messages import (
     TransactionResult,
 )
 from puripuly_heart.core.openrouter_credentials import (
-    OPENROUTER_BYOK_API_KEY_SECRET,
     OPENROUTER_MANAGED_API_KEY_SECRET,
     resolve_openrouter_credentials,
 )
@@ -209,7 +208,6 @@ from puripuly_heart.core.openrouter_handoff import (
     should_auto_show_founder_letter,
 )
 from puripuly_heart.core.openrouter_metadata import OpenRouterKeyMetadata
-from puripuly_heart.core.openrouter_pkce import OpenRouterPKCEClient
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
@@ -1055,6 +1053,7 @@ class GuiController:
         init=False,
         default=None,
     )
+    last_openrouter_pkce_result: OpenRouterPkceResult | None = field(init=False, default=None)
     _settings_commit_lock: asyncio.Lock | None = field(
         init=False,
         default=None,
@@ -1062,7 +1061,6 @@ class GuiController:
     )
     clock: SystemClock = SystemClock()
     _managed_openrouter_release_service: ManagedOpenRouterReleaseService | None = None
-    _openrouter_pkce_client: OpenRouterPKCEClient | None = None
     _oauth_runtime: OAuthRuntime | None = field(init=False, default=None)
 
     sender: VrchatOscUdpSender | None = None
@@ -6909,6 +6907,11 @@ class GuiController:
         )
         if callable(subscribe_managed):
             subscribe_managed(self.handle_managed_discord_callback)
+        subscribe_dashboard = getattr(
+            self.application_runtime_host, "subscribe_dashboard_runtime_facts", None
+        )
+        if callable(subscribe_dashboard):
+            subscribe_dashboard(self._apply_dashboard_runtime_facts)
         parts = self.application_runtime_host.parts
         if parts is None:
             raise RuntimeError("application runtime host is closed")
@@ -6923,6 +6926,17 @@ class GuiController:
         if callable(bind_suppressed):
             bind_suppressed(self._on_final_transcript_suppressed)
         self._last_peer_translation_enabled = self.settings.ui.peer_translation_enabled
+
+    def _apply_dashboard_runtime_facts(self, facts: object) -> None:
+        dashboard = getattr(self.app, "view_dashboard", None)
+        if dashboard is None:
+            return
+        set_translation = getattr(dashboard, "set_translation_needs_key", None)
+        if callable(set_translation):
+            set_translation(not bool(getattr(facts, "llm_available", False)))
+        set_stt = getattr(dashboard, "set_stt_needs_key", None)
+        if callable(set_stt):
+            set_stt(not bool(getattr(facts, "self_stt_available", False)))
 
     async def _replace_managed_openrouter_release_service(
         self,
@@ -7862,18 +7876,16 @@ class GuiController:
         except Exception as exc:
             self._log_error(f"Mic loop error: {exc}")
 
-    def _create_openrouter_pkce_client(self) -> OpenRouterPKCEClient:
-        return OpenRouterPKCEClient(callback_origin="http://localhost:3000")
-
-    def reopen_openrouter_pkce_authorization_url(self) -> bool:
-        if (
-            self._oauth_runtime is not None
-            and self._oauth_runtime.reopen_openrouter_pkce_authorization_url()
-        ):
-            return True
-        if self._openrouter_pkce_client is None:
+    async def reopen_openrouter_pkce_authorization_url(self) -> bool:
+        if self.application_runtime_host is None:
             return False
-        return self._openrouter_pkce_client.reopen_authorization_url()
+        result = await self.application_runtime_host.execute_openrouter_pkce(ReopenOpenRouterPkce())
+        return result.status == "reopened"
+
+    def openrouter_pkce_active(self) -> bool:
+        return bool(
+            self.application_runtime_host and self.application_runtime_host.openrouter_pkce_active()
+        )
 
     def build_managed_openrouter_byok_target_settings(self) -> AppSettings | None:
         """Build a BYOK OpenRouter target settings draft from the current managed state.
@@ -7938,32 +7950,6 @@ class GuiController:
         if profile.openrouter_model is None:
             raise ValueError("PKCE connection requires a BYOK OpenRouter model")
 
-        try:
-            pkce_client = self._create_openrouter_pkce_client()
-            self._openrouter_pkce_client = pkce_client
-            try:
-                result = await self._get_oauth_runtime().run_openrouter_pkce_flow(pkce_client)
-            finally:
-                self._openrouter_pkce_client = None
-        except Exception:
-            self._show_short_message("openrouter.pkce.failed")
-            self._log_error("OpenRouter PKCE flow failed")
-            self._maybe_show_founder_letter_after_pkce_failure(launch_source)
-            return False
-
-        try:
-            verified = await self._get_provider_verifier().verify_api_key(
-                "openrouter",
-                result.api_key,
-            )
-        except Exception:
-            verified = False
-        if not verified:
-            self._show_short_message("openrouter.pkce.failed")
-            self._log_error("OpenRouter PKCE key verification failed")
-            self._maybe_show_founder_letter_after_pkce_failure(launch_source)
-            return False
-
         updated = copy.deepcopy(target_settings)
         updated.provider.llm = LLMProviderName.OPENROUTER
         updated.openrouter.selection_alias = OpenRouterSelectionAlias(profile.alias)
@@ -7971,72 +7957,41 @@ class GuiController:
         updated.openrouter.llm_model = OpenRouterLLMModel(profile.openrouter_model)
         updated.api_key_verified.openrouter = True
 
-        secret_store = create_secret_store(self.settings.secrets, config_path=self.config_path)
-        secret_store_port = _ControllerSecretStorePortAdapter(secret_store)
-        settings_repository = _ControllerSettingsPatchRepository(
-            controller=self,
+        if self.application_runtime_host is None:
+            return False
+        receipt = await asyncio.to_thread(
+            self.canonical_settings_persistence.load_receipt,
+            self.config_path,
+            reason=None,
+            correlation_id=None,
+        )
+        canonical = self.canonical_settings_persistence.apply_legacy_delta(
+            canonical=receipt.envelope,
             base_settings=self.settings,
-            committed_settings=updated,
-            surface="openrouter_pkce",
+            next_settings=updated,
         )
-        transaction = SecretSettingsTransaction(
-            secret_store=secret_store_port,
-            settings_repository=settings_repository,
-        )
-        commit_outcome = await transaction.set_provider_secret_with_receipt(
-            SecretSetRequest(
-                secret_key=OPENROUTER_BYOK_API_KEY_SECRET,
-                secret_value=result.api_key,
-                settings_values=_settings_snapshot_values(updated),
-                expected_settings_revision=None,
-                reason="openrouter_pkce",
-                correlation_id=None,
+        outcome = await self.application_runtime_host.execute_openrouter_pkce(
+            StartOpenRouterPkce(
+                self.canonical_settings_persistence.values_for(canonical),
+                receipt.revision,
+                launch_source,
+                operational=self.runtime_operational_snapshot(),
             )
         )
-        commit_result = commit_outcome.transaction_result
-        if commit_result.status != TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+        self.last_openrouter_pkce_result = outcome
+        self.last_settings_mutation_result = outcome.transaction
+        if outcome.status not in {"succeeded", "committed_degraded"}:
             self._show_short_message("openrouter.pkce.failed")
-            self._log_error("OpenRouter PKCE settings commit failed")
-            self.last_settings_mutation_result = commit_result
             self._maybe_show_founder_letter_after_pkce_failure(launch_source)
-            self._complete_canonical_mutation()
             return False
-
-        if commit_outcome.receipt is None:
-            self._complete_canonical_mutation()
+        committed = outcome.receipt
+        if committed is None:
+            self._show_short_message("openrouter.pkce.failed")
             return False
-        committed_settings = self.canonical_settings_persistence.legacy_projection(
-            commit_outcome.receipt.envelope
-        )
-        plan = self._build_provider_runtime_apply_plan(
-            committed_settings,
-            force_rebuild_llm=True,
-        )
-        runtime_apply_port = _ControllerProviderRuntimeApply(
-            controller=self,
-            settings=committed_settings,
-            plan=plan,
-            surface="openrouter_pkce",
-            operation="openrouter_pkce_runtime_apply",
-        )
-        runtime_result = await runtime_apply_port.apply_runtime(
-            RuntimeApplyRequest(
-                receipt=commit_outcome.receipt,
-            )
-        )
-        if runtime_result.status == RUNTIME_APPLY_STATUS_APPLIED:
-            self.last_settings_mutation_result = TransactionResult(
-                status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
-                message=runtime_result.message,
-                diagnostics=runtime_result.diagnostics,
-            )
-            self._complete_canonical_mutation()
-            return True
-
-        self.last_settings_mutation_result = _runtime_apply_result_as_degraded_transaction(
-            runtime_result
-        )
-        self._complete_canonical_mutation()
+        self.vnext_settings = committed.envelope
+        self._vnext_settings_authoritative = True
+        self.settings = self.canonical_settings_persistence.legacy_projection(committed.envelope)
+        self._remember_canonical_legacy_projection(self.settings)
         return True
 
     def _maybe_show_founder_letter_after_pkce_failure(self, launch_source: str) -> None:

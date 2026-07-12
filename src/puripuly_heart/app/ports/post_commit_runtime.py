@@ -119,6 +119,9 @@ class DashboardRetryFactsDirective:
     self_stt_retry_pending: bool
     peer_stt_available: bool
     peer_stt_retry_pending: bool
+    translation_desired: bool = False
+    translation_effective: bool = False
+    settings_revision: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

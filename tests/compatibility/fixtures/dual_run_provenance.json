@@ -13,6 +13,7 @@
         "files": [
           "src/puripuly_heart/app/adapters/application_runtime_production.py",
         "src/puripuly_heart/app/adapters/canonical_state_repository.py",
+        "src/puripuly_heart/app/adapters/openrouter_pkce_production.py",
         "src/puripuly_heart/app/adapters/overlay_lifecycle_production.py",
         "src/puripuly_heart/app/adapters/overlay_osc_runtime.py",
         "src/puripuly_heart/app/adapters/overlay_runtime_effects.py",
@@ -23,6 +24,7 @@
         "src/puripuly_heart/app/ports/application_runtime.py",
         "src/puripuly_heart/app/ports/canonical_settings_persistence.py",
         "src/puripuly_heart/app/ports/canonical_state_repository.py",
+        "src/puripuly_heart/app/ports/openrouter_pkce_runtime.py",
         "src/puripuly_heart/app/ports/overlay_application.py",
         "src/puripuly_heart/app/ports/post_commit_runtime.py",
         "src/puripuly_heart/app/ports/runtime_apply.py",
@@ -35,6 +37,7 @@
         "src/puripuly_heart/app/services/canonical_state_repositories.py",
         "src/puripuly_heart/app/services/managed_connection_auth.py",
         "src/puripuly_heart/app/services/openrouter_pkce_handoff.py",
+        "src/puripuly_heart/app/services/openrouter_pkce_owner.py",
         "src/puripuly_heart/app/services/overlay_osc_application_runtime.py",
         "src/puripuly_heart/app/services/post_commit_runtime.py",
         "src/puripuly_heart/app/services/resolved_runtime_adapter.py",
@@ -50,10 +53,12 @@
         "src/puripuly_heart/config/runtime_resolution.py",
         "src/puripuly_heart/config/settings_vnext/compat.py",
         "src/puripuly_heart/config/settings_vnext/serialization.py",
+        "src/puripuly_heart/core/openrouter_pkce.py",
         "src/puripuly_heart/core/orchestrator/channel_runtime.py",
         "src/puripuly_heart/core/orchestrator/hub.py",
         "src/puripuly_heart/core/overlay/process.py",
           "src/puripuly_heart/core/runtime/overlay.py",
+          "src/puripuly_heart/core/runtime/oauth.py",
           "src/puripuly_heart/core/runtime/peer_channel.py",
         "src/puripuly_heart/core/runtime/provider_handle.py",
         "src/puripuly_heart/core/runtime/provider_state.py",
@@ -65,8 +70,8 @@
         "src/puripuly_heart/ui/app.py",
         "src/puripuly_heart/ui/controller.py"
       ],
-        "production_source_sha256": "c18b3810ad54018d3fa2fd627b7a296adba74875f66780d3abad589e25e20844",
-        "source_delta_sha256": "bf4546bbe9ae1e627966f6569946eb038037e73bbfe60ed144d72af3b2cec4dc"
+        "production_source_sha256": "487d994421b620f51a1e42cb873b6ed2643940a0cd488f5bbd6160dac6f560e9",
+        "source_delta_sha256": "ca188497dba7d5b8272d36d139ab9134acaf585c8b10382b7ca52db32839b79a"
     },
     "repair_base": "b4ace2631793aa1a1e384c0440b8ec7f315559ae"
   },

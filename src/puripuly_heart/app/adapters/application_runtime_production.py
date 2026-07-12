@@ -776,6 +776,7 @@ class ProductionRuntimeSynchronization:
     self_owner: SelfSTTChannelOwner
     peer_owner: PeerChannelRuntime
     epoch: RuntimePolicyEpoch
+    dashboard_projection: object | None = None
 
     async def synchronize_runtime(
         self, request, directive, *, before, after, operational  # noqa: ANN001
@@ -808,7 +809,29 @@ class ProductionRuntimeSynchronization:
         elif operation == "locale_ui_projection":
             self.hub.runtime_locale = directive.locale
         elif operation == "dashboard_retry_facts":
+            provider_snapshot = getattr(self.hub, "provider_state_snapshot", None)
+            llm_provider = (
+                provider_snapshot().llm.provider
+                if callable(provider_snapshot)
+                else getattr(self.hub, "llm", None)
+            )
+            llm_available = llm_provider is not None
+            directive = replace(
+                directive,
+                llm_available=llm_available,
+                llm_retry_pending=bool(operational.translation_enabled and not llm_available),
+                translation_desired=operational.translation_enabled,
+                translation_effective=bool(
+                    operational.translation_enabled
+                    and getattr(self.hub, "translation_enabled", False)
+                    and llm_available
+                ),
+                settings_revision=after.revision,
+            )
             self.hub.runtime_dashboard_facts = directive
+            publish = getattr(self.dashboard_projection, "publish_dashboard_runtime_facts", None)
+            if callable(publish):
+                publish(directive)
         return RuntimeApplyResult(RUNTIME_APPLY_STATUS_APPLIED, None, None)
 
     async def _synchronize_channels(self, request, operational) -> None:  # noqa: ANN001
@@ -1051,7 +1074,12 @@ def create_production_application_runtime(
     provider_activation = SelectiveProviderActivationAdapter(
         managed_resolved, self_owner, peer_owner, epoch
     )
-    synchronization = ProductionRuntimeSynchronization(hub, self_owner, peer_owner, epoch)
+    from puripuly_heart.app.adapters.overlay_ui_projection import ProductionUiProjection
+
+    dashboard_projection = ProductionUiProjection()
+    synchronization = ProductionRuntimeSynchronization(
+        hub, self_owner, peer_owner, epoch, dashboard_projection
+    )
     coordinator = PostCommitRuntimeTransactionOwner(provider_activation, synchronization)
     transactions = SelectiveSurfaceRuntimeTransactionPort(
         PostCommitRuntimePlanBuilder(resolver),
@@ -1066,14 +1094,27 @@ def create_production_application_runtime(
         resolver,
         managed_release_owner,
     )
-    return ApplicationRuntimeHost(
+    host = ApplicationRuntimeHost(
         parts=ApplicationRuntimeParts(sender, osc, hub, peer_owner, self_owner),
         runtime_composition=composition,
         committed_settings=receipt_source,
         resolver=resolver,
         runtime_logging=logging,
         audio_hooks=hooks,
+        dashboard_projection=dashboard_projection,
     )
+    from puripuly_heart.app.adapters.openrouter_pkce_production import (
+        create_production_openrouter_pkce_owner,
+    )
+
+    pkce_owner, _runtime_apply = create_production_openrouter_pkce_owner(
+        host=host,
+        persistence=persistence,
+        state_path=state_path,
+        secrets=secrets,
+    )
+    host.bind_openrouter_pkce(pkce_owner)
+    return host
 
 
 __all__ = ["create_production_application_runtime"]
