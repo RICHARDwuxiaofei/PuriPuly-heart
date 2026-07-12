@@ -5,7 +5,7 @@ from typing import Literal
 
 from puripuly_heart.ui.i18n import t
 
-OverlayPeerSurfaceState = Literal["off", "on", "warning"]
+OverlayPeerSurfaceState = Literal["off", "starting", "on", "warning"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -34,6 +34,7 @@ def build_overlay_peer_consumer_contract(
     peer_intent_enabled: bool,
     peer_effective_enabled: bool,
     peer_warning_reason: str | None = None,
+    peer_activation_starting: bool = False,
 ) -> OverlayPeerConsumerContract:
     overlay_contract = OverlayPeerToggleContract(
         intent_enabled=overlay_intent_enabled,
@@ -50,7 +51,11 @@ def build_overlay_peer_consumer_contract(
         overlay_state=overlay_state,
         peer_warning_reason=peer_warning_reason,
     )
-    peer_state = _peer_surface_state(peer_intent_enabled, peer_effective_enabled)
+    peer_state = _peer_surface_state(
+        peer_intent_enabled,
+        peer_effective_enabled,
+        peer_activation_starting,
+    )
     peer_contract = OverlayPeerToggleContract(
         intent_enabled=peer_intent_enabled,
         effective_enabled=peer_effective_enabled,
@@ -120,11 +125,14 @@ def _overlay_failure_text(overlay_failure_reason: str | None) -> str:
 def _peer_surface_state(
     peer_intent_enabled: bool,
     peer_effective_enabled: bool,
+    peer_activation_starting: bool,
 ) -> OverlayPeerSurfaceState:
     if not peer_intent_enabled:
         return "off"
     if peer_effective_enabled:
         return "on"
+    if peer_activation_starting:
+        return "starting"
     return "warning"
 
 
@@ -161,7 +169,7 @@ def _peer_helper_text(
         if overlay_state == "connected":
             return ""
         return t("settings.peer_translation.disabled.overlay_required")
-    if peer_state == "on":
+    if peer_state in {"starting", "on"}:
         return ""
     if peer_warning_reason == "overlay_starting":
         return t("settings.peer_translation.warning.overlay_starting")

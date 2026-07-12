@@ -235,6 +235,13 @@ class ManagedSTTProvider:
             await result
         self._backend_closed = True
 
+    async def discard_pending_events(self) -> None:
+        while True:
+            try:
+                self._events.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+
     async def handle_vad_event(self, event: VadEvent) -> None:
         if isinstance(event, SpeechStart):
             await self._on_speech_start(event)

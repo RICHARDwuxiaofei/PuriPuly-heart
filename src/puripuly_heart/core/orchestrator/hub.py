@@ -1015,12 +1015,37 @@ class ClientHub:
         await self._peer_stt_provider_runtime.start_if_provider(stt)
         self._sync_provider_runtime_aliases()
 
+    async def drain_peer_stt_for_toggle_off(self, stt: STTProvider) -> None:
+        if self.peer_stt is not stt:
+            return
+        await self.peer_final_runs.cancel_pending()
+        await self.peer_runtime.reset_runtime_state()
+        self._clear_peer_logical_turn_state()
+        self._clear_latency_state(channel="peer")
+        await self._peer_stt_provider_runtime.retire_for_dormant_reuse(stt)
+        self._sync_provider_runtime_aliases()
+
     async def replace_llm_provider(self, llm: LLMProvider | None) -> None:
         await self._llm_provider_runtime.replace_provider(llm, start=False)
         self._sync_provider_runtime_aliases()
 
-    async def drain_self_stt_for_toggle_off(self) -> None:
-        await self._self_stt_provider_runtime.drain_for_toggle_off()
+    async def drain_self_stt_for_toggle_off(
+        self,
+        *,
+        release_backend_after: float | None = None,
+    ) -> None:
+        await self._self_stt_provider_runtime.drain_for_toggle_off(
+            release_backend_after=release_backend_after
+        )
+        self._sync_provider_runtime_aliases()
+
+    async def schedule_self_stt_idle_release(self, *, release_backend_after: float) -> None:
+        await self._self_stt_provider_runtime.schedule_idle_release(
+            release_backend_after=release_backend_after
+        )
+
+    async def resume_self_stt_after_toggle_on(self) -> None:
+        await self._self_stt_provider_runtime.start()
         self._sync_provider_runtime_aliases()
 
     def _provider_runtime_handles_have_resources(self) -> bool:

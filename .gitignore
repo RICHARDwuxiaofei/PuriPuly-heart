@@ -234,6 +234,9 @@ refactoring/
 !/scripts/installer/
 /scripts/installer/*
 !/scripts/installer/install-local-stt-model.ps1
+!/scripts/release/
+/scripts/release/*
+!/scripts/release/unattended-runtime-evidence.py
 .codex/
 .agent/
 .agents/

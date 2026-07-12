@@ -242,6 +242,7 @@ from puripuly_heart.core.overlay.process import (
 )
 from puripuly_heart.core.runtime.clipboard import ClipboardRuntime
 from puripuly_heart.core.runtime.github_star_prompt import GithubStarPromptRuntime
+from puripuly_heart.core.runtime.local_qwen_lifecycle import LOCAL_QWEN_IDLE_RELEASE_SECONDS
 from puripuly_heart.core.runtime.local_stt_download import LocalSTTDownloadRuntime
 from puripuly_heart.core.runtime.logging import RuntimeLoggingService
 from puripuly_heart.core.runtime.mic_test import MicTestRuntime
@@ -947,6 +948,9 @@ class GuiController:
     _stt_switch_task: asyncio.Task[None] | None = None
     _stt_restart_requested: bool = False
     _stt_force_immediate: bool = False
+    _stt_activation_generation: int = field(init=False, default=0)
+    _stt_activation_starting: bool = field(init=False, default=False)
+    _stt_activation_failed: bool = field(init=False, default=False)
     _last_stt_runtime_signature: tuple[object, ...] | None = None
     _last_self_stt_runtime_signature: tuple[object, ...] | None = None
     _last_peer_stt_runtime_signature: tuple[object, ...] | None = None
@@ -956,6 +960,9 @@ class GuiController:
     _last_microphone_test_audio_settings_signature: tuple[object, ...] | None = None
     _last_peer_translation_enabled: bool | None = None
     _last_peer_translation_activation_requested: bool | None = None
+    _peer_activation_generation: int = field(init=False, default=0)
+    _peer_activation_starting: bool = field(init=False, default=False)
+    _process_idle_preparation_scheduled: bool = field(init=False, default=False)
     _peer_process_warning_reason: str | None = field(init=False, default=None)
     _last_vrc_mic_sync_enabled: bool | None = None
     _settings_view_order22_baseline: _SettingsPathSnapshot | None = field(
@@ -1145,6 +1152,7 @@ class GuiController:
             peer_intent_enabled=bool(self.settings.ui.peer_translation_enabled),
             peer_effective_enabled=peer_effective,
             peer_warning_reason=self._peer_process_warning_reason,
+            peer_activation_starting=self._peer_activation_starting,
         )
 
     def _refresh_overlay_peer_consumers(self) -> None:
@@ -1159,13 +1167,26 @@ class GuiController:
         if not force_immediate:
             drain = getattr(self.hub, "drain_self_stt_for_toggle_off", None)
             if callable(drain):
-                await drain()
+                release_backend_after = (
+                    LOCAL_QWEN_IDLE_RELEASE_SECONDS
+                    if self.settings is not None
+                    and self.settings.provider.stt == STTProviderName.LOCAL_QWEN
+                    else None
+                )
+                await drain(release_backend_after=release_backend_after)
                 return
         else:
             self.log_detailed("[STT] Force immediate toggle-off requested")
         stt = getattr(self.hub, "stt", None)
         if stt is not None:
             await stt.close()
+            if (
+                self.settings is not None
+                and self.settings.provider.stt == STTProviderName.LOCAL_QWEN
+            ):
+                schedule_release = getattr(self.hub, "schedule_self_stt_idle_release", None)
+                if callable(schedule_release):
+                    await schedule_release(release_backend_after=LOCAL_QWEN_IDLE_RELEASE_SECONDS)
 
     async def _refresh_overlay_runtime_dependencies(self) -> None:
         if self.settings is None or self.hub is None:
@@ -1250,6 +1271,20 @@ class GuiController:
         bridge = self._create_ui_event_bridge(runtime_logging=runtime_logging)
         self._start_ui_event_bridge_task(bridge)
         await self._sync_clipboard_watcher()
+        self._schedule_process_discovery_idle_preparation()
+
+    def _schedule_process_discovery_idle_preparation(self) -> None:
+        if self._process_idle_preparation_scheduled:
+            return
+        self._process_idle_preparation_scheduled = True
+        run_task = getattr(self.page, "run_task", None)
+        if callable(run_task):
+            with contextlib.suppress(Exception):
+                run_task(self._prepare_process_discovery_idle)
+
+    async def _prepare_process_discovery_idle(self) -> None:
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(lambda: tuple(PsutilCurrentUserProcessSnapshots().snapshots()))
 
     def _create_ui_event_bridge(self, *, runtime_logging) -> UIEventBridge:  # noqa: ANN001
         assert self.hub is not None
@@ -3972,6 +4007,8 @@ class GuiController:
             return
 
         enabled = bool(enabled)
+        self._peer_activation_generation += 1
+        activation_generation = self._peer_activation_generation
         self.log_basic(f"[Peer] Toggle request: enabled={enabled}")
         self.log_detailed(
             "[Peer] Toggle detail: "
@@ -3997,8 +4034,14 @@ class GuiController:
         self._last_peer_translation_activation_requested = (
             self._peer_translation_activation_requested_for(self.settings)
         )
+        self._peer_activation_starting = enabled
+        self._refresh_overlay_peer_consumers()
         if enabled:
-            await self._ensure_peer_local_stt_ready()
+            ready = await self._ensure_peer_local_stt_ready()
+            if activation_generation != self._peer_activation_generation:
+                return
+            if not ready:
+                self._peer_activation_starting = False
         self._clear_local_stt_pending_enable_if_provider_switched_away()
         self._sync_local_stt_notice()
         self._refresh_overlay_peer_consumers()
@@ -4007,7 +4050,10 @@ class GuiController:
             await self._begin_overlay_start()
         else:
             await self._refresh_overlay_runtime_dependencies()
+        if activation_generation != self._peer_activation_generation:
+            return
         self._sync_effective_hub_flags(self.settings)
+        self._peer_activation_starting = False
         if enabled:
             self._enqueue_peer_translation_disclosure()
         self._refresh_overlay_peer_consumers()
@@ -4637,6 +4683,11 @@ class GuiController:
             "[STT] Toggle detail: "
             f"desired_before={self._stt_desired} overlay_state={self.overlay_state}"
         )
+        self._stt_activation_generation += 1
+        activation_generation = self._stt_activation_generation
+        self._stt_activation_starting = bool(enabled)
+        self._stt_activation_failed = False
+        self._sync_local_stt_notice()
         self._stt_desired = bool(enabled)
         self._stt_force_immediate = force_immediate
         if not enabled:
@@ -4665,6 +4716,8 @@ class GuiController:
                 if dash is not None:
                     dash.set_stt_enabled(False)
                 self._show_short_stt_message("local_stt.download_in_progress")
+                self._stt_activation_starting = False
+                self._sync_local_stt_notice()
                 return
             if current_status in ("missing", "invalid", "download_failed"):
                 self._handle_local_stt_unavailable(
@@ -4672,6 +4725,8 @@ class GuiController:
                     resume_self=True,
                     resume_peer=self._peer_local_stt_requested(self.settings),
                 )
+                self._stt_activation_starting = False
+                self._sync_local_stt_notice()
                 return
 
         # Mark promo eligible when user explicitly enables STT via button
@@ -4679,6 +4734,9 @@ class GuiController:
             self.hub.mark_promo_eligible()
 
         await self._ensure_stt_switch()
+        if activation_generation == self._stt_activation_generation:
+            self._stt_activation_starting = False
+            self._sync_local_stt_notice()
 
     def _show_short_stt_message(self, message_key: str) -> None:
         self._show_short_message(message_key)
@@ -4827,7 +4885,16 @@ class GuiController:
         if dash is None or self.settings is None:
             return
         status = self._current_local_stt_runtime_status()
-        should_show = status == "downloading" or (
+        if (
+            self._stt_activation_starting
+            and self.settings.provider.stt == STTProviderName.LOCAL_QWEN
+        ):
+            status = "starting"
+        elif (
+            self._stt_activation_failed and self.settings.provider.stt == STTProviderName.LOCAL_QWEN
+        ):
+            status = "start_failed"
+        should_show = status in {"starting", "downloading"} or (
             (
                 self.settings.provider.stt == STTProviderName.LOCAL_QWEN
                 or self._peer_local_stt_requested(self.settings)
@@ -5004,6 +5071,8 @@ class GuiController:
                 resume_self=True,
                 resume_peer=self._peer_local_stt_requested(self.settings),
             )
+        if self.hub is not None and self.hub.stt is None:
+            await self._rebuild_stt_provider()
         if self.hub is None or self.hub.stt is None:
             self._stt_desired = False
             dash = getattr(self.app, "view_dashboard", None)
@@ -5047,7 +5116,6 @@ class GuiController:
                 resume_peer=True,
             )
         try:
-            await self._probe_peer_local_stt_runtime_load()
             self._local_stt_install_state = LocalSTTInstallState(status="ready")
             if self._local_stt_runtime_status != "downloading":
                 self._local_stt_runtime_status = "ready"
@@ -5117,6 +5185,7 @@ class GuiController:
         async with self._stt_switch_lock:
             while True:
                 desired = self._stt_desired
+                activation_generation = self._stt_activation_generation
                 restart = self._stt_restart_requested
                 self._stt_restart_requested = False
                 force_immediate = self._stt_force_immediate
@@ -5142,9 +5211,29 @@ class GuiController:
                             await self._drain_self_stt_for_toggle_off(
                                 force_immediate=force_immediate
                             )
+                    resume_stt = getattr(self.hub, "resume_self_stt_after_toggle_on", None)
+                    if callable(resume_stt):
+                        await resume_stt()
                     if not await self._ensure_local_stt_ready():
                         break
-                    await self._start_mic_loop()
+                    if (
+                        activation_generation != self._stt_activation_generation
+                        or not self._stt_desired
+                    ):
+                        continue
+                    started = await self._start_mic_loop()
+                    if activation_generation != self._stt_activation_generation:
+                        if started is not False:
+                            await self._stop_mic_loop()
+                        continue
+                    if started is False:
+                        self._stt_desired = False
+                        self._stt_activation_failed = True
+                        dash = getattr(self.app, "view_dashboard", None)
+                        if dash is not None:
+                            dash.set_stt_enabled(False)
+                        self._sync_local_stt_notice()
+                        break
                     # Pre-warm STT session for faster first response
                     if (
                         self.hub is not None
@@ -7434,9 +7523,15 @@ class GuiController:
                     manager.terminate()
         return names
 
-    def _create_peer_audio_source_from_runtime_config(self, config: PeerRuntimeConfig):
+    async def _create_peer_audio_source_from_runtime_config(self, config: PeerRuntimeConfig):
         if config.capture_target.kind == "process":
-            return self._create_process_peer_audio_source(config)
+            process_target = self._process_target_from_runtime_config(config)
+            resolution = await asyncio.to_thread(
+                lambda: ProcessCaptureResolver(
+                    snapshots=PsutilCurrentUserProcessSnapshots()
+                ).resolve_for_start(process_target)
+            )
+            return self._create_process_peer_audio_source(config, resolution=resolution)
 
         device_name = config.capture_target.device_name or config.output_device
         raw_source = DesktopLoopbackAudioSource(device_name=device_name)
@@ -7457,11 +7552,17 @@ class GuiController:
             log_detailed=lambda message: self.log_detailed(message),
         )
 
-    def _create_process_peer_audio_source(self, config: PeerRuntimeConfig) -> DesktopPeerPipeline:
-        process_target = self._process_target_from_runtime_config(config)
-        resolution = ProcessCaptureResolver(
-            snapshots=PsutilCurrentUserProcessSnapshots()
-        ).resolve_for_start(process_target)
+    def _create_process_peer_audio_source(
+        self,
+        config: PeerRuntimeConfig,
+        *,
+        resolution=None,
+    ) -> DesktopPeerPipeline:
+        if resolution is None:
+            process_target = self._process_target_from_runtime_config(config)
+            resolution = ProcessCaptureResolver(
+                snapshots=PsutilCurrentUserProcessSnapshots()
+            ).resolve_for_start(process_target)
         if resolution.identity is None:
             assert resolution.unavailable_reason is not None
             raise ProcessCaptureTargetUnavailableError(resolution.unavailable_reason)
@@ -7847,6 +7948,7 @@ class GuiController:
             vad_model_resolver=ensure_silero_vad_onnx,
             run_audio_loop=self._run_peer_audio_vad_loop,
             diagnostic_sink=self._on_peer_runtime_diagnostic,
+            idle_release_seconds=LOCAL_QWEN_IDLE_RELEASE_SECONDS,
         )
         self._last_peer_translation_enabled = self.settings.ui.peer_translation_enabled
         await self._configure_vrc_mic_receiver(enabled=self.settings.osc.vrc_mic_intercept)
@@ -8493,13 +8595,13 @@ class GuiController:
             )
         return owner
 
-    async def _start_mic_loop(self) -> None:
+    async def _start_mic_loop(self) -> bool:
         assert self.settings is not None
         assert self.hub is not None
         self_audio_runtime = self._adopt_self_audio_legacy_aliases()
 
         if self._mic_task is not None:
-            return
+            return True
 
         if self._audio_source is not None or self._last_mic_loop_close_exception is not None:
             with contextlib.suppress(Exception):
@@ -8510,13 +8612,13 @@ class GuiController:
                     level=logging.WARNING,
                     exception=self._last_mic_loop_close_exception,
                 )
-                return
+                return False
 
         try:
             model_path = ensure_silero_vad_onnx()
         except Exception as exc:
             self._log_error(f"Failed to prepare Silero VAD model ({SILERO_VAD_VERSION}): {exc}")
-            return
+            return False
 
         if self._mic_task is None:
             vad = VadGating(
@@ -8757,7 +8859,7 @@ class GuiController:
 
             if source is None:
                 self._log_error("All microphone attempts failed")
-                return
+                return False
 
             self._vad = vad
             self._audio_source = self._wrap_diagnostic_audio_source(source, channel_label="self")
@@ -8767,6 +8869,7 @@ class GuiController:
                 run_loop=self._run_mic_loop,
             )
             self._sync_self_audio_runtime_aliases(self_audio_runtime)
+        return self._mic_task is not None
 
     async def _stop_mic_loop(self) -> None:
         self_audio_runtime = self._adopt_self_audio_legacy_aliases()

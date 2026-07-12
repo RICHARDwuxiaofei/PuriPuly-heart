@@ -291,8 +291,29 @@ def classify_fixture_failure(exc: Exception) -> str:
         return "fixture_timeout"
     if isinstance(exc, RuntimeError):
         code = str(exc)
-        if code in {"native_capture_timeout", "direct_child_capture_timeout"}:
-            return "capture_timeout"
+        if code == "direct_child_capture_timeout":
+            return "direct_child_capture_timeout"
+        if code == "native_capture_timeout":
+            return "peer_runtime_capture_timeout"
+        if code == "peer_runtime_faulted_before_frames":
+            return "peer_runtime_faulted_before_frames"
+        if code.startswith("peer_runtime_faulted_before_frames:"):
+            reason = code.partition(":")[2]
+            if reason in {
+                "process_target_unavailable",
+                "process_setup_failed",
+                "process_target_exited",
+                "process_source_failed",
+                "process_provider_failed",
+                "peer_runtime_failed",
+            }:
+                return f"peer_runtime_faulted_before_frames_{reason}"
+        if code.startswith("peer_runtime_loop_exception:"):
+            exception_name = code.partition(":")[2]
+            if exception_name.replace("_", "").isalnum():
+                return f"peer_runtime_loop_exception_{exception_name[:80]}"
+        if code == "peer_runtime_loop_completed_before_frames":
+            return "peer_runtime_loop_completed_before_frames"
         if code == "target_exit_timeout":
             return "target_exit_timeout"
         if code == "direct_child_topology_invalid":
@@ -513,6 +534,7 @@ async def _run_native(thresholds: IsolationThresholds, runtime_dir: Path) -> dic
         ResolvedCredentialRequirement,
         ResolvedSTTConfig,
     )
+    from puripuly_heart.config.settings import STTProviderName
     from puripuly_heart.config.settings_vnext.schema import ProcessCaptureTargetIntent
     from puripuly_heart.core.audio.process_identity import PsutilProcessIdentityWatcher
     from puripuly_heart.core.audio.process_source import (
@@ -551,6 +573,7 @@ async def _run_native(thresholds: IsolationThresholds, runtime_dir: Path) -> dic
 
     events: list[str] = []
     samples: list[np.ndarray] = []
+    loop_failure_types: list[str] = []
     process_source_pids: list[int] = []
     source_closed: set[int] = set()
     native_mode_observations: list[bool] = []
@@ -617,14 +640,18 @@ async def _run_native(thresholds: IsolationThresholds, runtime_dir: Path) -> dic
         )
 
     async def collect_loop(*, source, **_kwargs) -> None:  # noqa: ANN001
-        async for frame in source.frames():
-            samples.append(frame.samples.copy())
+        try:
+            async for frame in source.frames():
+                samples.append(frame.samples.copy())
+        except Exception as exc:
+            loop_failure_types.append(type(exc).__name__)
+            raise
 
     credential = ResolvedCredentialRequirement(source="none", required=False, reference=None)
     backend = ResolvedSTTConfig(
         channel="peer",
         source_language="en",
-        provider="fixture",
+        provider=STTProviderName.DEEPGRAM,
         model=None,
         endpoint=None,
         region=None,
@@ -744,6 +771,14 @@ async def _run_native(thresholds: IsolationThresholds, runtime_dir: Path) -> dic
         deadline = time.monotonic() + CAPTURE_SECONDS + 5
         required_frames = int(CAPTURE_SECONDS * SAMPLE_RATE_HZ)
         while sum(frame.shape[0] for frame in samples) < required_frames:
+            if runtime.state == PeerChannelRuntimeState.FAULTED:
+                failure = runtime.last_failure
+                reason = failure.reason.value if failure is not None else "unknown"
+                if loop_failure_types:
+                    raise RuntimeError(f"peer_runtime_loop_exception:{loop_failure_types[-1]}")
+                raise RuntimeError(f"peer_runtime_faulted_before_frames:{reason}")
+            if initial_loop_task is not None and initial_loop_task.done():
+                raise RuntimeError("peer_runtime_loop_completed_before_frames")
             if time.monotonic() >= deadline:
                 raise RuntimeError("native_capture_timeout")
             await asyncio.sleep(0.05)

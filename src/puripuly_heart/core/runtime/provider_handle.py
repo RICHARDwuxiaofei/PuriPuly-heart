@@ -13,11 +13,11 @@ ProviderStateChanged = Callable[["ProviderRuntimeHandle"], None]
 class ProviderRuntimeHandle:
     """Owns one provider resource and its optional provider event loop task."""
 
-    resource_fields = ("provider", "event_task", "generation")
+    resource_fields = ("provider", "event_task", "idle_release_task", "generation")
     toggle_off_policy = (
         "STT toggle-off drains final transcript by awaiting provider.close() before "
-        "keeping provider event ingress active for later toggle-on; app shutdown/replacement "
-        "uses backend close."
+        "keeping provider event ingress active for later toggle-on; configured idle release, "
+        "app shutdown, and replacement use backend close."
     )
     shutdown_policy = (
         "stop ingress, cancel the provider event task, await provider.close(), then close "
@@ -33,13 +33,16 @@ class ProviderRuntimeHandle:
         event_handler: ProviderEventHandler | None = None,
         exception_handler: ProviderExceptionHandler | None = None,
         state_changed: ProviderStateChanged | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._name = name
         self._provider = provider
         self._event_handler = event_handler
         self._exception_handler = exception_handler
         self._state_changed = state_changed
+        self._sleep = sleep
         self._event_task: asyncio.Task[None] | None = None
+        self._idle_release_task: asyncio.Task[None] | None = None
         self._generation = 0
         self._running = False
         self._closed = False
@@ -67,6 +70,7 @@ class ProviderRuntimeHandle:
         return (
             self._provider is not None
             or self._event_task is not None
+            or self._idle_release_task is not None
             or bool(self._retired_providers)
         )
 
@@ -99,6 +103,7 @@ class ProviderRuntimeHandle:
 
     async def start(self) -> None:
         async with self._lock:
+            await self._cancel_idle_release_task()
             self._running = True
             self._closed = False
             self._start_event_loop_if_needed()
@@ -107,6 +112,7 @@ class ProviderRuntimeHandle:
         async with self._lock:
             if self._provider is not expected_provider:
                 return False
+            await self._cancel_idle_release_task()
             self._running = True
             self._closed = False
             self._start_event_loop_if_needed()
@@ -114,6 +120,7 @@ class ProviderRuntimeHandle:
 
     async def replace_provider(self, provider: object | None, *, start: bool) -> object | None:
         async with self._lock:
+            await self._cancel_idle_release_task()
             old_provider = self._provider
             self._generation += 1
             await self._cancel_event_task()
@@ -131,12 +138,36 @@ class ProviderRuntimeHandle:
                     raise
             return old_provider
 
-    async def drain_for_toggle_off(self) -> None:
+    async def drain_for_toggle_off(self, *, release_backend_after: float | None = None) -> None:
         async with self._lock:
+            if release_backend_after is None:
+                await self._cancel_idle_release_task()
             provider = self._provider
             if provider is not None:
                 await _call_async_method(provider, "close")
             self._start_event_loop_if_needed()
+            if (
+                provider is not None
+                and release_backend_after is not None
+                and self._idle_release_task is None
+            ):
+                self._schedule_idle_release_locked(provider, release_backend_after)
+
+    async def schedule_idle_release(self, *, release_backend_after: float) -> None:
+        async with self._lock:
+            provider = self._provider
+            if provider is not None and self._idle_release_task is None:
+                self._schedule_idle_release_locked(provider, release_backend_after)
+
+    async def retire_for_dormant_reuse(self, provider: object) -> None:
+        async with self._lock:
+            if self._provider is not provider:
+                return
+            self._running = False
+            self._generation += 1
+            await self._cancel_event_task()
+            await _call_async_method(provider, "close")
+            await _call_async_method(provider, "discard_pending_events")
 
     async def stop_ingress(self) -> None:
         async with self._lock:
@@ -151,6 +182,7 @@ class ProviderRuntimeHandle:
             self._closed = True
             self._running = False
             self._generation += 1
+            await self._cancel_idle_release_task()
             await self._cancel_event_task()
             failures: list[Exception] = []
             provider = self._provider
@@ -175,9 +207,9 @@ class ProviderRuntimeHandle:
             return
         generation = self._generation
         provider = self._provider
-        self._event_task = asyncio.create_task(
+        self._event_task = self._create_task(
             self._run_event_loop(provider=provider, generation=generation),
-            name=f"{self.owner_name}:events",
+            task_name="events",
         )
         self._event_task.add_done_callback(self._on_event_task_done)
         self._notify_state_changed()
@@ -216,6 +248,68 @@ class ProviderRuntimeHandle:
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+    async def _release_dormant_provider_after(
+        self,
+        *,
+        provider: object,
+        generation: int,
+        delay_seconds: float,
+    ) -> None:
+        await self._sleep(delay_seconds)
+        async with self._lock:
+            if provider is not self._provider or generation != self._generation or self._closed:
+                return
+            self._running = False
+            self._generation += 1
+            await self._cancel_event_task()
+            try:
+                await self._close_provider_for_shutdown(provider)
+            except Exception as exc:
+                if self._provider is provider:
+                    self._provider = None
+                    self._retain_retired_provider(provider)
+                    self._notify_state_changed()
+                if self._exception_handler is not None:
+                    result = self._exception_handler(exc)
+                    if inspect.isawaitable(result):
+                        await result
+                return
+            if self._provider is provider:
+                self._provider = None
+                self._notify_state_changed()
+
+    def _schedule_idle_release_locked(self, provider: object, delay_seconds: float) -> None:
+        self._idle_release_task = self._create_task(
+            self._release_dormant_provider_after(
+                provider=provider,
+                generation=self._generation,
+                delay_seconds=delay_seconds,
+            ),
+            task_name="idle-release",
+        )
+        self._idle_release_task.add_done_callback(self._on_idle_release_task_done)
+
+    async def _cancel_idle_release_task(self) -> None:
+        task = self._idle_release_task
+        if task is None:
+            return
+        self._idle_release_task = None
+        if task is asyncio.current_task():
+            return
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    def _on_idle_release_task_done(self, task: asyncio.Task[None]) -> None:
+        if not task.cancelled():
+            task.exception()
+        if self._idle_release_task is task:
+            self._idle_release_task = None
+        self._notify_state_changed()
+
+    def _create_task(self, coroutine: Awaitable[None], *, task_name: str) -> asyncio.Task[None]:
+        return asyncio.create_task(coroutine, name=f"{self.owner_name}:{task_name}")
 
     def _on_event_task_done(self, task: asyncio.Task[None]) -> None:
         if not task.cancelled():

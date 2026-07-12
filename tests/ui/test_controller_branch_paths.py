@@ -4610,7 +4610,7 @@ async def test_set_peer_translation_enabled_routes_through_controller_runtime_ru
     assert controller.settings.ui.integrated_context_enabled is True
     assert controller.settings.ui.integrated_context_bootstrapped is False
     assert controller.overlay_state == "starting"
-    assert refresh_calls == ["refresh", "refresh"]
+    assert refresh_calls == ["refresh", "refresh", "refresh"]
 
     contract = controller.build_overlay_peer_consumer_contract()
     assert contract is not None
@@ -5241,7 +5241,7 @@ async def test_peer_local_qwen_download_completion_resumes_peer_runtime_after_re
 
 
 @pytest.mark.asyncio
-async def test_refresh_peer_stt_runtime_blocks_peer_local_qwen_when_probe_load_fails_despite_ready_install(
+async def test_refresh_peer_stt_runtime_does_not_create_disposable_local_qwen_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dash = DummyDashboard()
@@ -5258,18 +5258,11 @@ async def test_refresh_peer_stt_runtime_blocks_peer_local_qwen_when_probe_load_f
 
     download_requests: list[str] = []
 
-    class FailingPeerBackend:
-        async def open_session(self):
-            raise controller_module.LocalQwenSherpaLoadError("bootstrap failed")
-
-        async def close(self) -> None:
-            return None
-
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
     monkeypatch.setattr(
         controller_module,
         "create_peer_stt_backend",
-        lambda *_a, **_k: FailingPeerBackend(),
+        lambda *_a, **_k: pytest.fail("disposable Peer backend probe created"),
     )
     monkeypatch.setattr(
         GuiController,
@@ -5280,9 +5273,9 @@ async def test_refresh_peer_stt_runtime_blocks_peer_local_qwen_when_probe_load_f
     await controller._refresh_peer_stt_runtime()
 
     assert len(controller._peer_runtime.policy_calls) == 1
-    assert controller._peer_runtime.policy_calls[0]["desired_active"] is False
-    assert download_requests == ["manual"]
-    assert dash.local_stt_notice_status == "invalid"
+    assert controller._peer_runtime.policy_calls[0]["desired_active"] is True
+    assert download_requests == []
+    assert dash.local_stt_notice_status is None
 
 
 @pytest.mark.asyncio
@@ -5307,13 +5300,14 @@ async def test_create_peer_audio_source_from_runtime_config_uses_desktop_loopbac
         lambda *args, **kwargs: FakePeerSource(),
     )
 
-    source = controller._create_peer_audio_source_from_runtime_config(config)
+    source = await controller._create_peer_audio_source_from_runtime_config(config)
 
     assert isinstance(source, FakePeerSource)
     assert opened == [{"device_name": config.output_device}]
 
 
-def test_create_peer_audio_source_from_runtime_config_routes_process_to_strict_source(
+@pytest.mark.asyncio
+async def test_create_peer_audio_source_from_runtime_config_routes_process_to_strict_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
@@ -5357,7 +5351,7 @@ def test_create_peer_audio_source_from_runtime_config_routes_process_to_strict_s
     )
     monkeypatch.setattr(controller_module, "DesktopPeerPipeline", lambda **kwargs: kwargs)
 
-    source = controller._create_peer_audio_source_from_runtime_config(config)
+    source = await controller._create_peer_audio_source_from_runtime_config(config)
 
     assert created["identity"] is identity
     assert "watcher" in created
@@ -5365,7 +5359,8 @@ def test_create_peer_audio_source_from_runtime_config_routes_process_to_strict_s
     assert getattr(source["source"], "source", None) is not None
 
 
-def test_create_peer_audio_source_logs_loopback_resolution(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_create_peer_audio_source_logs_loopback_resolution(monkeypatch) -> None:
     class FakeLoopbackSource:
         resolved_device_name = "Default Speakers [Loopback]"
         resolved_device_index = 10
@@ -5414,7 +5409,7 @@ def test_create_peer_audio_source_logs_loopback_resolution(monkeypatch) -> None:
         runtime_signature=(),
     )
 
-    controller._create_peer_audio_source_from_runtime_config(config)
+    await controller._create_peer_audio_source_from_runtime_config(config)
 
     messages = [message for _level, message in controller._runtime_logging.detailed_messages]
     pipeline_source = created["pipeline_kwargs"]["source"]  # type: ignore[index]
@@ -5428,7 +5423,8 @@ def test_create_peer_audio_source_logs_loopback_resolution(monkeypatch) -> None:
     assert any("used_default_fallback=True" in message for message in messages)
 
 
-def test_create_peer_audio_source_wires_capture_fault_provider(
+@pytest.mark.asyncio
+async def test_create_peer_audio_source_wires_capture_fault_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeLoopbackSource:
@@ -5466,7 +5462,7 @@ def test_create_peer_audio_source_wires_capture_fault_provider(
         runtime_signature=(),
     )
 
-    controller._create_peer_audio_source_from_runtime_config(config)
+    await controller._create_peer_audio_source_from_runtime_config(config)
 
     wrapped_source = created["pipeline_kwargs"]["source"]  # type: ignore[index]
     provider = getattr(wrapped_source, "fault_profile_provider")
@@ -19727,6 +19723,77 @@ async def test_apply_settings_pushes_updated_overlay_snapshot_to_bridge_and_rest
 
     restarted_bridge = FakeOverlayBridge.instances[1]
     assert restarted_bridge.initial_snapshot.blocks[0].secondary_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_self_local_qwen_toggle_off_schedules_ten_minute_release() -> None:
+    release_delays: list[float | None] = []
+
+    class Hub:
+        async def drain_self_stt_for_toggle_off(
+            self,
+            *,
+            release_backend_after: float | None = None,
+        ) -> None:
+            release_delays.append(release_backend_after)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN
+    controller.hub = Hub()
+
+    await controller._drain_self_stt_for_toggle_off()
+
+    assert release_delays == [600.0]
+
+
+@pytest.mark.asyncio
+async def test_self_non_local_provider_toggle_off_does_not_schedule_release() -> None:
+    release_delays: list[float | None] = []
+
+    class Hub:
+        async def drain_self_stt_for_toggle_off(
+            self,
+            *,
+            release_backend_after: float | None = None,
+        ) -> None:
+            release_delays.append(release_backend_after)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.DEEPGRAM
+    controller.hub = Hub()
+
+    await controller._drain_self_stt_for_toggle_off()
+
+    assert release_delays == [None]
+
+
+@pytest.mark.asyncio
+async def test_self_local_qwen_rebuilds_after_idle_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warmup_calls = 0
+
+    class Provider:
+        async def warmup(self) -> None:
+            nonlocal warmup_calls
+            warmup_calls += 1
+
+    hub = SimpleNamespace(stt=None)
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN
+    controller.hub = hub
+
+    async def rebuild(_self) -> None:
+        hub.stt = Provider()
+
+    monkeypatch.setattr(GuiController, "_current_local_stt_runtime_status", lambda _self: "ready")
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", rebuild)
+
+    assert await controller._ensure_local_stt_ready() is True
+    assert warmup_calls == 1
 
 
 @pytest.mark.asyncio
