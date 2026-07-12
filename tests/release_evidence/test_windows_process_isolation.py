@@ -294,3 +294,20 @@ async def test_supported_host_fixture_exception_is_failed_not_blocked(
     assert artifact["status"] == "failed"
     assert artifact["classification"] == "fixture_import_failed"
     assert "raw import detail" not in json.dumps(artifact)
+
+
+@pytest.mark.parametrize(
+    ("code", "classification"),
+    [
+        ("direct_child_capture_timeout", "direct_child_capture_timeout"),
+        ("native_capture_timeout", "peer_runtime_capture_timeout"),
+        ("peer_runtime_faulted_before_frames", "peer_runtime_faulted_before_frames"),
+        ("peer_runtime_loop_completed_before_frames", "peer_runtime_loop_completed_before_frames"),
+    ],
+)
+def test_capture_timeout_classification_preserves_attributable_stage(
+    code: str, classification: str
+) -> None:
+    from puripuly_heart.release_evidence.windows_process_isolation import classify_fixture_failure
+
+    assert classify_fixture_failure(RuntimeError(code)) == classification
