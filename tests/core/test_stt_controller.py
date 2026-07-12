@@ -2017,3 +2017,35 @@ async def test_managed_stt_provider_reopens_on_next_speech_after_terminal_failur
     assert stt._active_session is backend.sessions[1]
 
     await stt.close()
+
+
+async def test_stt_suppresses_error_event_during_close() -> None:
+    stt = ManagedSTTProvider(
+        backend=TerminalFailureBackend(),
+        sample_rate_hz=16000,
+        channel="peer",
+        connect_attempts=1,
+    )
+    session = TerminalFailureSession()
+    stt._closing = True
+
+    await stt._handle_terminal_session_failure(session, RuntimeError("backend closed"))
+
+    assert stt._events.empty()
+
+
+async def test_stt_emits_error_event_when_not_closing() -> None:
+    stt = ManagedSTTProvider(
+        backend=TerminalFailureBackend(),
+        sample_rate_hz=16000,
+        channel="peer",
+        connect_attempts=1,
+    )
+    session = TerminalFailureSession()
+
+    await stt._handle_terminal_session_failure(session, RuntimeError("backend closed"))
+
+    events: list[object] = []
+    while not stt._events.empty():
+        events.append(stt._events.get_nowait())
+    assert any(isinstance(e, STTErrorEvent) for e in events)

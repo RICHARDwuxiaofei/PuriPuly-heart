@@ -7263,6 +7263,7 @@ class GuiController:
                         section=process_section,
                     ),
                 )
+        options.sort(key=lambda o: o.disabled)
         return options
 
     def list_loopback_device_options(self) -> list[OptionItem]:

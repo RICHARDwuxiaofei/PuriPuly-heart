@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import flet as ft
 import pytest
 
 from puripuly_heart.config.process_capture_resolution import (
@@ -38,6 +39,21 @@ def _load_locale_keys(locale: str) -> set[str]:
     path = Path(i18n_module.__file__).resolve().parents[1] / "data" / "i18n" / f"{locale}.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     return set(data)
+
+
+def _collect_text_values(control: ft.Control) -> list[str]:
+    """Recursively collect all string values from a control tree."""
+    values: list[str] = []
+    if hasattr(control, "value") and isinstance(control.value, str) and control.value:
+        values.append(control.value)
+    children = getattr(control, "controls", None)
+    if children:
+        for child in children:
+            values.extend(_collect_text_values(child))
+    inner = getattr(control, "content", None)
+    if inner is not None and inner is not control:
+        values.extend(_collect_text_values(inner))
+    return values
 
 
 PROCESS_WARNING_KEYS = [
@@ -92,19 +108,24 @@ def test_settings_modal_renders_process_section_before_device_and_hides_descript
         show_description=False,
     )
     option_list = modal._build_option_list("process:vrchat:c:\\vrchat\\vrchat.exe")
-    labels = []
-    for control in option_list.controls:
-        content = getattr(control, "content", control)
-        if hasattr(content, "controls"):
-            for child in content.controls:
-                if hasattr(child, "value") and isinstance(child.value, str):
-                    labels.append(child.value)
-        elif hasattr(content, "value") and isinstance(content.value, str):
-            labels.append(content.value)
-    assert labels.index("Applications") < labels.index("Output devices")
-    assert "should stay hidden" not in labels
-    assert "hidden" not in labels
-    assert "Game (2)" in labels
+
+    assert isinstance(option_list, ft.Row)
+    assert len(option_list.controls) == 2
+
+    left_column = option_list.controls[0].content
+    right_column = option_list.controls[1].content
+
+    left_labels = _collect_text_values(left_column)
+    right_labels = _collect_text_values(right_column)
+
+    assert "Applications" in left_labels
+    assert "VRChat" in left_labels
+    assert "Game (2)" in left_labels
+    assert "Output devices" in right_labels
+    assert "Auto" in right_labels
+    assert "Speakers" in right_labels
+    assert "should stay hidden" not in left_labels + right_labels
+    assert "hidden" not in left_labels + right_labels
 
 
 def test_settings_modal_renders_unsectioned_options_without_loading_section() -> None:
@@ -142,6 +163,57 @@ def test_settings_modal_only_replaces_explicit_loading_section() -> None:
     assert controls[1].content.controls[0].__class__.__name__ == "ProgressRing"
     assert controls[2].content.controls[-1].value == "Output devices"
     assert controls[3].content.value == "Auto"
+
+
+def test_settings_modal_two_column_shows_loading_in_left_column() -> None:
+    modal = SettingsModal(
+        page=SimpleNamespace(open=lambda *_a, **_k: None, close=lambda *_a, **_k: None),
+        title="Loopback Audio",
+        options=[
+            OptionItem(value="", label="", section="Applications"),
+            OptionItem(value="device:", label="Auto", section="Output devices"),
+        ],
+        on_select=lambda _value: None,
+    )
+    modal._loading_section = "Applications"
+
+    option_list = modal._build_option_list("device:")
+
+    assert isinstance(option_list, ft.Row)
+    left_items = option_list.controls[0].content.controls
+    right_items = option_list.controls[1].content.controls
+
+    assert left_items[0].content.controls[-1].value == "Applications"
+    assert left_items[1].content.controls[0].__class__.__name__ == "ProgressRing"
+    assert right_items[0].content.controls[-1].value == "Output devices"
+    assert right_items[1].content.value == "Auto"
+
+
+def test_settings_modal_replace_options_updates_both_columns() -> None:
+    modal = SettingsModal(
+        page=SimpleNamespace(open=lambda *_a, **_k: None, close=lambda *_a, **_k: None),
+        title="Loopback Audio",
+        options=[
+            OptionItem(value="", label="", section="Applications"),
+            OptionItem(value="device:", label="Auto", section="Output devices"),
+        ],
+        on_select=lambda _value: None,
+    )
+    modal._loading_section = "Applications"
+    option_list = modal._build_option_list("device:")
+    assert isinstance(option_list, ft.Row)
+
+    modal.replace_options(
+        [
+            OptionItem(value="process:vrchat", label="VRChat", section="Applications"),
+            OptionItem(value="device:", label="Auto", section="Output devices"),
+        ]
+    )
+
+    left_labels = _collect_text_values(option_list.controls[0].content)
+    right_labels = _collect_text_values(option_list.controls[1].content)
+    assert "VRChat" in left_labels
+    assert "Auto" in right_labels
 
 
 def test_process_warning_helper_text_is_localized_and_retry_classified() -> None:
@@ -253,6 +325,46 @@ def test_controller_list_loopback_options_puts_process_before_device(
     device_index = next(i for i, option in enumerate(options) if option.value.startswith("device:"))
     assert device_index > 1
     assert options[device_index].section == t("settings.desktop_audio.section.device")
+
+
+def test_controller_process_options_sorts_disabled_after_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=Path("settings.json"),
+    )
+
+    class FakeResolver:
+        def __init__(self, *, snapshots):  # noqa: ANN001
+            _ = snapshots
+
+        def enumerate_candidates(self):
+            return (
+                SimpleNamespace(
+                    name="Game (2)",
+                    target=ProcessCaptureTargetIntent.generic_executable(r"C:\Apps\Game\Game.exe"),
+                    enabled=False,
+                ),
+                SimpleNamespace(
+                    name="VRChat",
+                    target=ProcessCaptureTargetIntent.vrchat(r"C:\VRChat\VRChat.exe"),
+                    enabled=True,
+                ),
+            )
+
+    monkeypatch.setattr(controller_module, "ProcessCaptureResolver", FakeResolver)
+    monkeypatch.setattr(
+        GuiController,
+        "_enumerate_loopback_device_names",
+        staticmethod(lambda: []),
+    )
+    options = controller.list_loopback_process_options()
+    assert options[0].label == "VRChat"
+    assert options[0].disabled is False
+    assert options[1].label == "Game (2)"
+    assert options[1].disabled is True
 
 
 def test_controller_process_diagnostic_sets_peer_warning_reason() -> None:

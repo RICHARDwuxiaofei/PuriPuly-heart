@@ -67,7 +67,8 @@ class SettingsModal:
         self._on_select = on_select
         self._show_description = show_description
         self._dialog: ft.AlertDialog | None = None
-        self._option_list: ft.ListView | None = None
+        self._option_list: ft.ListView | ft.Row | None = None
+        self._section_lists: list[tuple[str, ft.ListView]] | None = None
         self._current: str = ""
         self._loading_section: str = ""
 
@@ -81,10 +82,10 @@ class SettingsModal:
         """
         self._current = current
         self._loading_section = loading_section
-        # Build option list
-        option_list = self._build_option_list(current)
+        sections = self._collect_sections()
+        is_two_column = self._is_two_column(sections)
+        option_list = self._build_option_list(current, sections, is_two_column)
 
-        # Content column
         content_controls: list[ft.Control] = [
             ft.Text(
                 self._title,
@@ -96,14 +97,13 @@ class SettingsModal:
             option_list,
         ]
 
-        # Modal content
         modal_content = ft.Container(
             content=ft.Column(
                 content_controls,
                 spacing=8,
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
-            width=600,
+            width=880 if is_two_column else 600,
             height=700,
             padding=ft.padding.symmetric(horizontal=32, vertical=32),
             bgcolor=COLOR_SURFACE,
@@ -130,16 +130,50 @@ class SettingsModal:
         """
         self._options = options
         self._loading_section = ""
-        if self._option_list is None:
-            return
-        self._option_list.controls = self._build_option_items(self._current)
-        try:
-            self._option_list.update()
-        except Exception:
-            pass
+        if self._section_lists is not None:
+            for section, list_view in self._section_lists:
+                list_view.controls = self._build_section_items(self._current, section)
+                try:
+                    list_view.update()
+                except Exception:
+                    pass
+        elif self._option_list is not None:
+            self._option_list.controls = self._build_option_items(self._current)
+            try:
+                self._option_list.update()
+            except Exception:
+                pass
 
-    def _build_option_list(self, current: str) -> ft.ListView:
+    def _collect_sections(self) -> list[str]:
+        """Collect distinct section labels in order of appearance."""
+        seen: list[str] = []
+        for option in self._options:
+            if option.section and option.section not in seen:
+                seen.append(option.section)
+        return seen
+
+    def _is_two_column(self, sections: list[str]) -> bool:
+        """Check if the modal should use 2-column layout."""
+        if len(sections) != 2:
+            return False
+        return not any(not o.section for o in self._options)
+
+    def _build_option_list(
+        self,
+        current: str,
+        sections: list[str] | None = None,
+        is_two_column: bool | None = None,
+    ) -> ft.Control:
         """Build scrollable list of options."""
+        if sections is None:
+            sections = self._collect_sections()
+        if is_two_column is None:
+            is_two_column = self._is_two_column(sections)
+        if is_two_column:
+            return self._build_two_column_list(current, sections)
+        return self._build_single_column_list(current)
+
+    def _build_single_column_list(self, current: str) -> ft.ListView:
         items = self._build_option_items(current)
         self._option_list = ft.ListView(
             controls=items,
@@ -147,10 +181,43 @@ class SettingsModal:
             spacing=12,
             padding=ft.padding.only(right=8, bottom=12),
         )
+        self._section_lists = None
         return self._option_list
 
+    def _build_two_column_list(self, current: str, sections: list[str]) -> ft.Row:
+        columns: list[ft.Control] = []
+        self._section_lists = []
+        for section in sections:
+            section_items = self._build_section_items(current, section)
+            list_view = ft.ListView(
+                controls=section_items,
+                expand=True,
+                spacing=12,
+                padding=ft.padding.only(right=8, bottom=12),
+            )
+            self._section_lists.append((section, list_view))
+            columns.append(ft.Container(content=list_view, width=400))
+        self._option_list = ft.Row(
+            controls=columns,
+            spacing=16,
+            expand=True,
+        )
+        return self._option_list
+
+    def _build_section_items(self, current: str, section: str) -> list[ft.Control]:
+        """Build option items for a specific section (2-column mode)."""
+        items: list[ft.Control] = [self._build_section_header(section, is_first=True)]
+        if self._loading_section and section == self._loading_section:
+            items.append(self._build_loading_placeholder())
+            return items
+        for option in self._options:
+            if option.section != section:
+                continue
+            items.append(self._build_option_card(option, current))
+        return items
+
     def _build_option_items(self, current: str) -> list[ft.Control]:
-        """Build list of option item controls."""
+        """Build list of option item controls (1-column mode)."""
         items: list[ft.Control] = []
         previous_section: str | None = None
         is_first_section = True
@@ -164,81 +231,78 @@ class SettingsModal:
                     continue
             if self._loading_section and option.section == self._loading_section:
                 continue
-            is_selected = option.value == current and not option.disabled
-
-            # Colors
-            if option.disabled:
-                bg_color = COLOR_BACKGROUND
-                text_color = ft.Colors.with_opacity(0.35, COLOR_NEUTRAL_DARK)
-                desc_color = ft.Colors.with_opacity(0.35, COLOR_NEUTRAL_DARK)
-                border = None
-            else:
-                bg_color = COLOR_PRIMARY if is_selected else COLOR_BACKGROUND
-                text_color = ft.Colors.WHITE if is_selected else COLOR_ON_BACKGROUND
-                desc_color = (
-                    ft.Colors.with_opacity(0.8, ft.Colors.WHITE)
-                    if is_selected
-                    else COLOR_NEUTRAL_DARK
-                )
-                border = None
-
-            # Shadow for depth
-            shadow = (
-                ft.BoxShadow(
-                    blur_radius=2,
-                    color=ft.Colors.with_opacity(0.05, ft.Colors.BLACK),
-                    offset=ft.Offset(0, 1),
-                )
-                if not is_selected
-                else None
-            )
-
-            # Build content based on show_description
-            if self._show_description and option.description:
-                content = ft.Column(
-                    controls=[
-                        ft.Text(
-                            option.label,
-                            size=20,
-                            color=text_color,
-                            weight=ft.FontWeight.BOLD,
-                            text_align=ft.TextAlign.CENTER,
-                        ),
-                        ft.Text(
-                            option.description,
-                            size=16,
-                            color=desc_color,
-                            text_align=ft.TextAlign.CENTER,
-                        ),
-                    ],
-                    spacing=8,
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                )
-            else:
-                content = ft.Text(
-                    option.label,
-                    size=20,
-                    color=text_color,
-                    weight=ft.FontWeight.BOLD,
-                    text_align=ft.TextAlign.CENTER,
-                )
-
-            item = ft.Container(
-                content=content,
-                bgcolor=bg_color,
-                border_radius=16,
-                border=border,
-                padding=ft.padding.all(24),
-                alignment=ft.alignment.center,
-                on_click=None if option.disabled else lambda e, val=option.value: self._select(val),
-                on_hover=None if option.disabled else self._on_item_hover,
-                animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
-                shadow=shadow,
-                height=110,
-            )
-            items.append(item)
-
+            items.append(self._build_option_card(option, current))
         return items
+
+    def _build_option_card(self, option: OptionItem, current: str) -> ft.Control:
+        """Build a single option card."""
+        is_selected = option.value == current and not option.disabled
+
+        if option.disabled:
+            bg_color = COLOR_BACKGROUND
+            text_color = ft.Colors.with_opacity(0.35, COLOR_NEUTRAL_DARK)
+            desc_color = ft.Colors.with_opacity(0.35, COLOR_NEUTRAL_DARK)
+            border = None
+        else:
+            bg_color = COLOR_PRIMARY if is_selected else COLOR_BACKGROUND
+            text_color = ft.Colors.WHITE if is_selected else COLOR_ON_BACKGROUND
+            desc_color = (
+                ft.Colors.with_opacity(0.8, ft.Colors.WHITE) if is_selected else COLOR_NEUTRAL_DARK
+            )
+            border = None
+
+        shadow = (
+            ft.BoxShadow(
+                blur_radius=2,
+                color=ft.Colors.with_opacity(0.05, ft.Colors.BLACK),
+                offset=ft.Offset(0, 1),
+            )
+            if not is_selected
+            else None
+        )
+
+        if self._show_description and option.description:
+            content = ft.Column(
+                controls=[
+                    ft.Text(
+                        option.label,
+                        size=20,
+                        color=text_color,
+                        weight=ft.FontWeight.BOLD,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Text(
+                        option.description,
+                        size=16,
+                        color=desc_color,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                ],
+                spacing=8,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+        else:
+            content = ft.Text(
+                option.label,
+                size=20,
+                color=text_color,
+                weight=ft.FontWeight.BOLD,
+                text_align=ft.TextAlign.CENTER,
+            )
+
+        return ft.Container(
+            content=content,
+            bgcolor=bg_color,
+            border_radius=16,
+            border=border,
+            padding=ft.padding.all(24),
+            alignment=ft.alignment.center,
+            on_click=None if option.disabled else lambda e, val=option.value: self._select(val),
+            on_hover=None if option.disabled else self._on_item_hover,
+            animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
+            shadow=shadow,
+            height=110,
+        )
 
     def _build_loading_placeholder(self) -> ft.Control:
         """Build a loading placeholder with a spinner."""

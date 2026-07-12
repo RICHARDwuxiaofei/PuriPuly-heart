@@ -90,6 +90,7 @@ class ManagedSTTProvider:
     _diagnostic_zero_count: int = 0
     _stt_fault_logged_for_utterance: bool = False
     _backend_closed: bool = False
+    _closing: bool = False
 
     def __post_init__(self) -> None:
         if self.channel not in ("self", "peer"):
@@ -180,6 +181,7 @@ class ManagedSTTProvider:
         self._emit_basic(f"[STT] Session connected after {retries} {suffix}")
 
     async def close(self) -> None:
+        self._closing = True
         await self._set_state(
             STTSessionState.DRAINING if self._active_session else STTSessionState.DISCONNECTED
         )
@@ -874,14 +876,15 @@ class ManagedSTTProvider:
             level=logging.ERROR,
             fallback_level=logging.ERROR,
         )
-        await self._events.put(
-            STTErrorEvent(
-                message=report.message,
-                diagnostics=report.diagnostics,
-                channel=self.channel,
-                runtime_log_handled=True,
+        if not self._closing:
+            await self._events.put(
+                STTErrorEvent(
+                    message=report.message,
+                    diagnostics=report.diagnostics,
+                    channel=self.channel,
+                    runtime_log_handled=True,
+                )
             )
-        )
 
     async def _set_state(self, state: STTSessionState) -> None:
         if self._state == state:
