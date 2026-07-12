@@ -36,7 +36,6 @@ from puripuly_heart.config.settings import (
     TranslationSettings,
     to_dict,
 )
-from puripuly_heart.core import messages
 from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 from puripuly_heart.ui import controller as controller_module
 from puripuly_heart.ui import i18n as i18n_module
@@ -1561,7 +1560,7 @@ def test_load_from_settings_loads_local_llm_api_key(
 
 
 @pytest.mark.asyncio
-async def test_order22_live_settings_view_audio_change_emits_copied_draft_and_routes_controller(
+async def test_order22_legacy_audio_change_is_inert_after_replacement_cutover(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
@@ -1589,21 +1588,13 @@ async def test_order22_live_settings_view_audio_change_emits_copied_draft_and_ro
 
     view._on_audio_change()
 
-    assert controller.settings.audio.input_device == "Headset Mic"
-    assert len(emitted) == 1
-    assert emitted[0] is not controller.settings
-    assert emitted[0] is not view._settings
-    assert emitted[0].audio.input_device == "Headset Mic"
-
-    await controller.apply_settings(emitted[0])
-
-    assert len(requests) == 1
-    assert requests[0].reason == settings_mutation.SETTINGS_MUTATION_SURFACE_STT_LANGUAGE_AUDIO
-    assert requests[0].values == {"audio.input_device": "Headset Mic"}
+    assert controller.settings.audio.input_device == "Built-in Mic"
+    assert emitted == []
+    assert requests == []
 
 
 @pytest.mark.asyncio
-async def test_order22_live_settings_view_audio_change_save_failure_restores_controller_baseline(
+async def test_order22_legacy_audio_change_cannot_reach_save_after_replacement_cutover(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
@@ -1629,26 +1620,11 @@ async def test_order22_live_settings_view_audio_change_save_failure_restores_con
     monkeypatch.setattr(controller_module, "save_settings", fail_save_settings)
 
     view._on_audio_change()
-    assert controller.settings.audio.input_device == "Headset Mic"
-
-    await controller.apply_settings(emitted[-1])
-
-    result = controller.last_settings_mutation_result
-    assert result is not None
-    assert result.status == settings_mutation.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED
-    assert result.diagnostics == settings_mutation.ErrorDiagnostics(
-        component="settings_repository",
-        operation="save",
-        code="settings_save_failed",
-        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
-        visibility=settings_mutation.DIAGNOSTIC_VISIBILITY_BASIC,
-        content_policy=settings_mutation.CONTENT_POLICY_METADATA_ONLY,
-        status_code=None,
-        retry_after_ms=None,
-        fields={"surface": "stt_language_audio"},
-    )
     assert controller.settings.audio.input_device == "Built-in Mic"
-    assert raw_failure_text not in repr(result)
+
+    assert emitted == []
+    assert controller.last_settings_mutation_result is None
+    assert controller.settings.audio.input_device == "Built-in Mic"
     assert raw_failure_text not in repr(controller._runtime_logging)
 
 

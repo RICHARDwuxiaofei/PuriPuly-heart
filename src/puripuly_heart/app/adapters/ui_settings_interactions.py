@@ -28,6 +28,42 @@ from puripuly_heart.app.services.openrouter_pkce_owner import (
     ReopenOpenRouterPkce,
     StartOpenRouterPkce,
 )
+from puripuly_heart.app.services.ui_settings import normalize_pkce_intent
+
+PRODUCTION_UI_INTERACTION_DETAIL_CODES = frozenset(
+    {
+        "audio_enumerator_unbound",
+        "cancelled",
+        "closed",
+        "committed_degraded",
+        "device_unavailable",
+        "managed_owner_unavailable",
+        "managed_refresh_cancelled",
+        "managed_refresh_failed",
+        "managed_transaction_deferred_to_c3",
+        "microphone_owner_unbound",
+        "overlay_action_not_supported",
+        "overlay_owner_unbound",
+        "pkce_owner_unbound",
+        "failed",
+        "inactive",
+        "reopened",
+        "revision_conflict",
+        "secret_missing",
+        "session_start_failed",
+        "sounddevice_unavailable",
+        "started",
+        "succeeded",
+        "telemetry_owner_unbound",
+        "verification_owner_unbound",
+    }
+)
+PRODUCTION_CAPTURE_PRESENTATION_STATUSES = frozenset(
+    {"available", "failed", "ready", "refresh_failed", "unavailable"}
+)
+PRODUCTION_MANAGED_PRESENTATION_STATES = frozenset(
+    {"connected", "connecting", "disconnected", "failed", "unavailable", "unknown"}
+)
 
 
 class ProductionUiSettingsInteractions:
@@ -129,14 +165,23 @@ class ProductionUiSettingsInteractions:
         if self._runtime_host is None or self._persistence is None:
             return InteractionResult(InteractionStatus.UNAVAILABLE, "pkce_owner_unbound")
         receipt = await self._commands.current_receipt()
+        normalized = normalize_pkce_intent(
+            request,
+            canonical_connection=receipt.envelope.intent.translation.connection,
+        )
+        request = normalized.request
         if receipt.revision != request.expected_revision:
             return InteractionResult(InteractionStatus.FAILED, "revision_conflict")
+        connection_history = dict(receipt.envelope.intent.translation.connection_history)
+        connection_history[receipt.envelope.intent.translation.model] = "openrouter"
         translation = replace(
             receipt.envelope.intent.translation,
             connection="openrouter",
+            connection_history=connection_history,
             openrouter_model=request.model,
             openrouter_selected_source="byok",
             openrouter_selection_alias=request.selection_alias,
+            openrouter_provider_routing=normalized.provider_routing,
         )
         target = replace(
             receipt.envelope,
@@ -366,7 +411,12 @@ class ProductionUiSettingsInteractions:
             raise BaseExceptionGroup("UI settings interaction shutdown failed", failures)
 
 
-__all__ = ["ProductionUiSettingsInteractions"]
+__all__ = [
+    "PRODUCTION_CAPTURE_PRESENTATION_STATUSES",
+    "PRODUCTION_MANAGED_PRESENTATION_STATES",
+    "PRODUCTION_UI_INTERACTION_DETAIL_CODES",
+    "ProductionUiSettingsInteractions",
+]
 
 
 def _managed_pass_status(value):  # noqa: ANN001, ANN202

@@ -2274,7 +2274,7 @@ def test_sync_ui_from_settings_updates_dashboard_and_settings_view() -> None:
     assert dash.languages == ("ko", "en", "en", "ko")
     assert dash.recent_languages == (["ko", "ja"], ["en", "zh"])
     assert dash.on_recent_languages_change is None
-    assert settings_view.calls == [(settings, Path("settings.json"), False)]
+    assert settings_view.calls == []
 
 
 @pytest.mark.asyncio
@@ -14714,7 +14714,7 @@ async def test_apply_settings_source_language_change_reloads_settings_view(
     await controller.apply_settings(settings)
 
     assert replace_calls == ["replace"]
-    assert settings_view.calls == [(settings, Path("settings.json"), True)]
+    assert settings_view.calls == []
 
 
 @pytest.mark.asyncio
@@ -14749,7 +14749,7 @@ async def test_apply_settings_reloads_settings_view_for_target_only_change(
 
     await controller.apply_settings(settings)
 
-    assert settings_view.calls == [(settings, Path("settings.json"), True)]
+    assert settings_view.calls == []
 
 
 @pytest.mark.asyncio
@@ -15432,7 +15432,7 @@ async def test_github_star_prompt_click_persistence_routes_through_order24_servi
 
 
 @pytest.mark.asyncio
-async def test_first_live_settings_view_order24_mutation_uses_synced_baseline(
+async def test_superseded_settings_view_sync_does_not_seed_legacy_mutation_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -15456,12 +15456,8 @@ async def test_first_live_settings_view_order24_mutation_uses_synced_baseline(
 
     service = controller.settings_mutation_service
     assert service is not None
-    assert len(service.requests) == 1
-    assert service.requests[0].reason == (
-        settings_mutation.SETTINGS_MUTATION_SURFACE_UI_PROMPT_CLIPBOARD_STATE
-    )
-    assert service.requests[0].values == {"ui.clipboard_auto_translate_enabled": True}
-    assert direct_saves == []
+    assert service.requests == []
+    assert direct_saves == ["save"]
 
 
 @pytest.mark.asyncio
@@ -15502,7 +15498,7 @@ async def test_apply_settings_reload_updates_overlay_calibration_baseline_withou
 
     await controller.apply_settings(updated)
 
-    assert settings_view.calls == [(updated, Path("settings.json"), True)]
+    assert settings_view.calls == []
     assert controller.overlay_calibration.distance == 0.8
     assert controller.begin_overlay_calibration().distance == 1.2
 
@@ -18289,51 +18285,17 @@ async def test_order23_apply_settings_restore_baseline_on_live_settings_view_sav
 
 
 @pytest.mark.asyncio
-async def test_order23_first_live_settings_view_mutation_after_sync_uses_baseline_and_restores(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_order23_settings_view_sync_is_inert_after_replacement_cutover() -> None:
     settings_view = DummySettingsView()
     controller = _make_controller(app=SimpleNamespace(view_settings=settings_view))
     controller._runtime_logging = RuntimeLoggingSpy()
     controller.settings = AppSettings()
     controller.settings.overlay.show_translation = True
     controller.settings.osc.chatbox_include_source = False
-    raw_failure_text = "order23 synced baseline save failed secret-token-must-not-leak"
-
     controller._sync_ui_from_settings()
 
-    assert settings_view.calls
-
-    # SettingsView mutates the loaded AppSettings object in place before emitting a copy.
-    controller.settings.overlay.show_translation = False
-    controller.settings.osc.chatbox_include_source = True
-    pending = copy.deepcopy(controller.settings)
-
-    def fail_save_settings(_path, _settings) -> None:
-        raise RuntimeError(raw_failure_text)
-
-    monkeypatch.setattr(controller_module, "save_settings", fail_save_settings)
-
-    await controller.apply_settings(pending)
-
-    result = controller.last_settings_mutation_result
-    assert result is not None
-    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED
-    assert result.diagnostics == messages.ErrorDiagnostics(
-        component="settings_repository",
-        operation="save",
-        code="settings_save_failed",
-        category=messages.DIAGNOSTIC_CATEGORY_TRANSACTION,
-        visibility=messages.DIAGNOSTIC_VISIBILITY_BASIC,
-        content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
-        status_code=None,
-        retry_after_ms=None,
-        fields={"surface": "overlay_osc_output"},
-    )
-    assert controller.settings.overlay.show_translation is True
-    assert controller.settings.osc.chatbox_include_source is False
-    assert raw_failure_text not in repr(result)
-    assert raw_failure_text not in repr(controller._runtime_logging.basic_messages)
+    assert settings_view.calls == []
+    assert controller.last_settings_mutation_result is None
 
 
 @pytest.mark.asyncio

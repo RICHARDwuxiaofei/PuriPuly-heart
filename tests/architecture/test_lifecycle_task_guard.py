@@ -67,6 +67,7 @@ NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST = Counter(
             ASYNCIO_CREATE_TASK,
         ): 2,
         ("src/puripuly_heart/ui/desktop_overlay_repro.py", ASYNCIO_CREATE_TASK): 3,
+        ("src/puripuly_heart/ui/views/application_settings.py", RUN_TASK): 1,
     }
 )
 
@@ -115,6 +116,10 @@ TASK_CREATION_ALLOWLIST_RATIONALES = {
         "src/puripuly_heart/ui/app.py",
         RUN_TASK,
     ): "Flet UI callbacks, including peer-auto activation, must use page.run_task for async controller/service calls; each call remains UI-bound, not a background owner bypass",
+    (
+        "src/puripuly_heart/ui/views/application_settings.py",
+        RUN_TASK,
+    ): "Flet settings callbacks use page.run_task while UiSettingsApplication owns and settles the underlying interaction lifecycle",
     (
         "src/puripuly_heart/ui/components/settings/api_key_field.py",
         RUN_TASK,

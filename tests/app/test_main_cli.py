@@ -115,6 +115,7 @@ def _install_async_gui_harness(monkeypatch, tmp_path, calls, *, on_main_gui=None
         lambda *_args, **_kwargs: SimpleNamespace(
             runtime_host=runtime,
             canonical_commands=object(),
+            ui_settings=object(),
             start=runtime.start,
             shutdown=runtime.shutdown,
             close=runtime.shutdown,
@@ -130,6 +131,7 @@ def _install_async_gui_harness(monkeypatch, tmp_path, calls, *, on_main_gui=None
         calls["config_path"] = kwargs["config_path"]
         calls["debug_ui_preview"] = kwargs["debug_ui_preview"]
         calls["defer_startup"] = kwargs["defer_startup"]
+        calls["ui_settings"] = kwargs["ui_settings"]
         if on_main_gui is not None:
             on_main_gui()
         return SimpleNamespace(controller=Controller())
@@ -199,6 +201,9 @@ def test_main_run_gui_passes_debug_ui_preview_flag(monkeypatch, tmp_path) -> Non
     assert calls["assets_dir"] == str(tmp_path)
     assert calls["config_path"] == config_path
     assert calls["debug_ui_preview"] is True
+    from puripuly_heart.ui.debug_settings import InertDebugUiSettingsApplication
+
+    assert isinstance(calls["ui_settings"], InertDebugUiSettingsApplication)
 
 
 def test_main_run_gui_force_closes_logging_when_gui_runtime_logging_leaks(
@@ -334,6 +339,7 @@ def test_main_owns_gui_lifecycle_start_disconnect_and_awaited_stop(monkeypatch, 
         lambda *_args, **_kwargs: SimpleNamespace(
             runtime_host=runtime,
             canonical_commands=object(),
+            ui_settings=object(),
             start=runtime.start,
             shutdown=runtime.shutdown,
             close=runtime.shutdown,
@@ -449,6 +455,7 @@ def test_main_closes_constructed_resources_when_flet_swallows_construction_failu
         lambda *_args, **_kwargs: SimpleNamespace(
             runtime_host=runtime,
             canonical_commands=object(),
+            ui_settings=object(),
             start=runtime.start,
             shutdown=runtime.shutdown,
             close=runtime.shutdown,

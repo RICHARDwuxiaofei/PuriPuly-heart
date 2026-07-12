@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from pathlib import Path
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,20 +16,15 @@ from puripuly_heart.config.settings import (
     LLMProviderName,
     OpenRouterCredentialSource,
     OpenRouterLLMModel,
-    OpenRouterProviderRouting,
     OpenRouterSelectionAlias,
     ProviderSettings,
     STTProviderName,
-    TranslationConnection,
-    TranslationModel,
-    TranslationSettings,
     with_telemetry_consent,
 )
 from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 from puripuly_heart.core.runtime import OAuthRuntime
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.app import TranslatorApp, _check_and_notify_update
-from puripuly_heart.ui.controller import GuiController
 
 MISSING = object()
 
@@ -287,8 +282,9 @@ class ConstructionDummyDashboardView(ft.Container):
 
 
 class ConstructionDummySettingsView(ft.Container):
-    def __init__(self) -> None:
+    def __init__(self, application) -> None:
         super().__init__()
+        self.application = application
         self.on_settings_changed = None
         self.on_prompt_apply_settings = None
         self.on_providers_changed = None
@@ -349,7 +345,7 @@ class ConstructionDummyLogsView(ft.Container):
 def _patch_app_construction(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_module, "GuiController", ConstructionDummyController)
     monkeypatch.setattr(app_module, "DashboardView", ConstructionDummyDashboardView)
-    monkeypatch.setattr(app_module, "SettingsView", ConstructionDummySettingsView)
+    monkeypatch.setattr(app_module, "ApplicationSettingsView", ConstructionDummySettingsView)
     monkeypatch.setattr(app_module, "LogsView", ConstructionDummyLogsView)
     monkeypatch.setattr(app_module, "AboutView", lambda: ft.Container())
     monkeypatch.setattr(app_module, "TitleBar", lambda _page: ft.Container())
@@ -366,7 +362,7 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     _patch_app_construction(monkeypatch)
 
     page = DummyPage()
-    app = TranslatorApp(page, config_path=Path("settings.json"))
+    app = TranslatorApp(page, config_path=Path("settings.json"), ui_settings=object())
 
     assert app.controller.config_path == Path("settings.json")
     assert page.title == app_module.t("app.title")
@@ -383,22 +379,11 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert app.view_dashboard.on_message_input_activity == app._on_message_input_activity
     assert app.view_dashboard.on_toggle_overlay == app._on_overlay_toggle
     assert app.view_dashboard.on_toggle_peer_translation == app._on_peer_translation_toggle
-    assert app.view_settings.on_verify_api_key == app._on_verify_api_key
-    assert app.view_settings.on_prompt_apply_settings == app._on_prompt_apply_settings
-    assert app.view_settings.on_start_microphone_test == app._on_start_microphone_test
-    assert app.view_settings.on_desktop_overlay_lock_change == (app._on_desktop_overlay_lock_change)
-    assert app.view_settings.on_desktop_overlay_size_change == (app._on_desktop_overlay_size_change)
-    assert app.view_settings.on_desktop_overlay_recovery_action == (
-        app._on_desktop_overlay_recovery_action
-    )
-    assert app.view_settings.on_desktop_overlay_position_reset == (
-        app._on_desktop_overlay_position_reset
-    )
-    assert app.view_settings.on_view_logs == app._open_logs_tab
-    assert not hasattr(app.view_settings, "on_overlay_toggle")
-    assert not hasattr(app.view_settings, "on_peer_translation_toggle")
-    assert app.view_settings.runtime_log_basic == app.controller.log_basic
-    assert app.view_settings.runtime_log_detailed == app.controller.log_detailed
+    assert app.view_settings.application is app.ui_settings
+    assert app.view_settings.on_snackbar == app._show_settings_snackbar
+    assert app.view_settings.on_locale_changed == app._on_settings_locale_changed
+    assert app.view_settings.on_verify_api_key is None
+    assert app.view_settings.on_prompt_apply_settings is None
     assert app.view_logs.on_mode_change == app._on_runtime_logging_mode_change
     assert app.view_logs.runtime_logging_mode == "detailed"
 
@@ -410,7 +395,7 @@ async def test_desktop_gui_state_actions_are_dispatched_through_translator_app(
     _patch_app_construction(monkeypatch)
 
     page = DummyPage()
-    app = TranslatorApp(page, config_path=Path("settings.json"))
+    app = TranslatorApp(page, config_path=Path("settings.json"), ui_settings=object())
     locked_requests: list[bool] = []
     size_requests: list[str] = []
     retry_requests: list[bool] = []
@@ -457,7 +442,7 @@ async def test_desktop_gui_state_actions_refresh_settings_view_after_runtime_upd
     _patch_app_construction(monkeypatch)
 
     page = DummyPage()
-    app = TranslatorApp(page, config_path=Path("settings.json"))
+    app = TranslatorApp(page, config_path=Path("settings.json"), ui_settings=object())
     app.controller.settings = AppSettings()
     app.controller.settings.overlay.desktop_flet.position.x = 80
     app.controller.settings.overlay.desktop_flet.position.y = 90
@@ -503,7 +488,7 @@ def test_translator_app_does_not_mount_debug_preview_by_default(
     _patch_app_construction(monkeypatch)
 
     page = DummyPage()
-    app = TranslatorApp(page, config_path=Path("settings.json"))
+    app = TranslatorApp(page, config_path=Path("settings.json"), ui_settings=object())
 
     assert app.debug_ui_preview is False
     assert app.debug_preview_panel is None
@@ -528,6 +513,7 @@ def test_translator_app_mounts_debug_preview_when_enabled(
     app = TranslatorApp(
         page,
         config_path=Path("settings.json"),
+        ui_settings=object(),
         debug_ui_preview=True,
     )
 
@@ -709,7 +695,7 @@ def test_debug_preview_panel_wires_audio_fault_actions(monkeypatch) -> None:
 
     monkeypatch.setattr(app_module, "DebugPreviewPanel", FakeDebugPreviewPanel)
     app = app_module.TranslatorApp(
-        DummyPage(), config_path=Path("settings.json"), debug_ui_preview=True
+        DummyPage(), config_path=Path("settings.json"), debug_ui_preview=True, ui_settings=object()
     )
     monkeypatch.setattr(
         app, "_show_snackbar", lambda message, color=None: snackbars.append((message, color))
@@ -753,7 +739,7 @@ def test_debug_audio_fault_actions_do_not_call_persistence_or_providers(monkeypa
     )
 
     app = app_module.TranslatorApp(
-        DummyPage(), config_path=Path("settings.json"), debug_ui_preview=True
+        DummyPage(), config_path=Path("settings.json"), debug_ui_preview=True, ui_settings=object()
     )
     monkeypatch.setattr(app, "_show_snackbar", lambda *_args, **_kwargs: None)
 
@@ -800,7 +786,7 @@ def test_local_qwen_guidance_modal_open_guide_opens_github_api_key_guide_safely(
     monkeypatch.setattr(app_module, "get_locale", lambda: "ko")
 
     page = DummyPage()
-    app = TranslatorApp(page, config_path=Path("settings.json"))
+    app = TranslatorApp(page, config_path=Path("settings.json"), ui_settings=object())
     monkeypatch.setattr(app.content_area, "update", lambda: None)
     app.controller.apply_settings = lambda *args, **kwargs: forbidden_calls.append("apply_settings")
     app.controller.apply_providers = lambda *args, **kwargs: forbidden_calls.append(
@@ -935,6 +921,7 @@ def test_translator_app_keeps_debug_ui_preview_out_of_controller(
     app = TranslatorApp(
         DummyPage(),
         config_path=Path("settings.json"),
+        ui_settings=object(),
         debug_ui_preview=True,
     )
 
@@ -979,8 +966,9 @@ def test_translator_app_wires_runtime_log_detailed_into_dashboard_visual_commit_
             return None
 
     class DummySettingsView(ft.Container):
-        def __init__(self) -> None:
+        def __init__(self, application) -> None:
             super().__init__()
+            self.application = application
             self.on_settings_changed = None
             self.on_prompt_apply_settings = None
             self.on_providers_changed = None
@@ -1010,7 +998,7 @@ def test_translator_app_wires_runtime_log_detailed_into_dashboard_visual_commit_
 
     monkeypatch.setattr(app_module, "GuiController", DummyController)
     monkeypatch.setattr(app_module, "DashboardView", DummyDashboardView)
-    monkeypatch.setattr(app_module, "SettingsView", DummySettingsView)
+    monkeypatch.setattr(app_module, "ApplicationSettingsView", DummySettingsView)
     monkeypatch.setattr(app_module, "LogsView", DummyLogsView)
     monkeypatch.setattr(app_module, "AboutView", lambda: ft.Container())
     monkeypatch.setattr(app_module, "TitleBar", lambda _page: ft.Container())
@@ -1020,17 +1008,17 @@ def test_translator_app_wires_runtime_log_detailed_into_dashboard_visual_commit_
     monkeypatch.setattr(app_module, "font_for_language", lambda _code: "font")
     monkeypatch.setattr(app_module, "get_locale", lambda: "en")
 
-    app = TranslatorApp(DummyPage(), config_path=Path("settings.json"))
+    app = TranslatorApp(DummyPage(), config_path=Path("settings.json"), ui_settings=object())
 
     assert app.view_dashboard.runtime_log_detailed == app._log_detailed
 
 
-def test_settings_view_pkce_callback_is_wired(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_settings_view_has_no_controller_pkce_callback(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_app_construction(monkeypatch)
 
-    app = TranslatorApp(DummyPage(), config_path=Path("settings.json"))
+    app = TranslatorApp(DummyPage(), config_path=Path("settings.json"), ui_settings=object())
 
-    assert app.view_settings.on_request_openrouter_pkce == app._on_request_openrouter_pkce
+    assert app.view_settings.on_request_openrouter_pkce is None
 
 
 def test_translator_app_4x3_window_keeps_shell_navigation_usable(
@@ -1039,7 +1027,7 @@ def test_translator_app_4x3_window_keeps_shell_navigation_usable(
     _patch_app_construction(monkeypatch)
 
     page = DummyPage()
-    app = TranslatorApp(page, config_path=Path("settings.json"))
+    app = TranslatorApp(page, config_path=Path("settings.json"), ui_settings=object())
     monkeypatch.setattr(app.content_area, "update", lambda: None)
 
     assert app.content_area.padding == app_module.APP_CONTENT_PADDING
@@ -1120,11 +1108,12 @@ async def test_main_gui_routes_update_check_through_app_log_helper(
             seen["started"] = True
 
     class FakeApp:
-        def __init__(self, incoming_page, *, config_path, debug_ui_preview=False):
+        def __init__(self, incoming_page, *, config_path, debug_ui_preview=False, ui_settings=None):
             seen["init"] = (incoming_page, config_path, debug_ui_preview)
             seen["app"] = self
             self.page = incoming_page
             self.controller = FakeController()
+            self.view_settings = SimpleNamespace(load=lambda: asyncio.sleep(0))
 
         def _log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
             _ = (message, level)
@@ -1135,7 +1124,7 @@ async def test_main_gui_routes_update_check_through_app_log_helper(
     monkeypatch.setattr(app_module, "TranslatorApp", FakeApp)
     monkeypatch.setattr(app_module, "_check_and_notify_update", fake_check_and_notify_update)
 
-    await app_module.main_gui(page, config_path=Path("settings.json"))
+    await app_module.main_gui(page, config_path=Path("settings.json"), ui_settings=object())
 
     assert seen["started"] is True
     assert seen["check"][0] is page
@@ -1156,10 +1145,11 @@ async def test_main_gui_forwards_debug_ui_preview_flag(
             seen["started"] = True
 
     class FakeApp:
-        def __init__(self, incoming_page, *, config_path, debug_ui_preview=False):
+        def __init__(self, incoming_page, *, config_path, debug_ui_preview=False, ui_settings=None):
             seen["init"] = (incoming_page, config_path, debug_ui_preview)
             self.page = incoming_page
             self.controller = FakeController()
+            self.view_settings = SimpleNamespace(load=lambda: asyncio.sleep(0))
 
         def _log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
             _ = (message, level)
@@ -1173,6 +1163,7 @@ async def test_main_gui_forwards_debug_ui_preview_flag(
     await app_module.main_gui(
         page,
         config_path=Path("settings.json"),
+        ui_settings=object(),
         debug_ui_preview=True,
     )
 
@@ -1375,6 +1366,7 @@ def test_debug_preview_discord_auth_opens_dialog_with_close_only_actions(
     app.controller = SimpleNamespace(
         settings=settings,
         config_path=Path("settings.json"),
+        ui_settings=object(),
         _save_settings=lambda: pytest.fail("debug Discord-auth preview must not save settings"),
         persist_settings=lambda: pytest.fail(
             "debug Discord-auth preview must not persist settings"
@@ -1453,6 +1445,7 @@ def test_debug_preview_qq_auth_states_are_pure_ui_without_tasks_or_persistence(
     app.controller = SimpleNamespace(
         settings=settings,
         config_path=Path("settings.json"),
+        ui_settings=object(),
         _save_settings=lambda: pytest.fail("debug QQ-auth preview must not save settings"),
         persist_settings=lambda: pytest.fail("debug QQ-auth preview must not persist settings"),
         start_qq_managed_auth_from_dialog=lambda *_args, **_kwargs: pytest.fail(
@@ -1491,72 +1484,29 @@ def test_debug_preview_qq_auth_states_are_pure_ui_without_tasks_or_persistence(
 
 def test_discord_managed_auth_byok_launches_openrouter_pkce_with_byok_target() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
-    settings = AppSettings()
-    settings.provider.llm = LLMProviderName.OPENROUTER
-    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
-    settings.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
-    settings.openrouter.llm_model = OpenRouterLLMModel.QWEN_35_FLASH_02_23
-    app.controller = SimpleNamespace(settings=settings)
-    app.controller.build_managed_openrouter_byok_target_settings = MethodType(
-        GuiController.build_managed_openrouter_byok_target_settings, app.controller
+    snapshot = SimpleNamespace(
+        providers=SimpleNamespace(
+            openrouter_selection_alias="qwen35_flash_byok",
+            openrouter_model="qwen3.5-flash-02-23",
+        ),
+        translation=SimpleNamespace(model="gemma4"),
     )
-    pkce_calls: list[tuple[AppSettings, str]] = []
-    app._on_request_openrouter_pkce = (
-        lambda target_settings, *, launch_source="settings": pkce_calls.append(
-            (target_settings, launch_source)
-        )
+    pkce_calls: list[str] = []
+    app.view_settings = SimpleNamespace(
+        snapshot=snapshot,
+        request_pkce=lambda source: pkce_calls.append(source),
     )
     app._show_snackbar = lambda *_args, **_kwargs: pytest.fail(
-        "managed Discord auth BYOK should build a valid OpenRouter target"
+        "typed PKCE launch should have an authoritative snapshot"
     )
 
     app._on_discord_managed_auth_byok()
 
-    assert len(pkce_calls) == 1
-    target_settings, launch_source = pkce_calls[0]
-    assert launch_source == "discord_auth"
-    assert target_settings is not settings
-    assert target_settings.provider.llm is LLMProviderName.OPENROUTER
-    assert target_settings.openrouter.selected_source is OpenRouterCredentialSource.BYOK
-    assert target_settings.openrouter.selection_alias is OpenRouterSelectionAlias.QWEN35_FLASH_BYOK
-    assert target_settings.openrouter.llm_model is OpenRouterLLMModel.QWEN_35_FLASH_02_23
-    assert settings.openrouter.selected_source is OpenRouterCredentialSource.MANAGED
+    assert pkce_calls == ["discord_auth"]
 
 
 def test_discord_managed_auth_byok_clears_managed_china_translation_state() -> None:
-    app = TranslatorApp.__new__(TranslatorApp)
-    settings = AppSettings()
-    settings.provider.llm = LLMProviderName.OPENROUTER
-    settings.translation = TranslationSettings(
-        model=TranslationModel.DEEPSEEK_V4_FLASH,
-        connection=TranslationConnection.MANAGED_CHINA,
-        connection_history={
-            TranslationModel.DEEPSEEK_V4_FLASH.value: TranslationConnection.MANAGED_CHINA,
-        },
-    )
-    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
-    settings.openrouter.selection_alias = OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
-    settings.openrouter.llm_model = OpenRouterLLMModel.DEEPSEEK_V4_FLASH
-    settings.openrouter.provider_routing = OpenRouterProviderRouting.DEEPSEEK_ONLY
-    app.controller = SimpleNamespace(settings=settings)
-    app.controller.build_managed_openrouter_byok_target_settings = MethodType(
-        GuiController.build_managed_openrouter_byok_target_settings, app.controller
-    )
-
-    target_settings = app._build_managed_openrouter_byok_target_settings()
-
-    assert target_settings is not None
-    assert target_settings.openrouter.selected_source is OpenRouterCredentialSource.BYOK
-    assert (
-        target_settings.openrouter.selection_alias
-        is OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_BYOK
-    )
-    assert target_settings.openrouter.provider_routing is OpenRouterProviderRouting.DEFAULT
-    assert target_settings.translation.connection is TranslationConnection.OPENROUTER
-    assert (
-        target_settings.translation.connection_history[TranslationModel.DEEPSEEK_V4_FLASH.value]
-        is TranslationConnection.OPENROUTER
-    )
+    assert not hasattr(TranslatorApp, "_build_managed_openrouter_byok_target_settings")
 
 
 @pytest.mark.asyncio
@@ -2338,9 +2288,8 @@ async def test_on_nav_change_merges_current_languages_into_prompt_only_apply() -
     app._on_nav_change(0)
 
     assert app.content_area.content is app.view_dashboard
-    assert len(app.page.tasks) == 1
-    await app.page.tasks[0]()
-    assert events == [("merge", pending_settings), ("apply", merged_settings)]
+    assert app.page.tasks == []
+    assert events == []
 
 
 @pytest.mark.asyncio
@@ -2366,10 +2315,9 @@ async def test_on_nav_change_applies_provider_changes_when_leaving_settings() ->
 
     app._on_nav_change(0)
     assert app.content_area.content is app.view_dashboard
-    assert app.view_settings.has_provider_changes is False
-    assert len(app.page.tasks) == 1
-    await app.page.tasks[0]()
-    assert seen == ["merged-settings"]
+    assert app.view_settings.has_provider_changes is True
+    assert app.page.tasks == []
+    assert seen == []
 
 
 @pytest.mark.asyncio
@@ -2420,7 +2368,7 @@ async def test_on_nav_change_refreshes_prompt_and_schedules_log_scroll() -> None
 
     app._on_nav_change(1)
     assert app.content_area.content is app.view_settings
-    assert refreshed["count"] == 1
+    assert refreshed["count"] == 0
 
     app._on_nav_change(2)
     assert app.content_area.content is app.view_logs
@@ -2465,10 +2413,9 @@ async def test_on_nav_change_applies_pending_prompt_changes_when_leaving_setting
     app._on_nav_change(0)
 
     assert app.content_area.content is app.view_dashboard
-    assert len(app.page.tasks) == 1
-    await app.page.tasks[0]()
-    assert merge_calls == [pending_settings]
-    assert seen == [merged_settings]
+    assert app.page.tasks == []
+    assert merge_calls == []
+    assert seen == []
 
 
 @pytest.mark.asyncio
@@ -2954,7 +2901,7 @@ def test_on_request_openrouter_pkce_uses_settings_mutation_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_app_construction(monkeypatch)
-    app = TranslatorApp(DummyPage(), config_path=Path("settings.json"))
+    app = TranslatorApp(DummyPage(), config_path=Path("settings.json"), ui_settings=object())
     target_settings = AppSettings()
     queued: list[object] = []
     monkeypatch.setattr(app, "_queue_settings_mutation_task", queued.append)
@@ -2990,6 +2937,7 @@ async def test_on_request_openrouter_pkce_reopens_existing_auth_url_while_flow_a
         openrouter_pkce_active=lambda: active[0],
         settings=AppSettings(),
         config_path=Path("settings.json"),
+        ui_settings=object(),
     )
     app.page = DummyPage()
     app.view_settings = SimpleNamespace(
@@ -3034,6 +2982,7 @@ async def test_on_request_openrouter_pkce_ignores_duplicate_while_flow_active(
         openrouter_pkce_active=lambda: active[0],
         settings=AppSettings(),
         config_path=Path("settings.json"),
+        ui_settings=object(),
     )
     app.page = DummyPage()
     app.view_settings = SimpleNamespace(
@@ -3078,6 +3027,7 @@ async def test_on_request_openrouter_pkce_uses_draft_preserving_refresh_on_succe
         connect_openrouter_via_pkce=fake_connect_openrouter_via_pkce,
         settings=updated_settings,
         config_path=Path("settings.json"),
+        ui_settings=object(),
     )
     app.view_settings = SimpleNamespace(
         refresh_after_openrouter_pkce_success=lambda settings, *, config_path: refresh_calls.append(
@@ -3124,6 +3074,7 @@ async def test_on_request_openrouter_pkce_does_not_refresh_settings_view_on_fail
         connect_openrouter_via_pkce=fake_connect_openrouter_via_pkce,
         settings=AppSettings(),
         config_path=Path("settings.json"),
+        ui_settings=object(),
     )
     app.view_settings = SimpleNamespace(
         refresh_after_openrouter_pkce_success=lambda settings, *, config_path: refresh_calls.append(
@@ -3214,7 +3165,7 @@ async def test_queue_orders_generic_settings_change_before_provider_apply_on_set
     assert len(app.page.tasks) == 1
     await app.page.tasks[0]()
 
-    assert events == [("settings", raw_settings), ("providers", provider_settings)]
+    assert events == [("settings", raw_settings)]
 
 
 def test_on_nav_change_closes_open_dialog_before_switching_tabs() -> None:
@@ -3284,7 +3235,7 @@ def test_apply_locale_updates_views_and_page(monkeypatch: pytest.MonkeyPatch) ->
     app.apply_locale()
 
     assert app.page.title == app_module.t("app.title")
-    assert view_calls == ["dash", "settings", "logs"]
+    assert view_calls == ["dash", "logs"]
     assert app.page.updated == 1
 
 
@@ -3331,7 +3282,7 @@ def test_on_overlay_state_changed_updates_settings_view_runtime_state() -> None:
 
     assert app.overlay_state == "failed"
     assert app.overlay_failure_reason == "runtime_crashed"
-    assert seen == [("failed", "runtime_crashed", None, False)]
+    assert seen == []
     assert refreshed == [("settings", contract), ("dashboard", contract)]
 
 
@@ -3509,7 +3460,7 @@ def test_on_overlay_state_changed_routes_runtime_logs() -> None:
     assert controller.detailed_messages == [
         "[Overlay] State detail: overlay_state=failed failure_reason=runtime_crashed"
     ]
-    assert seen == [("failed", "runtime_crashed", None, False)]
+    assert seen == []
 
 
 @pytest.mark.asyncio

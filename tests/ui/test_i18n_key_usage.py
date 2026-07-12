@@ -27,6 +27,7 @@ DYNAMIC_I18N_PREFIXES = (
     "settings.peer_translation.status.",
     "logs.mode.",
     "settings.translation_model.",
+    "settings.application.field.",
 )
 
 GITHUB_STAR_SNACKBAR_KEYS = (

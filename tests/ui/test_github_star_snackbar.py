@@ -751,9 +751,17 @@ async def test_main_gui_runs_github_star_prompt_after_update_check(
             events.append("start")
 
     class FakeApp:
-        def __init__(self, incoming_page, *, config_path, debug_ui_preview=False):  # noqa: ANN001
+        def __init__(
+            self,
+            incoming_page,
+            *,
+            config_path,
+            debug_ui_preview=False,
+            ui_settings=None,
+        ):  # noqa: ANN001
             _ = (incoming_page, config_path, debug_ui_preview)
             self.controller = FakeController()
+            self.view_settings = SimpleNamespace(load=lambda: asyncio.sleep(0))
 
         def _log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
             _ = (message, level)
@@ -772,7 +780,7 @@ async def test_main_gui_runs_github_star_prompt_after_update_check(
     monkeypatch.setattr(app_module, "TranslatorApp", FakeApp)
     monkeypatch.setattr(app_module, "_check_and_notify_update", fake_check_and_notify_update)
 
-    await app_module.main_gui(page, config_path=Path("settings.json"))
+    await app_module.main_gui(page, config_path=Path("settings.json"), ui_settings=object())
 
     assert events == ["start", "update", "github-star"]
 

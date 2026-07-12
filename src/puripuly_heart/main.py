@@ -136,6 +136,7 @@ async def _run_gui_async(
         create_overlay_production_composition,
     )
     from puripuly_heart.ui import app as ui_app
+    from puripuly_heart.ui.debug_settings import InertDebugUiSettingsApplication
     from puripuly_heart.ui.fonts import assets_dir
 
     initial_settings = _call_load_settings_or_default(
@@ -202,6 +203,12 @@ async def _run_gui_async(
             kwargs["application_runtime_host"] = application_runtime_host
         if "application_adapters" in parameters or accepts_kwargs:
             kwargs["application_adapters"] = application_adapters
+        if "ui_settings" in parameters or accepts_kwargs:
+            kwargs["ui_settings"] = (
+                InertDebugUiSettingsApplication()
+                if debug_ui_preview
+                else runtime_composition.ui_settings
+            )
         if "defer_startup" in parameters or accepts_kwargs:
             kwargs["defer_startup"] = True
         if "allow_stable_settings_import" in parameters or any(

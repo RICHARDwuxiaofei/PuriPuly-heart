@@ -36,10 +36,52 @@ from puripuly_heart.app.ports.ui_settings import (
 from puripuly_heart.app.services.ui_settings import (
     ApplicationUiSettingsService,
     UiSettingsApplication,
+    normalize_pkce_intent,
 )
 from puripuly_heart.app.wiring_composition import create_application_runtime_production_composition
 from puripuly_heart.config.settings_vnext.facade import save_vnext_settings
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
+
+
+@pytest.mark.parametrize(
+    ("source", "selection_alias", "expected_alias"),
+    (
+        ("managed", "gemma4_managed", "gemma4_byok"),
+        ("managed", "qwen35_flash_managed", "qwen35_flash_byok"),
+        ("managed", "deepseek_v4_flash_managed", "deepseek_v4_flash_byok"),
+        ("byok", "gemma4_byok", "gemma4_byok"),
+        ("byok", "qwen35_flash_byok", "qwen35_flash_byok"),
+        ("byok", "deepseek_v4_flash_byok", "deepseek_v4_flash_byok"),
+    ),
+)
+@pytest.mark.parametrize("connection", ("managed_china", "managed", "openrouter"))
+@pytest.mark.parametrize(
+    ("model", "expected_model"),
+    (
+        ("deepseek-v4-flash", "deepseek/deepseek-v4-flash"),
+        ("gemma-4-26b-a4b-it", "google/gemma-4-26b-a4b-it"),
+        ("qwen/qwen3.5-flash-02-23", "qwen/qwen3.5-flash-02-23"),
+    ),
+)
+def test_pkce_normalization_matches_preserved_legacy_byok_projection(
+    source: str,
+    selection_alias: str,
+    expected_alias: str,
+    connection: str,
+    model: str,
+    expected_model: str,
+) -> None:
+    normalized = normalize_pkce_intent(
+        PkceStartRequest(selection_alias, model, "revision-7", "settings"),
+        canonical_connection=connection,
+    )
+    assert source in {"managed", "byok"}
+    assert normalized.request.selection_alias == expected_alias
+    assert normalized.request.model == expected_model
+    assert normalized.request.expected_revision == "revision-7"
+    assert normalized.request.launch_source == "settings"
+    assert normalized.provider_routing == "default"
+    assert "managed" not in normalized.request.selection_alias
 
 
 class Commands:
@@ -356,6 +398,12 @@ async def test_production_wiring_constructs_starts_cancels_and_closes_without_ui
     )
     assert pkce.status == InteractionStatus.APPLIED
     assert pkce_commands
+    projected = pkce_commands[-1].settings_values["intent"]["translation"]
+    assert projected["connection"] == "openrouter"
+    assert projected["connection_history"][projected["model"]] == "openrouter"
+    assert projected["openrouter_provider_routing"] == "default"
+    assert projected["openrouter_selected_source"] == "byok"
+    assert projected["openrouter_selection_alias"] == "openrouter_gemma4_26b_a4b"
     managed = await composition.ui_settings.interactions.managed_action(ManagedAction.REFRESH)
     assert managed.presentation.referral_id == "ref-id"
     capture = await composition.ui_settings.interactions.capture_targets()

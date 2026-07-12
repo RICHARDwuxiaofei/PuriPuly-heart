@@ -38,6 +38,12 @@ from puripuly_heart.app.services.application_settings_codecs import (
     OPERATIONAL_CODECS,
     CodecKind,
 )
+
+
+def settings_presentation_codecs():
+    return tuple(FIELD_CODECS.values())
+
+
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core.messages import ErrorDiagnostics
 

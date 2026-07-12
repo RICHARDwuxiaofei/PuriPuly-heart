@@ -16,6 +16,7 @@ from puripuly_heart.app.ports.overlay_application import (
     OverlayApplicationStatePort,
 )
 from puripuly_heart.app.ports.post_commit_runtime import SurfaceRuntimeTransactionPort
+from puripuly_heart.app.services.ui_settings import UiSettingsApplication
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
@@ -52,9 +53,9 @@ from puripuly_heart.ui.theme import (
     get_app_theme,
 )
 from puripuly_heart.ui.views.about import AboutView
+from puripuly_heart.ui.views.application_settings import ApplicationSettingsView
 from puripuly_heart.ui.views.dashboard import DashboardView
 from puripuly_heart.ui.views.logs import LogsView
-from puripuly_heart.ui.views.settings import SettingsView
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,7 @@ class TranslatorApp:
         vrc_audio_gate: AudioCaptureGatePort | None = None,
         application_runtime_host: object | None = None,
         application_adapters: object | None = None,
+        ui_settings: UiSettingsApplication,
     ):
         self.page = page
         controller_kwargs = {
@@ -168,6 +170,7 @@ class TranslatorApp:
         self.debug_ui_preview = bool(debug_ui_preview)
         self.debug_preview_panel: DebugPreviewPanel | None = None
         self._application_adapters = application_adapters
+        self.ui_settings = ui_settings
         self._oauth_runtime = (
             None if application_adapters is None else application_adapters.ui_oauth
         )
@@ -211,68 +214,22 @@ class TranslatorApp:
         self.view_dashboard.on_retry_peer_process_capture = self._on_retry_peer_process_capture
         self.view_dashboard.on_language_change = self._on_language_change
 
-        self.view_settings.on_settings_changed = self._on_settings_changed
-        self.view_settings.on_prompt_apply_settings = self._on_prompt_apply_settings
-        self.view_settings.on_providers_changed = self._on_providers_changed
-        self.view_settings.on_request_openrouter_pkce = self._on_request_openrouter_pkce
-        self.view_settings.on_verify_api_key = self._on_verify_api_key
-        self.view_settings.on_secret_cleared = self._on_secret_cleared
-        self.view_settings.on_local_llm_secret_changed = self._on_local_llm_secret_changed
-        self.view_settings.on_start_microphone_test = self._on_start_microphone_test
-        self.view_settings.on_telemetry_consent_change = self._on_telemetry_consent_change
-        self.view_settings.on_list_loopback_capture_options = (
-            lambda: self.controller.list_loopback_capture_options()
-        )
-        self.view_settings.on_list_loopback_process_options = (
-            lambda: self.controller.list_loopback_process_options()
-        )
-        self.view_settings.on_list_loopback_device_options = (
-            lambda: self.controller.list_loopback_device_options()
-        )
-        self.view_settings.on_current_loopback_capture_option = (
-            lambda: self.controller.current_loopback_capture_option_value()
-        )
-        self.view_settings.on_apply_loopback_capture_option = self._on_apply_loopback_capture_option
-        self.view_settings.on_loopback_capture_summary = (
-            lambda: self.controller.loopback_capture_summary()
-        )
-        self.view_settings.on_desktop_overlay_lock_change = self._on_desktop_overlay_lock_change
-        self.view_settings.on_desktop_overlay_size_change = self._on_desktop_overlay_size_change
-        self.view_settings.on_desktop_overlay_recovery_action = (
-            self._on_desktop_overlay_recovery_action
-        )
-        self.view_settings.on_desktop_overlay_position_reset = (
-            self._on_desktop_overlay_position_reset
-        )
-        self.view_settings.on_view_logs = self._open_logs_tab
-        self.view_settings.show_snackbar = self._show_snackbar
+        self.view_settings.on_snackbar = self._show_settings_snackbar
+        self.view_settings.on_locale_changed = self._on_settings_locale_changed
         self.view_logs.on_mode_change = self._on_runtime_logging_mode_change
         self.view_logs.set_runtime_logging_mode(self.controller.runtime_logging_mode)
-        runtime_log_basic = getattr(self.controller, "log_basic", None)
-        runtime_log_detailed = getattr(self.controller, "log_detailed", None)
-        if callable(runtime_log_basic):
-            self.view_settings.runtime_log_basic = runtime_log_basic
-        if callable(runtime_log_detailed):
-            self.view_settings.runtime_log_detailed = runtime_log_detailed
         self.view_dashboard.runtime_log_detailed = self._log_detailed
 
-        calibration_begin = getattr(self.controller, "begin_overlay_calibration", None)
-        calibration_change = getattr(self.controller, "set_overlay_calibration_field", None)
-        calibration_apply = getattr(self.controller, "apply_overlay_calibration", None)
-        calibration_cancel = getattr(self.controller, "cancel_overlay_calibration", None)
-        if callable(calibration_begin):
-            self.view_settings.on_overlay_calibration_begin = calibration_begin
-        if callable(calibration_change):
-            self.view_settings.on_overlay_calibration_change = calibration_change
-        if callable(calibration_apply):
-            self.view_settings.on_overlay_calibration_apply = calibration_apply
-        if callable(calibration_cancel):
-            self.view_settings.on_overlay_calibration_cancel = calibration_cancel
+    def _show_settings_snackbar(self, message: str, severity: str) -> None:
+        color = {
+            "success": COLOR_SUCCESS,
+            "warning": ft.Colors.ORANGE_700,
+            "error": ft.Colors.RED_700,
+        }.get(severity)
+        self._show_snackbar(message, color)
 
-        set_overlay_calibration = getattr(self.view_settings, "set_overlay_calibration", None)
-        overlay_calibration = getattr(self.controller, "overlay_calibration", None)
-        if callable(set_overlay_calibration) and overlay_calibration is not None:
-            set_overlay_calibration(overlay_calibration)
+    def _on_settings_locale_changed(self, _locale: str) -> None:
+        self.apply_locale()
 
     def _apply_dashboard_runtime_facts(self, facts: object) -> None:
         self.view_dashboard.translation_needs_key = not bool(getattr(facts, "llm_available", False))
@@ -333,10 +290,9 @@ class TranslatorApp:
 
     def _build_layout(self):
         self.view_dashboard = DashboardView()
-        self.view_settings = SettingsView()
+        self.view_settings = ApplicationSettingsView(self.ui_settings)
         self.view_logs = LogsView()
         self.view_about = AboutView()
-        self.view_settings.set_overlay_runtime_state(self.overlay_state)
 
         # Custom title bar
         self.title_bar = TitleBar(self.page)
@@ -822,36 +778,10 @@ class TranslatorApp:
         return 0 if index == 1 else APP_CONTENT_PADDING
 
     def _on_nav_change(self, index: int):
-        # Track previous tab for Settings auto-apply
         previous_tab = getattr(self, "_current_tab", 0)
         if previous_tab != index:
             self._close_open_dialog_for_navigation()
         self._current_tab = index
-
-        # Auto-apply Settings changes when leaving Settings (tab 1)
-        if previous_tab == 1 and index != 1:
-            if self.view_settings.has_provider_changes:
-                pending_settings = self.view_settings.consume_provider_apply_settings()
-                if pending_settings is not None:
-                    self.view_settings.has_provider_changes = False
-
-                    async def _task():
-                        await self.controller.apply_providers(pending_settings)
-
-                    self._queue_settings_mutation_task(_task)
-            elif getattr(self.view_settings, "has_pending_prompt_changes", False):
-                pending_settings = self.view_settings.consume_prompt_apply_settings()
-                if pending_settings is not None:
-
-                    async def _task():
-                        merged_settings = (
-                            self.controller.merge_settings_tab_apply_with_current_languages(
-                                pending_settings
-                            )
-                        )
-                        await self.controller.apply_settings(merged_settings)
-
-                    self._queue_settings_mutation_task(_task)
 
         if index == 0:
             self.content_area.content = self.view_dashboard
@@ -864,9 +794,7 @@ class TranslatorApp:
 
         self.content_area.padding = self._content_padding_for_index(index)
         self.content_area.update()
-        if index == 1:
-            self.view_settings.refresh_prompt_if_empty()
-        elif index == 2:
+        if index == 2:
             # Async scroll after rendering completes
             async def _scroll():
                 import asyncio
@@ -898,7 +826,6 @@ class TranslatorApp:
         self.page.theme = get_app_theme(font_family=font_for_language(get_locale()))
         self.title_bar.set_title(t("app.title"))
         self.view_dashboard.apply_locale()
-        self.view_settings.apply_locale()
         self.refresh_overlay_peer_contract()
         self.view_logs.apply_locale()
         debug_preview_panel = getattr(self, "debug_preview_panel", None)
@@ -924,26 +851,6 @@ class TranslatorApp:
         set_dashboard_contract = getattr(view_dashboard, "set_overlay_peer_contract", None)
         if callable(set_dashboard_contract):
             set_dashboard_contract(contract)
-
-    def _sync_settings_overlay_runtime_state(self) -> None:
-        view_settings = getattr(self, "view_settings", None)
-        set_state = getattr(view_settings, "set_overlay_runtime_state", None)
-        if not callable(set_state):
-            return
-        controller = getattr(self, "controller", None)
-        settings = getattr(controller, "settings", None)
-        overlay_target = None
-        if settings is not None:
-            overlay_target = getattr(settings.overlay, "target", None)
-        desktop_locked = False
-        if controller is not None:
-            desktop_locked = bool(getattr(controller, "desktop_overlay_captions_locked", False))
-        set_state(
-            self.overlay_state,
-            failure_reason=self.overlay_failure_reason,
-            overlay_target=overlay_target,
-            desktop_captions_locked=desktop_locked,
-        )
 
     def _on_desktop_overlay_lock_change(self, locked: bool) -> None:
         async def _task():
@@ -982,7 +889,6 @@ class TranslatorApp:
         sync_settings = getattr(view_settings, "sync_desktop_overlay_settings", None)
         if settings is not None and callable(sync_settings):
             sync_settings(settings)
-        self._sync_settings_overlay_runtime_state()
 
     def on_desktop_overlay_state_changed(
         self,
@@ -991,7 +897,6 @@ class TranslatorApp:
         captions_locked: bool | None = None,
     ) -> None:
         _ = (interaction_mode, captions_locked)
-        self._sync_settings_overlay_runtime_state()
 
     def _on_manual_submit(self, _source: str, text: str) -> None:
         async def _task():
@@ -1343,12 +1248,6 @@ class TranslatorApp:
                         self.controller.settings,
                         config_path=self.controller.config_path,
                     )
-                else:
-                    self.view_settings.load_from_settings(
-                        self.controller.settings,
-                        config_path=self.controller.config_path,
-                        preserve_custom_vocab_draft=True,
-                    )
                 self._show_snackbar(t("openrouter.pkce.connected"), COLOR_SUCCESS)
 
         self._queue_settings_mutation_task(_task)
@@ -1677,25 +1576,14 @@ class TranslatorApp:
         self._discord_managed_auth_task_handle = None
         self._close_discord_managed_auth_dialog()
 
-    def _build_managed_openrouter_byok_target_settings(self) -> AppSettings | None:
-        return self.controller.build_managed_openrouter_byok_target_settings()
-
-    def _build_founder_letter_target_settings(self) -> AppSettings | None:
-        return self._build_managed_openrouter_byok_target_settings()
-
     def _on_discord_managed_auth_byok(self) -> None:
-        target_settings = self._build_managed_openrouter_byok_target_settings()
-        if target_settings is None:
-            self._show_snackbar(t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)
-            return
-        self._on_request_openrouter_pkce(target_settings, launch_source="discord_auth")
+        self._start_settings_pkce("discord_auth")
 
     def _on_founder_letter_connect(self) -> None:
-        target_settings = self._build_founder_letter_target_settings()
-        if target_settings is None:
-            self._show_snackbar(t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)
-            return
-        self._on_request_openrouter_pkce(target_settings, launch_source="letter")
+        self._start_settings_pkce("letter")
+
+    def _start_settings_pkce(self, launch_source: str) -> None:
+        self.view_settings.request_pkce(launch_source)
 
     def _on_founder_letter_contact(self) -> None:
         webbrowser.open(FOUNDER_CONTACT_URL)
@@ -1844,7 +1732,6 @@ class TranslatorApp:
         self._log_detailed(
             f"[Overlay] State detail: overlay_state={state} failure_reason={failure_reason}"
         )
-        self._sync_settings_overlay_runtime_state()
         self.refresh_overlay_peer_contract()
 
 
@@ -1861,6 +1748,7 @@ async def main_gui(
     surface_runtime_transactions: SurfaceRuntimeTransactionPort | None = None,
     application_runtime_host: object | None = None,
     application_adapters: object | None = None,
+    ui_settings: UiSettingsApplication,
     defer_startup: bool = False,
 ):
     parameters = inspect.signature(TranslatorApp).parameters
@@ -1877,6 +1765,7 @@ async def main_gui(
         "vrc_audio_gate": vrc_audio_gate,
         "application_runtime_host": application_runtime_host,
         "application_adapters": application_adapters,
+        "ui_settings": ui_settings,
     }
     app_kwargs = {
         name: value for name, value in candidates.items() if name in parameters or accepts_kwargs
@@ -1893,9 +1782,7 @@ async def main_gui(
 
 
 async def complete_main_gui_startup(app: TranslatorApp, page: ft.Page) -> None:
-    show_telemetry_consent = getattr(app, "maybe_show_telemetry_consent_dialog", None)
-    if callable(show_telemetry_consent):
-        show_telemetry_consent()
+    await app.view_settings.load()
 
     # Check for updates in background
     update_kwargs = {"log_detailed": app._log_detailed}

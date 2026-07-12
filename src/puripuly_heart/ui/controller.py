@@ -5137,18 +5137,7 @@ class GuiController:
         *,
         preserve_custom_vocab_draft: bool,
     ) -> None:
-        view_settings = getattr(self.app, "view_settings", None)
-        if view_settings is None:
-            return
-        with contextlib.suppress(Exception):
-            view_settings.load_from_settings(
-                settings,
-                config_path=self.config_path,
-                preserve_custom_vocab_draft=preserve_custom_vocab_draft,
-            )
-            self._remember_settings_view_order22_baseline(settings)
-            self._remember_settings_view_order23_baseline(settings)
-            self._remember_settings_view_order24_baseline(settings)
+        _ = settings, preserve_custom_vocab_draft
 
     def _order22_patch_base_and_values(
         self,
@@ -5566,11 +5555,7 @@ class GuiController:
         if should_restart_stt:
             await self._replace_runtime_stt_provider()
 
-        if reload_settings_view and (source_language_changed or target_language_changed):
-            self._reload_settings_view_from_settings(
-                settings,
-                preserve_custom_vocab_draft=True,
-            )
+        _ = reload_settings_view, source_language_changed, target_language_changed
 
         if prev_locale != settings.ui.locale:
             set_locale(settings.ui.locale)
@@ -5715,12 +5700,6 @@ class GuiController:
                 self.last_settings_mutation_result = (
                     _ui_prompt_clipboard_state_runtime_degraded_transaction_result()
                 )
-
-        if self.settings is not None:
-            self._reload_settings_view_from_settings(
-                self.settings,
-                preserve_custom_vocab_draft=True,
-            )
 
         if (
             self.last_settings_mutation_result is not None
@@ -8543,15 +8522,6 @@ class GuiController:
             dash.set_peer_auto_detect_available(
                 settings.provider.peer_stt == STTProviderName.SONIOX
             )
-
-        with contextlib.suppress(Exception):
-            view_settings = getattr(self.app, "view_settings", None)
-            if view_settings is not None:
-                view_settings.load_from_settings(settings, config_path=self.config_path)
-                self._remember_settings_view_order22_baseline(settings)
-                self._remember_settings_view_order23_baseline(settings)
-                self._remember_settings_view_order24_baseline(settings)
-                view_settings.set_overlay_calibration(self.overlay_calibration)
 
         self._refresh_overlay_peer_consumers()
 

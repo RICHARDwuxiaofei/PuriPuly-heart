@@ -91,15 +91,22 @@
         "src/puripuly_heart/core/runtime/self_audio.py",
         "src/puripuly_heart/core/stt/controller.py",
         "src/puripuly_heart/core/telemetry.py",
+        "src/puripuly_heart/data/i18n/en.json",
+        "src/puripuly_heart/data/i18n/ja.json",
+        "src/puripuly_heart/data/i18n/ko.json",
+        "src/puripuly_heart/data/i18n/ru.json",
         "src/puripuly_heart/data/i18n/zh-CN.json",
         "src/puripuly_heart/main.py",
         "src/puripuly_heart/release_evidence/unattended_runtime.py",
         "src/puripuly_heart/release_evidence/windows_process_isolation.py",
         "src/puripuly_heart/ui/app.py",
-        "src/puripuly_heart/ui/controller.py"
+        "src/puripuly_heart/ui/components/settings/semantic_settings_editors.py",
+        "src/puripuly_heart/ui/controller.py",
+        "src/puripuly_heart/ui/debug_settings.py",
+        "src/puripuly_heart/ui/views/application_settings.py"
       ],
-      "production_source_sha256": "767d6f7769e48858713ea754b04b942200333e37e9e1996008ba8df761bc65c2",
-      "source_delta_sha256": "0fb89515fe7dceb368a83304c950040a1815d3d4fb2b983eb89c5d608f84852c"
+      "production_source_sha256": "627daf8865ce8dbb8db479cca05b9ef9ce5bc1c4507e9fbba33548d612d02afa",
+      "source_delta_sha256": "5b9d290af75df0b61ba335ef65283ec05757dab83b6ae88f973779f454e76e24"
     },
     "repair_base": "01b3973b64425c8feb9955696d5217fed5d422a4"
   },
@@ -107,7 +114,7 @@
   "sha256": {
     "runner": "5f9252d28e091d21dd7f506ec2d384c2e7ab9993add235a182001dea156c7961",
     "baseline_trace": "fdb3e1f58b13b83445967733ca737f17823e385efb1f5f85442161cb4224b78e",
-    "current_trace": "6ca6282b30668bd5e9e5e2453ec07f0748784a84cb49f2ca004be047ab612db4",
+    "current_trace": "8e8341be7eb7b41b49a09363bc49df2ec52ca82321cc37143f1debdb56988434",
     "difference_rules": "48b2c253511110aa0d7984d402bf6163206d9f729bb867a2989db977605fbe0b"
   },
   "scenario_sha256": {

@@ -323,6 +323,58 @@ class TelemetryPresentation:
 
 
 @dataclass(frozen=True, slots=True)
+class SettingsOption:
+    semantic_id: str
+    disabled: bool = False
+    recommended: bool = False
+    section: str | None = None
+
+
+class SettingsEditorKind(str, Enum):
+    TEXT = "text"
+    OPTIONAL_TEXT = "optional_text"
+    BOOLEAN = "boolean"
+    INTEGER = "integer"
+    NUMBER = "number"
+    STRING_LIST = "string_list"
+    STRING_MAP = "string_map"
+    STRING_LIST_MAP = "string_list_map"
+    JSON_SCALAR_MAP = "json_scalar_map"
+    FALLBACK = "fallback"
+    CALIBRATION = "calibration"
+    DESKTOP_OVERLAY = "desktop_overlay"
+    CAPTURE_TARGET = "capture_target"
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsFieldPresentation:
+    field: str
+    editor: SettingsEditorKind
+    options: tuple[SettingsOption, ...] = ()
+    minimum: float | None = None
+    maximum: float | None = None
+    section: str = "general"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "options", tuple(self.options))
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsPresentationCatalog:
+    fields: tuple[SettingsFieldPresentation, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "fields", tuple(self.fields))
+
+    def options_for(self, field: str) -> tuple[SettingsOption, ...]:
+        descriptor = self.field(field)
+        return () if descriptor is None else descriptor.options
+
+    def field(self, field: str) -> SettingsFieldPresentation | None:
+        return next((entry for entry in self.fields if entry.field == field), None)
+
+
+@dataclass(frozen=True, slots=True)
 class UiSettingsSnapshot:
     translation: TranslationSettingsSnapshot
     providers: ProviderSettingsSnapshot
@@ -340,6 +392,7 @@ class UiSettingsSnapshot:
     runtime: RuntimeFacts
     canonical_revision: str
     operational_revision: str
+    catalog: SettingsPresentationCatalog = SettingsPresentationCatalog()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "verification", tuple(self.verification))
@@ -435,6 +488,12 @@ class PkceStartRequest:
     model: str
     expected_revision: str
     launch_source: str = "settings"
+
+
+@dataclass(frozen=True, slots=True)
+class PkceNormalizedIntent:
+    request: PkceStartRequest
+    provider_routing: str
 
 
 @dataclass(frozen=True, slots=True)

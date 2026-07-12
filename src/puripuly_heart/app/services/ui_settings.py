@@ -21,10 +21,16 @@ from puripuly_heart.app.ports.ui_settings import (
     ManagedPresentation,
     OscOutputSettingsSnapshot,
     OverlaySettingsSnapshot,
+    PkceNormalizedIntent,
+    PkceStartRequest,
     PromptSettingsSnapshot,
     ProviderSettingsSnapshot,
     ProviderVerificationSnapshot,
     RuntimeFacts,
+    SettingsEditorKind,
+    SettingsFieldPresentation,
+    SettingsOption,
+    SettingsPresentationCatalog,
     SttSettingsSnapshot,
     TranslationSettingsSnapshot,
     UiClipboardTelemetrySnapshot,
@@ -38,8 +44,123 @@ from puripuly_heart.app.ports.ui_settings import (
     UiSurfaceOutcome,
     VocabularyGroup,
 )
+from puripuly_heart.app.services.canonical_application_settings import settings_presentation_codecs
 from puripuly_heart.app.services.canonical_command_composition import settings_command_for_surface
 from puripuly_heart.core.lifecycle import LifecycleScope, start_lifecycle_task
+
+
+def settings_presentation_catalog() -> SettingsPresentationCatalog:
+    sections = {
+        "translation.": "api",
+        "openrouter.": "api",
+        "qwen.": "api",
+        "cerebras.": "api",
+        "local_llm.": "api",
+        "llm.": "api",
+        "system_prompt": "prompt",
+        "secrets.": "prompt",
+        "overlay.": "overlay",
+        "osc.": "overlay",
+    }
+    editor_by_kind = {
+        "text": SettingsEditorKind.TEXT,
+        "empty_text": SettingsEditorKind.TEXT,
+        "optional_text": SettingsEditorKind.OPTIONAL_TEXT,
+        "boolean": SettingsEditorKind.BOOLEAN,
+        "integer": SettingsEditorKind.INTEGER,
+        "number": SettingsEditorKind.NUMBER,
+        "string_list": SettingsEditorKind.STRING_LIST,
+        "string_map": SettingsEditorKind.STRING_MAP,
+        "string_list_map": SettingsEditorKind.STRING_LIST_MAP,
+        "local_extra_body": SettingsEditorKind.JSON_SCALAR_MAP,
+        "fallback": SettingsEditorKind.FALLBACK,
+        "calibration": SettingsEditorKind.CALIBRATION,
+        "desktop_overlay": SettingsEditorKind.DESKTOP_OVERLAY,
+        "capture_target": SettingsEditorKind.CAPTURE_TARGET,
+    }
+    result = []
+    for codec in settings_presentation_codecs():
+        name = codec.field.value
+        section = next(
+            (value for prefix, value in sections.items() if name.startswith(prefix)), "general"
+        )
+        options = tuple(SettingsOption(value) for value in sorted(codec.choices))
+        composite_options = {
+            SettingsField.TRANSLATION_FALLBACK.value: (
+                *(
+                    SettingsOption(value, section="model")
+                    for value in (
+                        "gemma4",
+                        "deepseek_v4_flash",
+                        "gemini3_flash",
+                        "gemini31_flash_lite",
+                        "qwen35_flash",
+                    )
+                ),
+                *(
+                    SettingsOption(value, section="connection")
+                    for value in ("managed", "managed_china", "openrouter", "official_byok")
+                ),
+                *(
+                    SettingsOption(value, section="selection_alias")
+                    for value in (
+                        "none",
+                        "deepseek_v4_flash_official",
+                        "openrouter_deepseek_v4_flash",
+                        "openrouter_gemma4_26b_a4b",
+                        "cerebras_gemma4_31b",
+                        "deepseek_v4_flash_china",
+                    )
+                ),
+            ),
+            SettingsField.DESKTOP_AUDIO_CAPTURE_TARGET.value: (
+                *(
+                    SettingsOption(value, section="kind")
+                    for value in ("default_output_device", "named_output_device", "process")
+                ),
+                *(
+                    SettingsOption(value, section="process_kind")
+                    for value in ("generic_executable", "discord", "vrchat")
+                ),
+            ),
+            SettingsField.OVERLAY_CALIBRATION.value: (
+                SettingsOption("head_locked", section="anchor"),
+            ),
+            SettingsField.OVERLAY_DESKTOP_FLET.value: tuple(
+                SettingsOption(value, section="size")
+                for value in ("tiny", "xsmall", "small", "medium", "large", "xlarge")
+            ),
+        }
+        result.append(
+            SettingsFieldPresentation(
+                name,
+                editor_by_kind[codec.kind.value],
+                composite_options.get(name, options),
+                codec.minimum,
+                codec.maximum,
+                section,
+            )
+        )
+    return SettingsPresentationCatalog(tuple(result))
+
+
+def normalize_pkce_intent(
+    request: PkceStartRequest, *, canonical_connection: str
+) -> PkceNormalizedIntent:
+    managed_to_byok = {
+        "gemma4_managed": "gemma4_byok",
+        "qwen35_flash_managed": "qwen35_flash_byok",
+        "deepseek_v4_flash_managed": "deepseek_v4_flash_byok",
+    }
+    alias = managed_to_byok.get(request.selection_alias, request.selection_alias)
+    if request.model == "deepseek-v4-flash":
+        model = "deepseek/deepseek-v4-flash"
+    elif request.model == "gemma-4-26b-a4b-it":
+        model = "google/gemma-4-26b-a4b-it"
+    else:
+        model = request.model
+    normalized = PkceStartRequest(alias, model, request.expected_revision, request.launch_source)
+    return PkceNormalizedIntent(normalized, "default")
 
 
 def _surface(field: SettingsField) -> SettingsSurface:
@@ -261,6 +382,7 @@ class ApplicationUiSettingsService:
             runtime,
             canonical.revision,
             operational.revision,
+            settings_presentation_catalog(),
         )
 
     async def apply(self, delta: UiSettingsDelta) -> UiSettingsResult:
@@ -346,6 +468,7 @@ class UiSettingsApplication:
     ) -> None:
         self.settings = settings
         self.interactions = interactions
+        self.presentation_catalog = settings_presentation_catalog()
         self._scope = LifecycleScope("UiSettingsApplication")
         self._interaction_sequence = 0
         self._started = False
@@ -370,6 +493,12 @@ class UiSettingsApplication:
                 ),
             )
         )
+
+    async def snapshot(self) -> UiSettingsSnapshot:
+        return await self.settings.snapshot()
+
+    async def apply(self, delta: UiSettingsDelta) -> UiSettingsResult:
+        return await self.settings.apply(delta)
 
     def run_interaction(self, operation: Coroutine[Any, Any, Any]):
         if not self._started or self._closed:
