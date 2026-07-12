@@ -91,6 +91,14 @@ def test_first_run_locale_maps_japanese_locales_to_japanese(system_locale: str) 
     assert _resolve_first_run_locale(system_locale) == "ja"
 
 
+@pytest.mark.parametrize(
+    "system_locale",
+    ["ru", "ru-RU", "ru_RU", "RU_ru", "Russian_Russia.1251"],
+)
+def test_first_run_locale_maps_russian_locales_to_russian(system_locale: str) -> None:
+    assert _resolve_first_run_locale(system_locale) == "ru"
+
+
 @pytest.mark.parametrize("system_locale", ["en_US", "fr_FR", None])
 def test_first_run_locale_defaults_to_english(system_locale: str | None) -> None:
     assert _resolve_first_run_locale(system_locale) == "en"

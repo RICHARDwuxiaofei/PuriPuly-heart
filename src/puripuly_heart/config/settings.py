@@ -2656,6 +2656,8 @@ def resolve_first_run_ui_locale(system_locale: str | None) -> str:
         return "ja"
     if normalized == "zh" or normalized.startswith("zh-") or normalized.startswith("chinese"):
         return "zh-CN"
+    if normalized == "ru" or normalized.startswith("ru-") or normalized.startswith("russian"):
+        return "ru"
     return "en"
 
 
