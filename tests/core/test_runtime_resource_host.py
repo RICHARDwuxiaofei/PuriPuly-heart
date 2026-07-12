@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 import pytest
@@ -86,6 +87,51 @@ async def test_real_hub_mixed_retain_replace_clear_reports_only_adopted_candidat
     }
     assert retained.close_calls == replaced.close_calls == cleared.close_calls == 0
     assert candidate.close_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_real_hub_rejects_stale_candidate_inside_transition_lock_after_quiescence() -> None:
+    prior_provider, candidate = Provider(), Provider()
+    hub = ClientHub(stt=prior_provider, llm=None, osc=Osc())
+    prior = await hub.current_runtime_state()
+    outer_started = asyncio.Event()
+    receipt_revision = "1"
+
+    async def guard() -> None:
+        if receipt_revision != "1":
+            raise RuntimeError("stale receipt")
+
+    staged = StagedRuntimeResources(
+        RuntimeResourceReplacementPlan("retain", "replace", "retain"),
+        {"self_stt": ResourceRef("candidate-self", candidate)},
+        guard,
+    )
+
+    await hub._provider_transition_lock.acquire()
+
+    async def install():  # noqa: ANN202
+        outer_started.set()
+        return await hub.install_runtime_resources(staged)
+
+    task = asyncio.create_task(install())
+    await outer_started.wait()
+    await asyncio.sleep(0)
+    receipt_revision = "2"
+    hub._provider_transition_lock.release()
+    result = await task
+
+    assert isinstance(result, RuntimeInstallFailure)
+    assert result.cause_code == "runtime_install_commit_guard_failed"
+    assert result.active.slots == prior.slots
+    assert hub.provider_state_snapshot().self_stt.provider is prior_provider
+    assert candidate not in [
+        state.provider
+        for state in (
+            hub.provider_state_snapshot().llm,
+            hub.provider_state_snapshot().self_stt,
+            hub.provider_state_snapshot().peer_stt,
+        )
+    ]
 
 
 def _single_replace(candidate: Provider) -> StagedRuntimeResources:

@@ -32,6 +32,7 @@ class ResolvedRuntimeResourceFactory:
     stt_builder: STTResourceBuilderPort
     runtime_logging: RuntimeLoggingPort | None = None
     managed_release_service: ManagedReleaseServicePort | None = None
+    managed_release_owner: object | None = None
     managed_delegate: ManagedDelegatePort | None = None
 
     async def build_resources(
@@ -44,12 +45,15 @@ class ResolvedRuntimeResourceFactory:
         refs_by_resource: dict[int, ResourceRef] = {}
         try:
             if plan.llm == "replace":
+                managed_release_service = self.managed_release_service
+                if self.managed_release_owner is not None:
+                    managed_release_service = self.managed_release_owner.construction_service()
                 ref = self._ref_for_resource(
                     "llm",
                     self.llm_builder.build_llm(
                         config.llm,
                         secrets=self.secrets,
-                        managed_release_service=self.managed_release_service,
+                        managed_release_service=managed_release_service,
                         managed_delegate=self.managed_delegate,
                         runtime_logging=self.runtime_logging,
                     ),

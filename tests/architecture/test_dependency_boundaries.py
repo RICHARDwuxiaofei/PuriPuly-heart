@@ -444,14 +444,6 @@ KNOWN_ALLOWED_VIOLATIONS: frozenset[ImportViolation] = frozenset(
         ImportViolation(
             rule_id="ui-adapters-avoid-provider-construction",
             importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.core.managed_openrouter_broker_client",
-            importer_layer="UI adapters/renderers",
-            imported_layer="adapters",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
             imported="puripuly_heart.core.runtime_logging",
             importer_layer="UI adapters/renderers",
             imported_layer="adapters",

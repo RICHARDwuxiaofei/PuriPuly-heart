@@ -728,7 +728,8 @@
     "resolved_llm_config_fields": [
       "primary",
       "fallback",
-      "concurrency_limit"
+      "concurrency_limit",
+      "qwen_low_latency_mode"
     ],
     "resolved_credential_requirement_fields": [
       "source",

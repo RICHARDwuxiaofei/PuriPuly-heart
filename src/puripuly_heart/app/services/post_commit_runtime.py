@@ -20,6 +20,7 @@ from puripuly_heart.app.ports.post_commit_runtime import (
     RuntimeOperation,
     RuntimeOperationalSnapshot,
     RuntimeSyncDirective,
+    TranslationPolicyDirective,
 )
 from puripuly_heart.app.ports.settings_repository import SettingsCommitReceipt
 from puripuly_heart.config.resolved import (
@@ -41,7 +42,7 @@ from puripuly_heart.core.messages import (
 )
 
 _SURFACE_RESPONSIBILITIES: dict[str, tuple[str, ...]] = {
-    "translation_provider": ("dashboard_retry_facts",),
+    "translation_provider": ("translation_policy", "dashboard_retry_facts"),
     "stt_language_audio": (
         "language_runtime_clear",
         "audio_vad",
@@ -57,6 +58,7 @@ _SURFACE_RESPONSIBILITIES: dict[str, tuple[str, ...]] = {
     "managed_legacy": ("dashboard_retry_facts",),
 }
 _SYNC_OPERATION = {
+    "translation_policy": "apply_translation_policy",
     "language_runtime_clear": "apply_language_runtime_clear",
     "audio_vad": "apply_audio_vad_runtime",
     "overlay_osc": "apply_overlay_osc_output_runtime",
@@ -160,6 +162,7 @@ class PostCommitRuntimePlanBuilder:
                 after.revision,
                 after.reason,
                 after.correlation_id,
+                after,
             ),
             provenance=provenance,
             providers=providers,
@@ -272,6 +275,10 @@ def _synchronization_directives(
         intent.overlay.desktop_flet.size_preset
     )
     values: dict[str, RuntimeSyncDirective] = {
+        "translation_policy": TranslationPolicyDirective(
+            "translation_policy",
+            operational.translation_enabled,
+        ),
         "language_runtime_clear": LanguageRuntimeDirective(
             "language_runtime_clear",
             intent.languages.source_language,

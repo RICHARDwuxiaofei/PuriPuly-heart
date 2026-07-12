@@ -1178,6 +1178,22 @@ class ClientHub:
                     ),
                 )
             try:
+                if staged.commit_guard is not None:
+                    await staged.commit_guard()
+            except BaseException:
+                rollback_failure = await self._restore_provider_snapshot(prior, changed)
+                active = await self.current_runtime_state()
+                return RuntimeInstallFailure(
+                    active=active,
+                    returned_candidates=_inactive_state_refs(staged.candidates.values(), active),
+                    displaced_prior=_inactive_state_refs(_snapshot_refs(prior), active),
+                    restored=rollback_failure is None,
+                    cause_code=rollback_failure or "runtime_install_commit_guard_failed",
+                    origin_cause_code=(
+                        "runtime_install_commit_guard_failed" if rollback_failure else None
+                    ),
+                )
+            try:
                 self._provider_state.transition(replacements)
             except BaseException:
                 rollback_failure = await self._restore_provider_snapshot(prior, changed)

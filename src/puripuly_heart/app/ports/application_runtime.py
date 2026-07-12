@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from puripuly_heart.config.resolved import ResolvedApplicationRuntimeConfig
+
+if TYPE_CHECKING:
+    from puripuly_heart.app.ports.settings_repository import SettingsCommitReceipt
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,6 +15,7 @@ class ResolvedRuntimeActivationRequest:
     revision: str
     reason: str | None
     correlation_id: str | None
+    receipt: SettingsCommitReceipt | None = None
 
 
 class ApplicationRuntimePort(Protocol):

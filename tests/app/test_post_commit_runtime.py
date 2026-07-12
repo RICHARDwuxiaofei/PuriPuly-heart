@@ -110,7 +110,7 @@ class Sync:
 @pytest.mark.parametrize(
     ("surface", "expected"),
     [
-        ("translation_provider", ("dashboard_retry_facts",)),
+        ("translation_provider", ("translation_policy", "dashboard_retry_facts")),
         (
             "stt_language_audio",
             ("language_runtime_clear", "audio_vad", "dashboard_retry_facts"),

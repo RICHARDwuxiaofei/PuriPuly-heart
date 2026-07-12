@@ -9,9 +9,11 @@ from puripuly_heart.app.ports.application_runtime import ResolvedRuntimeActivati
 from puripuly_heart.app.ports.runtime_resources import (
     InstalledRuntimeState,
     ResourceRef,
+    RuntimeCommittedSettlementFailure,
     RuntimeInstallFailure,
     RuntimeInstallSuccess,
     RuntimeResourceBuildError,
+    RuntimeResourceInstallCancelled,
     RuntimeResourceInstallError,
     RuntimeResourceReplacementPlan,
     StagedRuntimeResources,
@@ -336,8 +338,10 @@ async def test_pending_cancellation_keeps_displaced_cleanup_failure_secondary() 
     await entered.wait()
     task.cancel()
     release.set()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(RuntimeCommittedSettlementFailure) as caught:
         await task
+    assert caught.value.cancellation_requested is True
+    assert caught.value.failed_displaced == (prior,)
     assert prior.resource.close_calls == 1
     assert candidate.resource.close_calls == 0
     assert adapter.cleanup_diagnostics[-1].operation == "ownership_return"
@@ -532,7 +536,7 @@ async def test_pending_cleanup_failure_retries_on_later_known_state_activation()
 
 
 @pytest.mark.asyncio
-async def test_ownership_return_close_failure_is_pending_and_retried_on_noop() -> None:
+async def test_ownership_return_close_failure_transfers_typed_committed_ownership() -> None:
     prior = ResourceRef("prior", Resource(fail_once=True))
     candidate = ResourceRef("candidate", Resource())
     initial = RuntimeInstallSuccess(
@@ -551,22 +555,11 @@ async def test_ownership_return_close_failure_is_pending_and_retried_on_noop() -
     adapter.factory = Factory(_staged(candidate))
     adapter.host = Host(success)
 
-    with pytest.raises(RuntimeError, match="close failed"):
+    with pytest.raises(RuntimeCommittedSettlementFailure) as caught:
         await adapter.replace_runtime(_request(2))
     assert prior.resource.close_calls == 1
-    assert len(adapter._pending_settlement) == 1
-
-    adapter.planner = type(
-        "NoopPlanner",
-        (),
-        {
-            "plan": lambda self, current, target: RuntimeResourceReplacementPlan(
-                "retain", "retain", "retain"
-            )
-        },
-    )()
-    await adapter.replace_runtime(_request(2))
-    assert prior.resource.close_calls == 2
+    assert caught.value.failed_displaced == (prior,)
+    assert caught.value.cancellation_requested is False
     assert adapter._pending_settlement == {}
 
 
@@ -617,6 +610,54 @@ async def test_host_exception_query_cancellation_leaves_no_query_task() -> None:
         and "current_runtime_state" in repr(other.get_coro())
         for other in asyncio.all_tasks()
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("committed", [False, True])
+async def test_shielded_install_cancellation_reports_explicit_provider_ownership(
+    committed: bool,
+) -> None:
+    prior = ResourceRef("prior", Resource())
+    candidate = ResourceRef("candidate", Resource())
+    initial = InstalledRuntimeState({"llm": prior})
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingHost:
+        async def current_runtime_state(self):  # noqa: ANN201
+            return initial
+
+        async def install_runtime_resources(self, staged):  # noqa: ANN001, ANN201
+            entered.set()
+            await release.wait()
+            if committed:
+                return RuntimeInstallSuccess(
+                    InstalledRuntimeState({"llm": candidate}),
+                    frozenset({"candidate"}),
+                    displaced=(prior,),
+                )
+            return RuntimeInstallFailure(
+                initial,
+                (candidate,),
+                True,
+                "runtime_install_commit_guard_failed",
+            )
+
+    plan = RuntimeResourceReplacementPlan("replace", "retain", "retain")
+    adapter = ResolvedRuntimeResourceAdapter(Factory(_staged(candidate, plan)), BlockingHost())
+    adapter._active_state = initial
+    adapter._ownership_state_known = True
+    task = asyncio.create_task(adapter.replace_runtime_with_plan(_request(2), plan))
+    await entered.wait()
+    task.cancel()
+    release.set()
+
+    with pytest.raises(RuntimeResourceInstallCancelled) as caught:
+        await task
+
+    assert caught.value.provider_state_committed is committed
+    assert candidate.resource.close_calls == (0 if committed else 1)
+    assert prior.resource.close_calls == (1 if committed else 0)
 
 
 @pytest.mark.asyncio

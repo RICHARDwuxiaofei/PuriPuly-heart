@@ -1308,6 +1308,7 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
         primary=primary,
         fallback=fallback_plan,
         concurrency_limit=translation.concurrency_limit,
+        qwen_low_latency_mode=runtime_input.self_stt.low_latency_enabled,
     )
 
 

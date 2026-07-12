@@ -22,6 +22,7 @@ ProviderIngressPolicy = Literal["active", "staged", "inactive"]
 ManagedLegacyDirective = Literal["none", "managed_release_rebuild_c4"]
 RuntimeOperation = Literal[
     "provider_activation",
+    "translation_policy",
     "language_runtime_clear",
     "audio_vad",
     "overlay_osc",
@@ -120,8 +121,15 @@ class DashboardRetryFactsDirective:
     peer_stt_retry_pending: bool
 
 
+@dataclass(frozen=True, slots=True)
+class TranslationPolicyDirective:
+    operation: Literal["translation_policy"]
+    enabled: bool
+
+
 RuntimeSyncDirective = (
-    LanguageRuntimeDirective
+    TranslationPolicyDirective
+    | LanguageRuntimeDirective
     | AudioVadDirective
     | OverlayOscDirective
     | LocaleUiProjectionDirective

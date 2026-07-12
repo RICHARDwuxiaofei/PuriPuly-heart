@@ -62,6 +62,8 @@ class SelfChannelCommandResult:
 class SelfIngressResume:
     config: SelfChannelConfig | None
     desired_enabled: bool
+    generation: int
+    intent_generation: int
 
 
 class SelfSTTCommandPort(Protocol):
@@ -235,7 +237,12 @@ class SelfSTTChannelOwner:
 
     async def freeze_for_provider_replacement(self) -> SelfIngressResume:
         async with self._lock:
-            resume = SelfIngressResume(self._config, self._desired)
+            resume = SelfIngressResume(
+                self._config,
+                self._desired,
+                self._generation + 1,
+                self._intent_generation,
+            )
             self._generation += 1
             self._desired = False
             self._reset_audio_gate()
@@ -243,6 +250,17 @@ class SelfSTTChannelOwner:
             self._state = SelfChannelState.STOPPED
             self._lease = None
         return resume
+
+    async def resume_after_provider_replacement(self, resume: SelfIngressResume) -> None:
+        async with self._lock:
+            still_current = (
+                self._intent_generation == resume.intent_generation
+                and self._intent_enabled == resume.desired_enabled
+                and self._generation == resume.generation
+                and not self._desired
+            )
+        if still_current and resume.config is not None and resume.desired_enabled:
+            await self.execute(SetSelfSTTEnabled(True, resume.config, record_intent=False))
 
     async def _disable(self, *, clear_provider: bool) -> None:
         async with self._lock:

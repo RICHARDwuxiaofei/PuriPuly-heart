@@ -333,6 +333,35 @@ def test_create_llm_provider_qwen_standard_mode_passes_runtime_logging() -> None
     assert provider.inner.runtime_logging is runtime_logging
 
 
+@pytest.mark.parametrize(
+    ("low_latency", "provider_type"),
+    [(False, QwenLLMProvider), (True, AsyncQwenLLMProvider)],
+)
+def test_create_llm_provider_from_resolved_qwen_uses_canonical_low_latency_policy(
+    low_latency: bool, provider_type: type
+) -> None:
+    resolved = ResolvedLLMConfig(
+        primary=ResolvedLLMTarget(
+            provider="qwen",
+            model="qwen3.5-plus",
+            credential=ResolvedCredentialRequirement(
+                source=CREDENTIAL_SOURCE_SECRET_STORE,
+                required=True,
+                reference="qwen:beijing",
+            ),
+            region="beijing",
+        ),
+        qwen_low_latency_mode=low_latency,
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("alibaba_api_key_beijing", "qwen-key")
+
+    provider = create_llm_provider_from_resolved_config(resolved, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, provider_type)
+
+
 def test_create_llm_provider_qwen_standard_mode_singapore() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.QWEN),

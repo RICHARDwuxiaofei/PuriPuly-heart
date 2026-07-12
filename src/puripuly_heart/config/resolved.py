@@ -192,6 +192,7 @@ class ResolvedLLMConfig:
     primary: ResolvedLLMTarget
     fallback: ResolvedLLMFallbackPlan | None = None
     concurrency_limit: int = 5
+    qwen_low_latency_mode: bool = False
 
     def __post_init__(self) -> None:
         if self.concurrency_limit <= 0:

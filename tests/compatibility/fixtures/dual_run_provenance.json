@@ -29,6 +29,7 @@
         "src/puripuly_heart/app/ports/runtime_resource_factory.py",
         "src/puripuly_heart/app/ports/runtime_resources.py",
           "src/puripuly_heart/app/ports/settings_repository.py",
+          "src/puripuly_heart/app/ports/translation_application.py",
           "src/puripuly_heart/app/services/application_runtime_host.py",
         "src/puripuly_heart/app/services/canonical_runtime_resolution.py",
         "src/puripuly_heart/app/services/canonical_state_repositories.py",
@@ -43,8 +44,10 @@
         "src/puripuly_heart/app/services/surface_runtime_transactions.py",
         "src/puripuly_heart/app/services/telemetry_operational_state.py",
         "src/puripuly_heart/app/wiring_composition.py",
+        "src/puripuly_heart/app/wiring_llm_factory.py",
         "src/puripuly_heart/config/prompts.py",
         "src/puripuly_heart/config/resolved.py",
+        "src/puripuly_heart/config/runtime_resolution.py",
         "src/puripuly_heart/config/settings_vnext/compat.py",
         "src/puripuly_heart/config/settings_vnext/serialization.py",
         "src/puripuly_heart/core/orchestrator/channel_runtime.py",
@@ -62,8 +65,8 @@
         "src/puripuly_heart/ui/app.py",
         "src/puripuly_heart/ui/controller.py"
       ],
-        "production_source_sha256": "7e11d1fb1f3d383a9b07a0654a101d76f9d3f8c0095bf21d0f7db5d3cdb1bed0",
-        "source_delta_sha256": "7d98ca35011d7a62d3c652dd7e327e0d73ded1f1edc12dcf8a895625e7941cbd"
+        "production_source_sha256": "c18b3810ad54018d3fa2fd627b7a296adba74875f66780d3abad589e25e20844",
+        "source_delta_sha256": "bf4546bbe9ae1e627966f6569946eb038037e73bbfe60ed144d72af3b2cec4dc"
     },
     "repair_base": "b4ace2631793aa1a1e384c0440b8ec7f315559ae"
   },

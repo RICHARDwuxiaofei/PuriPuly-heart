@@ -8,6 +8,11 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.app.ports.translation_application import (
+    SetTranslationEnabled,
+    TranslationCommandResult,
+    TranslationRuntimeSnapshot,
+)
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
@@ -94,6 +99,31 @@ class DummyHub:
             await old_llm.close()
 
 
+class TypedApplicationHost:
+    def __init__(self, hub: DummyHub) -> None:
+        self.parts = SimpleNamespace(hub=hub)
+        self.translation_commands: list[SetTranslationEnabled] = []
+        self._translation = TranslationRuntimeSnapshot(True, True, hub.llm is not None, 1)
+
+    async def start(self, *, auto_flush_osc: bool) -> None:
+        await self.parts.hub.start(auto_flush_osc=auto_flush_osc)
+
+    def translation_snapshot(self) -> TranslationRuntimeSnapshot:
+        return self._translation
+
+    async def set_translation_enabled(
+        self, command: SetTranslationEnabled
+    ) -> TranslationCommandResult:
+        self.translation_commands.append(command)
+        self._translation = TranslationRuntimeSnapshot(
+            command.enabled,
+            command.enabled and self.parts.hub.llm is not None,
+            self.parts.hub.llm is not None,
+            self._translation.provider_generation,
+        )
+        return TranslationCommandResult("applied", self._translation)
+
+
 def _local_stt_download_task(controller: GuiController) -> asyncio.Task[object] | None:
     runtime = controller._local_stt_download_runtime
     return runtime.download_task if runtime is not None else None
@@ -129,6 +159,7 @@ async def _start_controller_with_inspected_stt_state(
     settings.provider.stt = provider
     dash = DummyDashboard()
     hub = DummyHub(stt=hub_stt)
+    application_host = TypedApplicationHost(hub)
     inspect_calls: list[str] = []
     install_calls: list[str] = []
 
@@ -171,6 +202,7 @@ async def _start_controller_with_inspected_stt_state(
         page=SimpleNamespace(),
         app=SimpleNamespace(view_dashboard=dash),
         config_path=Path("settings.json"),
+        application_runtime_host=application_host,
     )
 
     await controller.start()

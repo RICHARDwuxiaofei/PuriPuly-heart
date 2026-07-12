@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from puripuly_heart.app.adapters.resolved_runtime_resource_factory import (
     ResolvedRuntimeResourceFactory,
@@ -12,7 +13,12 @@ from puripuly_heart.app.ports.post_commit_runtime import (
     RuntimeMutationProvenance,
     RuntimeOperationalSnapshot,
 )
-from puripuly_heart.app.ports.runtime_resources import RuntimeResourceReplacementPlan
+from puripuly_heart.app.ports.runtime_resources import (
+    ResourceRef,
+    RuntimeCommittedSettlementFailure,
+    RuntimeResourceInstallCancelled,
+    RuntimeResourceReplacementPlan,
+)
 from puripuly_heart.app.ports.settings_repository import SettingsCommitReceipt
 from puripuly_heart.app.services.application_runtime_host import (
     ApplicationRuntimeHost,
@@ -35,6 +41,7 @@ from puripuly_heart.core.messages import (
     DIAGNOSTIC_CATEGORY_LIFECYCLE,
     DIAGNOSTIC_VISIBILITY_BASIC,
     RUNTIME_APPLY_STATUS_APPLIED,
+    RUNTIME_APPLY_STATUS_DEGRADED,
     RUNTIME_APPLY_STATUS_FAILED,
     ErrorDiagnostics,
     RuntimeApplyResult,
@@ -103,7 +110,319 @@ class ResolvedLLMBuilderAdapter:
         from puripuly_heart.app.wiring import create_llm_provider_from_resolved_config
 
         kwargs.pop("managed_delegate", None)
-        return create_llm_provider_from_resolved_config(config, **kwargs)
+        return create_llm_provider_from_resolved_config(
+            config,
+            qwen_low_latency_mode=config.qwen_low_latency_mode,
+            **kwargs,
+        )
+
+
+def create_production_managed_release_service(
+    *, settings, secrets, on_discord_callback_received=None  # noqa: ANN001
+):  # noqa: ANN201
+    from puripuly_heart import __version__
+    from puripuly_heart.app.wiring import (
+        build_managed_identity_state_port,
+        build_openrouter_release_runtime_config,
+    )
+    from puripuly_heart.core.hardware_fingerprint import get_raw_hardware_fingerprint
+    from puripuly_heart.core.managed_openrouter_broker_client import (
+        HttpManagedOpenRouterBrokerClient,
+    )
+    from puripuly_heart.core.managed_openrouter_release import (
+        ManagedOpenRouterReleaseService,
+        UnavailableManagedOpenRouterReleaseClient,
+    )
+
+    try:
+        client = HttpManagedOpenRouterBrokerClient(base_url=settings.openrouter.broker_base_url)
+    except ValueError:
+        client = UnavailableManagedOpenRouterReleaseClient()
+    return ManagedOpenRouterReleaseService(
+        openrouter_config=build_openrouter_release_runtime_config(settings),
+        managed_state=build_managed_identity_state_port(settings, lambda _settings: None),
+        secrets=secrets,
+        client=client,
+        raw_hardware_fingerprint_provider=get_raw_hardware_fingerprint,
+        app_version=__version__,
+        on_discord_callback_received=on_discord_callback_received,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedDiscordCallbackEvent:
+    payload: object
+
+
+@dataclass(slots=True)
+class ManagedDiscordCallbackOutput:
+    subscribers: list[Callable[[ManagedDiscordCallbackEvent], object]]
+
+    def __init__(self) -> None:
+        self.subscribers = []
+
+    def subscribe(self, subscriber: Callable[[ManagedDiscordCallbackEvent], object]) -> None:
+        if subscriber not in self.subscribers:
+            self.subscribers.append(subscriber)
+
+    def publish(self, *payload: object) -> None:
+        event = ManagedDiscordCallbackEvent(payload[0] if len(payload) == 1 else payload)
+        for subscriber in tuple(self.subscribers):
+            try:
+                subscriber(event)
+            except Exception:
+                continue
+
+
+@dataclass(slots=True)
+class PendingCommittedSettlement:
+    displaced_providers: list[ResourceRef]
+    previous_service: object | None
+
+
+@dataclass(slots=True)
+class ProductionManagedReleaseServiceOwner:
+    persistence: object
+    state_path: Path
+    secrets: object
+    service: object | None = None
+    signature: tuple[object, ...] | None = None
+    receipt: SettingsCommitReceipt | None = None
+    closed: bool = False
+    callback_output: ManagedDiscordCallbackOutput | None = None
+    _lock: asyncio.Lock | None = None
+    _staged_service: object | None = None
+    _retirement_failures: list[object] | None = None
+    _committed_settlements: list[PendingCommittedSettlement] | None = None
+    authoritative_receipts: object | None = None
+
+    def __post_init__(self) -> None:
+        self.callback_output = self.callback_output or ManagedDiscordCallbackOutput()
+        self._lock = asyncio.Lock()
+        self._retirement_failures = []
+        self._committed_settlements = []
+
+    def current_service(self):  # noqa: ANN201
+        return self.service
+
+    def construction_service(self):  # noqa: ANN201
+        return self._staged_service or self.service
+
+    async def replace_runtime(
+        self,
+        receipt: SettingsCommitReceipt,
+        install: Callable[[], Awaitable[None]],
+    ) -> None:
+        assert self._lock is not None
+        async with self._lock:
+            await self._retry_committed_settlements()
+            await self._retry_retirements()
+            await self._validate_authoritative(receipt)
+            settings = self.persistence.legacy_projection(receipt.envelope)
+            signature = self._signature(settings, receipt)
+            if signature == self.signature and self.service is not None:
+                try:
+                    await install()
+                except RuntimeCommittedSettlementFailure as exc:
+                    assert self._committed_settlements is not None
+                    self._committed_settlements.append(
+                        PendingCommittedSettlement(list(exc.failed_displaced), None)
+                    )
+                    if exc.cancellation_requested:
+                        raise asyncio.CancelledError
+                    raise
+                return
+            candidate = create_production_managed_release_service(
+                settings=settings,
+                secrets=self.secrets,
+                on_discord_callback_received=self.callback_output.publish,
+            )
+            candidate.managed_state._persist = self._persist_managed_state
+            self._staged_service = candidate
+            previous_receipt = self.receipt
+            self.receipt = receipt
+            try:
+                await install()
+            except RuntimeCommittedSettlementFailure as exc:
+                previous = self.service
+                self.service = candidate
+                self.signature = signature
+                self.receipt = receipt
+                self.closed = False
+                self._staged_service = None
+                assert self._committed_settlements is not None
+                self._committed_settlements.append(
+                    PendingCommittedSettlement(list(exc.failed_displaced), previous)
+                )
+                if exc.cancellation_requested:
+                    raise asyncio.CancelledError
+                raise
+            except RuntimeResourceInstallCancelled as exc:
+                if not exc.provider_state_committed:
+                    self._staged_service = None
+                    self.receipt = previous_receipt
+                    await self._close_staged(candidate)
+                    raise
+                previous = self.service
+                self.service = candidate
+                self.signature = signature
+                self.receipt = receipt
+                self.closed = False
+                self._staged_service = None
+                if previous is not None and previous is not candidate:
+                    await self._retire(previous)
+                raise
+            except BaseException:
+                self._staged_service = None
+                self.receipt = previous_receipt
+                await self._close_staged(candidate)
+                raise
+            previous = self.service
+            self.service = candidate
+            self.signature = signature
+            self.receipt = receipt
+            self.closed = False
+            self._staged_service = None
+            if previous is not None and previous is not candidate:
+                await self._retire(previous)
+
+    @staticmethod
+    def _signature(settings, receipt: SettingsCommitReceipt) -> tuple[object, ...]:  # noqa: ANN001
+        return (
+            settings.openrouter.broker_base_url,
+            settings.openrouter.selected_source,
+            settings.openrouter.selection_alias,
+            settings.translation.connection,
+            receipt.envelope.state.managed_connection,
+        )
+
+    async def synchronize(self, receipt: SettingsCommitReceipt) -> None:
+        async def no_install() -> None:
+            return None
+
+        await self.replace_runtime(receipt, no_install)
+
+    async def _close_staged(self, service: object) -> None:
+        try:
+            await service.close()  # type: ignore[attr-defined]
+        except asyncio.CancelledError:
+            self._queue_retirement(service)
+            raise
+        except BaseException:
+            self._queue_retirement(service)
+
+    async def _retire(self, service: object) -> None:
+        try:
+            await service.close()  # type: ignore[attr-defined]
+        except asyncio.CancelledError:
+            self._queue_retirement(service)
+            raise
+        except BaseException:
+            self._queue_retirement(service)
+
+    def _queue_retirement(self, service: object) -> None:
+        if self._retirement_failures is None:
+            return
+        if not any(pending is service for pending in self._retirement_failures):
+            self._retirement_failures.append(service)
+
+    async def _retry_retirements(self) -> None:
+        pending = list(self._retirement_failures or ())
+        if self._retirement_failures is not None:
+            self._retirement_failures.clear()
+        for index, service in enumerate(pending):
+            try:
+                await self._retire(service)
+            except asyncio.CancelledError:
+                for unprocessed in pending[index + 1 :]:
+                    self._queue_retirement(unprocessed)
+                raise
+
+    async def _retry_committed_settlements(self) -> None:
+        pending = list(self._committed_settlements or ())
+        if self._committed_settlements is not None:
+            self._committed_settlements.clear()
+        for index, settlement in enumerate(pending):
+            remaining: list[ResourceRef] = []
+            cancellation: asyncio.CancelledError | None = None
+            for provider_index, ref in enumerate(settlement.displaced_providers):
+                try:
+                    await ref.resource.close()
+                except asyncio.CancelledError as exc:
+                    cancellation = exc
+                    remaining.extend(settlement.displaced_providers[provider_index:])
+                    break
+                except BaseException:
+                    remaining.append(ref)
+            if remaining:
+                assert self._committed_settlements is not None
+                self._committed_settlements.append(
+                    PendingCommittedSettlement(remaining, settlement.previous_service)
+                )
+                self._committed_settlements.extend(pending[index + 1 :])
+                if cancellation is not None:
+                    raise cancellation
+                raise RuntimeError("committed provider settlement failed")
+            if settlement.previous_service is not None:
+                await self._retire(settlement.previous_service)
+
+    async def _validate_authoritative(self, receipt: SettingsCommitReceipt) -> None:
+        if self.authoritative_receipts is None:
+            return
+        latest = await self.authoritative_receipts.load_receipt()
+        if latest.revision != receipt.revision or latest.envelope != receipt.envelope:
+            raise RuntimeError("stale authoritative runtime receipt")
+
+    def _persist_managed_state(self, settings) -> None:  # noqa: ANN001
+        from puripuly_heart.app.wiring_composition import create_canonical_state_repositories
+        from puripuly_heart.config.settings_vnext.schema import ManagedConnectionState
+
+        receipt = self.receipt
+        if receipt is None:
+            raise RuntimeError("managed release state has no authoritative receipt")
+        managed = settings.managed_identity
+        managed_connection = ManagedConnectionState(
+            installation_id=managed.installation_id,
+            release_token=managed.release_token,
+            release_token_expires_at=managed.release_token_expires_at,
+            verified_hardware_hash=managed.verified_hardware_hash,
+            verified_hardware_hash_salt_version=managed.verified_hardware_hash_salt_version,
+            active_managed_credential_ref=managed.active_managed_credential_ref,
+            active_managed_expires_at=managed.active_managed_expires_at,
+            founder_letter_seen_credential_ref=managed.founder_letter_seen_credential_ref,
+            referral_id=managed.referral_id,
+            local_managed_claim_sources=tuple(managed.local_managed_claim_sources),
+            pending_delivery_ack_source=managed.pending_delivery_ack_source,
+            pending_delivery_ack_delivery_id=managed.pending_delivery_ack_delivery_id,
+            pending_delivery_ack_managed_credential_ref=(
+                managed.pending_delivery_ack_managed_credential_ref
+            ),
+            pending_delivery_ack_expires_at=managed.pending_delivery_ack_expires_at,
+        )
+        repository = create_canonical_state_repositories(self.state_path).operational_state
+        snapshot = repository.load()
+        repository.save(
+            replace(
+                snapshot.value,
+                managed_connection=managed_connection,
+            ),
+            expected_revision=snapshot.revision,
+        )
+
+    async def close(self) -> None:
+        if self.closed:
+            return
+        await self._retry_committed_settlements()
+        await self._retry_retirements()
+        if self._retirement_failures:
+            raise RuntimeError("managed release service retirement failed")
+        service = self.service
+        self.service = None
+        if service is not None:
+            await self._retire(service)
+        if self._retirement_failures:
+            raise RuntimeError("managed release service retirement failed")
+        self.closed = True
 
 
 @dataclass(slots=True)
@@ -142,6 +461,74 @@ class RuntimePolicyEpoch:
 
 
 @dataclass(slots=True)
+class ManagedAwareResolvedRuntimeAdapter:
+    runtime: ResolvedRuntimeResourceAdapter
+    managed_release_owner: ProductionManagedReleaseServiceOwner
+    provider_settlement_owner: GeneralProviderSettlementOwner | None = None
+
+    def __post_init__(self) -> None:
+        if self.provider_settlement_owner is None:
+            self.provider_settlement_owner = GeneralProviderSettlementOwner()
+
+    async def replace_runtime_with_plan(self, request, plan) -> None:  # noqa: ANN001
+        assert self.provider_settlement_owner is not None
+        await self.provider_settlement_owner.retry()
+
+        async def install() -> None:
+            guarded = getattr(self.runtime, "replace_runtime_with_plan_guarded", None)
+            if callable(guarded):
+                await guarded(
+                    request,
+                    plan,
+                    lambda: self.managed_release_owner._validate_authoritative(request.receipt),
+                )
+                return
+            await self.runtime.replace_runtime_with_plan(request, plan)
+
+        if plan.llm == "replace" and request.receipt is not None:
+            await self.managed_release_owner.replace_runtime(request.receipt, install)
+            return
+        try:
+            await install()
+        except RuntimeCommittedSettlementFailure as exc:
+            self.provider_settlement_owner.adopt(exc.failed_displaced)
+            if exc.cancellation_requested:
+                raise asyncio.CancelledError
+            raise
+
+    async def close(self) -> None:
+        assert self.provider_settlement_owner is not None
+        await self.provider_settlement_owner.retry()
+
+
+@dataclass(slots=True)
+class GeneralProviderSettlementOwner:
+    pending: list[ResourceRef] = field(default_factory=list)
+
+    def adopt(self, refs: tuple[ResourceRef, ...]) -> None:
+        for ref in refs:
+            if not any(
+                pending.identity == ref.identity and pending.resource is ref.resource
+                for pending in self.pending
+            ):
+                self.pending.append(ref)
+
+    async def retry(self) -> None:
+        pending = list(self.pending)
+        self.pending.clear()
+        for index, ref in enumerate(pending):
+            try:
+                await ref.resource.close()
+            except asyncio.CancelledError:
+                self.adopt(tuple(pending[index:]))
+                raise
+            except BaseException:
+                self.adopt((ref,))
+        if self.pending:
+            raise RuntimeError("provider settlement failed")
+
+
+@dataclass(slots=True)
 class SelectiveProviderActivationAdapter:
     runtime: ResolvedRuntimeResourceAdapter
     self_owner: SelfSTTChannelOwner
@@ -158,6 +545,22 @@ class SelectiveProviderActivationAdapter:
         )
         try:
             await self.runtime.replace_runtime_with_plan(request, plan)
+        except RuntimeCommittedSettlementFailure:
+            return RuntimeApplyResult(
+                RUNTIME_APPLY_STATUS_DEGRADED,
+                None,
+                ErrorDiagnostics(
+                    component="provider_activation",
+                    operation="settle_committed_provider_set",
+                    code="provider_set_committed_settlement_pending",
+                    category=DIAGNOSTIC_CATEGORY_LIFECYCLE,
+                    visibility=DIAGNOSTIC_VISIBILITY_BASIC,
+                    content_policy=CONTENT_POLICY_METADATA_ONLY,
+                    status_code=None,
+                    retry_after_ms=None,
+                    fields={"committed": True},
+                ),
+            )
         except Exception:
             return RuntimeApplyResult(
                 RUNTIME_APPLY_STATUS_FAILED,
@@ -200,8 +603,9 @@ class ChannelAwareRuntimeResourceHost:
         return await self.hub.current_runtime_state()
 
     async def install_runtime_resources(self, staged):  # noqa: ANN001, ANN201
+        self_resume = None
         if staged.plan.self_stt != "retain":
-            await self.self_owner.freeze_for_provider_replacement()
+            self_resume = await self.self_owner.freeze_for_provider_replacement()
         action = staged.plan.peer_stt
         resume = None
         if action != "retain":
@@ -210,6 +614,8 @@ class ChannelAwareRuntimeResourceHost:
         try:
             return await self.hub.install_runtime_resources(staged)
         finally:
+            if self_resume is not None:
+                await self.self_owner.resume_after_provider_replacement(self_resume)
             if resume is not None:
                 await self.peer.resume_after_provider_replacement(resume)
 
@@ -382,6 +788,9 @@ class ProductionRuntimeSynchronization:
             self.hub.peer_source_language = directive.peer_source_language
             self.hub.peer_target_language = directive.peer_target_language
             self.hub.clear_context()
+        elif operation == "translation_policy":
+            self.hub.translation_enabled = bool(directive.enabled and self.hub.llm is not None)
+            self.hub.clear_context()
         elif operation == "audio_vad":
             resolved = request.config.self_stt
             self.hub.low_latency_mode = resolved.low_latency_enabled
@@ -467,17 +876,37 @@ class ProductionRuntimeSynchronization:
 
 @dataclass(slots=True)
 class ProductionRuntimeComposition:
-    resolved_adapter: ResolvedRuntimeResourceAdapter
+    resolved_adapter: ManagedAwareResolvedRuntimeAdapter
     surface_transactions: object
     plan_builder: object
     synchronization: ProductionRuntimeSynchronization
     resolver: CanonicalRuntimeConfigResolver
+    managed_release_owner: ProductionManagedReleaseServiceOwner | None = None
+
+    async def synchronize_managed_release_service(self, receipt: SettingsCommitReceipt) -> None:
+        if self.managed_release_owner is not None:
+            await self.managed_release_owner.synchronize(receipt)
+
+    async def replace_runtime_with_managed_service(
+        self,
+        receipt: SettingsCommitReceipt,
+        request: ResolvedRuntimeActivationRequest,
+        plan: RuntimeResourceReplacementPlan,
+    ) -> None:
+        _ = receipt
+        await self.resolved_adapter.replace_runtime_with_plan(request, plan)
+
+    async def close(self) -> None:
+        await self.resolved_adapter.close()
+        if self.managed_release_owner is not None:
+            await self.managed_release_owner.close()
 
     async def synchronize_startup(
         self, receipt: SettingsCommitReceipt, operational: RuntimeOperationalSnapshot
     ) -> RuntimeApplyResult:
         directives = {}
         for surface in (
+            "translation_provider",
             "stt_language_audio",
             "overlay_osc_output",
             "ui_prompt_clipboard_state",
@@ -501,8 +930,10 @@ class ProductionRuntimeComposition:
             receipt.revision,
             receipt.reason,
             receipt.correlation_id,
+            receipt,
         )
         for operation in (
+            "translation_policy",
             "language_runtime_clear",
             "overlay_osc",
             "locale_ui_projection",
@@ -527,6 +958,7 @@ class ProductionRuntimeComposition:
             receipt.revision,
             receipt.reason,
             receipt.correlation_id,
+            receipt,
         )
         await self.synchronization.synchronize_peer(request, desired_active=True)
         return RuntimeApplyResult(RUNTIME_APPLY_STATUS_APPLIED, None, None)
@@ -594,6 +1026,13 @@ def create_production_application_runtime(
         run_audio_loop=factories.peer_loop,
     )
     resolver = CanonicalRuntimeConfigResolver()
+    receipt_source = PersistedCanonicalReceiptSource(persistence, state_path)
+    managed_release_owner = ProductionManagedReleaseServiceOwner(
+        persistence=persistence,
+        state_path=state_path,
+        secrets=secrets,
+        authoritative_receipts=receipt_source,
+    )
     resource_factory = ResolvedRuntimeResourceFactory(
         secrets=secrets,
         clock=clock,
@@ -601,30 +1040,32 @@ def create_production_application_runtime(
         llm_builder=ResolvedLLMBuilderAdapter(),
         stt_builder=ResolvedSTTBuilderAdapter(hooks),
         runtime_logging=logging,
+        managed_release_owner=managed_release_owner,
     )
     epoch = RuntimePolicyEpoch()
     resolved = ResolvedRuntimeResourceAdapter(
         factory=resource_factory,
         host=ChannelAwareRuntimeResourceHost(hub, peer_owner, self_owner, epoch),
     )
+    managed_resolved = ManagedAwareResolvedRuntimeAdapter(resolved, managed_release_owner)
     provider_activation = SelectiveProviderActivationAdapter(
-        resolved, self_owner, peer_owner, epoch
+        managed_resolved, self_owner, peer_owner, epoch
     )
     synchronization = ProductionRuntimeSynchronization(hub, self_owner, peer_owner, epoch)
     coordinator = PostCommitRuntimeTransactionOwner(provider_activation, synchronization)
     transactions = SelectiveSurfaceRuntimeTransactionPort(
         PostCommitRuntimePlanBuilder(resolver),
         coordinator,
-        frozenset({"stt_language_audio"}),
+        frozenset({"translation_provider", "stt_language_audio"}),
     )
     composition = ProductionRuntimeComposition(
-        resolved,
+        managed_resolved,
         transactions,
         PostCommitRuntimePlanBuilder(resolver),
         synchronization,
         resolver,
+        managed_release_owner,
     )
-    receipt_source = PersistedCanonicalReceiptSource(persistence, state_path)
     return ApplicationRuntimeHost(
         parts=ApplicationRuntimeParts(sender, osc, hub, peer_owner, self_owner),
         runtime_composition=composition,

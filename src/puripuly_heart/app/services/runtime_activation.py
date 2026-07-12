@@ -71,6 +71,7 @@ class RuntimeActivationOwner(RuntimeApplyPort):
             revision=receipt.revision,
             reason=receipt.reason,
             correlation_id=receipt.correlation_id,
+            receipt=receipt,
         )
         try:
             await self.runtime.replace_runtime(activation_request)

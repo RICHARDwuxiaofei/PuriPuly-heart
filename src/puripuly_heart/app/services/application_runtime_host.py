@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import inspect
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -10,6 +12,11 @@ from puripuly_heart.app.ports.post_commit_runtime import (
 )
 from puripuly_heart.app.ports.runtime_resources import RuntimeResourceReplacementPlan
 from puripuly_heart.app.ports.settings_repository import SettingsCommitReceipt
+from puripuly_heart.app.ports.translation_application import (
+    SetTranslationEnabled,
+    TranslationCommandResult,
+    TranslationRuntimeSnapshot,
+)
 from puripuly_heart.app.services.canonical_runtime_resolution import CanonicalRuntimeConfigResolver
 from puripuly_heart.core.messages import (
     RUNTIME_APPLY_STATUS_APPLIED,
@@ -70,6 +77,17 @@ class RuntimeCompositionPort(Protocol):
 
     async def resume_peer_stt(self, receipt: SettingsCommitReceipt) -> RuntimeApplyResult: ...
 
+    async def synchronize_managed_release_service(self, receipt: SettingsCommitReceipt) -> None: ...
+
+    async def replace_runtime_with_managed_service(
+        self,
+        receipt: SettingsCommitReceipt,
+        request: ResolvedRuntimeActivationRequest,
+        plan: RuntimeResourceReplacementPlan,
+    ) -> None: ...
+
+    async def close(self) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class ApplicationRuntimeParts:
@@ -90,6 +108,7 @@ class ApplicationRuntimeHost:
         resolver: CanonicalRuntimeConfigResolver,
         runtime_logging: object | None = None,
         audio_hooks: object | None = None,
+        initial_translation_enabled: bool = False,
     ) -> None:
         self._parts: ApplicationRuntimeParts | None = parts
         self._runtime_composition = runtime_composition
@@ -102,7 +121,9 @@ class ApplicationRuntimeHost:
         self._self_closed = False
         self._peer_closed = False
         self._sender_closed = False
+        self._composition_closed = False
         self._shutdown = False
+        self._translation_desired = initial_translation_enabled
 
     @property
     def parts(self) -> ApplicationRuntimeParts | None:
@@ -129,14 +150,49 @@ class ApplicationRuntimeHost:
         parts = self._require_parts()
         return parts.self_stt.snapshot()
 
+    def translation_snapshot(self) -> TranslationRuntimeSnapshot:
+        parts = self._require_parts()
+        state = parts.hub.provider_state_snapshot().llm  # type: ignore[attr-defined]
+        return TranslationRuntimeSnapshot(
+            self._translation_desired,
+            bool(getattr(parts.hub, "translation_enabled", False)),
+            state.provider is not None,
+            state.generation,
+        )
+
+    @property
+    def managed_release_service(self):  # noqa: ANN201
+        owner = getattr(self._runtime_composition, "managed_release_owner", None)
+        return None if owner is None else owner.current_service()
+
+    async def resolve_managed_release_service(self):  # noqa: ANN201
+        receipt = await self._committed_settings.load_receipt()
+        synchronize = getattr(
+            self._runtime_composition, "synchronize_managed_release_service", None
+        )
+        if callable(synchronize):
+            await synchronize(receipt)
+        return self.managed_release_service
+
+    def subscribe_managed_discord_callback(self, handler: object) -> None:
+        owner = getattr(self._runtime_composition, "managed_release_owner", None)
+        output = None if owner is None else owner.callback_output
+        if output is not None and callable(handler):
+            output.subscribe(handler)
+
     async def start(self, *, auto_flush_osc: bool = True) -> None:
         if self._started:
             return
         parts = self._require_parts()
         receipt = await self._committed_settings.load_receipt()
-        installed = await self._install_available(receipt, ("llm", "self_stt", "peer_stt"))
+        slots: tuple[Literal["llm", "self_stt", "peer_stt"], ...] = (
+            ("llm", "self_stt", "peer_stt")
+            if self._translation_desired
+            else ("self_stt", "peer_stt")
+        )
+        installed = await self._install_available(receipt, slots)
         operational = RuntimeOperationalSnapshot(
-            translation_enabled=True,
+            translation_enabled=self._translation_desired,
             self_stt_enabled=False,
             self_stt_running=False,
             self_stt_staged=True,
@@ -144,7 +200,7 @@ class ApplicationRuntimeHost:
             peer_stt_running=False,
             peer_stt_staged=True,
             llm_available="llm" in installed,
-            llm_retry_pending="llm" not in installed,
+            llm_retry_pending=self._translation_desired and "llm" not in installed,
             self_stt_available="self_stt" in installed,
             self_stt_retry_pending="self_stt" not in installed,
             peer_stt_available="peer_stt" in installed,
@@ -160,6 +216,38 @@ class ApplicationRuntimeHost:
             await self.shutdown()
             raise
         self._started = True
+
+    async def set_translation_enabled(
+        self, command: SetTranslationEnabled
+    ) -> TranslationCommandResult:
+        self._translation_desired = command.enabled
+        parts = self._require_parts()
+        if not command.enabled:
+            parts.hub.translation_enabled = False  # type: ignore[attr-defined]
+            parts.hub.clear_context()  # type: ignore[attr-defined]
+            receipt = await self._committed_settings.load_receipt()
+            await self._replace(
+                receipt, RuntimeResourceReplacementPlan("clear", "retain", "retain")
+            )
+            return TranslationCommandResult("applied", self.translation_snapshot())
+        receipt = await self._committed_settings.load_receipt()
+        installed = await self._install_available(receipt, ("llm",))
+        if "llm" not in installed:
+            parts.hub.translation_enabled = False  # type: ignore[attr-defined]
+            return TranslationCommandResult("unavailable", self.translation_snapshot())
+        parts.hub.clear_context()  # type: ignore[attr-defined]
+        parts.hub.translation_enabled = True  # type: ignore[attr-defined]
+        provider = self.translation_snapshot()
+        if provider.provider_available:
+            active = getattr(parts.hub, "llm", None)
+            active = getattr(active, "inner", active)
+            warmup = getattr(active, "warmup", None)
+            if callable(warmup):
+                with contextlib.suppress(Exception):
+                    warmed = warmup()
+                    if inspect.isawaitable(warmed):
+                        await warmed
+        return TranslationCommandResult("applied", self.translation_snapshot())
 
     async def execute(self, command: SetSelfSTTEnabled) -> SelfChannelCommandResult:
         parts = self._require_parts()
@@ -255,6 +343,13 @@ class ApplicationRuntimeHost:
                 failures.append(exc)
             else:
                 self._hub_stopped = True
+        if not self._composition_closed:
+            try:
+                await self._runtime_composition.close()
+            except BaseException as exc:
+                failures.append(exc)
+            else:
+                self._composition_closed = True
         if not self._sender_closed:
             try:
                 parts.sender.close()
@@ -276,25 +371,34 @@ class ApplicationRuntimeHost:
         receipt: SettingsCommitReceipt,
         slots: tuple[Literal["llm", "self_stt", "peer_stt"], ...],
     ) -> frozenset[str]:
-        config = self._resolver.resolve(receipt)
-        plan = RuntimeResourceReplacementPlan(
-            "replace" if "llm" in slots else "retain",
-            "replace" if "self_stt" in slots else "retain",
-            "replace" if "peer_stt" in slots else "retain",
-        )
-        request = ResolvedRuntimeActivationRequest(
-            config,
-            receipt.revision,
-            receipt.reason,
-            receipt.correlation_id,
-        )
-        try:
-            await self._runtime_composition.resolved_adapter.replace_runtime_with_plan(
-                request, plan
+        installed: set[str] = set()
+        for slot in slots:
+            plan = RuntimeResourceReplacementPlan(
+                "replace" if slot == "llm" else "retain",
+                "replace" if slot == "self_stt" else "retain",
+                "replace" if slot == "peer_stt" else "retain",
             )
-        except Exception:
-            return frozenset()
-        return frozenset(slots)
+            try:
+                await self._replace(receipt, plan)
+            except Exception:
+                continue
+            installed.add(slot)
+        return frozenset(installed)
+
+    async def _replace(
+        self, receipt: SettingsCommitReceipt, plan: RuntimeResourceReplacementPlan
+    ) -> None:
+        config = self._resolver.resolve(receipt)
+        request = ResolvedRuntimeActivationRequest(
+            config, receipt.revision, receipt.reason, receipt.correlation_id, receipt
+        )
+        replace_with_service = getattr(
+            self._runtime_composition, "replace_runtime_with_managed_service", None
+        )
+        if callable(replace_with_service):
+            await replace_with_service(receipt, request, plan)
+            return
+        await self._runtime_composition.resolved_adapter.replace_runtime_with_plan(request, plan)
 
     def _require_parts(self) -> ApplicationRuntimeParts:
         if self._parts is None:

@@ -115,10 +115,8 @@ from puripuly_heart.app.wiring import (
     build_custom_vocabulary_runtime_config,
     build_managed_identity_state_port,
     build_openrouter_credential_runtime_config,
-    build_openrouter_release_runtime_config,
     build_peer_stt_provider_signature_from_vnext,
     copy_stable_secrets_to_vnext_namespace,
-    create_llm_provider,
     create_peer_stt_backend,
     create_peer_stt_backend_from_resolved_config,
     create_provider_verifier,
@@ -171,8 +169,6 @@ from puripuly_heart.core.audio.source import (
 )
 from puripuly_heart.core.clipboard.watcher import create_clipboard_watcher
 from puripuly_heart.core.clock import SystemClock
-from puripuly_heart.core.hardware_fingerprint import get_raw_hardware_fingerprint
-from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.local_stt_assets import (
     LocalQwenSherpaLoadError,
     LocalSTTInstallState,
@@ -186,15 +182,11 @@ from puripuly_heart.core.local_stt_runtime_installer import (
     RuntimeLocalSTTStatusUpdate,
     ensure_local_stt_installed,
 )
-from puripuly_heart.core.managed_openrouter_broker_client import (
-    HttpManagedOpenRouterBrokerClient,
-)
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseBehavior,
     ManagedOpenRouterReleaseService,
     ManagedOpenRouterStatusRefreshResult,
     TalkTogetherPassStatus,
-    UnavailableManagedOpenRouterReleaseClient,
     format_managed_openrouter_diagnostics,
 )
 from puripuly_heart.core.messages import (
@@ -1414,9 +1406,9 @@ class GuiController:
                 dash.translation_needs_key = False
 
             # Set initial enabled states (all start as off/gray)
-            dash.set_translation_enabled(False)
+            translation = self.application_runtime_host.translation_snapshot()
+            dash.set_translation_enabled(translation.effective_enabled)
             dash.set_stt_enabled(False)
-            self.hub.translation_enabled = False
             await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=False)
 
         bridge = self._create_ui_event_bridge(runtime_logging=runtime_logging)
@@ -1816,7 +1808,7 @@ class GuiController:
     ) -> bool | tuple[str, dict[str, object]]:
         if not self._managed_china_auth_relevant_for_translation_enable() or self.settings is None:
             return "qq_auth.error.retry", {}
-        service = self._managed_openrouter_release_service
+        service = await self._resolve_managed_auth_service()
         broker_client = getattr(service, "client", None)
         if broker_client is None:
             return "qq_auth.error.retry", {}
@@ -1845,10 +1837,7 @@ class GuiController:
         )
         if _settings_mutation_committed(result):
             self._set_managed_trial_pending_auth(False)
-            if self.hub is not None and self.hub.llm is None:
-                await self._rebuild_llm_provider()
-            else:
-                self._schedule_managed_trial_usage_refresh()
+            self._schedule_managed_trial_usage_refresh()
             return True
         message = result.message
         if message is None:
@@ -1876,7 +1865,7 @@ class GuiController:
         referral_id: str | None = None,
     ) -> bool:
         self.last_discord_managed_auth_referral_bonus_applied = False
-        release_service = self._managed_openrouter_release_service
+        release_service = await self._resolve_managed_auth_service()
         if release_service is None or self.settings is None:
             self._discord_managed_auth_in_progress = False
             self._set_managed_trial_pending_auth(False)
@@ -1963,13 +1952,6 @@ class GuiController:
                 self.last_discord_managed_auth_referral_bonus_applied = bool(
                     getattr(issue, "referral_bonus_applied", False)
                 )
-                if self.hub is None:
-                    self._show_short_message("discord_auth.error.retry")
-                    return False
-                await self._rebuild_llm_provider()
-                if self.hub.llm is None:
-                    self._show_short_message("discord_auth.error.retry")
-                    return False
                 result_referral_id = normalize_owned_referral_id(
                     getattr(issue, "referral_id", None)
                 )
@@ -2057,14 +2039,6 @@ class GuiController:
             self.last_discord_managed_auth_referral_bonus_applied = (
                 getattr(result, "referral_bonus_applied", False) is True
             )
-            if self.hub is None:
-                self._show_short_message("discord_auth.error.retry")
-                return False
-            if self.hub.llm is None:
-                await self._rebuild_llm_provider()
-            if self.hub.llm is None:
-                self._show_short_message("discord_auth.error.retry")
-                return False
             result_referral_id = normalize_owned_referral_id(getattr(result, "referral_id", None))
             self._set_managed_usage_view_state(
                 view_settings=getattr(self.app, "view_settings", None),
@@ -2720,7 +2694,7 @@ class GuiController:
     ) -> ManagedOpenRouterStatusRefreshResult:
         current_referral_id = self._current_owned_referral_id()
         if service is None:
-            service = self._managed_openrouter_release_service
+            service = self._current_managed_release_service()
         if service is None:
             return ManagedOpenRouterStatusRefreshResult(
                 referral_id=current_referral_id,
@@ -2775,7 +2749,7 @@ class GuiController:
         remaining_percent: int | None,
         current_referral_id: str | None,
     ) -> None:
-        service = self._managed_openrouter_release_service
+        service = self._current_managed_release_service()
         if service is None:
             return
         refresh_status = getattr(service, "refresh_managed_status", None)
@@ -2792,7 +2766,7 @@ class GuiController:
                 result = await self._refresh_managed_status_best_effort(
                     service=service,
                 )
-                if service is not self._managed_openrouter_release_service:
+                if service is not self._current_managed_release_service():
                     return
                 if (
                     self.settings is None
@@ -2944,7 +2918,7 @@ class GuiController:
         )
 
         if auto_show_founder_letter and is_effectively_exhausted(usage_metadata):
-            self._disable_translation_for_managed_exhaustion(
+            await self._disable_translation_for_managed_exhaustion(
                 reopen_founder_letter=should_auto_show_founder_letter(
                     build_managed_identity_state_port(
                         self.settings,
@@ -2976,7 +2950,7 @@ class GuiController:
         with contextlib.suppress(Exception):
             self._save_settings()
 
-    def _disable_translation_for_managed_exhaustion(
+    async def _disable_translation_for_managed_exhaustion(
         self,
         *,
         reopen_founder_letter: bool,
@@ -2985,8 +2959,12 @@ class GuiController:
         self._set_managed_trial_pending_auth(False)
         if reopen_founder_letter:
             self._show_founder_letter_dialog()
-        if self.hub is not None:
-            self.hub.translation_enabled = False
+        if self.application_runtime_host is not None:
+            from puripuly_heart.app.ports.translation_application import SetTranslationEnabled
+
+            await self.application_runtime_host.set_translation_enabled(
+                SetTranslationEnabled(False)
+            )
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
             dash.set_translation_enabled(False)
@@ -2999,7 +2977,7 @@ class GuiController:
         if not is_effectively_exhausted(self._managed_trial_usage_metadata):
             return False
 
-        self._disable_translation_for_managed_exhaustion(reopen_founder_letter=True)
+        await self._disable_translation_for_managed_exhaustion(reopen_founder_letter=True)
         return True
 
     def _build_llm_provider_signature(self, settings: AppSettings) -> tuple[object, ...]:
@@ -3818,7 +3796,7 @@ class GuiController:
                 self.sender.close()
             self.sender = None
         self.osc = None
-        await self._replace_managed_openrouter_release_service(None)
+        self._managed_openrouter_release_service = None
         if self._runtime_logging is not None:
             try:
                 self._runtime_logging.close_after_producers_stop(
@@ -4034,7 +4012,7 @@ class GuiController:
         request_generation = self._record_translation_toggle_intent(enabled)
         if not enabled:
             self._set_managed_trial_pending_auth(False)
-        if self.hub is None:
+        if self.hub is None or self.application_runtime_host is None:
             return False
         self.log_basic(f"[Translation] Toggle request: enabled={enabled}")
         self.log_detailed(
@@ -4042,6 +4020,12 @@ class GuiController:
             f"current_enabled={self.hub.translation_enabled} "
             f"llm_available={self.hub.llm is not None}"
         )
+        if enabled:
+            resolve_managed = getattr(
+                self.application_runtime_host, "resolve_managed_release_service", None
+            )
+            if callable(resolve_managed):
+                await resolve_managed()
         if enabled and await self._handle_managed_translation_enable(request_generation) is False:
             return False
         if enabled and not self._translation_toggle_intent_matches(
@@ -4052,8 +4036,12 @@ class GuiController:
                 "[Translation] Skipping stale enable request after newer toggle intent"
             )
             return False
-        if enabled and self.hub.llm is None:
-            self.hub.translation_enabled = False
+        from puripuly_heart.app.ports.translation_application import SetTranslationEnabled
+
+        command_result = await self.application_runtime_host.set_translation_enabled(
+            SetTranslationEnabled(enabled)
+        )
+        if command_result.status != "applied":
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 dash.set_translation_enabled(False)
@@ -4072,20 +4060,7 @@ class GuiController:
             else:
                 self.log_basic(f"[Translation] Enabled with provider: {provider}")
 
-        # Clear context history when toggling translation
-        self.hub.clear_context()
-        self.hub.translation_enabled = bool(enabled)
-        if enabled and self.hub.llm is not None:
-            llm = self.hub.llm
-            if isinstance(llm, SemaphoreLLMProvider):
-                llm = llm.inner
-            warmup = getattr(llm, "warmup", None)
-            if callable(warmup):
-                with contextlib.suppress(Exception):
-                    result = warmup()
-                    if inspect.isawaitable(result):
-                        await result
-        return bool(self.hub.translation_enabled)
+        return command_result.snapshot.effective_enabled
 
     async def set_stt_enabled(self, enabled: bool, *, force_immediate: bool = False) -> None:
         self.log_basic(f"[STT] Toggle request: enabled={enabled}")
@@ -4191,7 +4166,7 @@ class GuiController:
             return True
         if await self._should_route_managed_trans_to_founder_letter():
             return False
-        service = self._managed_openrouter_release_service
+        service = self._current_managed_release_service()
         if service is None:
             return True
         discord_claim_guard: ManagedAuthClaimGuard | None = None
@@ -4247,7 +4222,9 @@ class GuiController:
         if diagnostics_text:
             self.log_basic(f"[ManagedAuth] {diagnostics_text}", level=logging.ERROR)
         await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=False)
-        self.hub.translation_enabled = False
+        from puripuly_heart.app.ports.translation_application import SetTranslationEnabled
+
+        await self.application_runtime_host.set_translation_enabled(SetTranslationEnabled(False))
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
             dash.set_translation_enabled(False)
@@ -6043,23 +6020,15 @@ class GuiController:
         has_out_of_scope_draft = _settings_snapshot_values(
             committed_settings
         ) != _settings_snapshot_values(next_settings)
-        plan = self._build_provider_runtime_apply_plan(
-            committed_settings,
-            force_rebuild_llm=False,
-            canonical_settings=self._canonical_vnext_after_legacy_delta(
-                base_settings,
-                committed_settings,
-            ),
-        )
         repository = _ControllerSettingsPatchRepository(
             controller=self,
             base_settings=base_settings,
             committed_settings=committed_settings,
         )
-        runtime_apply = _ControllerProviderRuntimeApply(
+        runtime_apply = _ApplicationHostSurfaceRuntimeApply(
             controller=self,
-            settings=committed_settings,
-            plan=plan,
+            repository=repository,
+            surface="translation_provider",
         )
         command = TranslationProviderSettingsMutation(values=patch_values)
         service = self.settings_mutation_service or SettingsMutationService(
@@ -6079,6 +6048,7 @@ class GuiController:
             return True
 
         self.settings = committed_settings
+        self._render_committed_provider_state(committed_settings)
         if has_out_of_scope_draft:
             fallback_plan = self._build_provider_runtime_apply_plan(
                 next_settings,
@@ -6560,16 +6530,23 @@ class GuiController:
 
     def runtime_operational_snapshot(self) -> RuntimeOperationalSnapshot:
         hub = self.hub
+        translation = (
+            self.application_runtime_host.translation_snapshot()
+            if self.application_runtime_host is not None
+            else None
+        )
         return RuntimeOperationalSnapshot(
-            translation_enabled=True,
+            translation_enabled=bool(translation and translation.desired_enabled),
             self_stt_enabled=self._stt_desired,
             self_stt_running=bool(hub is not None and hub.stt is not None and self._stt_desired),
             self_stt_staged=bool(hub is not None and hub.stt is not None and not self._stt_desired),
             peer_stt_enabled=bool(self.settings and self.settings.ui.peer_translation_enabled),
             peer_stt_running=bool(hub is not None and hub.peer_stt is not None),
             peer_stt_staged=bool(hub is not None and hub.peer_stt is not None),
-            llm_available=bool(hub is not None and hub.llm is not None),
-            llm_retry_pending=self._last_llm_provider_signature == (),
+            llm_available=bool(translation and translation.provider_available),
+            llm_retry_pending=bool(
+                translation and translation.desired_enabled and not translation.provider_available
+            ),
             self_stt_available=bool(hub is not None and hub.stt is not None),
             self_stt_retry_pending=self._last_self_stt_provider_signature == (),
             peer_stt_available=bool(hub is not None and hub.peer_stt is not None),
@@ -6577,39 +6554,25 @@ class GuiController:
         )
 
     async def _rebuild_llm_provider(self) -> None:
-        """Rebuild only the LLM provider without tearing down the entire pipeline."""
-        if self.hub is None or self.settings is None:
+        if self.application_runtime_host is None:
             return
+        from puripuly_heart.app.ports.translation_application import SetTranslationEnabled
 
-        async def create_provider() -> object | None:
-            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-            new_managed_release_service = self._create_managed_openrouter_release_service(
-                secrets=secrets
-            )
-            await self._replace_managed_openrouter_release_service(new_managed_release_service)
-            return create_llm_provider(
-                self.settings,
-                secrets=secrets,
-                managed_release_service=self._managed_openrouter_release_service,
-                managed_delegate_ready=self._on_managed_trial_delegate_ready,
-                runtime_logging=self.runtime_logging,
-            )
-
-        outcome = await self._provider_rebuild_runtime.rebuild_llm_provider(
-            replace_provider=self.hub.replace_llm_provider,
-            create_provider=create_provider,
+        outcome = await self.application_runtime_host.set_translation_enabled(
+            SetTranslationEnabled(True)
         )
-        llm = outcome.provider
 
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
             dash.set_translation_needs_key(
-                (llm is None) and self._llm_provider_requires_secret(self.settings.provider.llm)
+                (not outcome.snapshot.provider_available)
+                and self.settings is not None
+                and self._llm_provider_requires_secret(self.settings.provider.llm)
             )
 
         await self._refresh_managed_trial_usage_state_best_effort()
 
-        if llm is None:
+        if not outcome.snapshot.provider_available:
             self._log_error("LLM provider not available")
             return
 
@@ -6919,10 +6882,8 @@ class GuiController:
                 self._dashboard_stt_needs_key(stt_available=self.hub.stt is not None)
             )
 
-            self.hub.translation_enabled = (
-                bool(getattr(dash, "is_translation_on", True)) and self.hub.llm is not None
-            )
-            dash.set_translation_enabled(self.hub.translation_enabled)
+            translation = self.application_runtime_host.translation_snapshot()
+            dash.set_translation_enabled(translation.effective_enabled)
 
         await self.hub.start(auto_flush_osc=True)
 
@@ -6941,14 +6902,13 @@ class GuiController:
     async def _init_pipeline(self) -> None:
         assert self.settings is not None
         self._sync_signature_caches(self.settings)
-        secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-        new_managed_release_service = self._create_managed_openrouter_release_service(
-            secrets=secrets
-        )
-        await self._replace_managed_openrouter_release_service(new_managed_release_service)
-
         if self.application_runtime_host is None:
             raise RuntimeError("application runtime host is required")
+        subscribe_managed = getattr(
+            self.application_runtime_host, "subscribe_managed_discord_callback", None
+        )
+        if callable(subscribe_managed):
+            subscribe_managed(self.handle_managed_discord_callback)
         parts = self.application_runtime_host.parts
         if parts is None:
             raise RuntimeError("application runtime host is closed")
@@ -6968,50 +6928,32 @@ class GuiController:
         self,
         service: ManagedOpenRouterReleaseService | None,
     ) -> None:
-        previous = self._managed_openrouter_release_service
-        self._managed_openrouter_release_service = service
-        if previous is not None and previous is not service:
-            with contextlib.suppress(Exception):
-                await previous.close()
+        _ = service
+
+    def _current_managed_release_service(self):  # noqa: ANN201
+        if self.application_runtime_host is not None:
+            service = getattr(self.application_runtime_host, "managed_release_service", None)
+            if service is not None:
+                return service
+        return self._managed_openrouter_release_service
+
+    async def _resolve_managed_auth_service(self):  # noqa: ANN201
+        if self.application_runtime_host is not None:
+            resolve = getattr(
+                self.application_runtime_host, "resolve_managed_release_service", None
+            )
+            if callable(resolve):
+                return await resolve()
+        return self._current_managed_release_service()
 
     def _create_managed_openrouter_release_service(
         self, *, secrets
     ) -> ManagedOpenRouterReleaseService | None:
-        if self.settings is None:
-            self.telemetry_client = None
-            return None
-        release_settings = self._managed_openrouter_release_settings()
-        if release_settings is None:
-            self.telemetry_client = None
-            return None
-
-        from puripuly_heart import __version__
-
-        try:
-            client = HttpManagedOpenRouterBrokerClient(
-                base_url=self.settings.openrouter.broker_base_url,
-            )
-            self.telemetry_client = client
-        except ValueError as exc:
-            logger.warning(
-                "[Managed OpenRouter] Invalid broker base URL %r; using unavailable fallback: %s",
-                self.settings.openrouter.broker_base_url,
-                exc,
-            )
-            client = UnavailableManagedOpenRouterReleaseClient()
-            self.telemetry_client = None
-
-        return ManagedOpenRouterReleaseService(
-            openrouter_config=build_openrouter_release_runtime_config(release_settings),
-            managed_state=build_managed_identity_state_port(
-                self.settings,
-                self._managed_identity_persistence_callback(self.settings),
-            ),
-            secrets=secrets,
-            client=client,
-            raw_hardware_fingerprint_provider=get_raw_hardware_fingerprint,
-            app_version=__version__,
-            on_discord_callback_received=self._on_discord_managed_auth_callback_received,
+        _ = secrets
+        return (
+            getattr(self.application_runtime_host, "managed_release_service", None)
+            if self.application_runtime_host is not None
+            else None
         )
 
     def _get_oauth_runtime(self) -> OAuthRuntime:
@@ -7046,6 +6988,10 @@ class GuiController:
         hook = self._discord_managed_auth_callback_received_hook
         if callable(hook):
             hook()
+
+    def handle_managed_discord_callback(self, event: object) -> None:
+        _ = event
+        self._on_discord_managed_auth_callback_received()
 
     @property
     def microphone_test_meter_level(self) -> float:
@@ -8559,8 +8505,12 @@ class GuiController:
             # User request: "Validation Fail -> Orange". Implicitly, if it's ON and fails, maybe we should turn it OFF?
             # For now, setting needs_key=True ensures that if they try to toggle, it warns.
             # If it is currently ON, we might want to flag it.
-            if self.hub:
-                self.hub.translation_enabled = False  # Disable internally
+            if self.application_runtime_host is not None:
+                from puripuly_heart.app.ports.translation_application import SetTranslationEnabled
+
+                await self.application_runtime_host.set_translation_enabled(
+                    SetTranslationEnabled(False)
+                )
             dash.set_translation_enabled(False)  # Visually turn off
         else:
             dash.set_translation_needs_key(False)

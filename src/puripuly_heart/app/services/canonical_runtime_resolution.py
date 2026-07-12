@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from puripuly_heart.app.ports.settings_repository import SettingsCommitReceipt
 from puripuly_heart.config.resolved import RUNTIME_CHANNEL_PEER, ResolvedApplicationRuntimeConfig
@@ -76,6 +76,7 @@ class CanonicalRuntimeConfigResolver:
             soniox_keepalive_interval_s=stt.soniox.keepalive_interval_s,
             soniox_trailing_silence_ms=stt.soniox.trailing_silence_ms,
         )
+        runtime_input = replace(runtime_input, self_stt=self_stt)
         peer_stt = STTRuntimeIntent(
             channel=RUNTIME_CHANNEL_PEER,
             provider=intent.peer_stt.provider,

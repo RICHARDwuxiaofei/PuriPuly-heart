@@ -136,6 +136,39 @@ async def test_gate_resets_before_start_freeze_restart_and_stop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_guard_failure_resume_restores_self_capture_when_intent_is_unchanged() -> None:
+    cell = ProviderStateCell(self_stt=Provider())
+    owner, _host, _ingress, _source, _sink = make_owner(cell)
+    await owner.execute(SetSelfSTTEnabled(True, CONFIG))
+
+    resume = await owner.freeze_for_provider_replacement()
+    assert owner.snapshot().state is SelfChannelState.STOPPED
+    await owner.resume_after_provider_replacement(resume)
+
+    snapshot = owner.snapshot()
+    assert snapshot.desired_enabled is True
+    assert snapshot.state is SelfChannelState.RUNNING
+    assert snapshot.intent_generation == resume.intent_generation
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_guard_failure_resume_does_not_override_disable_during_attempt() -> None:
+    cell = ProviderStateCell(self_stt=Provider())
+    owner, _host, _ingress, _source, _sink = make_owner(cell)
+    await owner.execute(SetSelfSTTEnabled(True, CONFIG))
+
+    resume = await owner.freeze_for_provider_replacement()
+    await owner.execute(SetSelfSTTEnabled(False))
+    await owner.resume_after_provider_replacement(resume)
+
+    snapshot = owner.snapshot()
+    assert snapshot.desired_enabled is False
+    assert snapshot.intent_enabled is False
+    assert snapshot.state is SelfChannelState.STOPPED
+
+
+@pytest.mark.asyncio
 async def test_stale_replacement_during_loop_rejects_late_event() -> None:
     first = Provider()
     replacement = Provider()

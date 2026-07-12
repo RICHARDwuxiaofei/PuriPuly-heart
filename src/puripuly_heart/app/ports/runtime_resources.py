@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal, Mapping, Protocol
@@ -9,9 +11,11 @@ from puripuly_heart.core.runtime.provider_state import ResourceRef
 
 RuntimeResourceAction = Literal["retain", "replace", "clear"]
 RuntimeResourceSlot = Literal["llm", "self_stt", "peer_stt"]
+RuntimeCommitGuard = Callable[[], Awaitable[None]]
 RuntimeInstallFailureCause = Literal[
     "runtime_install_validation_failed",
     "runtime_install_precommit_quiesce_failed",
+    "runtime_install_commit_guard_failed",
     "runtime_install_postcommit_state_failed",
     "runtime_install_postcommit_binding_failed",
     "runtime_install_postcommit_task_start_failed",
@@ -21,6 +25,7 @@ RuntimeInstallFailureCause = Literal[
 ]
 RuntimeInstallOriginCause = Literal[
     "runtime_install_precommit_quiesce_failed",
+    "runtime_install_commit_guard_failed",
     "runtime_install_postcommit_state_failed",
     "runtime_install_postcommit_binding_failed",
     "runtime_install_postcommit_task_start_failed",
@@ -28,6 +33,7 @@ RuntimeInstallOriginCause = Literal[
 _FAILURE_CAUSES = {
     "runtime_install_validation_failed",
     "runtime_install_precommit_quiesce_failed",
+    "runtime_install_commit_guard_failed",
     "runtime_install_postcommit_state_failed",
     "runtime_install_postcommit_binding_failed",
     "runtime_install_postcommit_task_start_failed",
@@ -37,6 +43,7 @@ _FAILURE_CAUSES = {
 }
 _ORIGIN_CAUSES = {
     "runtime_install_precommit_quiesce_failed",
+    "runtime_install_commit_guard_failed",
     "runtime_install_postcommit_state_failed",
     "runtime_install_postcommit_binding_failed",
     "runtime_install_postcommit_task_start_failed",
@@ -54,6 +61,7 @@ _POSTCOMMIT_CAUSES = {
 _RESTORED_TERMINAL_CAUSES = {
     "runtime_install_validation_failed",
     "runtime_install_precommit_quiesce_failed",
+    "runtime_install_commit_guard_failed",
     *_POSTCOMMIT_CAUSES,
 }
 
@@ -98,6 +106,7 @@ def _validate_identity_objects(refs) -> None:  # noqa: ANN001
 class StagedRuntimeResources:
     plan: RuntimeResourceReplacementPlan
     candidates: Mapping[RuntimeResourceSlot, ResourceRef]
+    commit_guard: RuntimeCommitGuard | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "candidates", _validated_refs(self.candidates))
@@ -176,6 +185,24 @@ class RuntimeResourceInstallError(Exception):
     def __init__(self, cause_code: str) -> None:
         super().__init__("runtime resource install failed")
         self.cause_code = cause_code
+
+
+class RuntimeResourceInstallCancelled(asyncio.CancelledError):
+    def __init__(self, *, provider_state_committed: bool) -> None:
+        super().__init__()
+        self.provider_state_committed = provider_state_committed
+
+
+class RuntimeCommittedSettlementFailure(Exception):
+    def __init__(
+        self,
+        failed_displaced: tuple[ResourceRef, ...],
+        *,
+        cancellation_requested: bool,
+    ) -> None:
+        super().__init__("committed runtime resource settlement failed")
+        self.failed_displaced = tuple(failed_displaced)
+        self.cancellation_requested = cancellation_requested
 
 
 class ResolvedRuntimeResourceFactoryPort(Protocol):

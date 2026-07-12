@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from puripuly_heart.app.ports.application_runtime import (
     ApplicationRuntimePort,
@@ -11,9 +11,11 @@ from puripuly_heart.app.ports.runtime_resources import (
     InstalledRuntimeState,
     ResolvedRuntimeResourceFactoryPort,
     ResourceRef,
+    RuntimeCommittedSettlementFailure,
     RuntimeHostInstallPort,
     RuntimeInstallFailure,
     RuntimeResourceBuildError,
+    RuntimeResourceInstallCancelled,
     RuntimeResourceInstallError,
     RuntimeResourcePlannerPort,
     RuntimeResourceReplacementPlan,
@@ -75,20 +77,29 @@ class ResolvedRuntimeResourceAdapter(ApplicationRuntimePort):
     )
 
     async def replace_runtime(self, request: ResolvedRuntimeActivationRequest) -> None:
-        await self._replace_runtime(request, explicit_plan=None)
+        await self._replace_runtime(request, explicit_plan=None, commit_guard=None)
 
     async def replace_runtime_with_plan(
         self,
         request: ResolvedRuntimeActivationRequest,
         plan: RuntimeResourceReplacementPlan,
     ) -> None:
-        await self._replace_runtime(request, explicit_plan=plan)
+        await self._replace_runtime(request, explicit_plan=plan, commit_guard=None)
+
+    async def replace_runtime_with_plan_guarded(
+        self,
+        request: ResolvedRuntimeActivationRequest,
+        plan: RuntimeResourceReplacementPlan,
+        commit_guard: object,
+    ) -> None:
+        await self._replace_runtime(request, explicit_plan=plan, commit_guard=commit_guard)
 
     async def _replace_runtime(
         self,
         request: ResolvedRuntimeActivationRequest,
         *,
         explicit_plan: RuntimeResourceReplacementPlan | None,
+        commit_guard: object | None = None,
     ) -> None:
         async with self._lock:
             if not self._ownership_state_known or self._pending_settlement:
@@ -110,6 +121,8 @@ class ResolvedRuntimeResourceAdapter(ApplicationRuntimePort):
                 return
             try:
                 staged = await self.factory.build_resources(request.config, plan)
+                if commit_guard is not None:
+                    staged = replace(staged, commit_guard=commit_guard)
             except RuntimeResourceBuildError as exc:
                 await self._settle_build_failure(exc.staged)
                 raise
@@ -140,7 +153,7 @@ class ResolvedRuntimeResourceAdapter(ApplicationRuntimePort):
                 self._ownership_state_known = True
                 self._active_config = None
                 if cancellation is not None:
-                    raise cancellation
+                    raise RuntimeResourceInstallCancelled(provider_state_committed=False)
                 raise RuntimeResourceInstallError("invalid_install_result")
             if isinstance(result, RuntimeInstallFailure):
                 await self._close_refs(
@@ -154,19 +167,44 @@ class ResolvedRuntimeResourceAdapter(ApplicationRuntimePort):
                 if not result.restored:
                     self._active_config = None
                 if cancellation is not None:
-                    raise cancellation
+                    raise RuntimeResourceInstallCancelled(provider_state_committed=False)
                 raise RuntimeResourceInstallError(result.cause_code)
             self._active_state = result.active
             self._ownership_state_known = True
             self._active_config = request.config
-            await self._close_refs(
-                (*result.displaced, *result.unadopted),
-                set(result.active.identities),
-                "ownership_return",
-                cancellation is not None,
+            failed, close_cancelled = await self._close_committed_refs(
+                (*result.displaced, *result.unadopted), set(result.active.identities)
             )
+            if failed:
+                raise RuntimeCommittedSettlementFailure(
+                    failed,
+                    cancellation_requested=cancellation is not None or close_cancelled,
+                )
             if cancellation is not None:
-                raise cancellation
+                raise RuntimeResourceInstallCancelled(provider_state_committed=True)
+
+    async def _close_committed_refs(
+        self, refs: tuple[ResourceRef, ...], active_ids: set[str]
+    ) -> tuple[tuple[ResourceRef, ...], bool]:
+        closed: set[str] = set()
+        failed: list[ResourceRef] = []
+        cancelled = False
+        for ref in refs:
+            if ref.identity in active_ids or ref.identity in closed:
+                continue
+            closed.add(ref.identity)
+            try:
+                await ref.resource.close()
+            except asyncio.CancelledError:
+                failed.append(ref)
+                cancelled = True
+            except BaseException:
+                failed.append(ref)
+        if failed:
+            self.cleanup_diagnostics.append(
+                RuntimeResourceCleanupDiagnostic("ownership_return", len(failed))
+            )
+        return tuple(failed), cancelled
 
     async def _settle_host_exception(self, staged) -> None:  # noqa: ANN001
         try:
