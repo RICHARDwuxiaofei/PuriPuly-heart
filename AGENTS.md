@@ -1,68 +1,30 @@
-## Purpose & Authority
+## Authority
 
-- If implementation facts and docs disagree, treat code as the source of truth and then align docs or escalate.
-- Keep this file concise and operational. Record only rules an agent must remember before touching the codebase.
-- Do not add comments to code unless explicitly requested.
-- API keys are in `@.env.local`.
-- If a compacted or resumed context references an active `/implement-work` run, reload the `implement-work` skill, read its ledger and selected source input, validate source identity/hash, and continue only from the recorded next action. Do not continue from compressed chat memory alone; stop for context or decision if the ledger or source is ambiguous.
+- Do not add code comments unless explicitly requested.
+- If resuming `/implement-work`, reload its skill and validate the ledger, selected source, hashes, worktree identity, and recorded next action before continuing.
 
-## Architecture Work Model
+## Product Invariants
 
-- Before changing behavior, name the boundary being changed: settings/persistence, runtime resolution, transaction service, lifecycle owner, output routing, message/diagnostics, adapter wiring, or UI rendering.
-- Keep persisted user intent, persisted operational state, resolved runtime config, and runtime-only state separate.
-- Prefer explicit contracts over convenient imports. A new dependency should be identifiable as a schema value, resolved DTO, service port, adapter, lifecycle owner, output/message/observability port, or UI renderer.
-- Split files by owner and reason-to-change after the boundary exists; avoid cosmetic or mechanical file splits.
+- Peer utterances must never route to the VRChat chatbox.
+- Keep self, peer, and system outputs as separate product channels.
+- Preserve established compatibility contracts unless the task explicitly approves a breaking change.
 
-## Compatibility & Persistence
+## Rules by Changed Surface
 
-- Settings compatibility is mandatory:
-  - Keep `to_dict` and `from_dict` synchronized.
-  - New settings must have defaults so existing `settings.json` continues loading.
-  - If a setting key is renamed, accept the old key in `from_dict` for backward compatibility.
-- Persisted schema changes require safe forward migration and a pre-migration backup.
-- Preserve compatibility surfaces unless explicitly approved: SecretStore keys, Broker `/v1`, overlay protocol and startup contract, prompt fallback including `translation_prompt.md`, provider aliases, i18n key parity, installer identity, and Rust overlay startup behavior.
+- When changing Python behavior, identify the owning boundary and prefer explicit DTO, port, adapter, lifecycle, output, message, or renderer contracts over cross-layer imports.
+- When changing settings or persistence, keep serialization round-trippable, preserve old settings files and keys, provide defaults, and back up persisted data before forward migration.
+- When changing credentials, preserve SecretStore key compatibility and load secrets through SecretStore; encrypted-file storage requires `PURIPULY_HEART_SECRETS_PASSPHRASE`.
+- When adding async or long-running work, keep I/O async and provide an explicit owner, cancellation, shutdown, and diagnostics path; provider teardown must await `close()`.
+- When changing Flet UI, use i18n for user-facing text, keep locale bundles in parity, localize at the UI boundary, and use `page.run_task` for async callbacks.
+- When changing debug preview behavior, keep it behind the explicit debug flag and prevent it from persisting settings, mutating secrets, or calling external systems.
+- When changing providers or prompts, preserve provider aliases and prompt fallback compatibility; verify prompt behavior in `src/puripuly_heart/config/prompts.py`.
+- When changing orchestrator defaults, verify their current values in `src/puripuly_heart/core/orchestrator/hub.py`.
+- When changing the Broker, preserve `/v1` compatibility and run Node verification only in a Linux-native workspace using Linux-installed dependencies.
+- When changing the Rust overlay, preserve its protocol and startup contract and finish by recompiling the Windows overlay.
+- When smoke-testing the installer, use an alternate AppId and an isolated installation directory.
 
-## UI, Preview & User Messages
+## Verification Environment
 
-- All new user-facing UI text must go through i18n keys, and all locale bundles must be updated.
-- Localize user-facing text at UI boundaries; core, provider, and app service code should emit message references and diagnostic facts instead of localized strings or raw exception text.
-- Debug UI preview mode may exist for hard-to-reproduce UI states.
-  - Verify the exact CLI flag and preview actions in code before use.
-  - Preview actions must not persist settings, mutate secrets, or call external providers/brokers.
-  - Use preview mode for manual QA of hidden UI states instead of forcing real broker/OpenRouter states.
-  - Debug preview controls must remain hidden unless the explicit debug flag is enabled.
-
-## Security, Async & Lifecycle
-
-- Keep provider and I/O calls async; avoid blocking the event loop.
-- Long-running work needs an explicit lifecycle owner, cancellation path, shutdown behavior, and diagnostics path.
-- Avoid unmanaged `asyncio.create_task`; owner-scoped tasks must be cancelled on shutdown.
-- Always `await` provider `close()` in teardown paths.
-- In Flet UI callbacks, use `page.run_task` for async work.
-- Secrets are loaded through `SecretStore` (keyring/encrypted file/env fallback).
-- When `secrets.backend` is `encrypted_file`, require `PURIPULY_HEART_SECRETS_PASSPHRASE`.
-- Never commit real credentials, API keys, or secret material.
-
-## Output, Diagnostics & Logs
-
-- Treat self, peer, and system outputs as separate product channels.
-- Peer utterances must not route to the VRChat chatbox.
-- Diagnostics and logs must be safe to display or persist: no raw secrets, credentials, unredacted stack traces, or unredacted provider payloads.
-
-## Environment & Verification
-
-- Prefer a project virtual environment for tests, verification, and development commands whenever one exists.
-- If `.venv` exists, Windows shells should use `.venv`.
-- If `.venv-wsl` exists, Linux / WSL shells should use `.venv-wsl`.
-- In WSL shells, use `direnv exec <repo> ...` or explicit `UV_PROJECT_ENVIRONMENT=.venv-wsl`; do not rely on `bash -i -c`.
-- Broker Node verification (`pnpm`, `vitest`, `wrangler`) must run from a Linux / WSL workspace only; do not run it from Windows shells.
-- In WSL, install broker Node dependencies inside the Linux workspace; do not reuse Windows-installed `node_modules` from `/mnt/c/...`.
-- If a task modifies Rust code, the final step of the overall task must recompile the Rust overlay for Windows.
-- Local installer smoke tests must use an alternate `AppId` and an isolated install directory; never reuse the production `AppId` for test installs.
-- Do not claim completion without verification evidence from the relevant commands or checks.
-
-## Freshness Checks
-
-- Do not hardcode volatile defaults or file format assumptions in this file.
-- Prompt file naming/extensions and fallback order must be verified in `src/puripuly_heart/config/prompts.py`.
-- Orchestrator default parameters (including context memory values) must be verified in `src/puripuly_heart/core/orchestrator/hub.py`.
+- Use `.venv` on Windows and `.venv-wsl` on Linux/WSL when present.
+- In WSL, use `direnv exec <repo> ...` or `UV_PROJECT_ENVIRONMENT=.venv-wsl`.
+- Select focused checks from the changed surface, then run broader checks when the affected contract crosses boundaries.
