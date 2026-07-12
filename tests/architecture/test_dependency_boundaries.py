@@ -1659,6 +1659,28 @@ def test_resolved_runtime_resource_transaction_has_no_ui_dependency() -> None:
         assert "AppSettings" not in source
 
 
+def test_application_settings_command_codecs_are_additive_typed_contracts() -> None:
+    port_path = SOURCE_PACKAGE_ROOT / "app" / "ports" / "application_settings.py"
+    codec_path = SOURCE_PACKAGE_ROOT / "app" / "services" / "application_settings_codecs.py"
+    sources = (port_path.read_text(encoding="utf-8"), codec_path.read_text(encoding="utf-8"))
+    for source in sources:
+        assert "puripuly_heart.ui" not in source
+        assert "puripuly_heart.config.settings import" not in source
+        assert "Mapping[str, object]" not in source
+        assert "value: object" not in source
+        assert "_replace_path" not in source
+    assert "masked:" not in sources[0]
+    assert "class OperationalStateCommand:" not in sources[0]
+    assert "PersistedOperationalState" not in sources[0]
+    assert "UserIntentSettings" not in sources[0]
+    production_sources = (
+        path.read_text(encoding="utf-8")
+        for path in SOURCE_PACKAGE_ROOT.rglob("*.py")
+        if path not in {port_path, codec_path}
+    )
+    assert all("application_settings_codecs" not in source for source in production_sources)
+
+
 def test_retired_controller_runtime_apply_adapters_do_not_return_as_aliases() -> None:
     path = SOURCE_PACKAGE_ROOT / "app" / "services" / "provider_runtime_apply.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
