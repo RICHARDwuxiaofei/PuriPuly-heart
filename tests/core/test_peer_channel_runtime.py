@@ -328,7 +328,7 @@ async def wait_until(predicate, *, timeout_s: float = 1.0) -> None:  # noqa: ANN
 def make_peer_runtime_config(output_device: str = "Headphones (Loopback)") -> PeerRuntimeConfig:
     backend = ResolvedSTTConfig(
         channel="peer",
-        provider=STTProviderName.DEEPGRAM,
+        provider=STTProviderName.DEEPGRAM.value,
         source_language="ko",
         model="nova-3",
         endpoint=None,
@@ -402,7 +402,7 @@ def make_local_qwen_runtime_config(*, model: str = "local") -> PeerRuntimeConfig
     config = make_peer_runtime_config()
     backend = replace(
         config.backend,
-        provider=STTProviderName.LOCAL_QWEN,
+        provider=STTProviderName.LOCAL_QWEN.value,
         model=model,
         credential=replace(config.backend.credential, required=False, reference=None),
     )
@@ -1464,6 +1464,27 @@ async def test_apply_policy_is_idempotent_for_same_runtime_signature() -> None:
     assert created == ["stt"]
     assert len(hub.replace_peer_stt_calls) == 1
     assert runtime.state == PeerChannelRuntimeState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_inactive_policy_accepts_resolved_string_provider() -> None:
+    runtime = PeerChannelRuntime(
+        hub=DummyHub(),
+        clock=FakeClock(),
+        stt_factory=lambda config, on_terminal_failure: DummyManagedSTT(),
+        source_factory=lambda config: DummySource(),
+        vad_factory=lambda config, model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=fake_run_audio_loop,
+        idle_release_seconds=600.0,
+    )
+    config = make_peer_runtime_config()
+
+    assert type(config.backend.provider) is str
+
+    await runtime.apply_policy(config=config, desired_active=False)
+
+    assert runtime.state == PeerChannelRuntimeState.STOPPED
 
 
 def test_peer_channel_runtime_exposes_named_owner_inventory_and_policies() -> None:

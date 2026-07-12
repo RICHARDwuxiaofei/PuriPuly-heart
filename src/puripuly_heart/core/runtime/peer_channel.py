@@ -190,7 +190,7 @@ class PeerChannelRuntime:
                 return
             if desired_active:
                 self._idle_release_deadline = None
-            elif config.backend.provider.value != "local_qwen" or self._provider_signature not in (
+            elif config.backend.provider != "local_qwen" or self._provider_signature not in (
                 None,
                 config.provider_signature,
             ):
@@ -325,7 +325,7 @@ class PeerChannelRuntime:
         fresh_candidate = False
         created_candidate: object | None = None
         try:
-            reusable = config.backend.provider.value == "local_qwen"
+            reusable = config.backend.provider == "local_qwen"
 
             async def build_and_warm() -> object:
                 nonlocal created_candidate, fresh_candidate
@@ -776,7 +776,7 @@ class PeerChannelRuntime:
         config: PeerRuntimeConfig,
         fresh_candidate: bool,
     ) -> bool:
-        if not fresh_candidate or config.backend.provider.value != "local_qwen":
+        if not fresh_candidate or config.backend.provider != "local_qwen":
             return False
         async with self._lock:
             current_config = self._config
@@ -800,7 +800,7 @@ class PeerChannelRuntime:
             stt = self._stt if self._stt is not None else self._retained_stt
             if (
                 stt is None
-                or config.backend.provider.value != "local_qwen"
+                or config.backend.provider != "local_qwen"
                 or self._provider_signature != config.provider_signature
                 or not callable(drain)
             ):
