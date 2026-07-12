@@ -45,6 +45,7 @@ LEGACY_TASK_CREATION_ALLOWLIST = Counter(
 
 NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST = Counter(
     {
+        ("src/puripuly_heart/main.py", RUN_TASK): 1,
         ("src/puripuly_heart/core/runtime/peer_channel.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/provider_handle.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/self_audio.py", ASYNCIO_CREATE_TASK): 1,
@@ -68,6 +69,10 @@ NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST = Counter(
 )
 
 TASK_CREATION_ALLOWLIST_RATIONALES = {
+    (
+        "src/puripuly_heart/main.py",
+        RUN_TASK,
+    ): "application entry schedules its owned Flet disconnect callback and also awaits shutdown before return",
     (
         "src/puripuly_heart/app/services/openrouter_pkce_owner.py",
         ASYNCIO_CREATE_TASK,

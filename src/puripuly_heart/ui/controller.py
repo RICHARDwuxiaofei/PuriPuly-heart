@@ -211,12 +211,7 @@ from puripuly_heart.core.openrouter_metadata import OpenRouterKeyMetadata
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
-from puripuly_heart.core.runtime.clipboard import ClipboardRuntime
-from puripuly_heart.core.runtime.github_star_prompt import GithubStarPromptRuntime
-from puripuly_heart.core.runtime.local_stt_download import LocalSTTDownloadRuntime
 from puripuly_heart.core.runtime.logging import RuntimeLoggingService
-from puripuly_heart.core.runtime.mic_test import MicTestRuntime
-from puripuly_heart.core.runtime.oauth import OAuthRuntime
 from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
 from puripuly_heart.core.runtime.provider_rebuild import ProviderRuntimeRebuildService
 from puripuly_heart.core.runtime.self_audio import (
@@ -999,6 +994,7 @@ class GuiController:
     provider_verifier: _ControllerProviderVerifier | None = None
     telemetry_client: TranslationSuccessTelemetryClientPort | None = None
     application_runtime_host: object | None = None
+    application_adapters: object | None = None
     self_stt_commands: SelfSTTCommandPort | None = None
     self_stt_state: SelfSTTStatePort | None = None
     self_stt_provider_application: SelfSTTProviderApplicationPort | None = None
@@ -1061,7 +1057,7 @@ class GuiController:
     )
     clock: SystemClock = SystemClock()
     _managed_openrouter_release_service: ManagedOpenRouterReleaseService | None = None
-    _oauth_runtime: OAuthRuntime | None = field(init=False, default=None)
+    _oauth_runtime: object | None = field(init=False, default=None)
 
     sender: VrchatOscUdpSender | None = None
     osc: ChatboxPaginator | None = None
@@ -1086,7 +1082,7 @@ class GuiController:
         repr=False,
     )
     _microphone_test_meter_level: float = field(init=False, default=0.0)
-    _microphone_test_runtime: MicTestRuntime | None = field(init=False, default=None)
+    _microphone_test_runtime: object | None = field(init=False, default=None)
     _microphone_test_lifecycle_lock: asyncio.Lock | None = field(
         init=False,
         default=None,
@@ -1126,7 +1122,7 @@ class GuiController:
         repr=False,
     )
     _ui_event_bridge: UIEventBridge | None = None
-    _clipboard_runtime: ClipboardRuntime | None = field(init=False, default=None)
+    _clipboard_runtime: object | None = field(init=False, default=None)
     _clipboard_watcher_lock: asyncio.Lock | None = field(init=False, default=None)
     _strict_runtime_errors_for_clipboard_watcher: bool = field(
         init=False,
@@ -1138,7 +1134,7 @@ class GuiController:
         default_factory=lambda: LocalSTTInstallState(status="ready"),
     )
     _local_stt_runtime_status: str = field(init=False, default="ready")
-    _local_stt_download_runtime: LocalSTTDownloadRuntime | None = field(
+    _local_stt_download_runtime: object | None = field(
         init=False,
         default=None,
     )
@@ -1186,7 +1182,7 @@ class GuiController:
     )
     _translation_toggle_intent_enabled: bool = field(init=False, default=False)
     _translation_toggle_generation: int = field(init=False, default=0)
-    _github_star_prompt_runtime: GithubStarPromptRuntime | None = field(
+    _github_star_prompt_runtime: object | None = field(
         init=False,
         default=None,
         repr=False,
@@ -1324,7 +1320,7 @@ class GuiController:
         self._sync_effective_hub_flags(self.settings)
         self._refresh_overlay_peer_consumers()
 
-    async def start(self) -> None:
+    async def prepare_presentation(self) -> None:
         self.settings = self._load_or_init_settings(self.config_path)
         self.vnext_settings = self._load_canonical_vnext_settings(self.config_path, self.settings)
         self._vnext_settings_authoritative = True
@@ -1361,14 +1357,9 @@ class GuiController:
             )
             if self.overlay_application_state is not None:
                 self.overlay_application_state.subscribe(self._on_overlay_application_state)
-            await self.overlay_commands.startup()
 
-        owned_parts = getattr(self.application_runtime_host, "parts", None)
-        if owned_parts is not None and owned_parts.hub is self.hub:
-            await self.application_runtime_host.start(auto_flush_osc=True)
-        else:
-            await self.hub.start(auto_flush_osc=True)
-
+    async def start_rendering(self) -> None:
+        runtime_logging = self.runtime_logging
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
             # Set needs_key flags based on saved verification status & key existence
@@ -1412,6 +1403,17 @@ class GuiController:
         bridge = self._create_ui_event_bridge(runtime_logging=runtime_logging)
         self._start_ui_event_bridge_task(bridge)
         await self._sync_clipboard_watcher()
+
+    async def start(self) -> None:
+        await self.prepare_presentation()
+        if self.overlay_commands is not None:
+            await self.overlay_commands.startup()
+        owned_parts = getattr(self.application_runtime_host, "parts", None)
+        if owned_parts is not None and owned_parts.hub is self.hub:
+            await self.application_runtime_host.start(auto_flush_osc=True)
+        elif self.hub is not None:
+            await self.hub.start(auto_flush_osc=True)
+        await self.start_rendering()
 
     def _create_ui_event_bridge(self, *, runtime_logging) -> UIEventBridge:  # noqa: ANN001
         assert self.hub is not None
@@ -2420,11 +2422,13 @@ class GuiController:
             self.persist_github_star_prompt_translation_success_observed()
         )
 
-    def _get_github_star_prompt_runtime(self) -> GithubStarPromptRuntime:
+    def _get_github_star_prompt_runtime(self):  # noqa: ANN201
         if self._github_star_prompt_runtime is None:
-            self._github_star_prompt_runtime = GithubStarPromptRuntime(
-                diagnostics_sink=self._github_star_prompt_runtime_diagnostics_sink,
+            adapters = self._require_application_adapters()
+            adapters.bind_controller_github_diagnostics(
+                self._github_star_prompt_runtime_diagnostics_sink
             )
+            self._github_star_prompt_runtime = adapters.controller_github_prompt
         return self._github_star_prompt_runtime
 
     def _github_star_prompt_runtime_diagnostics_sink(
@@ -2436,32 +2440,6 @@ class GuiController:
             f"[Lifecycle][GithubStarPromptRuntime] event={event} metadata={dict(metadata)}",
             level=logging.WARNING,
         )
-
-    async def _close_github_star_prompt_runtime_for_release(
-        self,
-        failures: list[Exception],
-    ) -> None:
-        runtime = self._github_star_prompt_runtime
-        if runtime is None:
-            return
-        try:
-            await runtime.close()
-        except Exception as exc:
-            failures.append(exc)
-
-    async def _close_app_github_star_prompt_runtime_for_release(
-        self,
-        failures: list[Exception],
-    ) -> None:
-        close_prompt_runtime = getattr(self.app, "close_github_star_prompt_runtime", None)
-        if not callable(close_prompt_runtime):
-            return
-        try:
-            result = close_prompt_runtime()
-            if inspect.isawaitable(result):
-                await result
-        except Exception as exc:
-            failures.append(exc)
 
     def schedule_github_star_prompt_translation_success_observed(self) -> bool:
         if self.settings is None:
@@ -3765,43 +3743,62 @@ class GuiController:
         if self.hub is hub:
             self.hub = None
 
-    async def stop(self) -> None:
-        cleanup_failures: list[Exception] = []
+    async def freeze_application_ingress(self) -> None:
         await self.release_manual_typing()
-        await self._close_app_github_star_prompt_runtime_for_release(cleanup_failures)
-        await self._close_github_star_prompt_runtime_for_release(cleanup_failures)
-        await self._close_clipboard_runtime()
-        await self._close_app_oauth_runtime_for_release(cleanup_failures)
-        await self._close_oauth_runtime_for_release(cleanup_failures)
-        await self._cancel_local_stt_download()
-        await self._close_microphone_test_runtime_for_release(cleanup_failures)
+
+    async def stop_legacy_application_adapters(self) -> None:
+        cleanup_failures: list[Exception] = []
         try:
             await self.set_stt_enabled(False)
         except Exception as exc:
             cleanup_failures.append(exc)
-        if self.overlay_commands is not None and not self._overlay_application_shutdown_started:
-            self._overlay_application_shutdown_started = True
-            await self.overlay_commands.shutdown()
-        await self._close_peer_runtime_for_release(cleanup_failures)
+        _raise_lifecycle_cleanup_failures(
+            "GUI application adapter cleanup failed",
+            cleanup_failures,
+        )
 
-        await self._stop_hub_for_release(cleanup_failures)
+    async def stop_rendering(self, failures: tuple[BaseException, ...] = ()) -> None:
+        cleanup_failures: list[Exception] = []
         if self.hub is None:
             self._bridge_task = None
             self._ui_event_bridge = None
-
-        if self.sender is not None:
-            with contextlib.suppress(Exception):
-                self.sender.close()
-            self.sender = None
+        self.sender = None
         self.osc = None
         self._managed_openrouter_release_service = None
         if self._runtime_logging is not None:
             try:
                 self._runtime_logging.close_after_producers_stop(
-                    cleanup_failures=tuple(cleanup_failures)
+                    cleanup_failures=tuple(
+                        failure for failure in failures if isinstance(failure, Exception)
+                    )
                 )
             except Exception as exc:
                 cleanup_failures.append(exc)
+        _raise_lifecycle_cleanup_failures(
+            "GUI presentation stop cleanup failed",
+            cleanup_failures,
+        )
+
+    async def stop(self) -> None:
+        cleanup_failures: list[Exception] = []
+        await self.freeze_application_ingress()
+        try:
+            await self.stop_legacy_application_adapters()
+        except Exception as exc:
+            cleanup_failures.append(exc)
+        if self.overlay_commands is not None and not self._overlay_application_shutdown_started:
+            self._overlay_application_shutdown_started = True
+            try:
+                await self.overlay_commands.shutdown()
+            except Exception as exc:
+                cleanup_failures.append(exc)
+        await self._close_peer_runtime_for_release(cleanup_failures)
+
+        await self._stop_hub_for_release(cleanup_failures)
+        try:
+            await self.stop_rendering(tuple(cleanup_failures))
+        except Exception as exc:
+            cleanup_failures.append(exc)
         _raise_lifecycle_cleanup_failures(
             "GUI controller stop cleanup failed",
             cleanup_failures,
@@ -4243,9 +4240,11 @@ class GuiController:
             self._local_stt_runtime_status = self._local_stt_install_state.status
         self._sync_local_stt_notice()
 
-    def _get_local_stt_download_runtime(self) -> LocalSTTDownloadRuntime:
+    def _get_local_stt_download_runtime(self):  # noqa: ANN201
         if self._local_stt_download_runtime is None:
-            self._local_stt_download_runtime = LocalSTTDownloadRuntime()
+            self._local_stt_download_runtime = (
+                self._require_application_adapters().local_stt_download
+            )
         return self._local_stt_download_runtime
 
     def _current_local_stt_runtime_status(self) -> str:
@@ -4619,9 +4618,9 @@ class GuiController:
             self._clipboard_watcher_lock = asyncio.Lock()
         return self._clipboard_watcher_lock
 
-    def _get_clipboard_runtime(self) -> ClipboardRuntime:
+    def _get_clipboard_runtime(self):  # noqa: ANN201
         if self._clipboard_runtime is None:
-            self._clipboard_runtime = ClipboardRuntime(
+            self._clipboard_runtime = self._require_application_adapters().bind_clipboard(
                 watcher_factory=create_clipboard_watcher,
                 submit_handler=self._submit_clipboard_text,
             )
@@ -4657,18 +4656,6 @@ class GuiController:
                 )
             except Exception:
                 self._log_error("Clipboard watcher failed to stop")
-                if self._strict_runtime_errors_for_clipboard_watcher:
-                    raise
-
-    async def _close_clipboard_runtime(self) -> None:
-        async with self._get_clipboard_watcher_lock():
-            runtime = self._clipboard_runtime
-            if runtime is None:
-                return
-            try:
-                await runtime.close()
-            except Exception:
-                self._log_error("Clipboard runtime failed to close")
                 if self._strict_runtime_errors_for_clipboard_watcher:
                     raise
 
@@ -6970,33 +6957,19 @@ class GuiController:
             else None
         )
 
-    def _get_oauth_runtime(self) -> OAuthRuntime:
+    def _require_application_adapters(self):  # noqa: ANN201
+        if self.application_adapters is None:
+            from puripuly_heart.app.services.application_adapters import (
+                ApplicationAdapterLifecycle,
+            )
+
+            self.application_adapters = ApplicationAdapterLifecycle()
+        return self.application_adapters
+
+    def _get_oauth_runtime(self):  # noqa: ANN201
         if self._oauth_runtime is None:
-            self._oauth_runtime = OAuthRuntime()
+            self._oauth_runtime = self._require_application_adapters().controller_oauth
         return self._oauth_runtime
-
-    async def _close_oauth_runtime(self) -> None:
-        runtime = self._oauth_runtime
-        if runtime is None:
-            return
-        await runtime.close()
-
-    async def _close_oauth_runtime_for_release(self, failures: list[Exception]) -> None:
-        try:
-            await self._close_oauth_runtime()
-        except Exception as exc:
-            failures.append(exc)
-
-    async def _close_app_oauth_runtime_for_release(self, failures: list[Exception]) -> None:
-        close_oauth_runtime = getattr(self.app, "close_oauth_runtime", None)
-        if not callable(close_oauth_runtime):
-            return
-        try:
-            result = close_oauth_runtime()
-            if inspect.isawaitable(result):
-                await result
-        except Exception as exc:
-            failures.append(exc)
 
     def _on_discord_managed_auth_callback_received(self) -> None:
         hook = self._discord_managed_auth_callback_received_hook
@@ -7022,9 +6995,9 @@ class GuiController:
             self._microphone_test_lifecycle_lock = asyncio.Lock()
         return self._microphone_test_lifecycle_lock
 
-    def _get_microphone_test_runtime(self) -> MicTestRuntime:
+    def _get_microphone_test_runtime(self):  # noqa: ANN201
         if self._microphone_test_runtime is None:
-            self._microphone_test_runtime = MicTestRuntime()
+            self._microphone_test_runtime = self._require_application_adapters().microphone_test
         return self._microphone_test_runtime
 
     @staticmethod
@@ -7171,7 +7144,7 @@ class GuiController:
 
     async def _recover_microphone_test_runtime_before_start(
         self,
-        runtime: MicTestRuntime,
+        runtime: object,
     ) -> bool:
         if runtime.has_active_direct_capture:
             return False
@@ -7185,20 +7158,6 @@ class GuiController:
             self._log_error(f"Microphone test cleanup retry failed: {exc}")
             return False
         return runtime.source is None and runtime.pending_frame_task is None
-
-    async def _close_microphone_test_runtime_for_release(
-        self,
-        cleanup_failures: list[Exception],
-    ) -> None:
-        runtime = self._microphone_test_runtime
-        if runtime is None:
-            return
-        try:
-            await runtime.close()
-        except Exception as exc:
-            cleanup_failures.append(exc)
-        finally:
-            self._microphone_test_meter_level = 0.0
 
     async def _set_microphone_test_meter_level(
         self,

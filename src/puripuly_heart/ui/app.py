@@ -24,8 +24,6 @@ from puripuly_heart.core.discord_oauth_loopback import (
 )
 from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
-from puripuly_heart.core.runtime.github_star_prompt import GithubStarPromptRuntime
-from puripuly_heart.core.runtime.oauth import OAuthRuntime
 from puripuly_heart.core.updater import check_for_update
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
 from puripuly_heart.ui.components.debug_preview_panel import DebugPreviewPanel
@@ -128,6 +126,7 @@ class TranslatorApp:
         overlay_ui_projection: object | None = None,
         vrc_audio_gate: AudioCaptureGatePort | None = None,
         application_runtime_host: object | None = None,
+        application_adapters: object | None = None,
     ):
         self.page = page
         controller_kwargs = {
@@ -158,6 +157,8 @@ class TranslatorApp:
             controller_kwargs["allow_stable_settings_import"] = allow_stable_settings_import
         if application_runtime_host is not None:
             controller_kwargs["application_runtime_host"] = application_runtime_host
+        if application_adapters is not None:
+            controller_kwargs["application_adapters"] = application_adapters
         self.controller = GuiController(**controller_kwargs)
         self.overlay_commands = overlay_commands
         self.overlay_state = "off"
@@ -165,7 +166,10 @@ class TranslatorApp:
         self.overlay_peer_contract = None
         self.debug_ui_preview = bool(debug_ui_preview)
         self.debug_preview_panel: DebugPreviewPanel | None = None
-        self._oauth_runtime = OAuthRuntime()
+        self._application_adapters = application_adapters
+        self._oauth_runtime = (
+            None if application_adapters is None else application_adapters.ui_oauth
+        )
         self._discord_managed_auth_generation = 0
         self._discord_managed_auth_cancelled = False
         self._discord_managed_auth_task_handle = None
@@ -173,9 +177,13 @@ class TranslatorApp:
         self._qq_managed_auth_cancelled = False
         self._qq_managed_auth_task_handle = None
         self._github_star_prompt_launch_pending = True
-        self._github_star_prompt_runtime = GithubStarPromptRuntime(
-            diagnostics_sink=self._github_star_prompt_runtime_diagnostics_sink,
+        self._github_star_prompt_runtime = (
+            None if application_adapters is None else application_adapters.ui_github_prompt
         )
+        if application_adapters is not None:
+            application_adapters.bind_ui_github_diagnostics(
+                self._github_star_prompt_runtime_diagnostics_sink
+            )
         self._launch_high_priority_feedback_shown = False
         self._launch_high_priority_feedback_reason: str | None = None
         self._launch_high_priority_snackbar = None
@@ -451,12 +459,17 @@ class TranslatorApp:
         finally:
             self._github_star_prompt_launch_pending = False
 
-    def _get_github_star_prompt_runtime(self) -> GithubStarPromptRuntime:
+    def _get_github_star_prompt_runtime(self):  # noqa: ANN201
         runtime = getattr(self, "_github_star_prompt_runtime", None)
         if runtime is None:
-            runtime = GithubStarPromptRuntime(
-                diagnostics_sink=self._github_star_prompt_runtime_diagnostics_sink,
+            from puripuly_heart.app.services.application_adapters import (
+                ApplicationAdapterLifecycle,
             )
+
+            adapters = ApplicationAdapterLifecycle()
+            adapters.bind_ui_github_diagnostics(self._github_star_prompt_runtime_diagnostics_sink)
+            self._application_adapters = adapters
+            runtime = adapters.ui_github_prompt
             self._github_star_prompt_runtime = runtime
         return runtime
 
@@ -475,10 +488,13 @@ class TranslatorApp:
         )
 
     async def close_github_star_prompt_runtime(self) -> None:
-        runtime = getattr(self, "_github_star_prompt_runtime", None)
-        if runtime is None:
-            return
-        await runtime.close()
+        adapters = getattr(self, "_application_adapters", None)
+        if adapters is not None:
+            await adapters.cancel_ui_github_prompt()
+        else:
+            runtime = getattr(self, "_github_star_prompt_runtime", None)
+            if runtime is not None:
+                await runtime.close()
         self._github_star_prompt_launch_pending = False
 
     async def _open_github_star_prompt_snackbar(self, *, should_open=None) -> bool:  # noqa: ANN001
@@ -1334,12 +1350,37 @@ class TranslatorApp:
         if callable(close):
             close()
 
-    def _get_oauth_runtime(self) -> OAuthRuntime:
+    def _get_oauth_runtime(self):  # noqa: ANN201
         runtime = getattr(self, "_oauth_runtime", None)
         if runtime is None:
-            runtime = OAuthRuntime()
+            from puripuly_heart.app.services.application_adapters import (
+                ApplicationAdapterLifecycle,
+            )
+
+            adapters = getattr(self, "_application_adapters", None)
+            if adapters is None:
+                adapters = ApplicationAdapterLifecycle()
+                self._application_adapters = adapters
+            runtime = adapters.ui_oauth
             self._oauth_runtime = runtime
         return runtime
+
+    async def close_oauth_runtime(self) -> None:
+        self._discord_managed_auth_cancelled = True
+        self._qq_managed_auth_cancelled = True
+        self._discord_managed_auth_generation = (
+            int(getattr(self, "_discord_managed_auth_generation", 0)) + 1
+        )
+        self._qq_managed_auth_generation = int(getattr(self, "_qq_managed_auth_generation", 0)) + 1
+        self._discord_managed_auth_task_handle = None
+        self._qq_managed_auth_task_handle = None
+        adapters = getattr(self, "_application_adapters", None)
+        if adapters is not None:
+            await adapters.cancel_ui_oauth()
+            return
+        runtime = getattr(self, "_oauth_runtime", None)
+        if runtime is not None:
+            await runtime.close()
 
     def show_discord_managed_auth_dialog(self, preview: bool = False) -> None:
         if not preview:
@@ -1594,30 +1635,6 @@ class TranslatorApp:
             generation=generation,
         )
 
-    async def close_oauth_runtime(self) -> None:
-        self._discord_managed_auth_cancelled = True
-        self._qq_managed_auth_cancelled = True
-        self._discord_managed_auth_generation = (
-            int(getattr(self, "_discord_managed_auth_generation", 0)) + 1
-        )
-        self._qq_managed_auth_generation = int(getattr(self, "_qq_managed_auth_generation", 0)) + 1
-        task_handle = getattr(self, "_discord_managed_auth_task_handle", None)
-        qq_task_handle = getattr(self, "_qq_managed_auth_task_handle", None)
-        self._discord_managed_auth_task_handle = None
-        self._qq_managed_auth_task_handle = None
-        runtime = getattr(self, "_oauth_runtime", None)
-        if runtime is None:
-            return
-        runtime.cancel_external_task(
-            qq_task_handle,
-            task_name="qq-managed-auth-dialog",
-        )
-        runtime.cancel_external_task(
-            task_handle,
-            task_name="discord-managed-auth-dialog",
-        )
-        await runtime.close()
-
     def mark_discord_managed_auth_callback_received(self, generation: int | None = None) -> None:
         if generation is not None and not self._is_current_discord_managed_auth_generation(
             generation
@@ -1834,6 +1851,8 @@ async def main_gui(
     vrc_audio_gate: AudioCaptureGatePort | None = None,
     surface_runtime_transactions: SurfaceRuntimeTransactionPort | None = None,
     application_runtime_host: object | None = None,
+    application_adapters: object | None = None,
+    defer_startup: bool = False,
 ):
     parameters = inspect.signature(TranslatorApp).parameters
     accepts_kwargs = any(
@@ -1848,6 +1867,7 @@ async def main_gui(
         "surface_runtime_transactions": surface_runtime_transactions,
         "vrc_audio_gate": vrc_audio_gate,
         "application_runtime_host": application_runtime_host,
+        "application_adapters": application_adapters,
     }
     app_kwargs = {
         name: value for name, value in candidates.items() if name in parameters or accepts_kwargs
@@ -1857,7 +1877,13 @@ async def main_gui(
     ):
         app_kwargs["allow_stable_settings_import"] = allow_stable_settings_import
     app = TranslatorApp(page, **app_kwargs)
-    await app.controller.start()
+    if not defer_startup:
+        await app.controller.start()
+        await complete_main_gui_startup(app, page)
+    return app
+
+
+async def complete_main_gui_startup(app: TranslatorApp, page: ft.Page) -> None:
     show_telemetry_consent = getattr(app, "maybe_show_telemetry_consent_dialog", None)
     if callable(show_telemetry_consent):
         show_telemetry_consent()

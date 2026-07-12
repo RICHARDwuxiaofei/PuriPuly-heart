@@ -11,6 +11,17 @@ SRC_PATH = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC_PATH))
 
 
+@pytest.fixture(autouse=True)
+def isolate_runtime_log_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.core import runtime_logging
+
+    log_directory = tmp_path / "runtime-logs"
+    monkeypatch.setattr(runtime_logging, "user_config_dir", lambda: log_directory)
+
+
 def _is_puripuly_gui_command(command: object) -> bool:
     if isinstance(command, (str, bytes)):
         return False

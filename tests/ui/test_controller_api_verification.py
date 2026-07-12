@@ -950,7 +950,7 @@ async def test_local_stt_download_rejects_new_start_after_runtime_close() -> Non
 
 
 @pytest.mark.asyncio
-async def test_stop_cancels_active_local_stt_download_task(
+async def test_application_adapter_owner_cancels_active_local_stt_download_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = GuiController(
@@ -971,6 +971,9 @@ async def test_stop_cancels_active_local_stt_download_task(
     )
 
     await controller.stop()
+
+    assert not active_download.done()
+    await controller.application_adapters.close()
 
     assert active_download.done()
     assert owner.download_task is None

@@ -490,7 +490,9 @@ def test_production_host_has_no_ui_dependency_and_main_owns_construction() -> No
 
     assert "puripuly_heart.ui" not in host_source
     assert "ClientHub(" not in controller_source
-    assert "application_runtime_host = create_application_runtime_host(" in main_source
+    assert '"runtime"' in main_source
+    assert "lambda: create_application_runtime_host(" in main_source
+    assert "adopt_runtime" in main_source
     assert 'kwargs["application_runtime_host"] = application_runtime_host' in main_source
     assert "audio_gate=composition.audio_gate" in main_source
     assert "_ControllerProviderRuntimeApply" not in stt_route

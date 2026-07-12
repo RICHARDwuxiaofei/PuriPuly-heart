@@ -532,12 +532,16 @@ async def test_stop_cancels_pending_github_star_observation_via_runtime_owner(
     stop_task = asyncio.create_task(controller.stop())
     await asyncio.sleep(0)
 
-    assert not stop_task.done()
+    assert stop_task.done()
     assert settings.ui.github_star_prompt_translation_success_observed is True
+
+    close_task = asyncio.create_task(controller.application_adapters.close())
+    await asyncio.sleep(0)
+    assert not close_task.done()
 
     release_first_to_thread.set()
     try:
-        await asyncio.wait_for(stop_task, timeout=1.0)
+        await asyncio.wait_for(close_task, timeout=1.0)
 
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(persist_task, timeout=1.0)
@@ -547,6 +551,8 @@ async def test_stop_cancels_pending_github_star_observation_via_runtime_owner(
     finally:
         if not stop_task.done():
             stop_task.cancel()
+        if not close_task.done():
+            close_task.cancel()
             await asyncio.gather(stop_task, return_exceptions=True)
         if not persist_task.done():
             persist_task.cancel()

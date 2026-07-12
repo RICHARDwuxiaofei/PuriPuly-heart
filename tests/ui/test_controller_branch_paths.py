@@ -10122,7 +10122,7 @@ async def test_runtime_logging_close_failure_is_aggregated_not_suppressed(
 
 
 @pytest.mark.asyncio
-async def test_stop_aggregates_oauth_runtime_close_failure_and_continues_later_shutdown(
+async def test_controller_stop_leaves_oauth_runtime_for_application_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
@@ -10172,17 +10172,13 @@ async def test_stop_aggregates_oauth_runtime_close_failure_and_continues_later_s
     with pytest.raises(ExceptionGroup) as exc_info:
         await controller.stop()
 
-    assert list(exc_info.value.exceptions) == [
-        oauth_failure,
-        hub_failure,
-        logging_failure,
-    ]
+    assert list(exc_info.value.exceptions) == [hub_failure, logging_failure]
+    assert "oauth_close" not in events
     assert events == [
-        "oauth_close",
         "stt_off",
         "overlay_shutdown",
         "hub_stop",
-        "runtime_logging_summary:RuntimeError,RuntimeError",
+        "runtime_logging_summary:RuntimeError",
         "runtime_logging_close",
     ]
     assert controller.hub is hub
@@ -10190,7 +10186,9 @@ async def test_stop_aggregates_oauth_runtime_close_failure_and_continues_later_s
 
 
 @pytest.mark.asyncio
-async def test_stop_closes_app_owned_oauth_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_controller_stop_does_not_close_app_owned_oauth_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[str] = []
 
     class FakeApp:
@@ -10204,7 +10202,7 @@ async def test_stop_closes_app_owned_oauth_runtime(monkeypatch: pytest.MonkeyPat
 
     await controller.stop()
 
-    assert events == ["app_oauth_close"]
+    assert events == []
 
 
 def test_log_error_fallback_does_not_append_duplicate_ui_line(
@@ -11312,8 +11310,10 @@ async def test_controller_stop_closes_mic_test_runtime_and_continues_after_close
     monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
     _set_overlay_shutdown(controller, fake_shutdown_overlay_runtime)
 
+    await controller.stop()
+
     with pytest.raises(RuntimeError, match="mic source close failed"):
-        await controller.stop()
+        await controller.application_adapters.close()
 
     assert events == ["stt-off", "overlay-shutdown"]
     assert runtime.is_closed is True
@@ -11795,6 +11795,9 @@ async def test_controller_stop_cancels_active_microphone_test(
     assert await controller.start_microphone_test() is True
     await capture_started.wait()
     await controller.stop()
+
+    assert capture_cancelled == []
+    await controller.application_adapters.close()
 
     assert capture_cancelled == ["cancelled"]
     assert _microphone_test_task(controller) is None
@@ -12826,11 +12829,13 @@ async def _relocated_controller_stop_closes_vrc_mic_receiver_before_hub_shutdown
 
 
 @pytest.mark.asyncio
-async def test_controller_stop_uses_bounded_prompt_runtime_close_and_still_stops_hub(
+async def test_application_owner_uses_bounded_prompt_close_after_controller_stops_hub(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
-    runtime = controller_module.GithubStarPromptRuntime(cancel_timeout_s=0.01)
+    from puripuly_heart.core.runtime.github_star_prompt import GithubStarPromptRuntime
+
+    runtime = GithubStarPromptRuntime(cancel_timeout_s=0.01)
     started = asyncio.Event()
     release = asyncio.Event()
     events: list[str] = []
@@ -12848,6 +12853,8 @@ async def test_controller_stop_uses_bounded_prompt_runtime_close_and_still_stops
     task = runtime.start_translation_success_observation(suppress_cancellation())
     await started.wait()
     controller._github_star_prompt_runtime = runtime
+    adapters = controller._require_application_adapters()
+    adapters.controller_github_prompt = runtime
 
     class FakeHub:
         async def stop(self) -> None:
@@ -12867,11 +12874,7 @@ async def test_controller_stop_uses_bounded_prompt_runtime_close_and_still_stops
 
     controller.hub = FakeHub()
     monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
-    monkeypatch.setattr(GuiController, "_close_clipboard_runtime", fake_noop)
-    monkeypatch.setattr(GuiController, "_close_app_oauth_runtime_for_release", fake_noop)
-    monkeypatch.setattr(GuiController, "_close_oauth_runtime", fake_noop)
     monkeypatch.setattr(GuiController, "_cancel_local_stt_download", fake_noop)
-    monkeypatch.setattr(GuiController, "_close_microphone_test_runtime_for_release", fake_noop)
     _set_overlay_shutdown(controller, fake_shutdown_overlay)
     monkeypatch.setattr(GuiController, "_close_peer_runtime_for_release", fake_noop)
     monkeypatch.setattr(GuiController, "_replace_managed_openrouter_release_service", fake_noop)
@@ -12879,19 +12882,21 @@ async def test_controller_stop_uses_bounded_prompt_runtime_close_and_still_stops
     stop_task = asyncio.create_task(controller.stop())
     try:
         await asyncio.wait_for(hub_stopped.wait(), timeout=0.2)
+        await asyncio.wait_for(stop_task, timeout=0.2)
 
+        close_task = asyncio.create_task(adapters.close())
         with pytest.raises(TimeoutError, match="translation_success"):
-            await asyncio.wait_for(stop_task, timeout=0.2)
+            await asyncio.wait_for(close_task, timeout=0.2)
 
-        assert events[:3] == ["prompt_cancelled", "stt:False", "overlay_shutdown"]
-        assert events[-1] == "hub_stop"
+        assert events[:3] == ["stt:False", "overlay_shutdown", "hub_stop"]
+        assert "prompt_cancelled" in events
         assert runtime.translation_success_task is task
     finally:
         release.set()
         await asyncio.wait_for(task, timeout=0.2)
-        if not stop_task.done():
+        if "close_task" in locals() and not close_task.done():
             with contextlib.suppress(Exception):
-                await asyncio.wait_for(stop_task, timeout=0.2)
+                await asyncio.wait_for(close_task, timeout=0.2)
 
 
 @pytest.mark.asyncio
