@@ -59,3 +59,22 @@ Distribution schema v3 uses `PuriPulyHeartProcessCaptureSmoke.exe`, a release-on
 to exercise the strict factory against packaged and isolated-installed native contents. The normal
 application CLI and production installer omit this helper. Only the exact alternate-AppId smoke
 installer includes it, and isolated uninstall cleanup removes it with the test installation.
+
+## Unattended runtime evidence
+
+The model-independent fixture and actual Windows runtime probes require no input, credentials, or
+network access. Reports are written only to the requested path; a baseline is read-only and must
+contain `approved: true` plus an exact environment/model identity before comparison is allowed.
+
+```powershell
+$env:PYTHONPATH = "src"
+python scripts/release/unattended-runtime-evidence.py --target deterministic --evidence artifacts/deterministic.json
+python scripts/release/unattended-runtime-evidence.py --target process-capture --evidence artifacts/process.json
+python scripts/release/unattended-runtime-evidence.py --target local-qwen --evidence artifacts/local-qwen.json
+```
+
+Exit `0` is pass, `1` is a runtime/contract failure, and `2` is an explicit prerequisite block.
+The Qwen probe uses one second of generated silence, reports load/inference/RTF, recognizer count,
+queue/drop, RSS and cleanup facts, and never records transcript text or filesystem paths. The
+process probe also leaves its lower-level native report beside the requested report with a
+`.native.json` suffix. Generated reports are not release fixtures and must not be committed.
