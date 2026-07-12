@@ -500,12 +500,13 @@ pnpm --filter @puripuly-heart/broker run dev
 ## Участники
 
 [RICHARDwuxiaofei](https://github.com/RICHARDwuxiaofei)
+[fzcfweasdferttgg-png](https://github.com/fzcfweasdferttgg-png)
 
 ---
 
 ## Особая благодарность
 
-SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์, EA\_PE, Ephedrine, ~ eri ~
+SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์, EA\_PE, Ephedrine, ~ eri ~, fzcfweasdferttgg-png
 
 ---
 

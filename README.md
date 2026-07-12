@@ -499,12 +499,13 @@ pnpm --filter @puripuly-heart/broker run dev
 ## Contributors
 
 [RICHARDwuxiaofei](https://github.com/RICHARDwuxiaofei)
+[fzcfweasdferttgg-png](https://github.com/fzcfweasdferttgg-png)
 
 ---
 
 ## Special Thanks
 
-SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์, EA\_PE, Ephedrine, ~ eri ~
+SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์, EA\_PE, Ephedrine, ~ eri ~, fzcfweasdferttgg-png
 
 ---
 
