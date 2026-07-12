@@ -149,7 +149,7 @@
   "settings.peer_translation.status.starting": "Peer translation is starting",
   "settings.peer_translation.status.on": "Peer translation is on",
   "settings.peer_translation.status.warning": "Peer translation is waiting",
-  "dashboard.local_stt_notice_starting": "Local speech recognition is starting…",
+  "dashboard.local_stt_notice_starting": "Loading the model…",
   "dashboard.local_stt_notice_start_failed": "Local speech recognition could not start.",
   "settings.peer_translation.warning.overlay_starting": "Saved as on. It will start when the overlay connects.",
   "settings.peer_translation.warning.overlay_stopping": "Peer translation pauses while the overlay stops.",

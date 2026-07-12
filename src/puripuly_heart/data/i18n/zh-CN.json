@@ -149,7 +149,7 @@
     "settings.peer_translation.status.starting": "正在启动对方翻译",
     "settings.peer_translation.status.on": "对方翻译已开启",
     "settings.peer_translation.status.warning": "对方翻译正在等待",
-    "dashboard.local_stt_notice_starting": "正在启动本地语音识别…",
+    "dashboard.local_stt_notice_starting": "正在加载模型…",
     "dashboard.local_stt_notice_start_failed": "无法启动本地语音识别。",
     "settings.peer_translation.warning.overlay_starting": "已保存为开启，叠加层连接后会自动开始。",
     "settings.peer_translation.warning.overlay_stopping": "叠加层停止期间，对方翻译也会暂时暂停。",
