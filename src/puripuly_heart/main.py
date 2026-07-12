@@ -132,7 +132,7 @@ async def _run_gui_async(
         ApplicationStartupError,
     )
     from puripuly_heart.app.wiring_composition import (
-        create_application_runtime_host,
+        create_application_runtime_production_composition,
         create_overlay_production_composition,
     )
     from puripuly_heart.ui import app as ui_app
@@ -157,15 +157,18 @@ async def _run_gui_async(
             close_name="shutdown",
             owned_resource=lambda result: result.commands,
         )
-        application_runtime_host = construction_scope.construct(
+        runtime_composition = construction_scope.construct(
             "runtime",
-            lambda: create_application_runtime_host(
+            lambda: create_application_runtime_production_composition(
                 config_path,
                 initial_settings,
                 audio_gate=composition.audio_gate,
+                overlay_runtime=composition.runtime,
             ),
             close_name="shutdown",
+            owned_resource=lambda result: result.runtime_host,
         )
+        application_runtime_host = runtime_composition.runtime_host
         application_adapters = construction_scope.construct(
             "application_adapters",
             ApplicationAdapterLifecycle,

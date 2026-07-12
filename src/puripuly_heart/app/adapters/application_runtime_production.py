@@ -128,7 +128,10 @@ class ResolvedLLMBuilderAdapter:
 
 
 def create_production_managed_release_service(
-    *, settings, secrets, on_discord_callback_received=None  # noqa: ANN001
+    *,
+    settings,
+    secrets,
+    on_discord_callback_received=None,  # noqa: ANN001
 ):  # noqa: ANN201
     from puripuly_heart import __version__
     from puripuly_heart.app.wiring import (
@@ -225,64 +228,71 @@ class ProductionManagedReleaseServiceOwner:
     ) -> None:
         assert self._lock is not None
         async with self._lock:
-            await self._retry_committed_settlements()
-            await self._retry_retirements()
-            await self._validate_authoritative(receipt)
-            settings = self.persistence.legacy_projection(receipt.envelope)
-            signature = self._signature(settings, receipt)
-            if signature == self.signature and self.service is not None:
-                try:
-                    await install()
-                except RuntimeCommittedSettlementFailure as exc:
-                    assert self._committed_settlements is not None
-                    self._committed_settlements.append(
-                        PendingCommittedSettlement(list(exc.failed_displaced), None)
-                    )
-                    if exc.cancellation_requested:
-                        raise asyncio.CancelledError
-                    raise
-                return
-            candidate = create_production_managed_release_service(
-                settings=settings,
-                secrets=self.secrets,
-                on_discord_callback_received=self.callback_output.publish,
-            )
-            candidate.managed_state._persist = self._persist_managed_state
-            self._staged_service = candidate
-            previous_receipt = self.receipt
-            self.receipt = receipt
+            await self._replace_runtime_locked(receipt, install, replacement_secrets=None)
+
+    async def replace_runtime_with_secret_store(
+        self,
+        receipt: SettingsCommitReceipt,
+        secrets: object,
+        install: Callable[[], Awaitable[None]],
+    ) -> None:
+        assert self._lock is not None
+        async with self._lock:
+            await self._replace_runtime_locked(receipt, install, replacement_secrets=secrets)
+
+    async def _replace_runtime_locked(
+        self,
+        receipt: SettingsCommitReceipt,
+        install: Callable[[], Awaitable[None]],
+        *,
+        replacement_secrets: object | None,
+    ) -> None:
+        await self._retry_committed_settlements()
+        await self._retry_retirements()
+        await self._validate_authoritative(receipt)
+        settings = self.persistence.legacy_projection(receipt.envelope)
+        signature = self._signature(settings, receipt)
+        if signature == self.signature and self.service is not None and replacement_secrets is None:
             try:
                 await install()
             except RuntimeCommittedSettlementFailure as exc:
-                previous = self.service
-                self.service = candidate
-                self.signature = signature
-                self.receipt = receipt
-                self.closed = False
-                self._staged_service = None
                 assert self._committed_settlements is not None
                 self._committed_settlements.append(
-                    PendingCommittedSettlement(list(exc.failed_displaced), previous)
+                    PendingCommittedSettlement(list(exc.failed_displaced), None)
                 )
                 if exc.cancellation_requested:
                     raise asyncio.CancelledError
                 raise
-            except RuntimeResourceInstallCancelled as exc:
-                if not exc.provider_state_committed:
-                    self._staged_service = None
-                    self.receipt = previous_receipt
-                    await self._close_staged(candidate)
-                    raise
-                previous = self.service
-                self.service = candidate
-                self.signature = signature
-                self.receipt = receipt
-                self.closed = False
-                self._staged_service = None
-                if previous is not None and previous is not candidate:
-                    await self._retire(previous)
-                raise
-            except BaseException:
+            return
+        candidate = create_production_managed_release_service(
+            settings=settings,
+            secrets=replacement_secrets or self.secrets,
+            on_discord_callback_received=self.callback_output.publish,
+        )
+        candidate.managed_state._persist = self._persist_managed_state
+        self._staged_service = candidate
+        previous_receipt = self.receipt
+        self.receipt = receipt
+        try:
+            await install()
+        except RuntimeCommittedSettlementFailure as exc:
+            previous = self.service
+            self.service = candidate
+            self.signature = signature
+            self.receipt = receipt
+            self.closed = False
+            if replacement_secrets is not None:
+                self.secrets = replacement_secrets
+            self._staged_service = None
+            assert self._committed_settlements is not None
+            self._committed_settlements.append(
+                PendingCommittedSettlement(list(exc.failed_displaced), previous)
+            )
+            if exc.cancellation_requested:
+                raise asyncio.CancelledError
+            raise
+        except RuntimeResourceInstallCancelled as exc:
+            if not exc.provider_state_committed:
                 self._staged_service = None
                 self.receipt = previous_receipt
                 await self._close_staged(candidate)
@@ -292,9 +302,27 @@ class ProductionManagedReleaseServiceOwner:
             self.signature = signature
             self.receipt = receipt
             self.closed = False
+            if replacement_secrets is not None:
+                self.secrets = replacement_secrets
             self._staged_service = None
             if previous is not None and previous is not candidate:
                 await self._retire(previous)
+            raise
+        except BaseException:
+            self._staged_service = None
+            self.receipt = previous_receipt
+            await self._close_staged(candidate)
+            raise
+        previous = self.service
+        self.service = candidate
+        self.signature = signature
+        self.receipt = receipt
+        self.closed = False
+        if replacement_secrets is not None:
+            self.secrets = replacement_secrets
+        self._staged_service = None
+        if previous is not None and previous is not candidate:
+            await self._retire(previous)
 
     @staticmethod
     def _signature(settings, receipt: SettingsCommitReceipt) -> tuple[object, ...]:  # noqa: ANN001
@@ -506,6 +534,46 @@ class ManagedAwareResolvedRuntimeAdapter:
                 raise asyncio.CancelledError
             raise
 
+    async def replace_runtime_with_secret_store(
+        self,
+        receipt,
+        secrets,
+        request,
+        plan,  # noqa: ANN001
+    ) -> None:
+        assert self.provider_settlement_owner is not None
+        await self.provider_settlement_owner.retry()
+
+        async def install() -> None:
+            factory = getattr(self.runtime, "factory", None)
+            old_secrets = getattr(factory, "secrets", None)
+            if factory is not None and hasattr(factory, "secrets"):
+                factory.secrets = secrets
+            guarded = getattr(self.runtime, "replace_runtime_with_plan_guarded", None)
+            try:
+                if callable(guarded):
+                    await guarded(
+                        request,
+                        plan,
+                        lambda: self.managed_release_owner._validate_authoritative(receipt),
+                    )
+                    return
+                await self.runtime.replace_runtime_with_plan(request, plan)
+            except RuntimeCommittedSettlementFailure:
+                raise
+            except RuntimeResourceInstallCancelled as exc:
+                if not exc.provider_state_committed and factory is not None:
+                    factory.secrets = old_secrets
+                raise
+            except BaseException:
+                if factory is not None and hasattr(factory, "secrets"):
+                    factory.secrets = old_secrets
+                raise
+
+        await self.managed_release_owner.replace_runtime_with_secret_store(
+            receipt, secrets, install
+        )
+
     async def close(self) -> None:
         assert self.provider_settlement_owner is not None
         await self.provider_settlement_owner.retry()
@@ -689,7 +757,12 @@ class ProductionAudioFactories:
         raise RuntimeError("all microphone capture attempts failed") from last_error
 
     def _open_with_channel_fallback(
-        self, backend, device, channels, auto_convert, exclusive  # noqa: ANN001
+        self,
+        backend,
+        device,
+        channels,
+        auto_convert,
+        exclusive,  # noqa: ANN001
     ):
         try:
             return self.source_type(
@@ -813,11 +886,21 @@ class ProductionRuntimeSynchronization:
     peer_owner: PeerChannelRuntime
     epoch: RuntimePolicyEpoch
     dashboard_projection: object | None = None
+    overlay_runtime: object | None = None
+
+    def bind_overlay_runtime(self, runtime: object | None) -> None:
+        self.overlay_runtime = runtime
 
     async def synchronize_runtime(
-        self, request, directive, *, before, after, operational  # noqa: ANN001
+        self,
+        request,
+        directive,
+        *,
+        before,
+        after,
+        operational,  # noqa: ANN001
     ) -> RuntimeApplyResult:
-        _ = (before, after)
+        _ = before
         operation = directive.operation
         if operation == "language_runtime_clear":
             self.hub.source_language = directive.source_language
@@ -842,6 +925,11 @@ class ProductionRuntimeSynchronization:
         elif operation == "overlay_osc":
             self.hub.chatbox_include_source = directive.chatbox_include_source
             self.hub.runtime_overlay_directive = directive
+            apply_overlay = getattr(self.overlay_runtime, "apply_overlay_osc", None)
+            if callable(apply_overlay):
+                applied = await apply_overlay(directive)
+                if not applied:
+                    return RuntimeApplyResult(RUNTIME_APPLY_STATUS_FAILED, None, None)
         elif operation == "locale_ui_projection":
             self.hub.runtime_locale = directive.locale
         elif operation == "dashboard_retry_facts":
@@ -944,6 +1032,9 @@ class ProductionRuntimeComposition:
     resolver: CanonicalRuntimeConfigResolver
     managed_release_owner: ProductionManagedReleaseServiceOwner | None = None
 
+    def bind_overlay_runtime(self, runtime: object | None) -> None:
+        self.synchronization.bind_overlay_runtime(runtime)
+
     async def synchronize_managed_release_service(self, receipt: SettingsCommitReceipt) -> None:
         if self.managed_release_owner is not None:
             await self.managed_release_owner.synchronize(receipt)
@@ -956,6 +1047,17 @@ class ProductionRuntimeComposition:
     ) -> None:
         _ = receipt
         await self.resolved_adapter.replace_runtime_with_plan(request, plan)
+
+    async def replace_runtime_with_secret_store(
+        self,
+        receipt: SettingsCommitReceipt,
+        secrets: object,
+        request: ResolvedRuntimeActivationRequest,
+        plan: RuntimeResourceReplacementPlan,
+    ) -> None:
+        await self.resolved_adapter.replace_runtime_with_secret_store(
+            receipt, secrets, request, plan
+        )
 
     async def close(self) -> None:
         await self.resolved_adapter.close()
@@ -1122,7 +1224,14 @@ def create_production_application_runtime(
     transactions = SelectiveSurfaceRuntimeTransactionPort(
         PostCommitRuntimePlanBuilder(resolver),
         coordinator,
-        frozenset({"translation_provider", "stt_language_audio"}),
+        frozenset(
+            {
+                "translation_provider",
+                "stt_language_audio",
+                "overlay_osc_output",
+                "ui_prompt_clipboard_state",
+            }
+        ),
     )
     composition = ProductionRuntimeComposition(
         managed_resolved,

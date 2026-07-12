@@ -380,6 +380,13 @@ class SettingsCommandResult:
     diagnostics: ErrorDiagnostics | None = None
     cancellation_count: int = 0
     committed_revision: str | None = None
+    receipt: object | None = None
+    runtime_status: str | None = None
+    runtime_completed: tuple[str, ...] = ()
+    runtime_failed: str | None = None
+    runtime_skipped: tuple[str, ...] = ()
+    reconciliation_required: bool = False
+    no_op: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, str):
@@ -390,6 +397,8 @@ class SettingsCommandResult:
             raise TypeError("message must be UserMessageRef or null")
         if self.diagnostics is not None and not isinstance(self.diagnostics, ErrorDiagnostics):
             raise TypeError("diagnostics must be ErrorDiagnostics or null")
+        object.__setattr__(self, "runtime_completed", tuple(self.runtime_completed))
+        object.__setattr__(self, "runtime_skipped", tuple(self.runtime_skipped))
 
 
 class OperationalField(str, Enum):
@@ -485,6 +494,12 @@ class OperationalCommandResult:
     status: str
     snapshot: OperationalStateSnapshot
     diagnostics: ErrorDiagnostics | None = None
+    receipt: object | None = None
+    runtime_outcome: str = "no_runtime_change"
+    committed_revision: str | None = None
+    cancellation_count: int = 0
+    no_op: bool = False
+    reconciliation_required: bool = False
 
 
 @dataclass(frozen=True, slots=True)

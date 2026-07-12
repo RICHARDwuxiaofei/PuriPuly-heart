@@ -164,15 +164,44 @@ class _DeferredSelfSTTHost:
         return await host.clear_self_stt_for_toggle_off()
 
 
+@dataclass(frozen=True, slots=True)
+class ApplicationRuntimeProductionComposition:
+    runtime_host: object
+    canonical_commands: object
+    secrets: object
+    persistence: object
+
+
 def create_application_runtime_host(
     state_path: Path,
     initial_settings,
     *,
     runtime_logging=None,  # noqa: ANN001
     audio_gate=None,  # noqa: ANN001
+    overlay_runtime=None,  # noqa: ANN001
 ):  # noqa: ANN201
+    return create_application_runtime_production_composition(
+        state_path,
+        initial_settings,
+        runtime_logging=runtime_logging,
+        audio_gate=audio_gate,
+        overlay_runtime=overlay_runtime,
+    ).runtime_host
+
+
+def create_application_runtime_production_composition(
+    state_path: Path,
+    initial_settings,
+    *,
+    runtime_logging=None,  # noqa: ANN001
+    audio_gate=None,  # noqa: ANN001
+    overlay_runtime=None,  # noqa: ANN001
+) -> ApplicationRuntimeProductionComposition:
     from puripuly_heart.app.adapters.application_runtime_production import (
         create_production_application_runtime,
+    )
+    from puripuly_heart.app.services.canonical_command_composition import (
+        create_canonical_command_composition,
     )
     from puripuly_heart.app.services.canonical_settings_persistence import (
         compose_canonical_settings_persistence,
@@ -183,7 +212,7 @@ def create_application_runtime_host(
     persistence = compose_canonical_settings_persistence()
     legacy = persistence.legacy_projection(initial_settings)
     secrets = create_secret_store(legacy.secrets, config_path=state_path)
-    return create_production_application_runtime(
+    runtime_host = create_production_application_runtime(
         state_path=state_path,
         initial_settings=initial_settings,
         persistence=persistence,
@@ -191,6 +220,20 @@ def create_application_runtime_host(
         clock=SystemClock(),
         runtime_logging=runtime_logging,
         audio_gate=audio_gate,
+    )
+    if overlay_runtime is not None:
+        runtime_host.bind_overlay_runtime(overlay_runtime)
+    canonical_commands = create_canonical_command_composition(
+        state_path=state_path,
+        runtime_host=runtime_host,
+        secrets=secrets,
+    )
+    runtime_host.bind_canonical_commands(canonical_commands)
+    return ApplicationRuntimeProductionComposition(
+        runtime_host=runtime_host,
+        canonical_commands=canonical_commands,
+        secrets=secrets,
+        persistence=persistence,
     )
 
 

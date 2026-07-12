@@ -9,11 +9,15 @@ from puripuly_heart.app.ports.application_settings import (
     OperationalCommandResult,
     OperationalStateCommand,
     OperationalStateSnapshot,
+    OverlayOscOutputSettingsCommand,
     SettingsCommand,
     SettingsCommandResult,
     SettingValue,
     StringListMapValue,
     StringMapValue,
+    SttLanguageAudioSettingsCommand,
+    TranslationProviderSettingsCommand,
+    UiPromptClipboardSettingsCommand,
 )
 from puripuly_heart.app.ports.canonical_state_repository import (
     AsyncCanonicalStateRepositoryPort,
@@ -23,12 +27,18 @@ from puripuly_heart.app.ports.canonical_state_repository import (
     CanonicalRepositoryError,
 )
 from puripuly_heart.app.ports.owned_async import OwnedFailure, settle_owned
-from puripuly_heart.app.ports.runtime_apply import RuntimeApplyPort, RuntimeApplyRequest
+from puripuly_heart.app.ports.runtime_apply import (
+    RuntimeApplyExecution,
+    RuntimeApplyPort,
+    RuntimeApplyRequest,
+)
+from puripuly_heart.app.ports.settings_repository import SettingsCommitReceipt
 from puripuly_heart.app.services.application_settings_codecs import (
     FIELD_CODECS,
     OPERATIONAL_CODECS,
     CodecKind,
 )
+from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core.messages import ErrorDiagnostics
 
 
@@ -115,6 +125,40 @@ def _empty_operational_snapshot(revision: str = "unavailable") -> OperationalSta
     return OperationalStateSnapshot((), revision)
 
 
+def _envelope_receipt(
+    envelope: CanonicalEnvelopeSnapshot,
+    *,
+    reason: str | None,
+    correlation_id: str | None,
+) -> SettingsCommitReceipt:
+    return SettingsCommitReceipt(
+        AppSettingsVNext(intent=envelope.intent, state=envelope.operational_state),
+        envelope.revision,
+        reason,
+        correlation_id,
+    )
+
+
+def surface_for_settings_command(command: SettingsCommand) -> str:
+    return {
+        TranslationProviderSettingsCommand: "translation_provider",
+        SttLanguageAudioSettingsCommand: "stt_language_audio",
+        OverlayOscOutputSettingsCommand: "overlay_osc_output",
+        UiPromptClipboardSettingsCommand: "ui_prompt_clipboard_state",
+    }[type(command)]
+
+
+async def _execute_runtime(
+    runtime: RuntimeApplyPort,
+    request: RuntimeApplyRequest,
+) -> RuntimeApplyExecution:
+    apply_execution = getattr(runtime, "apply_runtime_execution", None)
+    if callable(apply_execution):
+        return await apply_execution(request)
+    result = await runtime.apply_runtime(request)
+    return RuntimeApplyExecution(result=result)
+
+
 class CanonicalApplicationSettingsService:
     def __init__(
         self,
@@ -163,6 +207,11 @@ class CanonicalApplicationSettingsService:
                     _intent_snapshot(envelope),
                     diagnostics=_diagnostics("validate", "invalid_command"),
                 )
+            before_receipt = _envelope_receipt(
+                envelope,
+                reason=None,
+                correlation_id=command.correlation_id,
+            )
             cancellation_count = 0
             try:
                 receipt = await self._repository.commit_intent(
@@ -191,28 +240,45 @@ class CanonicalApplicationSettingsService:
                 receipt.envelope.intent, receipt.envelope.state, receipt.revision
             )
             committed_snapshot = _intent_snapshot(committed)
+            surface = surface_for_settings_command(command)
+            request = RuntimeApplyRequest(
+                receipt=receipt,
+                before=before_receipt,
+                surface=surface,
+            )
             try:
-                outcome = await settle_owned(
-                    self._runtime.apply_runtime(RuntimeApplyRequest(receipt))
-                )
-                applied = outcome.value
+                outcome = await settle_owned(_execute_runtime(self._runtime, request))
+                execution = outcome.value
                 cancellation_count += outcome.cancellation_count
+                applied = execution.result
                 status = "applied" if applied.status == "applied" else "degraded"
                 diagnostics = applied.diagnostics
+                runtime_status = applied.status
+                completed = execution.completed
+                failed = execution.failed
+                skipped = execution.skipped
+                reconciliation = execution.reconciliation_required
             except OwnedFailure as exc:
-                status = "degraded"
-                diagnostics = _diagnostics("runtime_apply", "runtime_exception")
                 return SettingsCommandResult(
                     "cancelled_degraded",
                     committed_snapshot,
-                    diagnostics=diagnostics,
+                    diagnostics=_diagnostics("runtime_apply", "runtime_exception"),
                     cancellation_count=cancellation_count + exc.cancellation_count,
                     committed_revision=receipt.revision,
+                    receipt=receipt,
+                    runtime_status="failed",
+                    reconciliation_required=True,
                 )
             except Exception:
-                status = "degraded"
-                diagnostics = _diagnostics("runtime_apply", "runtime_exception")
-            result = SettingsCommandResult(status, committed_snapshot, diagnostics=diagnostics)
+                return SettingsCommandResult(
+                    "degraded",
+                    committed_snapshot,
+                    diagnostics=_diagnostics("runtime_apply", "runtime_exception"),
+                    committed_revision=receipt.revision,
+                    receipt=receipt,
+                    runtime_status="failed",
+                    reconciliation_required=True,
+                )
             if cancellation_count:
                 return SettingsCommandResult(
                     "cancelled_degraded" if status == "degraded" else "cancelled_committed",
@@ -220,8 +286,25 @@ class CanonicalApplicationSettingsService:
                     diagnostics=diagnostics,
                     cancellation_count=cancellation_count,
                     committed_revision=receipt.revision,
+                    receipt=receipt,
+                    runtime_status=runtime_status,
+                    runtime_completed=completed,
+                    runtime_failed=failed,
+                    runtime_skipped=skipped,
+                    reconciliation_required=reconciliation or status == "degraded",
                 )
-            return result
+            return SettingsCommandResult(
+                status,
+                committed_snapshot,
+                diagnostics=diagnostics,
+                committed_revision=receipt.revision,
+                receipt=receipt,
+                runtime_status=runtime_status,
+                runtime_completed=completed,
+                runtime_failed=failed,
+                runtime_skipped=skipped,
+                reconciliation_required=reconciliation or status == "degraded",
+            )
 
 
 class CanonicalOperationalStateService:
@@ -245,12 +328,14 @@ class CanonicalOperationalStateService:
                     "read_failed",
                     _empty_operational_snapshot(),
                     _diagnostics("read", "read_failed"),
+                    runtime_outcome="no_runtime_change",
                 )
             if envelope.revision != command.expected_revision:
                 return OperationalCommandResult(
                     "conflict",
                     _operational_snapshot(envelope),
                     _diagnostics("commit", "revision_conflict"),
+                    runtime_outcome="no_runtime_change",
                 )
             try:
                 codec = next(
@@ -259,6 +344,21 @@ class CanonicalOperationalStateService:
                     if isinstance(command, codec.command_type)
                 )
                 path, value = codec.encode(command)
+                current_value = _get(envelope.operational_state, path)
+                current_receipt = _envelope_receipt(
+                    envelope,
+                    reason=type(command).__name__,
+                    correlation_id=None,
+                )
+                if current_value == value:
+                    return OperationalCommandResult(
+                        "no_change",
+                        _operational_snapshot(envelope),
+                        receipt=current_receipt,
+                        runtime_outcome="no_runtime_change",
+                        committed_revision=envelope.revision,
+                        no_op=True,
+                    )
                 state = _set(envelope.operational_state, path, value)
                 receipt = await self._repository.commit_operational_state(
                     state,  # type: ignore[arg-type]
@@ -266,31 +366,51 @@ class CanonicalOperationalStateService:
                     reason=type(command).__name__,
                     correlation_id=None,
                 )
+                cancellation_count = 0
             except (StopIteration, TypeError, ValueError):
                 return OperationalCommandResult(
                     "invalid",
                     _operational_snapshot(envelope),
                     _diagnostics("validate", "invalid_command"),
+                    runtime_outcome="no_runtime_change",
                 )
             except CanonicalRepositoryCancelled as exc:
                 if exc.committed is None:
                     raise
-                raise
+                receipt = exc.committed
+                cancellation_count = exc.cancellation_count
             except CanonicalRepositoryConflict as exc:
                 snapshot = _operational_snapshot(exc.authoritative)
                 return OperationalCommandResult(
-                    "conflict", snapshot, _diagnostics("rebase", "revision_conflict")
+                    "conflict",
+                    snapshot,
+                    _diagnostics("rebase", "revision_conflict"),
+                    runtime_outcome="no_runtime_change",
                 )
             except CanonicalRepositoryError as exc:
                 return OperationalCommandResult(
                     exc.status,
                     _operational_snapshot(envelope),
                     _diagnostics("commit", exc.status),
+                    runtime_outcome="no_runtime_change",
                 )
             committed = CanonicalEnvelopeSnapshot(
                 receipt.envelope.intent, receipt.envelope.state, receipt.revision
             )
-            return OperationalCommandResult("committed", _operational_snapshot(committed))
+            status = "cancelled_committed" if cancellation_count else "committed"
+            return OperationalCommandResult(
+                status,
+                _operational_snapshot(committed),
+                receipt=receipt,
+                runtime_outcome="no_runtime_change",
+                committed_revision=receipt.revision,
+                cancellation_count=cancellation_count,
+                reconciliation_required=bool(cancellation_count),
+            )
 
 
-__all__ = ["CanonicalApplicationSettingsService", "CanonicalOperationalStateService"]
+__all__ = [
+    "CanonicalApplicationSettingsService",
+    "CanonicalOperationalStateService",
+    "surface_for_settings_command",
+]

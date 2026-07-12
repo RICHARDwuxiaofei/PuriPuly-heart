@@ -40,7 +40,9 @@
           "src/puripuly_heart/app/services/application_runtime_host.py",
           "src/puripuly_heart/app/services/application_settings_codecs.py",
           "src/puripuly_heart/app/services/canonical_application_settings.py",
+        "src/puripuly_heart/app/services/canonical_command_composition.py",
         "src/puripuly_heart/app/services/canonical_runtime_resolution.py",
+        "src/puripuly_heart/app/services/canonical_secret_commands.py",
         "src/puripuly_heart/app/services/canonical_state_repositories.py",
         "src/puripuly_heart/app/services/managed_connection_auth.py",
         "src/puripuly_heart/app/services/openrouter_pkce_handoff.py",
@@ -82,8 +84,8 @@
         "src/puripuly_heart/ui/app.py",
         "src/puripuly_heart/ui/controller.py"
       ],
-        "production_source_sha256": "23a22d84fb7bdb8202e5e9c09a28fa3fdbbf5a9db81b4e8281f7fe6afca02ba1",
-        "source_delta_sha256": "12d8cdff59c33bef61a0bcef47fd689980101b92d18d21ad91dc73d5de1871bf"
+        "production_source_sha256": "69c561022741354fb2b290e25b85e836461f61733b562bf38250698d539a8c7b",
+        "source_delta_sha256": "37d55c9895b1e3e3c6aca8901085c51115d51e442a5c03a14d4725ec16a9c001"
     },
     "repair_base": "01b3973b64425c8feb9955696d5217fed5d422a4"
   },
@@ -91,7 +93,7 @@
   "sha256": {
     "runner": "5f9252d28e091d21dd7f506ec2d384c2e7ab9993add235a182001dea156c7961",
     "baseline_trace": "fdb3e1f58b13b83445967733ca737f17823e385efb1f5f85442161cb4224b78e",
-    "current_trace": "c30d2bc1ec8e802e3144c78b7838261c3e9f1130aed74692b342d801791422bf",
+    "current_trace": "9cc07f65ed2e677a9c297f6791921c1a8fc5fff3c4aaf26ad504996dcb5d000d",
     "difference_rules": "48b2c253511110aa0d7984d402bf6163206d9f729bb867a2989db977605fbe0b"
   },
   "scenario_sha256": {

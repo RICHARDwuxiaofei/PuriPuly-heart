@@ -160,6 +160,345 @@ class Composition:
         return None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phase", "failure"),
+    [
+        ("success", None),
+        ("build", RuntimeError("build")),
+        ("build", asyncio.CancelledError()),
+        ("settlement", RuntimeError("close")),
+        ("settlement", asyncio.CancelledError()),
+    ],
+)
+async def test_secret_rebind_uses_managed_aware_replacement_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    phase: str,
+    failure: BaseException | None,
+) -> None:
+    import puripuly_heart.app.adapters.application_runtime_production as production
+    from puripuly_heart.app.adapters.application_runtime_production import (
+        ManagedAwareResolvedRuntimeAdapter,
+        ProductionManagedReleaseServiceOwner,
+    )
+    from puripuly_heart.app.ports.runtime_resources import (
+        InstalledRuntimeState,
+        ResourceRef,
+        RuntimeInstallSuccess,
+        StagedRuntimeResources,
+    )
+    from puripuly_heart.app.services.canonical_settings_persistence import (
+        compose_canonical_settings_persistence,
+    )
+    from puripuly_heart.app.services.resolved_runtime_adapter import (
+        ResolvedRuntimeResourceAdapter,
+    )
+
+    old_store = object()
+    new_store = object()
+
+    class Service:
+        def __init__(self, secrets: object) -> None:
+            self.secrets = secrets
+            self.managed_state = SimpleNamespace(_persist=None)
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    services: list[Service] = []
+
+    def create_service(**kwargs):  # noqa: ANN003, ANN202
+        service = Service(kwargs["secrets"])
+        services.append(service)
+        return service
+
+    monkeypatch.setattr(production, "create_production_managed_release_service", create_service)
+    receipt = SettingsCommitReceipt(AppSettingsVNext(), "r1", "rebind", None)
+    owner = ProductionManagedReleaseServiceOwner(
+        compose_canonical_settings_persistence(), tmp_path / "settings.json", old_store
+    )
+    await owner.synchronize(receipt)
+
+    class Provider:
+        def __init__(self, secrets: object, service: object) -> None:
+            self.secrets = secrets
+            self.service = service
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            if phase == "settlement" and self.secrets is old_store and self.close_calls == 1:
+                assert failure is not None
+                raise failure
+
+    old_refs = {
+        slot: ResourceRef(f"old-{slot}", Provider(old_store, services[0]))
+        for slot in ("llm", "self_stt", "peer_stt")
+    }
+
+    class Factory:
+        def __init__(self) -> None:
+            self.secrets = old_store
+
+        async def build_resources(self, config, plan):  # noqa: ANN001, ANN201
+            _ = config
+            if phase == "build":
+                assert failure is not None
+                raise failure
+            candidates = {
+                slot: ResourceRef(
+                    f"new-{slot}", Provider(self.secrets, owner.construction_service())
+                )
+                for slot in ("llm", "self_stt", "peer_stt")
+            }
+            return StagedRuntimeResources(plan, candidates)
+
+    class ResourceHost:
+        def __init__(self) -> None:
+            self.active = InstalledRuntimeState(old_refs)
+
+        async def current_runtime_state(self):  # noqa: ANN201
+            return self.active
+
+        async def install_runtime_resources(self, staged):  # noqa: ANN001, ANN201
+            displaced = tuple(self.active.slots.values())
+            self.active = InstalledRuntimeState(staged.candidates)
+            return RuntimeInstallSuccess(
+                self.active,
+                frozenset(ref.identity for ref in staged.candidates.values()),
+                displaced=displaced,
+            )
+
+    factory = Factory()
+    resource_host = ResourceHost()
+    resolved = ResolvedRuntimeResourceAdapter(factory, resource_host)
+    resolved._active_state = resource_host.active
+    resolved._ownership_state_known = True
+    managed = ManagedAwareResolvedRuntimeAdapter(resolved, owner)
+
+    class RuntimeComposition:
+        resolved_adapter = managed
+        managed_release_owner = owner
+
+        async def replace_runtime_with_secret_store(
+            self, receipt, secrets, request, plan  # noqa: ANN001
+        ) -> None:
+            await managed.replace_runtime_with_secret_store(receipt, secrets, request, plan)
+
+    events: list[str] = []
+    host = ApplicationRuntimeHost(
+        parts=ApplicationRuntimeParts(
+            Sender(events), object(), Hub(events), Peer(events), SelfOwner(events)
+        ),
+        runtime_composition=RuntimeComposition(),
+        committed_settings=Receipts(receipt),
+        resolver=CanonicalRuntimeConfigResolver(),
+    )
+
+    if phase == "success":
+        await host.rebind_secret_store(new_store, receipt)
+        assert factory.secrets is new_store
+        assert owner.secrets is new_store
+        assert owner.current_service().secrets is new_store
+        assert services[0].close_calls == 1
+        assert all(ref.resource.close_calls == 1 for ref in old_refs.values())
+        assert all(
+            ref.resource.secrets is new_store and ref.resource.service is owner.current_service()
+            for ref in resource_host.active.slots.values()
+        )
+    elif phase == "build":
+        with pytest.raises(type(failure)):
+            await host.rebind_secret_store(new_store, receipt)
+        assert factory.secrets is old_store
+        assert owner.secrets is old_store
+        assert owner.current_service() is services[0]
+        assert owner.signature is not None
+        assert services[0].close_calls == 0
+        assert all(ref.resource.close_calls == 0 for ref in old_refs.values())
+        assert resource_host.active.slots == old_refs
+    else:
+        expected = (
+            asyncio.CancelledError if isinstance(failure, asyncio.CancelledError) else Exception
+        )
+        with pytest.raises(expected):
+            await host.rebind_secret_store(new_store, receipt)
+        assert factory.secrets is new_store
+        assert owner.secrets is new_store
+        assert owner.current_service().secrets is new_store
+        assert all(ref.resource.secrets is new_store for ref in resource_host.active.slots.values())
+        assert owner._committed_settlements
+        for ref in old_refs.values():
+            ref.resource.close_calls = 1
+        await owner._retry_committed_settlements()
+        assert owner._committed_settlements == []
+
+
+@pytest.mark.asyncio
+async def test_secret_store_replacement_serializes_staging_with_managed_owner_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import puripuly_heart.app.adapters.application_runtime_production as production
+    from puripuly_heart.app.adapters.application_runtime_production import (
+        ProductionManagedReleaseServiceOwner,
+    )
+    from puripuly_heart.app.services.canonical_settings_persistence import (
+        compose_canonical_settings_persistence,
+    )
+
+    old_store = object()
+    new_store = object()
+    observed: list[object] = []
+
+    class Service:
+        def __init__(self) -> None:
+            self.managed_state = SimpleNamespace(_persist=None)
+
+        async def close(self) -> None:
+            return None
+
+    def create(**kwargs):  # noqa: ANN003, ANN202
+        observed.append(kwargs["secrets"])
+        return Service()
+
+    monkeypatch.setattr(production, "create_production_managed_release_service", create)
+    receipt = SettingsCommitReceipt(AppSettingsVNext(), "r1", "concurrent", None)
+    owner = ProductionManagedReleaseServiceOwner(
+        compose_canonical_settings_persistence(), tmp_path / "settings.json", old_store
+    )
+    await owner.synchronize(receipt)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def install() -> None:
+        entered.set()
+        await release.wait()
+
+    replacement = asyncio.create_task(
+        owner.replace_runtime_with_secret_store(receipt, new_store, install)
+    )
+    await entered.wait()
+    concurrent = asyncio.create_task(owner.synchronize(receipt))
+    await asyncio.sleep(0)
+
+    assert observed == [old_store, new_store]
+    assert owner.secrets is old_store
+    assert concurrent.done() is False
+
+    release.set()
+    await replacement
+    await concurrent
+
+    assert owner.secrets is new_store
+    assert observed == [old_store, new_store]
+
+
+@pytest.mark.asyncio
+async def test_overlapping_host_rebinds_serialize_factory_and_managed_synchronize(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import puripuly_heart.app.adapters.application_runtime_production as production
+    from puripuly_heart.app.adapters.application_runtime_production import (
+        ManagedAwareResolvedRuntimeAdapter,
+        ProductionManagedReleaseServiceOwner,
+    )
+    from puripuly_heart.app.services.canonical_settings_persistence import (
+        compose_canonical_settings_persistence,
+    )
+
+    old_store = object()
+    first_store = object()
+    second_store = object()
+
+    class Service:
+        def __init__(self, secrets: object) -> None:
+            self.secrets = secrets
+            self.managed_state = SimpleNamespace(_persist=None)
+
+        async def close(self) -> None:
+            return None
+
+    def create_service(**kwargs):  # noqa: ANN003, ANN202
+        return Service(kwargs["secrets"])
+
+    monkeypatch.setattr(production, "create_production_managed_release_service", create_service)
+    receipt = SettingsCommitReceipt(AppSettingsVNext(), "r1", "overlap", None)
+    owner = ProductionManagedReleaseServiceOwner(
+        compose_canonical_settings_persistence(), tmp_path / "settings.json", old_store
+    )
+    await owner.synchronize(receipt)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    observations: list[tuple[object, object]] = []
+
+    class Runtime:
+        def __init__(self) -> None:
+            self.factory = SimpleNamespace(secrets=old_store)
+            self.providers = SimpleNamespace(secrets=old_store, service=owner.current_service())
+            self.calls = 0
+
+        async def replace_runtime_with_plan_guarded(
+            self, request, plan, guard
+        ) -> None:  # noqa: ANN001
+            _ = (request, plan)
+            self.calls += 1
+            before = self.factory.secrets
+            if self.calls == 1:
+                entered.set()
+                await release.wait()
+            await guard()
+            after = self.factory.secrets
+            observations.append((before, after))
+            self.providers = SimpleNamespace(secrets=after, service=owner.construction_service())
+
+    runtime = Runtime()
+    managed = ManagedAwareResolvedRuntimeAdapter(runtime, owner)
+
+    class RuntimeComposition:
+        resolved_adapter = managed
+        managed_release_owner = owner
+
+        async def replace_runtime_with_secret_store(
+            self, receipt, secrets, request, plan  # noqa: ANN001
+        ) -> None:
+            await managed.replace_runtime_with_secret_store(receipt, secrets, request, plan)
+
+        async def synchronize_managed_release_service(self, receipt) -> None:  # noqa: ANN001
+            await owner.synchronize(receipt)
+
+    events: list[str] = []
+    host = ApplicationRuntimeHost(
+        parts=ApplicationRuntimeParts(
+            Sender(events), object(), Hub(events), Peer(events), SelfOwner(events)
+        ),
+        runtime_composition=RuntimeComposition(),
+        committed_settings=Receipts(receipt),
+        resolver=CanonicalRuntimeConfigResolver(),
+    )
+    first = asyncio.create_task(host.rebind_secret_store(first_store, receipt))
+    await entered.wait()
+    second = asyncio.create_task(host.rebind_secret_store(second_store, receipt))
+    synchronize = asyncio.create_task(host.resolve_managed_release_service())
+    await asyncio.sleep(0)
+
+    assert runtime.factory.secrets is first_store
+    assert second.done() is False
+    assert synchronize.done() is False
+
+    release.set()
+    await first
+    await synchronize
+    await second
+
+    assert observations == [(first_store, first_store), (second_store, second_store)]
+    assert runtime.factory.secrets is second_store
+    assert owner.secrets is second_store
+    assert owner.current_service().secrets is second_store
+    assert runtime.providers.secrets is second_store
+    assert runtime.providers.service is owner.current_service()
+
+
 def _facts(*, self_enabled: bool = False, peer_enabled: bool = False):
     return RuntimeOperationalSnapshot(
         translation_enabled=True,
@@ -530,7 +869,7 @@ def test_production_host_has_no_ui_dependency_and_main_owns_construction() -> No
     assert "puripuly_heart.ui" not in host_source
     assert "ClientHub(" not in controller_source
     assert '"runtime"' in main_source
-    assert "lambda: create_application_runtime_host(" in main_source
+    assert "lambda: create_application_runtime_production_composition(" in main_source
     assert "adopt_runtime" in main_source
     assert 'kwargs["application_runtime_host"] = application_runtime_host' in main_source
     assert "audio_gate=composition.audio_gate" in main_source

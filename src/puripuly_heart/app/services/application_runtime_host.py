@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import inspect
 from dataclasses import dataclass
@@ -130,6 +131,8 @@ class ApplicationRuntimeHost:
         self._translation_desired = initial_translation_enabled
         self._openrouter_pkce = openrouter_pkce
         self._dashboard_projection = dashboard_projection
+        self._canonical_commands = None
+        self._secret_rebind_lock = asyncio.Lock()
 
     @property
     def parts(self) -> ApplicationRuntimeParts | None:
@@ -142,6 +145,109 @@ class ApplicationRuntimeHost:
     @property
     def state(self) -> ApplicationRuntimeHost:
         return self
+
+    @property
+    def canonical_commands(self):  # noqa: ANN201
+        return self._canonical_commands
+
+    def bind_canonical_commands(self, composition: object) -> None:
+        if self._canonical_commands is not None:
+            raise RuntimeError("canonical command composition is already bound")
+        self._canonical_commands = composition
+
+    def runtime_operational_snapshot(self) -> RuntimeOperationalSnapshot:
+        from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntimeState
+        from puripuly_heart.core.runtime.self_audio import SelfChannelState
+
+        parts = self._require_parts()
+        translation = self.translation_snapshot()
+        self_snapshot = parts.self_stt.snapshot()
+        peer_policy = parts.peer_runtime.policy_snapshot()
+        peer_state = getattr(parts.peer_runtime, "state", PeerChannelRuntimeState.STOPPED)
+        self_available = bool(
+            self_snapshot.provider_available or self._provider_is_available("self_stt")
+        )
+        peer_available = self._provider_is_available("peer_stt")
+        self_enabled = bool(self_snapshot.intent_enabled)
+        peer_enabled = bool(peer_policy.intent_desired_active)
+        self_running = self_snapshot.state == SelfChannelState.RUNNING
+        peer_running = peer_state == PeerChannelRuntimeState.RUNNING
+        return RuntimeOperationalSnapshot(
+            translation_enabled=translation.desired_enabled,
+            self_stt_enabled=self_enabled,
+            self_stt_running=self_running,
+            self_stt_staged=bool(self_available and not self_enabled),
+            peer_stt_enabled=peer_enabled,
+            peer_stt_running=peer_running,
+            peer_stt_staged=bool(peer_available and not peer_enabled),
+            llm_available=translation.provider_available,
+            llm_retry_pending=bool(
+                translation.desired_enabled and not translation.provider_available
+            ),
+            self_stt_available=self_available,
+            self_stt_retry_pending=not self_available,
+            peer_stt_available=peer_available,
+            peer_stt_retry_pending=not peer_available,
+        )
+
+    async def rebind_secret_store(self, secrets: object, receipt: SettingsCommitReceipt) -> None:
+        async with self._secret_rebind_lock:
+            await self._rebind_secret_store_locked(secrets, receipt)
+
+    async def _rebind_secret_store_locked(
+        self, secrets: object, receipt: SettingsCommitReceipt
+    ) -> None:
+        adapter = getattr(self._runtime_composition, "resolved_adapter", None)
+        runtime = getattr(adapter, "runtime", adapter)
+        factory = getattr(runtime, "factory", None)
+        owner = getattr(self._runtime_composition, "managed_release_owner", None)
+        old_factory_secrets = getattr(factory, "secrets", None)
+        old_owner_secrets = getattr(owner, "secrets", None)
+        old_owner_signature = getattr(owner, "signature", None)
+        replace_secrets = getattr(
+            self._runtime_composition, "replace_runtime_with_secret_store", None
+        )
+        try:
+            if callable(replace_secrets):
+                config = self._resolver.resolve(receipt)
+                request = ResolvedRuntimeActivationRequest(
+                    config, receipt.revision, receipt.reason, receipt.correlation_id, receipt
+                )
+                await replace_secrets(
+                    receipt,
+                    secrets,
+                    request,
+                    RuntimeResourceReplacementPlan("replace", "replace", "replace"),
+                )
+            else:
+                if factory is not None and hasattr(factory, "secrets"):
+                    factory.secrets = secrets
+                if owner is not None and hasattr(owner, "secrets"):
+                    owner.secrets = secrets
+                    owner.signature = None
+                await self._replace(
+                    receipt,
+                    RuntimeResourceReplacementPlan("replace", "replace", "replace"),
+                )
+        except BaseException:
+            committed = owner is not None and getattr(owner, "secrets", None) is secrets
+            if not committed and factory is not None and hasattr(factory, "secrets"):
+                factory.secrets = old_factory_secrets
+            if not committed and owner is not None and hasattr(owner, "secrets"):
+                owner.secrets = old_owner_secrets
+                owner.signature = old_owner_signature
+            raise
+
+    def secret_store_is_authoritative(self, secrets: object) -> bool:
+        adapter = getattr(self._runtime_composition, "resolved_adapter", None)
+        runtime = getattr(adapter, "runtime", adapter)
+        factory = getattr(runtime, "factory", None)
+        owner = getattr(self._runtime_composition, "managed_release_owner", None)
+        return bool(
+            factory is not None
+            and getattr(factory, "secrets", None) is secrets
+            and (owner is None or getattr(owner, "secrets", None) is secrets)
+        )
 
     def bind_final_suppressed(self, callback: object) -> None:
         if self.audio_hooks is not None:
@@ -354,6 +460,11 @@ class ApplicationRuntimeHost:
         if self._openrouter_pkce is not None:
             raise RuntimeError("OpenRouter PKCE owner is already bound")
         self._openrouter_pkce = owner
+
+    def bind_overlay_runtime(self, runtime: object | None) -> None:
+        bind = getattr(self._runtime_composition, "bind_overlay_runtime", None)
+        if callable(bind):
+            bind(runtime)
 
     async def shutdown(self) -> None:
         if self._shutdown:

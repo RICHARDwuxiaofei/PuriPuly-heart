@@ -106,10 +106,15 @@ def _install_async_gui_harness(monkeypatch, tmp_path, calls, *, on_main_gui=None
             transactions=object(),
             ui_projection=object(),
             audio_gate=object(),
+            runtime=object(),
         ),
     )
     monkeypatch.setattr(
-        wiring_composition, "create_application_runtime_host", lambda *_args, **_kwargs: runtime
+        wiring_composition,
+        "create_application_runtime_production_composition",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            runtime_host=runtime, canonical_commands=object()
+        ),
     )
     monkeypatch.setattr(
         overlay_lifecycle_production,
@@ -316,10 +321,15 @@ def test_main_owns_gui_lifecycle_start_disconnect_and_awaited_stop(monkeypatch, 
             transactions=object(),
             ui_projection=object(),
             audio_gate=object(),
+            runtime=object(),
         ),
     )
     monkeypatch.setattr(
-        wiring_composition, "create_application_runtime_host", lambda *_args, **_kwargs: runtime
+        wiring_composition,
+        "create_application_runtime_production_composition",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            runtime_host=runtime, canonical_commands=object()
+        ),
     )
     monkeypatch.setattr(
         overlay_lifecycle_production,
@@ -422,10 +432,15 @@ def test_main_closes_constructed_resources_when_flet_swallows_construction_failu
             transactions=object(),
             ui_projection=object(),
             audio_gate=object(),
+            runtime=object(),
         ),
     )
     monkeypatch.setattr(
-        wiring_composition, "create_application_runtime_host", lambda *_args, **_kwargs: runtime
+        wiring_composition,
+        "create_application_runtime_production_composition",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            runtime_host=runtime, canonical_commands=object()
+        ),
     )
     monkeypatch.setattr(
         overlay_lifecycle_production,

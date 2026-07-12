@@ -1073,6 +1073,7 @@ class GuiController:
         init=False,
         default=None,
     )
+    last_production_dispatch: object | None = field(init=False, default=None)
     last_openrouter_pkce_result: OpenRouterPkceResult | None = field(init=False, default=None)
     _settings_commit_lock: asyncio.Lock | None = field(
         init=False,
@@ -5336,6 +5337,10 @@ class GuiController:
         strict_persistence_errors: bool = False,
         reload_settings_view: bool = True,
     ) -> None:
+        if self._production_surface_runtime_apply_enabled():
+            raise RuntimeError(
+                "production composition is bound; controller-owned settings runtime sequencing is not production-reachable"
+            )
         if persist:
             self._begin_canonical_mutation(
                 legacy_snapshot=self._canonical_legacy_projection_snapshot or self.settings
@@ -5752,21 +5757,32 @@ class GuiController:
         has_out_of_scope_draft = _settings_snapshot_values(
             committed_settings
         ) != _settings_snapshot_values(next_settings)
+        if self._production_surface_runtime_apply_enabled():
+            result = await self._execute_production_settings_delta(
+                base_settings=base_settings,
+                next_settings=next_settings,
+            )
+            assert result is not None
+            self._complete_canonical_mutation()
+            self.last_settings_mutation_result = result
+            if result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+                self._sync_signature_caches(self.settings)
+            self._remember_settings_view_order22_baseline(self.settings)
+            return True
         repository = _ControllerSettingsPatchRepository(
             controller=self,
             base_settings=base_settings,
             committed_settings=committed_settings,
             surface="stt_language_audio",
         )
-        runtime_apply = (
-            _ControllerNoopRuntimeApply()
-            if has_out_of_scope_draft
-            else _ControllerSttLanguageAudioRuntimeApply(
+        if has_out_of_scope_draft:
+            runtime_apply = _ControllerNoopRuntimeApply()
+        else:
+            runtime_apply = _ControllerSttLanguageAudioRuntimeApply(
                 controller=self,
                 settings=committed_settings,
                 reload_settings_view=reload_settings_view,
             )
-        )
         command = SttLanguageAudioSettingsMutation(values=patch_values)
         service = self.settings_mutation_service or SettingsMutationService(
             settings_repository=repository,
@@ -5849,25 +5865,35 @@ class GuiController:
         has_out_of_scope_draft = _settings_snapshot_values(
             committed_settings
         ) != _settings_snapshot_values(next_settings)
+        if self._production_surface_runtime_apply_enabled():
+            result = await self._execute_production_settings_delta(
+                base_settings=base_settings,
+                next_settings=next_settings,
+            )
+            assert result is not None
+            self._complete_canonical_mutation()
+            self.last_settings_mutation_result = result
+            self._sync_overlay_calibration_cache(self.settings)
+            if result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+                self._sync_signature_caches(self.settings)
+            self._remember_settings_view_order23_baseline(self.settings)
+            return True
         repository = _ControllerSettingsPatchRepository(
             controller=self,
             base_settings=base_settings,
             committed_settings=committed_settings,
             surface="overlay_osc_output",
         )
-        runtime_apply = (
-            _ControllerNoopRuntimeApply()
-            if has_out_of_scope_draft
-            else (
-                _OverlayOscSurfaceRuntimeApply(
-                    controller=self,
-                    repository=repository,
-                    runtime=self.surface_runtime_transactions,
-                )
-                if self.surface_runtime_transactions is not None
-                else _UnavailableOverlayOscRuntimeApply()
+        if has_out_of_scope_draft:
+            runtime_apply = _ControllerNoopRuntimeApply()
+        elif self.surface_runtime_transactions is not None:
+            runtime_apply = _OverlayOscSurfaceRuntimeApply(
+                controller=self,
+                repository=repository,
+                runtime=self.surface_runtime_transactions,
             )
-        )
+        else:
+            runtime_apply = _UnavailableOverlayOscRuntimeApply()
         command = OverlayOscOutputSettingsMutation(values=patch_values)
         service = self.settings_mutation_service or SettingsMutationService(
             settings_repository=repository,
@@ -5922,8 +5948,9 @@ class GuiController:
         patch_values: Mapping[str, object],
         committed_settings: AppSettings,
         runtime_apply,
+        repository: _ControllerSettingsPatchRepository | None = None,
     ) -> TransactionResult:
-        repository = _ControllerSettingsPatchRepository(
+        repository = repository or _ControllerSettingsPatchRepository(
             controller=self,
             base_settings=self.settings or committed_settings,
             committed_settings=committed_settings,
@@ -5960,19 +5987,36 @@ class GuiController:
             committed_settings
         ) != _settings_snapshot_values(next_settings)
         runtime_settings = copy.deepcopy(next_settings)
-        runtime_apply = (
-            _ControllerNoopRuntimeApply()
-            if has_out_of_scope_draft
-            else _ControllerUiPromptClipboardStateRuntimeApply(
+        if self._production_surface_runtime_apply_enabled():
+            result = await self._execute_production_settings_delta(
+                base_settings=base_settings,
+                next_settings=next_settings,
+            )
+            assert result is not None
+            self.last_settings_mutation_result = result
+            if result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+                self._sync_signature_caches(self.settings)
+            self._remember_settings_view_order24_baseline(self.settings)
+            return True
+        repository = _ControllerSettingsPatchRepository(
+            controller=self,
+            base_settings=base_settings,
+            committed_settings=committed_settings,
+            surface="ui_prompt_clipboard_state",
+        )
+        if has_out_of_scope_draft:
+            runtime_apply = _ControllerNoopRuntimeApply()
+        else:
+            runtime_apply = _ControllerUiPromptClipboardStateRuntimeApply(
                 controller=self,
                 settings=runtime_settings,
             )
-        )
 
         result = await self._mutate_order24_settings_patch(
             patch_values=patch_values,
             committed_settings=committed_settings,
             runtime_apply=runtime_apply,
+            repository=repository,
         )
         self.last_settings_mutation_result = result
         if not _settings_mutation_committed(result):
@@ -6312,6 +6356,19 @@ class GuiController:
         has_out_of_scope_draft = _settings_snapshot_values(
             committed_settings
         ) != _settings_snapshot_values(next_settings)
+        if self._production_surface_runtime_apply_enabled():
+            result = await self._execute_production_settings_delta(
+                base_settings=base_settings,
+                next_settings=next_settings,
+            )
+            assert result is not None
+            self._complete_canonical_mutation()
+            self.last_settings_mutation_result = result
+            self._render_committed_provider_state(self.settings)
+            if result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+                self._sync_signature_caches(self.settings)
+            self._remember_settings_view_order22_baseline(self.settings)
+            return True
         repository = _ControllerSettingsPatchRepository(
             controller=self,
             base_settings=base_settings,
@@ -6413,6 +6470,18 @@ class GuiController:
         has_out_of_scope_draft = _settings_snapshot_values(
             committed_settings
         ) != _settings_snapshot_values(next_settings)
+        if self._production_surface_runtime_apply_enabled():
+            result = await self._execute_production_settings_delta(
+                base_settings=base_settings,
+                next_settings=next_settings,
+            )
+            assert result is not None
+            self._complete_canonical_mutation()
+            self.last_settings_mutation_result = result
+            if result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+                self._sync_signature_caches(self.settings)
+            self._remember_settings_view_order22_baseline(self.settings)
+            return True
         repository = _ControllerSettingsPatchRepository(
             controller=self,
             base_settings=base_settings,
@@ -6820,7 +6889,85 @@ class GuiController:
             self.provider_verifier = create_provider_verifier()
         return self.provider_verifier
 
+    def _production_surface_runtime_apply_enabled(self) -> bool:
+        host = self.application_runtime_host
+        if host is None:
+            return False
+        return getattr(host, "canonical_commands", None) is not None
+
+    async def _execute_production_settings_delta(
+        self,
+        *,
+        base_settings: AppSettings,
+        next_settings: AppSettings,
+    ) -> TransactionResult | None:
+        host = self.application_runtime_host
+        if host is None:
+            return None
+        composition = getattr(host, "canonical_commands", None)
+        if composition is None:
+            return None
+        from puripuly_heart.app.services.canonical_command_composition import (
+            dispatch_result_as_transaction,
+        )
+
+        before = self._canonical_vnext_settings_for(base_settings)
+        after = self._canonical_vnext_after_legacy_delta(base_settings, next_settings)
+        dispatch = await composition.execute_production_settings_delta(
+            before=before,
+            after=after,
+        )
+        self.last_production_dispatch = dispatch
+        self.vnext_settings = dispatch.final_receipt.envelope
+        self._vnext_settings_authoritative = True
+        projected = self.canonical_settings_persistence.legacy_projection(
+            dispatch.final_receipt.envelope
+        )
+        _copy_runtime_only_ui_state(base_settings, projected)
+        self.settings = projected
+        for settings_field in fields(AppSettings):
+            setattr(
+                next_settings,
+                settings_field.name,
+                copy.deepcopy(getattr(projected, settings_field.name)),
+            )
+        self._remember_canonical_legacy_projection(projected)
+        return dispatch_result_as_transaction(dispatch)
+
     def runtime_operational_snapshot(self) -> RuntimeOperationalSnapshot:
+        host = self.application_runtime_host
+        if host is not None:
+            snapshot = getattr(host, "runtime_operational_snapshot", None)
+            if callable(snapshot):
+                operational = snapshot()
+                return RuntimeOperationalSnapshot(
+                    translation_enabled=operational.translation_enabled,
+                    self_stt_enabled=self._stt_desired or operational.self_stt_enabled,
+                    self_stt_running=bool(
+                        operational.self_stt_running
+                        or (self.hub is not None and self.hub.stt is not None and self._stt_desired)
+                    ),
+                    self_stt_staged=operational.self_stt_staged,
+                    peer_stt_enabled=bool(
+                        operational.peer_stt_enabled
+                        or (self.settings and self.settings.ui.peer_translation_enabled)
+                    ),
+                    peer_stt_running=bool(
+                        operational.peer_stt_running
+                        or (self.hub is not None and self.hub.peer_stt is not None)
+                    ),
+                    peer_stt_staged=operational.peer_stt_staged,
+                    llm_available=operational.llm_available,
+                    llm_retry_pending=operational.llm_retry_pending,
+                    self_stt_available=operational.self_stt_available
+                    or bool(self.hub is not None and self.hub.stt is not None),
+                    self_stt_retry_pending=self._last_self_stt_provider_signature == ()
+                    or operational.self_stt_retry_pending,
+                    peer_stt_available=operational.peer_stt_available
+                    or bool(self.hub is not None and self.hub.peer_stt is not None),
+                    peer_stt_retry_pending=self._last_peer_stt_provider_signature == ()
+                    or operational.peer_stt_retry_pending,
+                )
         hub = self.hub
         translation = (
             self.application_runtime_host.translation_snapshot()
