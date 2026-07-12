@@ -138,6 +138,16 @@ class ProviderRuntimeHandle:
                 await _call_async_method(provider, "close")
             self._start_event_loop_if_needed()
 
+    async def retire_for_dormant_reuse(self, provider: object) -> None:
+        async with self._lock:
+            if self._provider is not provider:
+                return
+            self._running = False
+            self._generation += 1
+            await self._cancel_event_task()
+            await _call_async_method(provider, "close")
+            await _call_async_method(provider, "discard_pending_events")
+
     async def stop_ingress(self) -> None:
         async with self._lock:
             self._running = False

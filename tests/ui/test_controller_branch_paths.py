@@ -5241,7 +5241,7 @@ async def test_peer_local_qwen_download_completion_resumes_peer_runtime_after_re
 
 
 @pytest.mark.asyncio
-async def test_refresh_peer_stt_runtime_blocks_peer_local_qwen_when_probe_load_fails_despite_ready_install(
+async def test_refresh_peer_stt_runtime_does_not_create_disposable_local_qwen_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dash = DummyDashboard()
@@ -5258,18 +5258,11 @@ async def test_refresh_peer_stt_runtime_blocks_peer_local_qwen_when_probe_load_f
 
     download_requests: list[str] = []
 
-    class FailingPeerBackend:
-        async def open_session(self):
-            raise controller_module.LocalQwenSherpaLoadError("bootstrap failed")
-
-        async def close(self) -> None:
-            return None
-
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
     monkeypatch.setattr(
         controller_module,
         "create_peer_stt_backend",
-        lambda *_a, **_k: FailingPeerBackend(),
+        lambda *_a, **_k: pytest.fail("disposable Peer backend probe created"),
     )
     monkeypatch.setattr(
         GuiController,
@@ -5280,9 +5273,9 @@ async def test_refresh_peer_stt_runtime_blocks_peer_local_qwen_when_probe_load_f
     await controller._refresh_peer_stt_runtime()
 
     assert len(controller._peer_runtime.policy_calls) == 1
-    assert controller._peer_runtime.policy_calls[0]["desired_active"] is False
-    assert download_requests == ["manual"]
-    assert dash.local_stt_notice_status == "invalid"
+    assert controller._peer_runtime.policy_calls[0]["desired_active"] is True
+    assert download_requests == []
+    assert dash.local_stt_notice_status is None
 
 
 @pytest.mark.asyncio

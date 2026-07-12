@@ -5100,7 +5100,6 @@ class GuiController:
                 resume_peer=True,
             )
         try:
-            await self._probe_peer_local_stt_runtime_load()
             self._local_stt_install_state = LocalSTTInstallState(status="ready")
             if self._local_stt_runtime_status != "downloading":
                 self._local_stt_runtime_status = "ready"
