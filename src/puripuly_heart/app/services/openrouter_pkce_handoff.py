@@ -6,13 +6,16 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from puripuly_heart.app.ports._settings_values import freeze_settings_values
+from puripuly_heart.app.ports.openrouter_pkce_runtime import OpenRouterPkceRuntimeApplyPort
+from puripuly_heart.app.ports.post_commit_runtime import RuntimeOperation
 from puripuly_heart.app.ports.provider_verifier import (
     PROVIDER_VERIFICATION_STATUS_VERIFIED,
     ProviderVerificationRequest,
     ProviderVerificationResult,
     ProviderVerifierPort,
 )
-from puripuly_heart.app.ports.runtime_apply import RuntimeApplyPort, RuntimeApplyRequest
+from puripuly_heart.app.ports.runtime_apply import RuntimeApplyRequest
+from puripuly_heart.app.ports.settings_repository import SettingsCommitReceipt
 from puripuly_heart.app.services.operational_state_payloads import (
     ProviderVerificationEvidence,
     provider_verification_state_values,
@@ -28,6 +31,7 @@ from puripuly_heart.core.messages import (
     DIAGNOSTIC_VISIBILITY_BASIC,
     RUNTIME_APPLY_STATUS_APPLIED,
     TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED,
+    TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
     DiagnosticFieldValue,
@@ -78,10 +82,18 @@ class OpenRouterPkceHandoffRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class OpenRouterPkceHandoffResult(TransactionResult):
+    receipt: SettingsCommitReceipt | None = field(default=None, repr=False)
+    reconciliation_required: bool = False
+    completed: tuple[RuntimeOperation, ...] = ()
+    failed: RuntimeOperation | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class OpenRouterPkceHandoffService:
     provider_verifier: ProviderVerifierPort
     secret_transaction: SecretSettingsTransaction
-    runtime_apply: RuntimeApplyPort
+    runtime_apply: OpenRouterPkceRuntimeApplyPort
 
     async def complete_handoff(
         self,
@@ -101,7 +113,7 @@ class OpenRouterPkceHandoffService:
             request=request,
             verification_result=verification_result,
         )
-        local_commit_result = await self.secret_transaction.set_provider_secret(
+        local_commit_outcome = await self.secret_transaction.set_provider_secret_with_receipt(
             SecretSetRequest(
                 secret_key=request.secret_key,
                 secret_value=request.transient_api_key,
@@ -111,35 +123,60 @@ class OpenRouterPkceHandoffService:
                 correlation_id=request.correlation_id,
             )
         )
+        local_commit_result = local_commit_outcome.transaction_result
         if local_commit_result.status != TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
             return local_commit_result
+        if local_commit_outcome.receipt is None:
+            return TransactionResult(
+                status=TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED,
+                message=local_commit_result.message,
+                diagnostics=local_commit_result.diagnostics,
+            )
 
         try:
             runtime_result = await self.runtime_apply.apply_runtime(
                 RuntimeApplyRequest(
-                    settings_values=settings_values,
-                    reason=request.reason,
-                    correlation_id=request.correlation_id,
+                    receipt=local_commit_outcome.receipt,
                 )
             )
-        except Exception:
-            return _runtime_apply_exception_result(request)
+        except BaseException:
+            degraded = _runtime_apply_exception_result(request)
+            return OpenRouterPkceHandoffResult(
+                degraded.status,
+                degraded.message,
+                degraded.diagnostics,
+                local_commit_outcome.receipt,
+                True,
+                (),
+                None,
+            )
 
         if runtime_result.status == RUNTIME_APPLY_STATUS_APPLIED:
-            return TransactionResult(
+            return OpenRouterPkceHandoffResult(
                 status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
                 message=runtime_result.message or local_commit_result.message,
                 diagnostics=runtime_result.diagnostics or local_commit_result.diagnostics,
+                receipt=local_commit_outcome.receipt,
+                reconciliation_required=bool(
+                    getattr(runtime_result, "reconciliation_required", False)
+                ),
+                completed=tuple(getattr(runtime_result, "completed", ())),
+                failed=getattr(runtime_result, "failed", None),
             )
 
-        return TransactionResult(
+        return OpenRouterPkceHandoffResult(
             status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
             message=runtime_result.message or local_commit_result.message,
-            diagnostics=_runtime_apply_degraded_diagnostics(
+            diagnostics=runtime_result.diagnostics
+            or _runtime_apply_degraded_diagnostics(
                 request=request,
                 runtime_status=runtime_result.status,
-                runtime_diagnostics_present=runtime_result.diagnostics is not None,
+                runtime_diagnostics_present=False,
             ),
+            receipt=local_commit_outcome.receipt,
+            reconciliation_required=True,
+            completed=tuple(getattr(runtime_result, "completed", ())),
+            failed=getattr(runtime_result, "failed", None),
         )
 
     async def _verify_transient_key(
@@ -428,5 +465,6 @@ def _runtime_apply_exception_result(
 
 __all__ = [
     "OpenRouterPkceHandoffRequest",
+    "OpenRouterPkceHandoffResult",
     "OpenRouterPkceHandoffService",
 ]

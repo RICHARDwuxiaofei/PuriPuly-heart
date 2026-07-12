@@ -1283,12 +1283,13 @@ def test_backup_creation_failure_aborts_vnext_save_and_leaves_original_bytes(
 
 def test_save_failure_before_final_replace_leaves_original_and_backup_safe(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     compat = _compat()
     fixed_now = datetime(2026, 6, 9, 1, 2, 3, tzinfo=timezone.utc)
     path = tmp_path / "settings.json"
     original_bytes = _write_json_bytes(path, maximal_v24_settings_fixture())
-    (tmp_path / "settings.json.tmp").mkdir()
+    monkeypatch.setattr(compat.os, "replace", lambda *_: (_ for _ in ()).throw(OSError("replace")))
 
     result = compat.load_vnext_settings(path, now=fixed_now)
 

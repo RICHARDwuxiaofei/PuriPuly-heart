@@ -298,50 +298,6 @@ def _ui_prompt_clipboard_state_save_failed_transaction_result(
 
 
 @dataclass(slots=True)
-class _ControllerProviderRuntimeApply:
-    controller: ControllerRuntimeApplyBoundary
-    settings: object
-    plan: _ProviderRuntimeApplyPlan
-    surface: str = "translation_provider"
-    operation: str = "apply_provider_runtime"
-
-    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
-        _ = request
-        try:
-            await self.controller._apply_provider_runtime_plan(self.settings, self.plan)
-        except Exception:
-            return RuntimeApplyResult(
-                status=RUNTIME_APPLY_STATUS_FAILED,
-                message=UserMessageRef(
-                    key="settings.mutation.runtime_apply_failed",
-                    params={"phase": "runtime_apply"},
-                    severity=SEVERITY_WARNING,
-                ),
-                diagnostics=_settings_mutation_diagnostics(
-                    component="gui_controller",
-                    operation=self.operation,
-                    code="provider_runtime_apply_exception",
-                    category=DIAGNOSTIC_CATEGORY_LIFECYCLE,
-                    surface=self.surface,
-                ),
-            )
-        unavailable_result = _provider_runtime_apply_unavailable_result(
-            controller=self.controller,
-            settings=self.settings,
-            plan=self.plan,
-            operation=self.operation,
-            surface=self.surface,
-        )
-        if unavailable_result is not None:
-            return unavailable_result
-        return RuntimeApplyResult(
-            status=RUNTIME_APPLY_STATUS_APPLIED,
-            message=None,
-            diagnostics=None,
-        )
-
-
-@dataclass(slots=True)
 class _ControllerSttLanguageAudioRuntimeApply:
     controller: ControllerRuntimeApplyBoundary
     settings: object
@@ -378,32 +334,6 @@ class _ControllerSttLanguageAudioRuntimeApply:
         )
         if unavailable_result is not None:
             return unavailable_result
-        return RuntimeApplyResult(
-            status=RUNTIME_APPLY_STATUS_APPLIED,
-            message=None,
-            diagnostics=None,
-        )
-
-
-@dataclass(slots=True)
-class _ControllerOverlayOscOutputRuntimeApply:
-    controller: ControllerRuntimeApplyBoundary
-    settings: object
-
-    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
-        _ = request
-        try:
-            await self.controller._apply_settings_direct(
-                self.settings,
-                persist=False,
-                strict_runtime_errors=True,
-            )
-        except Exception:
-            return _runtime_apply_failed_result(
-                operation="apply_overlay_osc_output_runtime",
-                code="overlay_osc_output_runtime_apply_exception",
-                surface="overlay_osc_output",
-            )
         return RuntimeApplyResult(
             status=RUNTIME_APPLY_STATUS_APPLIED,
             message=None,

@@ -149,7 +149,7 @@
   "settings.peer_translation.status.starting": "Запуск перевода собеседника",
   "settings.peer_translation.status.on": "Перевод собеседника включён",
   "settings.peer_translation.status.warning": "Перевод собеседника ожидает",
-  "dashboard.local_stt_notice_starting": "Запуск локального распознавания речи…",
+  "dashboard.local_stt_notice_starting": "Загрузка модели…",
   "dashboard.local_stt_notice_start_failed": "Не удалось запустить локальное распознавание речи.",
   "settings.peer_translation.warning.overlay_starting": "Включено. Запустится, когда оверлей подключится.",
   "settings.peer_translation.warning.overlay_stopping": "Перевод собеседника на паузе — оверлей останавливается.",

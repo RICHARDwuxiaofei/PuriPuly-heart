@@ -334,6 +334,40 @@ async def test_self_microphone_start_failure_becomes_effective_off_failure_notic
 
 
 @pytest.mark.asyncio
+async def test_production_self_command_publishes_starting_without_blocking_loop() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class Commands:
+        async def execute(self, command):  # noqa: ANN001, ANN201
+            entered.set()
+            await release.wait()
+            return SimpleNamespace(
+                status="applied",
+                snapshot=SimpleNamespace(
+                    desired_enabled=command.enabled,
+                    provider_available=True,
+                ),
+            )
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=Path("x"),
+        self_stt_commands=Commands(),
+    )
+    controller.settings = AppSettings()
+    controller.hub = SimpleNamespace(mark_promo_eligible=lambda: None)
+    activation = asyncio.create_task(controller.set_stt_enabled(True))
+    await entered.wait()
+    assert controller._stt_activation_starting is True
+    assert await asyncio.sleep(0, result=True) is True
+    release.set()
+    await activation
+    assert controller._stt_activation_starting is False
+
+
+@pytest.mark.asyncio
 async def test_stale_self_start_failure_cannot_disable_latest_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -782,6 +816,54 @@ async def test_controller_retry_clears_process_warning_only_on_success(
     controller._peer_runtime = Runtime(True)  # type: ignore[assignment]
     assert await controller.retry_peer_process_capture() is True
     assert controller._peer_process_warning_reason is None
+
+
+@pytest.mark.asyncio
+async def test_peer_local_qwen_reenable_after_idle_expiry_reinstalls_before_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resume_calls = 0
+
+    class Host:
+        peer_translation_enabled = False
+        integrated_context_enabled = False
+
+        def lease_stt_provider(self, _slot):  # noqa: ANN001, ANN201
+            return None
+
+    class ApplicationHost:
+        async def resume_peer_stt(self):  # noqa: ANN201
+            nonlocal resume_calls
+            resume_calls += 1
+            return SimpleNamespace(status="applied")
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=Path("x"),
+        application_runtime_host=ApplicationHost(),
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    controller.settings.ui.overlay_enabled = True
+    controller.settings.ui.peer_translation_enabled = True
+    controller.overlay_state = "connected"
+    controller.hub = Host()
+    controller._peer_runtime = SimpleNamespace()
+    monkeypatch.setattr(
+        GuiController,
+        "_ensure_peer_local_stt_ready",
+        lambda self: asyncio.sleep(0, result=True),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_peer_runtime_should_be_active",
+        lambda self, settings: True,
+    )
+
+    await controller._refresh_peer_stt_runtime()
+
+    assert resume_calls == 1
 
 
 def test_loopback_summary_prefers_localized_process_name() -> None:

@@ -8,6 +8,11 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.app.ports.translation_application import (
+    SetTranslationEnabled,
+    TranslationCommandResult,
+    TranslationRuntimeSnapshot,
+)
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
@@ -94,9 +99,53 @@ class DummyHub:
             await old_llm.close()
 
 
+class TypedApplicationHost:
+    def __init__(self, hub: DummyHub) -> None:
+        self.parts = SimpleNamespace(hub=hub)
+        self.translation_commands: list[SetTranslationEnabled] = []
+        self._translation = TranslationRuntimeSnapshot(True, True, hub.llm is not None, 1)
+
+    async def start(self, *, auto_flush_osc: bool) -> None:
+        await self.parts.hub.start(auto_flush_osc=auto_flush_osc)
+
+    def translation_snapshot(self) -> TranslationRuntimeSnapshot:
+        return self._translation
+
+    async def set_translation_enabled(
+        self, command: SetTranslationEnabled
+    ) -> TranslationCommandResult:
+        self.translation_commands.append(command)
+        self._translation = TranslationRuntimeSnapshot(
+            command.enabled,
+            command.enabled and self.parts.hub.llm is not None,
+            self.parts.hub.llm is not None,
+            self._translation.provider_generation,
+        )
+        return TranslationCommandResult("applied", self._translation)
+
+
 def _local_stt_download_task(controller: GuiController) -> asyncio.Task[object] | None:
     runtime = controller._local_stt_download_runtime
     return runtime.download_task if runtime is not None else None
+
+
+def _typed_self_commands(calls: list[bool]):
+    from puripuly_heart.core.runtime.self_audio import SelfChannelState
+
+    class TypedSelfCommands:
+        async def execute(self, command):  # noqa: ANN001, ANN201
+            calls.append(command.enabled)
+            return SimpleNamespace(
+                snapshot=controller_module.SelfChannelSnapshot(
+                    command.enabled,
+                    (SelfChannelState.RUNNING if command.enabled else SelfChannelState.STOPPED),
+                    True,
+                    len(calls),
+                    None,
+                )
+            )
+
+    return TypedSelfCommands()
 
 
 async def _start_controller_with_inspected_stt_state(
@@ -110,6 +159,7 @@ async def _start_controller_with_inspected_stt_state(
     settings.provider.stt = provider
     dash = DummyDashboard()
     hub = DummyHub(stt=hub_stt)
+    application_host = TypedApplicationHost(hub)
     inspect_calls: list[str] = []
     install_calls: list[str] = []
 
@@ -152,6 +202,7 @@ async def _start_controller_with_inspected_stt_state(
         page=SimpleNamespace(),
         app=SimpleNamespace(view_dashboard=dash),
         config_path=Path("settings.json"),
+        application_runtime_host=application_host,
     )
 
     await controller.start()
@@ -899,7 +950,7 @@ async def test_local_stt_download_rejects_new_start_after_runtime_close() -> Non
 
 
 @pytest.mark.asyncio
-async def test_stop_cancels_active_local_stt_download_task(
+async def test_application_adapter_owner_cancels_active_local_stt_download_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = GuiController(
@@ -911,23 +962,7 @@ async def test_stop_cancels_active_local_stt_download_task(
     async def fake_set_stt_enabled(self, enabled: bool) -> None:
         _ = self, enabled
 
-    async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
-        _ = self, enabled
-
-    async def fake_shutdown_overlay_runtime(self, *, preserve_failure_reason: bool) -> None:
-        _ = self, preserve_failure_reason
-
     monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
-    monkeypatch.setattr(
-        GuiController,
-        "_configure_vrc_mic_receiver",
-        fake_configure_vrc_mic_receiver,
-    )
-    monkeypatch.setattr(
-        GuiController,
-        "_shutdown_overlay_runtime",
-        fake_shutdown_overlay_runtime,
-    )
 
     owner = controller._get_local_stt_download_runtime()
     active_download = owner.start(
@@ -936,6 +971,9 @@ async def test_stop_cancels_active_local_stt_download_task(
     )
 
     await controller.stop()
+
+    assert not active_download.done()
+    await controller.application_adapters.close()
 
     assert active_download.done()
     assert owner.download_task is None
@@ -980,6 +1018,7 @@ async def test_local_qwen_successful_runtime_install_retries_enable_once(
     monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_switch)
 
     controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.self_stt_commands = _typed_self_commands(switch_calls)
     controller.settings = settings
     controller.hub = DummyWarmupHub()
     controller._local_stt_install_state = LocalSTTInstallState(status="missing")
@@ -989,7 +1028,7 @@ async def test_local_qwen_successful_runtime_install_retries_enable_once(
     assert download_task is not None
     await download_task
 
-    assert rebuild_calls == ["rebuild"]
+    assert rebuild_calls == []
     assert switch_calls == [True]
     assert dashboard.local_stt_notice_status is None
     assert controller_module.t("local_stt.download_success") not in status_messages
@@ -1155,6 +1194,7 @@ async def test_local_qwen_reenable_during_runtime_install_rearms_pending_auto_en
     monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_switch)
 
     controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.self_stt_commands = _typed_self_commands(switch_calls)
     controller.settings = settings
     controller.hub = DummyWarmupHub()
     controller._local_stt_install_state = LocalSTTInstallState(status="missing")
@@ -1173,7 +1213,7 @@ async def test_local_qwen_reenable_during_runtime_install_rearms_pending_auto_en
     assert download_task is not None
     await download_task
 
-    assert rebuild_calls == ["rebuild"]
+    assert rebuild_calls == []
     assert switch_calls == [False, True]
     assert dashboard.stt_enabled is True
 

@@ -832,6 +832,7 @@ def derive_translation_runtime_intent_from_compatibility(
     deepseek_model: object = None,
     cerebras_model: object = None,
     concurrency_limit: object = None,
+    connection_history: Mapping[str, str] | None = None,
 ) -> TranslationRuntimeIntent:
     provider = _normalize_allowed(
         provider_llm,
@@ -849,6 +850,12 @@ def derive_translation_runtime_intent_from_compatibility(
         default="default",
     )
     concurrency = _normalize_positive_int(concurrency_limit, default=5)
+
+    def history_connection_or_default(model: TranslationModelName) -> TranslationConnectionName:
+        candidate = connection_history.get(model) if connection_history is not None else None
+        if candidate in TRANSLATION_CONNECTIONS_BY_MODEL[model]:
+            return cast(TranslationConnectionName, candidate)
+        return _default_translation_connection(model)
 
     if provider == PROVIDER_OPENROUTER:
         if openrouter_model_value == OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT:
@@ -872,13 +879,19 @@ def derive_translation_runtime_intent_from_compatibility(
                 concurrency_limit=concurrency,
             )
         if openrouter_model_value == OPENROUTER_MODEL_QWEN_35_FLASH_02_23:
-            return TranslationRuntimeIntent(
-                model=TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH,
-                connection=_translation_connection_from_openrouter_source(
-                    openrouter_source,
+            if connection_history is None:
+                return TranslationRuntimeIntent(
                     model=TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH,
-                    provider_routing=provider_routing,
-                ),
+                    connection=_translation_connection_from_openrouter_source(
+                        openrouter_source,
+                        model=TRANSLATION_MODEL_OPENROUTER_QWEN_35_FLASH,
+                        provider_routing=provider_routing,
+                    ),
+                    concurrency_limit=concurrency,
+                )
+            return TranslationRuntimeIntent(
+                model=TRANSLATION_MODEL_DEEPSEEK_V4_FLASH,
+                connection=history_connection_or_default(TRANSLATION_MODEL_DEEPSEEK_V4_FLASH),
                 concurrency_limit=concurrency,
             )
         if openrouter_model_value == OPENROUTER_MODEL_GEMINI_3_FLASH:
@@ -952,7 +965,7 @@ def derive_translation_runtime_intent_from_compatibility(
         ):
             return TranslationRuntimeIntent(
                 model=TRANSLATION_MODEL_DEEPSEEK_V4_FLASH,
-                connection=_default_translation_connection(TRANSLATION_MODEL_DEEPSEEK_V4_FLASH),
+                connection=history_connection_or_default(TRANSLATION_MODEL_DEEPSEEK_V4_FLASH),
                 concurrency_limit=concurrency,
             )
         return TranslationRuntimeIntent(
@@ -1308,6 +1321,7 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
         primary=primary,
         fallback=fallback_plan,
         concurrency_limit=translation.concurrency_limit,
+        qwen_low_latency_mode=runtime_input.self_stt.low_latency_enabled,
     )
 
 

@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -52,11 +58,95 @@ class BackupCreationError(OSError):
     pass
 
 
+_PATH_LOCKS_GUARD = threading.Lock()
+_PATH_LOCKS: dict[Path, threading.RLock] = {}
+_HELD_PATHS = threading.local()
+
+
+class CanonicalSettingsLockTimeout(TimeoutError):
+    pass
+
+
+@contextmanager
+def canonical_settings_path_lock(path: Path, *, timeout_s: float = 10.0) -> Iterator[None]:
+    resolved = path.resolve()
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.setdefault(resolved, threading.RLock())
+    with lock:
+        held = getattr(_HELD_PATHS, "values", set())
+        if resolved in held:
+            yield
+            return
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = resolved.with_name(f".{resolved.name}.lock")
+        with lock_path.open("a+b") as handle:
+            deadline = time.monotonic() + timeout_s
+            while True:
+                try:
+                    _lock_file(handle)
+                    break
+                except OSError as exc:
+                    if time.monotonic() >= deadline:
+                        raise CanonicalSettingsLockTimeout(
+                            "canonical settings lock acquisition timed out"
+                        ) from exc
+                    time.sleep(0.01)
+            try:
+                _HELD_PATHS.values = {*held, resolved}
+                yield
+            finally:
+                _HELD_PATHS.values = held
+                _unlock_file(handle)
+
+
+def _lock_file(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        if handle.read(1) == b"":
+            handle.seek(0)
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def load_vnext_settings(
     path: Path,
     *,
     now: datetime | None = None,
     max_backup_attempts: int = 100,
+) -> VNextSettingsLoadResult:
+    with canonical_settings_path_lock(path):
+        return _load_vnext_settings_locked(
+            path,
+            now=now,
+            max_backup_attempts=max_backup_attempts,
+        )
+
+
+def _load_vnext_settings_locked(
+    path: Path,
+    *,
+    now: datetime | None,
+    max_backup_attempts: int,
 ) -> VNextSettingsLoadResult:
     try:
         original_bytes = path.read_bytes()
@@ -122,15 +212,16 @@ def load_vnext_settings(
 
 
 def save_vnext_settings(path: Path, settings: AppSettingsVNext) -> VNextSettingsSaveResult:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(path, serialization.to_json_text(settings), encoding="utf-8")
-    except Exception as exc:
-        return VNextSettingsSaveResult(
-            status=SettingsPersistenceStatus.SAVE_FAILED,
-            error=_error(SettingsPersistenceStatus.SAVE_FAILED, exc),
-        )
-    return VNextSettingsSaveResult(status=SettingsPersistenceStatus.SUCCESS)
+    with canonical_settings_path_lock(path):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(path, serialization.to_json_text(settings), encoding="utf-8")
+        except Exception as exc:
+            return VNextSettingsSaveResult(
+                status=SettingsPersistenceStatus.SAVE_FAILED,
+                error=_error(SettingsPersistenceStatus.SAVE_FAILED, exc),
+            )
+        return VNextSettingsSaveResult(status=SettingsPersistenceStatus.SUCCESS)
 
 
 def _requires_canonical_save(raw: dict[str, Any], settings: AppSettingsVNext) -> bool:
@@ -213,10 +304,14 @@ def previous_schema_version_label(raw: dict[str, Any]) -> str:
 
 
 def _atomic_write_text(path: Path, content: str, *, encoding: str) -> None:
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(name)
     try:
-        tmp_path.write_text(content, encoding=encoding)
-        tmp_path.replace(path)
+        with os.fdopen(descriptor, "w", encoding=encoding) as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
     except Exception:
         try:
             tmp_path.unlink(missing_ok=True)

@@ -13,6 +13,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -212,12 +213,24 @@ async def _peer_generation_probe() -> dict[str, Any]:
     from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, _PeerHubVadSink
 
     class Hub:
-        peer_stt = None
-
         def __init__(self) -> None:
             self.events: list[object] = []
+            self.peer_stt = object()
 
-        async def handle_peer_vad_event(self, event: object) -> None:
+        def lease_stt_provider(self, _slot):  # noqa: ANN001, ANN201
+            provider = self.peer_stt
+            return SimpleNamespace(
+                current=provider,
+                is_current=provider is self.peer_stt,
+                slot="peer_stt",
+                identity="evidence-peer",
+                generation=0,
+            )
+
+        async def handle_peer_vad_event(
+            self, event: object, *, stt_provider=None
+        ) -> None:  # noqa: ANN001
+            _ = stt_provider
             self.events.append(event)
 
         async def replace_peer_stt_provider(self, provider: object | None) -> None:
@@ -227,14 +240,14 @@ async def _peer_generation_probe() -> dict[str, Any]:
     runtime = PeerChannelRuntime(
         hub=hub,
         clock=SystemClock(),
-        stt_factory=lambda *_args: None,
+        provider_read_port=hub,
         source_factory=lambda *_args: None,
         vad_factory=lambda *_args: None,
         vad_model_resolver=lambda: Path(),
         run_audio_loop=lambda **_kwargs: asyncio.sleep(0),
     )
     generation = runtime._generation
-    sink = _PeerHubVadSink(hub=hub, runtime=runtime, generation=generation)
+    sink = _PeerHubVadSink(runtime=runtime, generation=generation)
     await runtime.close()
     attempted = 1
     await sink.handle_vad_event(object())
@@ -253,12 +266,24 @@ def _active_peer_publication_gate() -> tuple[Any, Any, Any, dict[str, Any]]:
     from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, _PeerHubVadSink
 
     class Hub:
-        peer_stt = None
-
         def __init__(self) -> None:
             self.events: list[object] = []
+            self.peer_stt = object()
 
-        async def handle_peer_vad_event(self, event: object) -> None:
+        def lease_stt_provider(self, _slot):  # noqa: ANN001, ANN201
+            provider = self.peer_stt
+            return SimpleNamespace(
+                current=provider,
+                is_current=provider is self.peer_stt,
+                slot="peer_stt",
+                identity="evidence-peer",
+                generation=0,
+            )
+
+        async def handle_peer_vad_event(
+            self, event: object, *, stt_provider=None
+        ) -> None:  # noqa: ANN001
+            _ = stt_provider
             self.events.append(event)
 
         async def replace_peer_stt_provider(self, provider: object | None) -> None:
@@ -268,7 +293,7 @@ def _active_peer_publication_gate() -> tuple[Any, Any, Any, dict[str, Any]]:
     runtime = PeerChannelRuntime(
         hub=hub,
         clock=SystemClock(),
-        stt_factory=lambda *_args: None,
+        provider_read_port=hub,
         source_factory=lambda *_args: None,
         vad_factory=lambda *_args: None,
         vad_model_resolver=lambda: Path(),
@@ -276,7 +301,7 @@ def _active_peer_publication_gate() -> tuple[Any, Any, Any, dict[str, Any]]:
     )
     runtime._desired_active = True
     generation = runtime._generation
-    sink = _PeerHubVadSink(hub=hub, runtime=runtime, generation=generation)
+    sink = _PeerHubVadSink(runtime=runtime, generation=generation)
     facts = {"generation_before": generation, "attempted": 0, "published": 0}
 
     async def publish() -> None:

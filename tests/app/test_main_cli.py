@@ -8,7 +8,7 @@ import logging
 import sys
 from logging.handlers import QueueHandler
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -56,112 +56,138 @@ def test_main_rejects_removed_cli_commands(argv, capsys) -> None:
     assert "invalid choice" in capsys.readouterr().err
 
 
-def test_main_run_gui_invokes_flet_app(monkeypatch, tmp_path) -> None:
-    calls: dict[str, object] = {}
+def _install_async_gui_harness(monkeypatch, tmp_path, calls, *, on_main_gui=None) -> None:
+    from puripuly_heart.app import wiring_composition
+    from puripuly_heart.app.adapters import overlay_lifecycle_production
+    from puripuly_heart.ui import app as ui_app
+    from puripuly_heart.ui import fonts
+
+    class Runtime:
+        async def start(self, *, auto_flush_osc=True) -> None:
+            calls["runtime_start"] = auto_flush_osc
+
+        async def shutdown(self) -> None:
+            calls["runtime_stop"] = int(calls.get("runtime_stop", 0)) + 1
+
+    class Overlay:
+        async def startup(self) -> None:
+            calls["overlay_start"] = True
+
+        async def shutdown(self) -> None:
+            calls["overlay_stop"] = int(calls.get("overlay_stop", 0)) + 1
+
+    class Controller:
+        async def prepare_presentation(self) -> None:
+            calls["presentation_prepare"] = True
+
+        async def start_rendering(self) -> None:
+            calls["render_start"] = True
+
+        async def freeze_application_ingress(self) -> None:
+            calls["ingress_freeze"] = True
+
+        async def stop_rendering(self, failures=()) -> None:
+            calls["render_stop"] = len(failures)
+
+    class Page:
+        on_disconnect = None
+
+        def run_task(self, handler):  # noqa: ANN001, ANN201
+            return asyncio.create_task(handler())
+
+    overlay = Overlay()
+    runtime = Runtime()
+    monkeypatch.setattr(
+        wiring_composition,
+        "create_overlay_production_composition",
+        lambda **_kwargs: SimpleNamespace(
+            commands=overlay,
+            state=object(),
+            transactions=object(),
+            ui_projection=object(),
+            audio_gate=object(),
+        ),
+    )
+    monkeypatch.setattr(
+        wiring_composition, "create_application_runtime_host", lambda *_args, **_kwargs: runtime
+    )
+    monkeypatch.setattr(
+        overlay_lifecycle_production,
+        "resolve_overlay_lifecycle_configuration",
+        lambda _settings: object(),
+    )
+
+    async def main_gui(page, **kwargs):  # noqa: ANN001, ANN003, ANN201
+        calls["config_path"] = kwargs["config_path"]
+        calls["debug_ui_preview"] = kwargs["debug_ui_preview"]
+        calls["defer_startup"] = kwargs["defer_startup"]
+        if on_main_gui is not None:
+            on_main_gui()
+        return SimpleNamespace(controller=Controller())
+
+    async def complete_main_gui_startup(_app, _page) -> None:
+        calls["ui_complete"] = True
+
+    monkeypatch.setattr(ui_app, "main_gui", main_gui)
+    monkeypatch.setattr(ui_app, "complete_main_gui_startup", complete_main_gui_startup)
+    monkeypatch.setattr(fonts, "assets_dir", lambda: tmp_path)
 
     fake_flet = ModuleType("flet")
 
-    def fake_app(*, target, assets_dir):
-        calls["target"] = target
+    async def fake_app_async(*, target, assets_dir) -> None:
         calls["assets_dir"] = assets_dir
+        page = Page()
+        await target(page)
+        page.on_disconnect(None)
 
-    fake_flet.app = fake_app
+    fake_flet.app_async = fake_app_async
     monkeypatch.setitem(sys.modules, "flet", fake_flet)
 
-    fake_ui_app = ModuleType("puripuly_heart.ui.app")
 
-    async def main_gui(page, *, config_path, debug_ui_preview=False):
-        _ = page
-        calls["config_path"] = config_path
-        calls["debug_ui_preview"] = debug_ui_preview
+def test_gui_cli_tests_do_not_reintroduce_synchronous_flet_contract() -> None:
+    source = Path(__file__).read_text(encoding="utf-8")
 
-    fake_ui_app.main_gui = main_gui
-    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.app", fake_ui_app)
+    assert "fake_flet" + ".app =" not in source
+    assert "calls" + '["target"]' not in source
+    assert "asyncio.run" + "(calls" not in source
 
-    fake_fonts = ModuleType("puripuly_heart.ui.fonts")
-    fake_fonts.assets_dir = lambda: tmp_path
-    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.fonts", fake_fonts)
+
+def test_main_run_gui_invokes_flet_app(monkeypatch, tmp_path) -> None:
+    calls: dict[str, object] = {}
+    _install_async_gui_harness(monkeypatch, tmp_path, calls)
 
     config_path = tmp_path / "settings.json"
     result = main_module.main(["--config", str(config_path), "run-gui"])
 
     assert result == 0
     assert calls["assets_dir"] == str(tmp_path)
-    assert callable(calls["target"])
-    asyncio.run(calls["target"](object()))
     assert calls["config_path"] == config_path
     assert calls["debug_ui_preview"] is False
+    assert calls["runtime_stop"] == calls["overlay_stop"] == 1
 
 
 def test_main_default_invokes_gui(monkeypatch, tmp_path) -> None:
     calls: dict[str, object] = {}
-
-    fake_flet = ModuleType("flet")
-
-    def fake_app(*, target, assets_dir):
-        calls["target"] = target
-        calls["assets_dir"] = assets_dir
-
-    fake_flet.app = fake_app
-    monkeypatch.setitem(sys.modules, "flet", fake_flet)
-
-    fake_ui_app = ModuleType("puripuly_heart.ui.app")
-
-    async def main_gui(page, *, config_path, debug_ui_preview=False):
-        _ = page
-        calls["config_path"] = config_path
-        calls["debug_ui_preview"] = debug_ui_preview
-
-    fake_ui_app.main_gui = main_gui
-    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.app", fake_ui_app)
-
-    fake_fonts = ModuleType("puripuly_heart.ui.fonts")
-    fake_fonts.assets_dir = lambda: tmp_path
-    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.fonts", fake_fonts)
+    _install_async_gui_harness(monkeypatch, tmp_path, calls)
 
     config_path = tmp_path / "settings.json"
     result = main_module.main(["--config", str(config_path)])
 
     assert result == 0
     assert calls["assets_dir"] == str(tmp_path)
-    assert callable(calls["target"])
-    asyncio.run(calls["target"](object()))
     assert calls["config_path"] == config_path
     assert calls["debug_ui_preview"] is False
 
 
 def test_main_run_gui_passes_debug_ui_preview_flag(monkeypatch, tmp_path) -> None:
     calls: dict[str, object] = {}
-
-    fake_flet = ModuleType("flet")
-
-    def fake_app(*, target, assets_dir):
-        calls["target"] = target
-        calls["assets_dir"] = assets_dir
-
-    fake_flet.app = fake_app
-    monkeypatch.setitem(sys.modules, "flet", fake_flet)
-
-    fake_ui_app = ModuleType("puripuly_heart.ui.app")
-
-    async def main_gui(page, *, config_path, debug_ui_preview=False):
-        _ = page
-        calls["config_path"] = config_path
-        calls["debug_ui_preview"] = debug_ui_preview
-
-    fake_ui_app.main_gui = main_gui
-    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.app", fake_ui_app)
-
-    fake_fonts = ModuleType("puripuly_heart.ui.fonts")
-    fake_fonts.assets_dir = lambda: tmp_path
-    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.fonts", fake_fonts)
+    _install_async_gui_harness(monkeypatch, tmp_path, calls)
 
     config_path = tmp_path / "settings.json"
     result = main_module.main(["--config", str(config_path), "run-gui", "--debug-ui-preview"])
 
     assert result == 0
     assert calls["assets_dir"] == str(tmp_path)
-    asyncio.run(calls["target"](object()))
     assert calls["config_path"] == config_path
     assert calls["debug_ui_preview"] is True
 
@@ -173,6 +199,7 @@ def test_main_run_gui_force_closes_logging_when_gui_runtime_logging_leaks(
     root_logger.handlers.clear()
     root_logger.propagate = False
     leaked_services: list[SessionRuntimeLoggingService] = []
+    calls: dict[str, object] = {}
     monkeypatch.setattr("puripuly_heart.core.runtime_logging.user_config_dir", lambda: tmp_path)
 
     monkeypatch.setattr(
@@ -181,27 +208,10 @@ def test_main_run_gui_force_closes_logging_when_gui_runtime_logging_leaks(
         lambda: configure_main_logging(root_logger=root_logger),
     )
 
-    fake_flet = ModuleType("flet")
-
-    def fake_app(*, target, assets_dir):
-        _ = assets_dir
-        asyncio.run(target(object()))
-
-    fake_flet.app = fake_app
-    monkeypatch.setitem(sys.modules, "flet", fake_flet)
-
-    fake_ui_app = ModuleType("puripuly_heart.ui.app")
-
-    async def main_gui(page, *, config_path, debug_ui_preview=False):
-        _ = page, config_path, debug_ui_preview
+    def leak_runtime_logging() -> None:
         leaked_services.append(SessionRuntimeLoggingService(root_logger=root_logger))
 
-    fake_ui_app.main_gui = main_gui
-    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.app", fake_ui_app)
-
-    fake_fonts = ModuleType("puripuly_heart.ui.fonts")
-    fake_fonts.assets_dir = lambda: tmp_path
-    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.fonts", fake_fonts)
+    _install_async_gui_harness(monkeypatch, tmp_path, calls, on_main_gui=leak_runtime_logging)
 
     try:
         result = main_module.main(["--config", str(tmp_path / "settings.json"), "run-gui"])
@@ -218,38 +228,255 @@ def test_main_run_gui_force_closes_logging_when_gui_runtime_logging_leaks(
 
 def test_main_default_gui_passes_debug_ui_preview_flag(monkeypatch, tmp_path) -> None:
     calls: dict[str, object] = {}
-
-    fake_flet = ModuleType("flet")
-
-    def fake_app(*, target, assets_dir):
-        calls["target"] = target
-        calls["assets_dir"] = assets_dir
-
-    fake_flet.app = fake_app
-    monkeypatch.setitem(sys.modules, "flet", fake_flet)
-
-    fake_ui_app = ModuleType("puripuly_heart.ui.app")
-
-    async def main_gui(page, *, config_path, debug_ui_preview=False):
-        _ = page
-        calls["config_path"] = config_path
-        calls["debug_ui_preview"] = debug_ui_preview
-
-    fake_ui_app.main_gui = main_gui
-    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.app", fake_ui_app)
-
-    fake_fonts = ModuleType("puripuly_heart.ui.fonts")
-    fake_fonts.assets_dir = lambda: tmp_path
-    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.fonts", fake_fonts)
+    _install_async_gui_harness(monkeypatch, tmp_path, calls)
 
     config_path = tmp_path / "settings.json"
     result = main_module.main(["--config", str(config_path), "--debug-ui-preview"])
 
     assert result == 0
     assert calls["assets_dir"] == str(tmp_path)
-    asyncio.run(calls["target"](object()))
     assert calls["config_path"] == config_path
     assert calls["debug_ui_preview"] is True
+
+
+def test_main_owns_gui_lifecycle_start_disconnect_and_awaited_stop(monkeypatch, tmp_path) -> None:
+    events: list[str] = []
+    loop_ids: list[int] = []
+    from puripuly_heart.app import wiring_composition
+    from puripuly_heart.app.adapters import overlay_lifecycle_production
+    from puripuly_heart.ui import app as ui_app
+
+    class Controller:
+        async def prepare_presentation(self) -> None:
+            loop_ids.append(id(asyncio.get_running_loop()))
+            events.append("prepare")
+
+        async def start_rendering(self) -> None:
+            events.append("render_start")
+
+        async def freeze_application_ingress(self) -> None:
+            loop_ids.append(id(asyncio.get_running_loop()))
+            events.append("freeze")
+
+        async def stop_rendering(self, failures=()) -> None:
+            events.append(f"render_stop:{len(failures)}")
+
+    class Runtime:
+        async def start(self, *, auto_flush_osc=True) -> None:
+            events.append(f"runtime_start:{auto_flush_osc}")
+
+        async def shutdown(self) -> None:
+            loop_ids.append(id(asyncio.get_running_loop()))
+            await asyncio.sleep(0)
+            events.append("runtime_stop")
+
+    class Overlay:
+        async def startup(self) -> None:
+            events.append("overlay_start")
+
+        async def shutdown(self) -> None:
+            events.append("overlay_stop")
+
+    class Page:
+        on_disconnect = None
+
+        def __init__(self) -> None:
+            self.tasks = []
+
+        def run_task(self, callback):  # noqa: ANN001, ANN201
+            task = asyncio.create_task(callback())
+            self.tasks.append(task)
+            return task
+
+    fake_flet = ModuleType("flet")
+
+    async def fake_app_async(*, target, assets_dir) -> None:
+        _ = assets_dir
+
+        async def run() -> None:
+            page = Page()
+            await target(page)
+            events.append("target_return")
+            page.on_disconnect(None)
+            events.append("flet_return")
+
+        await run()
+
+    fake_flet.app_async = fake_app_async
+    monkeypatch.setitem(sys.modules, "flet", fake_flet)
+
+    runtime = Runtime()
+    overlay = Overlay()
+    monkeypatch.setattr(
+        wiring_composition,
+        "create_overlay_production_composition",
+        lambda **_kwargs: SimpleNamespace(
+            commands=overlay,
+            state=object(),
+            transactions=object(),
+            ui_projection=object(),
+            audio_gate=object(),
+        ),
+    )
+    monkeypatch.setattr(
+        wiring_composition, "create_application_runtime_host", lambda *_args, **_kwargs: runtime
+    )
+    monkeypatch.setattr(
+        overlay_lifecycle_production,
+        "resolve_overlay_lifecycle_configuration",
+        lambda _settings: object(),
+    )
+    monkeypatch.setattr(
+        ui_app,
+        "main_gui",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=SimpleNamespace(controller=Controller())),
+    )
+
+    async def complete(_app, _page) -> None:
+        events.append("ui_complete")
+
+    monkeypatch.setattr(ui_app, "complete_main_gui_startup", complete)
+    monkeypatch.setattr(main_module, "_call_load_settings_or_default", lambda *_a, **_k: object())
+
+    assert (
+        main_module._run_gui(
+            tmp_path / "settings.json",
+            debug_ui_preview=False,
+            allow_stable_settings_import=False,
+        )
+        == 0
+    )
+    assert events == [
+        "prepare",
+        "runtime_start:True",
+        "overlay_start",
+        "render_start",
+        "ui_complete",
+        "target_return",
+        "flet_return",
+        "freeze",
+        "overlay_stop",
+        "runtime_stop",
+        "render_stop:0",
+    ]
+    assert len(set(loop_ids)) == 1
+
+
+@pytest.mark.parametrize("failure_stage", ["ui", "complete_startup"])
+def test_main_closes_constructed_resources_when_flet_swallows_construction_failure(
+    monkeypatch, tmp_path, failure_stage
+) -> None:
+    from puripuly_heart.app import wiring_composition
+    from puripuly_heart.app.adapters import overlay_lifecycle_production
+    from puripuly_heart.app.services.application_lifecycle import ApplicationStartupError
+    from puripuly_heart.ui import app as ui_app
+
+    events: list[str] = []
+
+    class SocketRuntime:
+        def __init__(self) -> None:
+            self.socket_open = True
+            self.close_calls = 0
+
+        async def start(self, *, auto_flush_osc=True) -> None:
+            _ = auto_flush_osc
+
+        async def shutdown(self) -> None:
+            self.close_calls += 1
+            self.socket_open = False
+            events.append("socket_closed")
+
+    class Overlay:
+        close_calls = 0
+
+        async def startup(self) -> None:
+            return None
+
+        async def shutdown(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                events.append("overlay_close_failed")
+                raise RuntimeError("overlay close failed")
+            events.append("overlay_closed")
+
+    runtime = SocketRuntime()
+    overlay = Overlay()
+
+    fake_flet = ModuleType("flet")
+
+    async def fake_app_async(*, target, assets_dir) -> None:
+        _ = assets_dir
+        try:
+            await target(SimpleNamespace())
+        except BaseException:
+            events.append("flet_swallowed_target_failure")
+
+    fake_flet.app_async = fake_app_async
+    monkeypatch.setitem(sys.modules, "flet", fake_flet)
+    monkeypatch.setattr(
+        wiring_composition,
+        "create_overlay_production_composition",
+        lambda **_kwargs: SimpleNamespace(
+            commands=overlay,
+            state=object(),
+            transactions=object(),
+            ui_projection=object(),
+            audio_gate=object(),
+        ),
+    )
+    monkeypatch.setattr(
+        wiring_composition, "create_application_runtime_host", lambda *_args, **_kwargs: runtime
+    )
+    monkeypatch.setattr(
+        overlay_lifecycle_production,
+        "resolve_overlay_lifecycle_configuration",
+        lambda _settings: object(),
+    )
+
+    async def fail_ui_construction(*_args, **_kwargs):
+        if failure_stage == "ui":
+            raise ValueError("presentation construction failed")
+        return SimpleNamespace(controller=Controller())
+
+    class Controller:
+        async def prepare_presentation(self) -> None:
+            return None
+
+        async def start_rendering(self) -> None:
+            return None
+
+        async def freeze_application_ingress(self) -> None:
+            return None
+
+        async def stop_rendering(self, failures=()) -> None:
+            _ = failures
+
+    monkeypatch.setattr(ui_app, "main_gui", fail_ui_construction)
+
+    async def complete_startup(*_args) -> None:
+        if failure_stage == "complete_startup":
+            raise ValueError("complete startup failed")
+
+    monkeypatch.setattr(ui_app, "complete_main_gui_startup", complete_startup)
+    monkeypatch.setattr(main_module, "_call_load_settings_or_default", lambda *_a, **_k: object())
+
+    with pytest.raises(ApplicationStartupError) as raised:
+        main_module._run_gui(
+            tmp_path / "settings.json",
+            debug_ui_preview=False,
+            allow_stable_settings_import=False,
+        )
+
+    assert isinstance(raised.value.exceptions[0], ValueError)
+    assert runtime.socket_open is False
+    assert runtime.close_calls == 1
+    assert overlay.close_calls == 2
+    expected = ["overlay_close_failed", "socket_closed"]
+    if failure_stage == "ui":
+        expected.extend(["overlay_closed", "flet_swallowed_target_failure"])
+    else:
+        expected.extend(["flet_swallowed_target_failure", "overlay_closed"])
+    assert events == expected
 
 
 def test_real_main_gui_accepts_debug_ui_preview_keyword_only() -> None:
@@ -261,6 +488,28 @@ def test_real_main_gui_accepts_debug_ui_preview_keyword_only() -> None:
     debug_ui_preview = parameters["debug_ui_preview"]
     assert debug_ui_preview.kind is inspect.Parameter.KEYWORD_ONLY
     assert debug_ui_preview.default is False
+
+
+def test_main_production_overlay_graph_is_coherent_and_typed() -> None:
+    from puripuly_heart.app.adapters.overlay_runtime_effects import (
+        ProductionOverlaySafeLog,
+        ProductionVrcMicrophoneEffects,
+    )
+    from puripuly_heart.app.adapters.overlay_ui_projection import ProductionUiProjection
+    from puripuly_heart.app.wiring_composition import create_overlay_production_composition
+
+    composition = create_overlay_production_composition()
+
+    assert composition.commands is composition.state
+    assert composition.commands.runtime is composition.runtime
+    assert composition.runtime.renderer_output is composition.ui_projection
+    assert composition.runtime.dashboard is composition.ui_projection
+    assert isinstance(composition.ui_projection, ProductionUiProjection)
+    assert isinstance(composition.logging, ProductionOverlaySafeLog)
+    assert composition.runtime.safe_log is composition.logging
+    assert isinstance(composition.vrc, ProductionVrcMicrophoneEffects)
+    assert composition.runtime.vrc_microphone is composition.vrc
+    assert composition.transactions is not None
 
 
 def test_main_local_qwen_runtime_check_dispatches_runner(monkeypatch, tmp_path) -> None:

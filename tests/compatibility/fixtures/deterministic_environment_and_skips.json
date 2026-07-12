@@ -1,0 +1,33 @@
+{
+  "current_commit": "b4ace2631793aa1a1e384c0440b8ec7f315559ae",
+  "environment": {
+    "home": "isolated temporary directory",
+    "userprofile": "isolated temporary directory",
+    "appdata": "isolated temporary directory",
+    "localappdata": "isolated temporary directory",
+    "temp": "isolated temporary directory outside the repository",
+    "logs": "isolated temporary directory",
+    "secrets": "known provider and passphrase environment variables removed",
+    "network": "deterministic tier uses fakes; integration tests remain disabled"
+  },
+  "result": {
+    "tests": 3992,
+    "passed": 3959,
+    "failed": 0,
+    "skipped": 33
+  },
+  "skip_classes": {
+    "integration": {
+      "count": 30,
+      "reason": "INTEGRATION=1 not set; live providers, local services, audio assets, and external endpoints are release-tier rather than deterministic evidence"
+    },
+    "dependency": {
+      "count": 3,
+      "reason": "Windows PowerShell executable unavailable for local-STT installer script tests"
+    },
+    "platform": {"count": 0},
+    "temporarily_disabled": {"count": 0},
+    "unknown": {"count": 0}
+  },
+  "junit": ".data/iw-evidence/current/junit-foundation-final.xml"
+}

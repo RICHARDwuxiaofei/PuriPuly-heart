@@ -68,6 +68,11 @@ from puripuly_heart.core.runtime.output import (
     OutputRuntime,
 )
 from puripuly_heart.core.runtime.provider_handle import ProviderRuntimeHandle
+from puripuly_heart.core.runtime.provider_state import (
+    ProviderStateCell,
+    ProviderStateSnapshot,
+    ResourceRef,
+)
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadEvent
 from puripuly_heart.domain.events import (
     STTErrorEvent,
@@ -97,6 +102,49 @@ _PROMO_INTERVAL_SEC: float = 300.0  # 5 minutes
 _RELAXED_OVERLAP_MIN_CHARS: int = 3
 _BOUNDARY_PUNCT = {".", ",", ";", ":", "!", "?"}
 _SOFT_REUSE_PUNCT = {".", ",", "…", "。", "，", "、"}
+
+
+def _unique_refs(refs) -> tuple[ResourceRef, ...]:  # noqa: ANN001
+    unique: dict[tuple[str, int], ResourceRef] = {}
+    for ref in refs:
+        if ref is not None:
+            unique.setdefault((ref.identity, id(ref.resource)), ref)
+    return tuple(unique.values())
+
+
+def _inactive_refs(
+    refs, snapshot: ProviderStateSnapshot
+) -> tuple[ResourceRef, ...]:  # noqa: ANN001
+    active = {
+        (state.identity, id(state.provider))
+        for slot in ("llm", "self_stt", "peer_stt")
+        if (state := snapshot.slot(slot)).ref is not None
+    }
+    return tuple(
+        ref for ref in _unique_refs(refs) if (ref.identity, id(ref.resource)) not in active
+    )
+
+
+def _same_resource_ref(left: ResourceRef, right: ResourceRef) -> bool:
+    return left.identity == right.identity and left.resource is right.resource
+
+
+def _snapshot_refs(snapshot: ProviderStateSnapshot) -> tuple[ResourceRef, ...]:
+    return _unique_refs(
+        state.ref
+        for slot in ("llm", "self_stt", "peer_stt")
+        if (state := snapshot.slot(slot)).ref is not None
+    )
+
+
+def _inactive_state_refs(refs, active) -> tuple[ResourceRef, ...]:  # noqa: ANN001
+    return tuple(
+        ref
+        for ref in _unique_refs(refs)
+        if not any(_same_resource_ref(ref, active_ref) for active_ref in active.slots.values())
+    )
+
+
 _SELF_RUNTIME_FIELDS = {
     "stt": "stt",
     "_stt_task": "stt_task",
@@ -175,6 +223,10 @@ class ClientHub:
     translation_enabled: bool = True
     peer_translation_enabled: bool = False
     integrated_context_enabled: bool = False
+    clipboard_auto_translate_enabled: bool = False
+    runtime_locale: str = "en"
+    runtime_overlay_directive: object | None = None
+    runtime_dashboard_facts: object | None = None
     hangover_s: float = (
         DEFAULT_STABLE_VAD_HANGOVER_MS / 1000.0
     )  # Self VAD hangover in seconds for user-facing E2E latency.
@@ -238,6 +290,8 @@ class ClientHub:
     _self_stt_provider_runtime: ProviderRuntimeHandle = field(init=False)
     _peer_stt_provider_runtime: ProviderRuntimeHandle = field(init=False)
     _llm_provider_runtime: ProviderRuntimeHandle = field(init=False)
+    _provider_state: ProviderStateCell = field(init=False)
+    _provider_transition_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock)
 
     def __post_init__(self) -> None:
         self.output_runtime = OutputRuntime(chatbox=self.osc, clock=self.clock)
@@ -256,7 +310,7 @@ class ClientHub:
             merge_buffer=self._merge_buffer,
             alias_target=self,
         )
-        self.peer_runtime = ChannelRuntime(channel="peer", stt=self.peer_stt)
+        self.peer_runtime = ChannelRuntime(channel="peer", stt=self.peer_stt, alias_target=self)
         self.peer_final_runs = PeerFinalRunsLifecycleOwner(
             on_child_created=self._on_peer_final_run_child_created,
             on_child_started=self._on_peer_final_run_child_started,
@@ -264,6 +318,11 @@ class ClientHub:
             on_child_terminal=self._on_peer_final_run_child_terminal,
             on_parent_closed=self._on_peer_final_run_parent_closed,
             on_parent_rejected=self._on_peer_final_run_parent_rejected,
+        )
+        self._provider_state = ProviderStateCell(
+            llm=self.llm,
+            self_stt=self.stt,
+            peer_stt=self.peer_stt,
         )
         self._self_stt_provider_runtime = ProviderRuntimeHandle(
             name="self_stt",
@@ -274,6 +333,8 @@ class ClientHub:
                 channel="self",
             ),
             state_changed=self._sync_provider_runtime_aliases,
+            state_cell=self._provider_state,
+            slot="self_stt",
         )
         self._peer_stt_provider_runtime = ProviderRuntimeHandle(
             name="peer_stt",
@@ -284,12 +345,25 @@ class ClientHub:
                 channel="peer",
             ),
             state_changed=self._sync_provider_runtime_aliases,
+            state_cell=self._provider_state,
+            slot="peer_stt",
         )
         self._llm_provider_runtime = ProviderRuntimeHandle(
             name="llm",
             provider=self.llm,
             state_changed=self._sync_provider_runtime_aliases,
+            state_cell=self._provider_state,
+            slot="llm",
         )
+        object.__setattr__(self, "stt", None)
+        object.__setattr__(self, "peer_stt", None)
+        object.__setattr__(self, "llm", None)
+        object.__setattr__(self, "_stt_task", None)
+        object.__setattr__(self, "_peer_stt_task", None)
+        object.__setattr__(self.self_runtime, "stt", None)
+        object.__setattr__(self.self_runtime, "stt_task", None)
+        object.__setattr__(self.peer_runtime, "stt", None)
+        object.__setattr__(self.peer_runtime, "stt_task", None)
         self.context_resolver = ContextResolver(
             clock=self.clock,
             local_time_window_s=self.context_time_window_s,
@@ -302,6 +376,20 @@ class ClientHub:
         self._sync_self_runtime_aliases()
 
     def __setattr__(self, name: str, value: object) -> None:
+        if name in {"stt", "peer_stt", "llm", "_stt_task", "_peer_stt_task"}:
+            handle_name = {
+                "stt": "_self_stt_provider_runtime",
+                "peer_stt": "_peer_stt_provider_runtime",
+                "llm": "_llm_provider_runtime",
+                "_stt_task": "_self_stt_provider_runtime",
+                "_peer_stt_task": "_peer_stt_provider_runtime",
+            }[name]
+            try:
+                object.__getattribute__(self, handle_name)
+            except AttributeError:
+                pass
+            else:
+                raise AttributeError(f"{name} is derived from the provider runtime handle")
         object.__setattr__(self, name, value)
         if name in {
             "clock",
@@ -344,8 +432,6 @@ class ClientHub:
                 output_runtime = None
             if output_runtime is not None:
                 output_runtime.chatbox = value  # type: ignore[assignment]
-        if name in {"stt", "peer_stt", "llm"}:
-            self._attach_provider_assignment(name, value)
         runtime_field = _SELF_RUNTIME_FIELDS.get(name)
         if runtime_field is None:
             return
@@ -355,6 +441,25 @@ class ClientHub:
             return
         object.__setattr__(runtime, runtime_field, value)
 
+    def __getattribute__(self, name: str) -> object:
+        handle_name = {
+            "stt": "_self_stt_provider_runtime",
+            "peer_stt": "_peer_stt_provider_runtime",
+            "llm": "_llm_provider_runtime",
+            "_stt_task": "_self_stt_provider_runtime",
+            "_peer_stt_task": "_peer_stt_provider_runtime",
+        }.get(name)
+        if handle_name is not None:
+            try:
+                handle = object.__getattribute__(self, handle_name)
+            except AttributeError:
+                pass
+            else:
+                if name in {"_stt_task", "_peer_stt_task"}:
+                    return handle.event_task
+                return handle.provider
+        return object.__getattribute__(self, name)
+
     @property
     def provider_runtime_handles(self) -> dict[str, ProviderRuntimeHandle]:
         return {
@@ -363,34 +468,18 @@ class ClientHub:
             "llm": self._llm_provider_runtime,
         }
 
-    def _attach_provider_assignment(self, name: str, value: object) -> None:
-        try:
-            if name == "stt":
-                handle = object.__getattribute__(self, "_self_stt_provider_runtime")
-            elif name == "peer_stt":
-                handle = object.__getattribute__(self, "_peer_stt_provider_runtime")
-            else:
-                handle = object.__getattribute__(self, "_llm_provider_runtime")
-        except AttributeError:
-            return
-        if handle.provider is not value:
-            handle.attach_provider_reference(value)
+    def provider_state_snapshot(self) -> ProviderStateSnapshot:
+        return self._provider_state.snapshot()
+
+    def lease_stt_provider(self, slot):  # noqa: ANN001, ANN201
+        if slot not in {"self_stt", "peer_stt"}:
+            raise ValueError("STT provider lease requires an STT slot")
+        return self._provider_state.lease(slot)
 
     def _sync_provider_runtime_aliases(self, _handle: ProviderRuntimeHandle | None = None) -> None:
-        object.__setattr__(self, "stt", self._self_stt_provider_runtime.provider)
-        object.__setattr__(self, "peer_stt", self._peer_stt_provider_runtime.provider)
-        object.__setattr__(self, "llm", self._llm_provider_runtime.provider)
-        object.__setattr__(self, "_stt_task", self._self_stt_provider_runtime.event_task)
-        object.__setattr__(self, "_peer_stt_task", self._peer_stt_provider_runtime.event_task)
-        if hasattr(self, "self_runtime"):
-            self.self_runtime.stt = self.stt
-            self.self_runtime.stt_task = self._stt_task
-        if hasattr(self, "peer_runtime"):
-            self.peer_runtime.stt = self.peer_stt
-            self.peer_runtime.stt_task = self._peer_stt_task
+        return
 
     def _sync_self_runtime_aliases(self) -> None:
-        self._stt_task = self.self_runtime.stt_task
         self._utterances = self.self_runtime.utterances
         self._translation_tasks = self.self_runtime.translation_tasks
         self._utterance_sources = self.self_runtime.utterance_sources
@@ -932,6 +1021,10 @@ class ClientHub:
         return event.message
 
     async def start(self, *, auto_flush_osc: bool = False) -> None:
+        async with self._provider_transition_lock:
+            await self._start_locked(auto_flush_osc=auto_flush_osc)
+
+    async def _start_locked(self, *, auto_flush_osc: bool = False) -> None:
         if self._running:
             return
         try:
@@ -946,6 +1039,10 @@ class ClientHub:
         self._sync_provider_runtime_aliases()
 
     async def stop(self) -> None:
+        async with self._provider_transition_lock:
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
         if (
             not self._running
             and not self._provider_runtime_handles_have_resources()
@@ -984,6 +1081,10 @@ class ClientHub:
         _raise_output_provider_runtime_close_failures(cleanup_failures)
 
     async def replace_stt_provider(self, stt: STTProvider | None) -> None:
+        async with self._provider_transition_lock:
+            await self._replace_stt_provider_locked(stt)
+
+    async def _replace_stt_provider_locked(self, stt: STTProvider | None) -> None:
         await self._self_stt_provider_runtime.stop_ingress()
         await self.reset_overlay_preview()
         await self.self_runtime.reset_runtime_state()
@@ -998,6 +1099,12 @@ class ClientHub:
         *,
         start: bool | None = None,
     ) -> None:
+        async with self._provider_transition_lock:
+            await self._replace_peer_stt_provider_locked(stt, start=start)
+
+    async def _replace_peer_stt_provider_locked(
+        self, stt: STTProvider | None, *, start: bool | None = None
+    ) -> None:
         await self._peer_stt_provider_runtime.stop_ingress()
         await self.peer_final_runs.cancel_pending()
         await self.peer_runtime.reset_runtime_state()
@@ -1010,12 +1117,21 @@ class ClientHub:
         self._sync_provider_runtime_aliases()
 
     async def start_peer_stt_provider_ingress(self, stt: STTProvider) -> None:
+        async with self._provider_transition_lock:
+            await self._start_peer_stt_provider_ingress_locked(stt)
+
+    async def _start_peer_stt_provider_ingress_locked(self, stt: STTProvider) -> None:
         if not self._running:
             return
         await self._peer_stt_provider_runtime.start_if_provider(stt)
         self._sync_provider_runtime_aliases()
 
-    async def drain_peer_stt_for_toggle_off(self, stt: STTProvider) -> None:
+    async def drain_peer_stt_for_toggle_off(
+        self,
+        stt: STTProvider,
+        *,
+        release_backend_after: float | None = None,
+    ) -> None:
         if self.peer_stt is not stt:
             return
         await self.peer_final_runs.cancel_pending()
@@ -1023,30 +1139,255 @@ class ClientHub:
         self._clear_peer_logical_turn_state()
         self._clear_latency_state(channel="peer")
         await self._peer_stt_provider_runtime.retire_for_dormant_reuse(stt)
+        if release_backend_after is not None:
+            await self._peer_stt_provider_runtime.schedule_idle_release(
+                release_backend_after=release_backend_after
+            )
         self._sync_provider_runtime_aliases()
 
     async def replace_llm_provider(self, llm: LLMProvider | None) -> None:
-        await self._llm_provider_runtime.replace_provider(llm, start=False)
-        self._sync_provider_runtime_aliases()
+        async with self._provider_transition_lock:
+            await self._llm_provider_runtime.replace_provider(llm, start=False)
+            self._sync_provider_runtime_aliases()
+
+    async def current_runtime_state(self):  # noqa: ANN201
+        from puripuly_heart.app.ports.runtime_resources import InstalledRuntimeState
+
+        return InstalledRuntimeState(
+            {
+                slot: ref
+                for slot, handle in self.provider_runtime_handles.items()
+                if (ref := handle.resource_ref) is not None
+            }
+        )
+
+    async def install_runtime_resources(self, staged):  # noqa: ANN001, ANN201
+        from puripuly_heart.app.ports.runtime_resources import (
+            RuntimeInstallFailure,
+            RuntimeInstallSuccess,
+        )
+
+        async with self._provider_transition_lock:
+            prior = self._provider_state.snapshot()
+            try:
+                replacements = self._validate_runtime_install(staged, prior)
+            except Exception:
+                active = await self.current_runtime_state()
+                return RuntimeInstallFailure(
+                    active=active,
+                    returned_candidates=_inactive_state_refs(staged.candidates.values(), active),
+                    restored=True,
+                    cause_code="runtime_install_validation_failed",
+                )
+            changed = tuple(replacements)
+            try:
+                for slot in changed:
+                    await self.provider_runtime_handles[slot]._quiesce_for_transition()
+            except BaseException:
+                rollback_failure = await self._restore_provider_snapshot(prior, changed)
+                active = await self.current_runtime_state()
+                return RuntimeInstallFailure(
+                    active=active,
+                    returned_candidates=_inactive_state_refs(staged.candidates.values(), active),
+                    displaced_prior=_inactive_state_refs(_snapshot_refs(prior), active),
+                    restored=rollback_failure is None,
+                    cause_code=rollback_failure or "runtime_install_precommit_quiesce_failed",
+                    origin_cause_code=(
+                        "runtime_install_precommit_quiesce_failed" if rollback_failure else None
+                    ),
+                )
+            try:
+                if staged.commit_guard is not None:
+                    await staged.commit_guard()
+            except BaseException:
+                rollback_failure = await self._restore_provider_snapshot(prior, changed)
+                active = await self.current_runtime_state()
+                return RuntimeInstallFailure(
+                    active=active,
+                    returned_candidates=_inactive_state_refs(staged.candidates.values(), active),
+                    displaced_prior=_inactive_state_refs(_snapshot_refs(prior), active),
+                    restored=rollback_failure is None,
+                    cause_code=rollback_failure or "runtime_install_commit_guard_failed",
+                    origin_cause_code=(
+                        "runtime_install_commit_guard_failed" if rollback_failure else None
+                    ),
+                )
+            try:
+                self._provider_state.transition(replacements)
+            except BaseException:
+                rollback_failure = await self._restore_provider_snapshot(prior, changed)
+                active = await self.current_runtime_state()
+                return RuntimeInstallFailure(
+                    active=active,
+                    returned_candidates=_inactive_state_refs(staged.candidates.values(), active),
+                    displaced_prior=_inactive_state_refs(_snapshot_refs(prior), active),
+                    restored=rollback_failure is None,
+                    cause_code=rollback_failure or "runtime_install_postcommit_state_failed",
+                    origin_cause_code=(
+                        "runtime_install_postcommit_state_failed" if rollback_failure else None
+                    ),
+                )
+            try:
+                self._bind_transition_handles(changed)
+            except BaseException:
+                rollback_failure = await self._restore_provider_snapshot(prior, changed)
+                active = await self.current_runtime_state()
+                return RuntimeInstallFailure(
+                    active=active,
+                    returned_candidates=_inactive_state_refs(staged.candidates.values(), active),
+                    displaced_prior=_inactive_state_refs(_snapshot_refs(prior), active),
+                    restored=rollback_failure is None,
+                    cause_code=(
+                        "runtime_install_postcommit_binding_failed"
+                        if rollback_failure is None
+                        else rollback_failure
+                    ),
+                    origin_cause_code=(
+                        None
+                        if rollback_failure is None
+                        else "runtime_install_postcommit_binding_failed"
+                    ),
+                )
+            try:
+                self._start_transition_handles(changed)
+            except BaseException:
+                rollback_failure = await self._restore_provider_snapshot(prior, changed)
+                active = await self.current_runtime_state()
+                return RuntimeInstallFailure(
+                    active=active,
+                    returned_candidates=_inactive_state_refs(staged.candidates.values(), active),
+                    displaced_prior=_inactive_state_refs(_snapshot_refs(prior), active),
+                    restored=rollback_failure is None,
+                    cause_code=(
+                        "runtime_install_postcommit_task_start_failed"
+                        if rollback_failure is None
+                        else rollback_failure
+                    ),
+                    origin_cause_code=(
+                        None
+                        if rollback_failure is None
+                        else "runtime_install_postcommit_task_start_failed"
+                    ),
+                )
+            active = await self.current_runtime_state()
+            prior_refs = _unique_refs(
+                state.ref for slot in changed if (state := prior.slot(slot)).ref is not None
+            )
+            displaced = _inactive_refs(prior_refs, self._provider_state.snapshot())
+            adopted = frozenset(
+                ref.identity
+                for ref in staged.candidates.values()
+                if any(_same_resource_ref(ref, active_ref) for active_ref in active.slots.values())
+            )
+            return RuntimeInstallSuccess(
+                active=active,
+                adopted_ids=adopted,
+                displaced=displaced,
+                unadopted=_inactive_refs(
+                    staged.candidates.values(), self._provider_state.snapshot()
+                ),
+            )
+
+    def _validate_runtime_install(
+        self, staged, snapshot: ProviderStateSnapshot
+    ):  # noqa: ANN001, ANN202
+        replacements: dict[str, ResourceRef | None] = {}
+        known = {
+            state.identity: state.provider
+            for slot in ("llm", "self_stt", "peer_stt")
+            if (state := snapshot.slot(slot)).identity is not None
+        }
+        for slot in ("llm", "self_stt", "peer_stt"):
+            action = getattr(staged.plan, slot)
+            if action == "retain":
+                continue
+            ref = None if action == "clear" else staged.candidates[slot]
+            if (
+                ref is not None
+                and ref.identity in known
+                and known[ref.identity] is not ref.resource
+            ):
+                raise ValueError("resource identity conflicts with active provider")
+            if snapshot.slot(slot).ref is not ref:
+                replacements[slot] = ref
+        return replacements
+
+    def _bind_transition_handles(self, slots) -> None:  # noqa: ANN001
+        for slot in slots:
+            self.provider_runtime_handles[slot]._bind_committed_state(running=self._running)
+
+    def _start_transition_handles(self, slots) -> None:  # noqa: ANN001
+        for slot in slots:
+            self.provider_runtime_handles[slot]._start_committed_task()
+
+    async def _restore_provider_snapshot(
+        self, prior: ProviderStateSnapshot, slots
+    ):  # noqa: ANN001, ANN202
+        try:
+            for slot in slots:
+                await self.provider_runtime_handles[slot]._quiesce_for_transition()
+        except BaseException:
+            return "runtime_install_rollback_quiesce_failed"
+        try:
+            self._provider_state.transition({slot: prior.slot(slot).ref for slot in slots})
+        except BaseException:
+            return "runtime_install_rollback_state_failed"
+        try:
+            self._bind_transition_handles(slots)
+            self._start_transition_handles(slots)
+        except BaseException:
+            return "runtime_install_rollback_task_start_failed"
+        return None
 
     async def drain_self_stt_for_toggle_off(
         self,
         *,
         release_backend_after: float | None = None,
     ) -> None:
-        await self._self_stt_provider_runtime.drain_for_toggle_off(
-            release_backend_after=release_backend_after
-        )
-        self._sync_provider_runtime_aliases()
+        async with self._provider_transition_lock:
+            await self._self_stt_provider_runtime.drain_for_toggle_off(
+                release_backend_after=release_backend_after
+            )
+            self._sync_provider_runtime_aliases()
 
     async def schedule_self_stt_idle_release(self, *, release_backend_after: float) -> None:
-        await self._self_stt_provider_runtime.schedule_idle_release(
-            release_backend_after=release_backend_after
-        )
+        async with self._provider_transition_lock:
+            await self._self_stt_provider_runtime.schedule_idle_release(
+                release_backend_after=release_backend_after
+            )
 
     async def resume_self_stt_after_toggle_on(self) -> None:
-        await self._self_stt_provider_runtime.start()
-        self._sync_provider_runtime_aliases()
+        async with self._provider_transition_lock:
+            await self._self_stt_provider_runtime.start()
+            self._sync_provider_runtime_aliases()
+
+    async def clear_self_stt_for_toggle_off(self):  # noqa: ANN201
+        from puripuly_heart.app.ports.runtime_resources import (
+            ClearSelfSTTResult,
+            RuntimeInstallFailure,
+            RuntimeResourceReplacementPlan,
+            StagedRuntimeResources,
+        )
+
+        result = await self.install_runtime_resources(
+            StagedRuntimeResources(
+                plan=RuntimeResourceReplacementPlan("retain", "clear", "retain"),
+                candidates={},
+            )
+        )
+        if isinstance(result, RuntimeInstallFailure):
+            raise RuntimeError(result.cause_code)
+        displaced = next(
+            (ref for ref in result.displaced if ref.resource is not None),
+            None,
+        )
+        if displaced is not None:
+            await self._self_stt_provider_runtime.close_displaced_for_toggle_off(displaced.resource)
+        return ClearSelfSTTResult(
+            active=result.active,
+            cleared=displaced is not None,
+            displaced_identity=None if displaced is None else displaced.identity,
+        )
 
     def _provider_runtime_handles_have_resources(self) -> bool:
         return any(handle.has_resources for handle in self.provider_runtime_handles.values())
@@ -1143,7 +1484,9 @@ class ClientHub:
             len(context),
         )
 
-    async def handle_vad_event(self, event: VadEvent) -> None:
+    async def handle_vad_event(
+        self, event: VadEvent, *, stt_provider: STTProvider | None = None
+    ) -> None:
         resume_overlay_resync_buffer: _MergeBuffer | None = None
 
         if isinstance(event, SpeechStart):
@@ -1172,8 +1515,9 @@ class ClientHub:
                 self._maybe_start_finalize_wait(event.utterance_id)
                 await self._maybe_clear_resume_on_end(event)
 
-        if self.stt is not None:
-            await self.stt.handle_vad_event(event)
+        provider = stt_provider if stt_provider is not None else self.stt
+        if provider is not None:
+            await provider.handle_vad_event(event)
 
         if (
             resume_overlay_resync_buffer is not None
@@ -1181,7 +1525,9 @@ class ClientHub:
         ):
             await self._sync_overlay_active_self(resume_overlay_resync_buffer)
 
-    async def handle_peer_vad_event(self, event: VadEvent) -> None:
+    async def handle_peer_vad_event(
+        self, event: VadEvent, *, stt_provider: STTProvider | None = None
+    ) -> None:
         if isinstance(event, SpeechEnd) and not self.peer_final_runs.is_parent_closed(
             event.utterance_id
         ):
@@ -1204,8 +1550,9 @@ class ClientHub:
                 )
             if event.utterance_id in self._peer_parent_turn_ids:
                 self._maybe_clear_completed_peer_parent(event.utterance_id)
-        if self.peer_stt is not None:
-            await self.peer_stt.handle_vad_event(event)
+        provider = self.peer_stt if stt_provider is None else stt_provider
+        if provider is not None:
+            await provider.handle_vad_event(event)
 
     async def submit_text(self, text: str, *, source: str = "You") -> UUID:
         text = text.strip()

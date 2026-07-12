@@ -421,12 +421,9 @@ class OverlayRuntimeHandle:
                     failures.append(result)
         failures.extend(self._completed_task_failures.values())
         self._completed_task_failures.clear()
-        if self._start_task is not current_task:
-            self._start_task = None
-        if self._monitor_task is not current_task:
-            self._monitor_task = None
-        if self._renderer_event_task is not current_task:
-            self._renderer_event_task = None
+        self._start_task = None
+        self._monitor_task = None
+        self._renderer_event_task = None
         for task in child_tasks:
             self._child_task_names.pop(task, None)
 

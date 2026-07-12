@@ -750,8 +750,10 @@ def create_llm_provider_from_resolved_config(
     managed_delegate_ready: Callable[[], object] | None = None,
     runtime_logging: SessionRuntimeLoggingService | None = None,
     compatibility_settings: AppSettings | None = None,
-    qwen_low_latency_mode: bool = True,
+    qwen_low_latency_mode: bool | None = None,
 ) -> LLMProvider:
+    if qwen_low_latency_mode is None:
+        qwen_low_latency_mode = config.qwen_low_latency_mode
     base = _base_llm_provider_from_resolved_config(
         config,
         secrets=secrets,

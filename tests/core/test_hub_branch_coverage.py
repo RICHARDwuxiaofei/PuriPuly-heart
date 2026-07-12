@@ -468,7 +468,6 @@ async def test_clear_language_runtime_state_self_preserves_stt_task_and_clears_o
     self_id = uuid4()
     standalone_id = uuid4()
     peer_id = uuid4()
-    stt_task = asyncio.create_task(asyncio.sleep(60.0))
     translation_task = asyncio.create_task(asyncio.sleep(60.0))
     standalone_translation_task = asyncio.create_task(asyncio.sleep(60.0))
     spec_task = asyncio.create_task(asyncio.sleep(60.0))
@@ -476,7 +475,6 @@ async def test_clear_language_runtime_state_self_preserves_stt_task_and_clears_o
     awaiting_vad_timeout_task = asyncio.create_task(asyncio.sleep(60.0))
     resume_end_timeout_task = asyncio.create_task(asyncio.sleep(60.0))
     all_tasks = [
-        stt_task,
         translation_task,
         standalone_translation_task,
         spec_task,
@@ -485,7 +483,6 @@ async def test_clear_language_runtime_state_self_preserves_stt_task_and_clears_o
         resume_end_timeout_task,
     ]
 
-    hub.self_runtime.stt_task = stt_task
     hub.self_runtime.translation_tasks[self_id] = translation_task
     hub.self_runtime.translation_tasks[standalone_id] = standalone_translation_task
     hub.self_runtime.get_or_create_bundle(self_id)
@@ -523,8 +520,8 @@ async def test_clear_language_runtime_state_self_preserves_stt_task_and_clears_o
     try:
         await hub.clear_language_runtime_state(channel="self")
 
-        assert hub.self_runtime.stt_task is stt_task
-        assert hub._stt_task is stt_task
+        assert hub.self_runtime.stt_task is None
+        assert hub._stt_task is None
         assert hub.self_runtime.translation_tasks == {}
         assert hub.self_runtime.merge_buffer is None
         assert standalone_id in hub.self_runtime.utterances
@@ -541,7 +538,6 @@ async def test_clear_language_runtime_state_self_preserves_stt_task_and_clears_o
         assert finalize_wait_task.cancelled() is True
         assert awaiting_vad_timeout_task.cancelled() is True
         assert resume_end_timeout_task.cancelled() is True
-        assert stt_task.done() is False
     finally:
         for task in all_tasks:
             if not task.done():

@@ -1,0 +1,40 @@
+{
+  "provenance": {
+    "source_manifest_sha256": "745b4bee02d71c8f7e4c9533beed63192a099d0da66d4bbd37c075e94f78b821"
+  },
+  "fallback_triggers": {
+    "primary_error": {
+      "calls": ["primary_error", "fallback_after_error"],
+      "result": "fallback_after_error"
+    },
+    "timeout": {
+      "calls": ["primary_slow", "fallback_after_timeout"],
+      "result": "fallback_after_timeout"
+    }
+  },
+  "first_run_defaults": {
+    "non_zh_cn": {
+      "connection": "managed",
+      "fallback": "openrouter_deepseek_v4_flash",
+      "model": "gemma4"
+    },
+    "zh_cn": {
+      "connection": "managed_china",
+      "fallback": "openrouter_gemma4_26b_a4b",
+      "model": "deepseek_v4_flash"
+    }
+  },
+  "prompt_policy": {
+    "sha256": "0b886ae19c6185c34a8d7f5837d6759558eeb5dbcc9ef34cdb67efa67d7c11df"
+  },
+  "prompt_routing": {
+    "cerebras": "SHARED_TRANSLATION",
+    "unknown": ""
+  },
+  "settings_defaults": {
+    "connection": "managed",
+    "fallback": "none",
+    "model": "gemma4",
+    "provider": "openrouter"
+  }
+}

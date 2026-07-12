@@ -149,7 +149,7 @@
   "settings.peer_translation.status.starting": "相手翻訳を開始しています",
   "settings.peer_translation.status.on": "相手翻訳がオンになっています",
   "settings.peer_translation.status.warning": "相手翻訳を待機中です",
-  "dashboard.local_stt_notice_starting": "ローカル音声認識を開始しています…",
+  "dashboard.local_stt_notice_starting": "モデルを読み込んでいます…",
   "dashboard.local_stt_notice_start_failed": "ローカル音声認識を開始できませんでした。",
   "settings.peer_translation.warning.overlay_starting": "オンとして保存されました。オーバーレイが接続されるとすぐに開始します。",
   "settings.peer_translation.warning.overlay_stopping": "オーバーレイが停止している間、相手翻訳も一時停止します。",

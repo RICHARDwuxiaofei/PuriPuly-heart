@@ -9,7 +9,6 @@ from typing import Any, Final
 from puripuly_heart.config.settings_vnext.schema import (
     VNEXT_SETTINGS_SCHEMA_VERSION,
     AppSettingsVNext,
-    with_telemetry_consent,
 )
 
 CANONICAL_TOP_LEVEL_KEYS: Final = frozenset({"settings_version", "intent", "state"})
@@ -95,10 +94,6 @@ def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
     merged = _merge_dataclass(default, compatible_data, path="settings")
     if not isinstance(merged, AppSettingsVNext):
         raise TypeError("vNext settings merge produced unexpected type")
-    merged = with_telemetry_consent(
-        merged,
-        merged.intent.telemetry.consent,
-    )
     return merged
 
 

@@ -218,11 +218,13 @@ LAYER_RULES = (
     ),
     LayerRule(
         layer=APP_COMPOSITION,
-        prefixes=("puripuly_heart.app.services.canonical_settings_persistence",),
+        prefixes=(
+            "puripuly_heart.app.services.canonical_settings_persistence",
+            "puripuly_heart.app.wiring_composition",
+        ),
         forbidden_layers=frozenset(
             {
                 UI_ADAPTERS_RENDERERS,
-                ADAPTERS,
                 PROVIDERS,
             }
         ),
@@ -264,7 +266,10 @@ LAYER_RULES = (
     ),
     LayerRule(
         layer=SETTINGS_PERSISTENCE_ADAPTERS,
-        prefixes=("puripuly_heart.app.adapters.settings_vnext_canonical_persistence",),
+        prefixes=(
+            "puripuly_heart.app.adapters.canonical_state_repository",
+            "puripuly_heart.app.adapters.settings_vnext_canonical_persistence",
+        ),
         forbidden_layers=frozenset(
             {
                 UI_ADAPTERS_RENDERERS,
@@ -439,14 +444,6 @@ KNOWN_ALLOWED_VIOLATIONS: frozenset[ImportViolation] = frozenset(
         ImportViolation(
             rule_id="ui-adapters-avoid-provider-construction",
             importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.core.managed_openrouter_broker_client",
-            importer_layer="UI adapters/renderers",
-            imported_layer="adapters",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
             imported="puripuly_heart.core.runtime_logging",
             importer_layer="UI adapters/renderers",
             imported_layer="adapters",
@@ -456,14 +453,6 @@ KNOWN_ALLOWED_VIOLATIONS: frozenset[ImportViolation] = frozenset(
             rule_id="ui-adapters-avoid-provider-construction",
             importer="src/puripuly_heart/ui/controller.py",
             imported="puripuly_heart.core.osc.chatbox_paginator",
-            importer_layer="UI adapters/renderers",
-            imported_layer="adapters",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.core.osc.receiver",
             importer_layer="UI adapters/renderers",
             imported_layer="adapters",
             reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
@@ -528,6 +517,7 @@ SETTINGS_PERSISTENCE_COMPOSITION_PATHS = frozenset(
 
 SETTINGS_LEGACY_COMPATIBILITY_ADAPTER_PATHS = frozenset(
     {
+        "src/puripuly_heart/app/adapters/settings_vnext_canonical_persistence.py",
         "src/puripuly_heart/app/services/settings_mutation_legacy.py",
         "src/puripuly_heart/app/wiring_llm_factory.py",
         "src/puripuly_heart/app/wiring_managed_auth_factory.py",
@@ -618,12 +608,6 @@ KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementVio
             "src/puripuly_heart/ui/views/settings.py",
             "AppSettings",
             "SettingsView remains a UI editor for the public AppSettings compatibility model while controller/app services own persistence; replacing the view draft model is deferred UI-rendering work, not active runtime resolution.",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
-            "src/puripuly_heart/core/telemetry.py",
-            "AppSettings",
-            "Translation-success telemetry service mutates and persists consent/anonymous identity through the public AppSettings compatibility model until a dedicated telemetry state port is extracted.",
         ),
     }
 )
@@ -1338,6 +1322,39 @@ def test_ui_controller_active_overlay_logic_avoids_legacy_resource_mirrors() -> 
     assert offenders == []
 
 
+def test_ui_controller_does_not_own_overlay_lifecycle_or_concrete_resources() -> None:
+    controller_path = SOURCE_PACKAGE_ROOT / "ui" / "controller.py"
+    source = controller_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    forbidden_methods = {
+        "_begin_overlay_start",
+        "_run_overlay_start",
+        "_watch_overlay_runtime",
+        "_shutdown_overlay_runtime",
+        "_teardown_overlay_runtime",
+        "_new_overlay_runtime_handle",
+        "_ensure_overlay_runtime_handle",
+    }
+    definitions = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+    assert not forbidden_methods & definitions
+    for forbidden in (
+        "OverlayRuntimeHandle",
+        "OverlayProcessManager",
+        "DefaultOverlayProcessRunner",
+        "DesktopFletOverlayRunner",
+        "self._overlay_runtime",
+        "self._overlay_lock",
+        "self._active_overlay_target",
+        "self.hub.overlay_sink",
+        "self.hub.overlay_diagnostics",
+    ):
+        assert forbidden not in source
+
+
 def test_current_concrete_osc_imports_are_adapter_boundary_violations() -> None:
     orchestrator_rule = _rule_for_layer(ORCHESTRATOR)
     ui_rule = _rule_for_layer(UI_ADAPTERS_RENDERERS)
@@ -1346,14 +1363,6 @@ def test_current_concrete_osc_imports_are_adapter_boundary_violations() -> None:
             rule_id=ui_rule.rule_id,
             importer="src/puripuly_heart/ui/controller.py",
             imported="puripuly_heart.core.osc.chatbox_paginator",
-            importer_layer=UI_ADAPTERS_RENDERERS,
-            imported_layer=ADAPTERS,
-            reason=ui_rule.reason,
-        ),
-        ImportViolation(
-            rule_id=ui_rule.rule_id,
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.core.osc.receiver",
             importer_layer=UI_ADAPTERS_RENDERERS,
             imported_layer=ADAPTERS,
             reason=ui_rule.reason,
@@ -1528,6 +1537,62 @@ def test_dependency_boundary_allowlist_matches_current_violations() -> None:
     )
 
 
+def test_canonical_state_service_does_not_compose_concrete_adapter() -> None:
+    service_path = SOURCE_PACKAGE_ROOT / "app" / "services" / "canonical_state_repositories.py"
+    tree = ast.parse(service_path.read_text(encoding="utf-8"))
+    assert not any(
+        isinstance(node, ast.ImportFrom)
+        and (node.module or "").startswith("puripuly_heart.app.adapters")
+        for node in ast.walk(tree)
+    )
+
+
+def test_settings_commit_writers_require_non_optional_revision() -> None:
+    repository_port = ast.parse(
+        (SOURCE_PACKAGE_ROOT / "app" / "ports" / "settings_repository.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    request_class = next(
+        node
+        for node in repository_port.body
+        if isinstance(node, ast.ClassDef) and node.name == "SettingsCommitRequest"
+    )
+    expected_revision = next(
+        node
+        for node in request_class.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "expected_revision"
+    )
+    assert isinstance(expected_revision.annotation, ast.Name)
+    assert expected_revision.annotation.id == "str"
+    for path in SOURCE_PACKAGE_ROOT.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function = node.func
+            if not (isinstance(function, ast.Name) and function.id == "SettingsCommitRequest"):
+                continue
+            keyword = next(
+                (item for item in node.keywords if item.arg == "expected_revision"),
+                None,
+            )
+            assert keyword is not None
+            assert not (isinstance(keyword.value, ast.Constant) and keyword.value.value is None)
+
+
+def test_wiring_composition_is_the_only_c1_service_path_allowed_to_import_adapters() -> None:
+    assert _layer_for_module("puripuly_heart.app.wiring_composition") == APP_COMPOSITION
+    violations = _dependency_violations()
+    assert not any(
+        violation.importer == "src/puripuly_heart/app/wiring_composition.py"
+        and violation.imported.startswith("puripuly_heart.app.adapters")
+        for violation in violations
+    )
+
+
 def test_dependency_boundary_allowlist_entries_have_gate6_rationale() -> None:
     assert set(KNOWN_ALLOWED_VIOLATION_GATE6_RATIONALES) == set(KNOWN_ALLOWED_VIOLATIONS)
     assert all(
@@ -1581,3 +1646,92 @@ def test_settings_runtime_confinement_guard_flags_qualified_to_legacy_dict_usage
         "src/puripuly_heart/app/services/example.py",
         "to_legacy_dict",
     ) in violation_keys
+
+
+def test_resolved_runtime_resource_transaction_has_no_ui_dependency() -> None:
+    for relative_path in (
+        "src/puripuly_heart/app/ports/runtime_resources.py",
+        "src/puripuly_heart/app/services/resolved_runtime_adapter.py",
+    ):
+        source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        assert "puripuly_heart.ui" not in source
+        assert "GuiController" not in source
+        assert "AppSettings" not in source
+
+
+def test_application_settings_command_codecs_are_additive_typed_contracts() -> None:
+    port_path = SOURCE_PACKAGE_ROOT / "app" / "ports" / "application_settings.py"
+    codec_path = SOURCE_PACKAGE_ROOT / "app" / "services" / "application_settings_codecs.py"
+    sources = (port_path.read_text(encoding="utf-8"), codec_path.read_text(encoding="utf-8"))
+    for source in sources:
+        assert "puripuly_heart.ui" not in source
+        assert "puripuly_heart.config.settings import" not in source
+        assert "Mapping[str, object]" not in source
+        assert "value: object" not in source
+        assert "_replace_path" not in source
+    assert "masked:" not in sources[0]
+    assert "class OperationalStateCommand:" not in sources[0]
+    assert "PersistedOperationalState" not in sources[0]
+    assert "UserIntentSettings" not in sources[0]
+    production_sources = (
+        (path, path.read_text(encoding="utf-8"))
+        for path in SOURCE_PACKAGE_ROOT.rglob("*.py")
+        if path not in {port_path, codec_path}
+    )
+    approved_consumers = {
+        SOURCE_PACKAGE_ROOT / "app" / "services" / "canonical_application_settings.py",
+    }
+    assert all(
+        "application_settings_codecs" not in source or path in approved_consumers
+        for path, source in production_sources
+    )
+
+
+def test_retired_controller_runtime_apply_adapters_do_not_return_as_aliases() -> None:
+    path = SOURCE_PACKAGE_ROOT / "app" / "services" / "provider_runtime_apply.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    definitions = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert "_ControllerProviderRuntimeApply" not in definitions
+    assert "_ControllerOverlayOscOutputRuntimeApply" not in definitions
+    assert not {
+        name
+        for name in definitions
+        if name.endswith(("ProviderRuntimeApply", "OverlayOscOutputRuntimeApply"))
+    }
+
+
+def test_c3_retained_controller_runtime_apply_paths_remain_explicit() -> None:
+    path = SOURCE_PACKAGE_ROOT / "app" / "services" / "provider_runtime_apply.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    definitions = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert {
+        "_ControllerNoopRuntimeApply",
+        "_ControllerSttLanguageAudioRuntimeApply",
+        "_ControllerUiPromptClipboardStateRuntimeApply",
+        "_provider_runtime_apply_unavailable_result",
+        "_stt_language_audio_runtime_unavailable_result",
+    } <= definitions
+
+    controller = ast.parse(
+        (SOURCE_PACKAGE_ROOT / "ui" / "controller.py").read_text(encoding="utf-8")
+    )
+    controller_definitions = {
+        node.name
+        for node in ast.walk(controller)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert {
+        "_apply_settings_direct",
+        "_apply_providers_direct",
+        "_apply_provider_runtime_plan",
+        "_build_provider_runtime_apply_plan",
+        "_sync_signature_caches",
+    } <= controller_definitions

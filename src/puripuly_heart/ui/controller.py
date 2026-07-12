@@ -9,7 +9,6 @@ import json
 import logging
 import math
 import os
-import secrets
 import sys
 import threading
 import traceback
@@ -27,6 +26,17 @@ from puripuly_heart.app.language_selection import LanguageSelectionChange
 from puripuly_heart.app.ports.canonical_settings_persistence import (
     CanonicalSettingsPersistencePort,
 )
+from puripuly_heart.app.ports.overlay_application import (
+    AudioCaptureGatePort,
+    OverlayApplicationCommandPort,
+    OverlayApplicationStatePort,
+    OverlayLifecycleSnapshot,
+)
+from puripuly_heart.app.ports.post_commit_runtime import (
+    RuntimeMutationProvenance,
+    RuntimeOperationalSnapshot,
+    SurfaceRuntimeTransactionPort,
+)
 from puripuly_heart.app.ports.runtime_apply import RuntimeApplyRequest
 from puripuly_heart.app.ports.secret_store import (
     SecretReadResult,
@@ -34,14 +44,20 @@ from puripuly_heart.app.ports.secret_store import (
     SecretWriteResult,
 )
 from puripuly_heart.app.ports.settings_repository import (
+    SettingsCommitReceipt,
     SettingsCommitRequest,
     SettingsCommitResult,
+    SettingsInitializeRequest,
+    SettingsNotInitializedError,
+    SettingsRevisionConflict,
     SettingsSnapshot,
 )
 from puripuly_heart.app.services.canonical_settings_persistence import (
     compose_canonical_settings_persistence,
 )
-from puripuly_heart.app.services.capture_target_settings import persist_desktop_audio_capture_target
+from puripuly_heart.app.services.capture_target_settings import (
+    persist_desktop_audio_capture_target,
+)
 from puripuly_heart.app.services.managed_auth_claims import (
     MANAGED_AUTH_CLAIM_SOURCE_DISCORD,
     ManagedAuthClaimGuard,
@@ -50,11 +66,13 @@ from puripuly_heart.app.services.managed_connection_auth import (
     ManagedConnectionAuthRequest,
     ManagedConnectionAuthService,
 )
-from puripuly_heart.app.services.peer_capture_target import PeerCaptureTargetResolutionService
+from puripuly_heart.app.services.openrouter_pkce_owner import (
+    OpenRouterPkceResult,
+    ReopenOpenRouterPkce,
+    StartOpenRouterPkce,
+)
 from puripuly_heart.app.services.provider_runtime_apply import (
     _ControllerNoopRuntimeApply,
-    _ControllerOverlayOscOutputRuntimeApply,
-    _ControllerProviderRuntimeApply,
     _ControllerSttLanguageAudioRuntimeApply,
     _ControllerUiPromptClipboardStateRuntimeApply,
     _overlay_osc_output_runtime_degraded_transaction_result,
@@ -72,10 +90,6 @@ from puripuly_heart.app.services.provider_runtime_apply import (
     _ui_prompt_clipboard_state_save_failed_transaction_result,
 )
 from puripuly_heart.app.services.qq_managed_auth import QqManagedAuthRequest, QqManagedAuthService
-from puripuly_heart.app.services.secret_settings_transaction import (
-    SecretSetRequest,
-    SecretSettingsTransaction,
-)
 from puripuly_heart.app.services.settings_mutation import (
     OverlayOscOutputSettingsMutation,
     SettingsMutationService,
@@ -95,6 +109,9 @@ from puripuly_heart.app.services.settings_mutation_legacy import (
     settings_path_snapshot_for_stt_language_audio,
     settings_path_snapshot_for_ui_prompt_clipboard_state,
 )
+from puripuly_heart.app.services.telemetry_operational_state import (
+    TelemetryOperationalStateOwner,
+)
 from puripuly_heart.app.wiring import (
     DiscordManagedBrokerClientAdapter,
     DiscordOAuthAuthAdapter,
@@ -102,20 +119,16 @@ from puripuly_heart.app.wiring import (
     build_custom_vocabulary_runtime_config,
     build_managed_identity_state_port,
     build_openrouter_credential_runtime_config,
-    build_openrouter_release_runtime_config,
     build_peer_stt_provider_signature_from_vnext,
     copy_stable_secrets_to_vnext_namespace,
-    create_llm_provider,
     create_peer_stt_backend,
     create_peer_stt_backend_from_resolved_config,
     create_provider_verifier,
     create_secret_store,
-    create_stt_backend,
-    resolve_overlay_config,
     resolve_peer_stt_runtime_config_from_vnext,
 )
+from puripuly_heart.app.wiring_composition import create_canonical_state_repositories
 from puripuly_heart.config.audio_host_api import normalize_input_host_api
-from puripuly_heart.config.capture_target_resolution import resolve_desktop_audio_capture_target
 from puripuly_heart.config.llm_profiles import (
     get_openrouter_selection_alias_for_model_and_source,
     profile_for_alias,
@@ -126,10 +139,8 @@ from puripuly_heart.config.process_capture_resolution import (
     ProcessCaptureTargetUnavailableError,
 )
 from puripuly_heart.config.profile_bootstrap import import_stable_settings_if_missing
-from puripuly_heart.config.resolved import ResolvedDesktopAudioCaptureTarget, ResolvedOverlayConfig
+from puripuly_heart.config.resolved import ResolvedDesktopAudioCaptureTarget
 from puripuly_heart.config.settings import (
-    DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA,
-    DESKTOP_FLET_DEFAULT_TEXT_SCALE,
     DESKTOP_FLET_MIN_HEIGHT,
     DESKTOP_FLET_MIN_WIDTH,
     DESKTOP_FLET_SIZE_PRESETS,
@@ -160,7 +171,6 @@ from puripuly_heart.config.vad_defaults import DEFAULT_STABLE_VAD_HANGOVER_MS
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
 from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
 from puripuly_heart.core.audio.diagnostics import compute_audio_frame_metrics
-from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.audio.process_identity import (
     PsutilCurrentUserProcessSnapshots,
     PsutilProcessIdentityWatcher,
@@ -177,8 +187,6 @@ from puripuly_heart.core.audio.source import (
 )
 from puripuly_heart.core.clipboard.watcher import create_clipboard_watcher
 from puripuly_heart.core.clock import SystemClock
-from puripuly_heart.core.hardware_fingerprint import get_raw_hardware_fingerprint
-from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.local_stt_assets import (
     LocalQwenSherpaLoadError,
     LocalSTTInstallState,
@@ -192,26 +200,23 @@ from puripuly_heart.core.local_stt_runtime_installer import (
     RuntimeLocalSTTStatusUpdate,
     ensure_local_stt_installed,
 )
-from puripuly_heart.core.managed_openrouter_broker_client import (
-    HttpManagedOpenRouterBrokerClient,
-)
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseBehavior,
     ManagedOpenRouterReleaseService,
     ManagedOpenRouterStatusRefreshResult,
     TalkTogetherPassStatus,
-    UnavailableManagedOpenRouterReleaseClient,
     format_managed_openrouter_diagnostics,
 )
 from puripuly_heart.core.messages import (
     RUNTIME_APPLY_STATUS_APPLIED,
+    RUNTIME_APPLY_STATUS_FAILED,
     TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
+    RuntimeApplyResult,
     TransactionResult,
 )
 from puripuly_heart.core.openrouter_credentials import (
-    OPENROUTER_BYOK_API_KEY_SECRET,
     OPENROUTER_MANAGED_API_KEY_SECRET,
     resolve_openrouter_credentials,
 )
@@ -221,33 +226,10 @@ from puripuly_heart.core.openrouter_handoff import (
     should_auto_show_founder_letter,
 )
 from puripuly_heart.core.openrouter_metadata import OpenRouterKeyMetadata
-from puripuly_heart.core.openrouter_pkce import OpenRouterPKCEClient
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
-from puripuly_heart.core.osc.receiver import (
-    VRC_OSC_RECEIVER_HOST,
-    VRC_OSC_RECEIVER_PORT,
-    VrcMicState,
-    VrcOscReceiver,
-)
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
-from puripuly_heart.core.overlay.bridge import OverlayBridge
-from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
-from puripuly_heart.core.overlay.presenter import OverlayPresenter
-from puripuly_heart.core.overlay.process import (
-    DefaultOverlayProcessRunner,
-    DesktopFletOverlayRunner,
-    OverlayProcessManager,
-    OverlayProcessRunner,
-)
-from puripuly_heart.core.runtime.clipboard import ClipboardRuntime
-from puripuly_heart.core.runtime.github_star_prompt import GithubStarPromptRuntime
-from puripuly_heart.core.runtime.local_qwen_lifecycle import LOCAL_QWEN_IDLE_RELEASE_SECONDS
-from puripuly_heart.core.runtime.local_stt_download import LocalSTTDownloadRuntime
 from puripuly_heart.core.runtime.logging import RuntimeLoggingService
-from puripuly_heart.core.runtime.mic_test import MicTestRuntime
-from puripuly_heart.core.runtime.oauth import OAuthRuntime
-from puripuly_heart.core.runtime.overlay import OverlayRuntimeHandle
 from puripuly_heart.core.runtime.peer_channel import (
     PeerChannelRuntime,
     PeerRuntimeConfig,
@@ -255,8 +237,15 @@ from puripuly_heart.core.runtime.peer_channel import (
     PeerRuntimeFailureReason,
 )
 from puripuly_heart.core.runtime.provider_rebuild import ProviderRuntimeRebuildService
-from puripuly_heart.core.runtime.receiver import VrcMicReceiverRuntime
-from puripuly_heart.core.runtime.self_audio import SelfAudioRuntime
+from puripuly_heart.core.runtime.self_audio import (
+    SelfAudioRuntime,
+    SelfChannelConfig,
+    SelfChannelSnapshot,
+    SelfSTTCommandPort,
+    SelfSTTProviderApplicationPort,
+    SelfSTTStatePort,
+    SetSelfSTTEnabled,
+)
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.controller import (
     FinalTranscriptSuppressedNotification,
@@ -302,8 +291,6 @@ QQ_AUTH_DIALOG_MESSAGE_KEY_BY_SERVICE_KEY = {
 
 # Hardcoded STT session reset deadline (not configurable via settings)
 STT_RESET_DEADLINE_S = 300.0
-OVERLAY_STARTUP_TIMEOUT_MS = 3000
-OVERLAY_SHUTDOWN_GRACE_S = 0.05
 DESKTOP_BOUNDS_PERSIST_DEBOUNCE_S = 0.05
 MANUAL_INPUT_TYPING_IDLE_TIMEOUT_S = 3.0
 MANUAL_INPUT_TYPING_REASON = "manual_input"
@@ -577,38 +564,120 @@ class _ControllerSettingsPatchRepository:
     committed_settings: AppSettings
     base_settings: AppSettings | None = None
     surface: str = "translation_provider"
+    last_loaded_receipt: SettingsCommitReceipt | None = field(init=False, default=None)
 
     async def load(self) -> SettingsSnapshot:
-        settings = self.controller.settings or self.committed_settings
-        return SettingsSnapshot(values=_settings_snapshot_values(settings), revision=None)
+        receipt = await self.load_receipt()
+        projected = self.controller.canonical_settings_persistence.legacy_projection(
+            receipt.envelope
+        )
+        return SettingsSnapshot(
+            values=_settings_snapshot_values(projected),
+            revision=receipt.revision,
+        )
+
+    async def load_receipt(self) -> SettingsCommitReceipt:
+        try:
+            receipt = await asyncio.to_thread(
+                self.controller.canonical_settings_persistence.load_receipt,
+                self.controller.config_path,
+                reason=None,
+                correlation_id=None,
+            )
+            self.last_loaded_receipt = receipt
+            return receipt
+        except SettingsNotInitializedError:
+            canonical = (
+                self.controller.vnext_settings
+                if self.controller._vnext_settings_authoritative
+                and self.controller.vnext_settings is not None
+                else self.controller._canonical_vnext_settings_for(
+                    self.controller.settings or self.committed_settings
+                )
+            )
+            receipt = await self.initialize(SettingsInitializeRequest(canonical, "bootstrap", None))
+            self.controller.vnext_settings = receipt.envelope
+            self.controller._vnext_settings_authoritative = True
+            self.last_loaded_receipt = receipt
+            return receipt
+
+    async def initialize(self, request: SettingsInitializeRequest) -> SettingsCommitReceipt:
+        return await asyncio.to_thread(
+            self.controller.canonical_settings_persistence.initialize,
+            self.controller.config_path,
+            request.envelope,
+            reason=request.reason,
+            correlation_id=request.correlation_id,
+        )
 
     async def save(self, request: SettingsCommitRequest) -> SettingsCommitResult:
-        base_settings = self.base_settings
-        next_settings = copy.deepcopy(base_settings or self.committed_settings)
-        if (
-            base_settings is None
-            and "state" not in request.values
-            and "intent" not in request.values
+        async with self.controller._get_settings_commit_lock():
+            return await self._save_locked(request)
+
+    async def _save_locked(self, request: SettingsCommitRequest) -> SettingsCommitResult:
+        current_receipt = await self.load_receipt()
+        if request.expected_revision != current_receipt.revision:
+            self._restore_authoritative_receipt(current_receipt)
+            return SettingsCommitResult(
+                succeeded=False,
+                snapshot=None,
+                message=None,
+                diagnostics=_settings_mutation_diagnostics(
+                    component="settings_repository",
+                    operation="save",
+                    code="settings_revision_conflict",
+                    surface=self.surface,
+                ),
+            )
+        if self.controller._canonical_persistence_port_enabled:
+            legacy_baseline = self.controller.canonical_settings_persistence.legacy_projection(
+                current_receipt.envelope
+            )
+        else:
+            legacy_baseline = copy.deepcopy(self.base_settings or self.committed_settings)
+        next_settings = copy.deepcopy(legacy_baseline)
+        if all(isinstance(path, str) and "." in path for path in request.values) or (
+            all(isinstance(path, str) for path in request.values)
+            and not ("state" in request.values or "intent" in request.values)
+            and not any(isinstance(value, Mapping) for value in request.values.values())
         ):
-            next_settings = copy.deepcopy(self.committed_settings)
-        elif all(isinstance(path, str) and "." in path for path in request.values):
             _apply_settings_path_patch(next_settings, request.values)
         elif "state" in request.values or "intent" in request.values:
             _apply_managed_pending_delivery_ack_patch(next_settings, request.values)
         else:
             next_settings = copy.deepcopy(self.committed_settings)
-        self.controller._begin_canonical_mutation()
+        outer_mutation_depth = self.controller._canonical_mutation_depth
+        if self.controller._canonical_persistence_port_enabled:
+            self.controller.vnext_settings = current_receipt.envelope
+            self.controller._vnext_settings_authoritative = True
         self.controller._update_canonical_settings_from_legacy_delta(
-            base_settings or next_settings,
+            legacy_baseline,
             next_settings,
         )
         try:
-            await asyncio.to_thread(
+            receipt = await asyncio.to_thread(
                 self.controller._persist_settings_at_controller_boundary,
                 next_settings,
+                expected_revision=current_receipt.revision,
+                reason=request.reason,
+                correlation_id=request.correlation_id,
+                canonical_baseline=current_receipt.envelope,
+            )
+        except SettingsRevisionConflict:
+            self._restore_authoritative_receipt(current_receipt)
+            return SettingsCommitResult(
+                succeeded=False,
+                snapshot=None,
+                message=None,
+                diagnostics=_settings_mutation_diagnostics(
+                    component="settings_repository",
+                    operation="save",
+                    code="settings_revision_conflict",
+                    surface=self.surface,
+                ),
             )
         except Exception:
-            self.controller._rollback_canonical_mutation()
+            self._restore_authoritative_receipt(current_receipt)
             self.controller._log_error("Failed to save settings mutation")
             return SettingsCommitResult(
                 succeeded=False,
@@ -621,17 +690,46 @@ class _ControllerSettingsPatchRepository:
                     surface=self.surface,
                 ),
             )
-        self.committed_settings = next_settings
-        self.controller._remember_canonical_legacy_projection(next_settings)
+        if receipt is None:
+            raise RuntimeError("canonical commit receipt missing")
+        projected = self.controller.canonical_settings_persistence.legacy_projection(
+            receipt.envelope
+        )
+        _copy_runtime_only_ui_state(next_settings, projected)
+        self.committed_settings = copy.deepcopy(projected)
+        self.controller._remember_canonical_legacy_projection(projected)
+        if outer_mutation_depth > 0:
+            self.controller._rebase_canonical_mutation_rollback(
+                receipt=receipt,
+                projected=projected,
+            )
         return SettingsCommitResult(
             succeeded=True,
             snapshot=SettingsSnapshot(
-                values=_settings_snapshot_values(self.committed_settings),
-                revision=None,
+                values=_settings_snapshot_values(projected),
+                revision=receipt.revision,
             ),
             message=None,
             diagnostics=None,
+            receipt=receipt,
         )
+
+    def _restore_authoritative_receipt(self, receipt: SettingsCommitReceipt) -> None:
+        if not self.controller._canonical_persistence_port_enabled:
+            return
+        projected = self.controller.canonical_settings_persistence.legacy_projection(
+            receipt.envelope
+        )
+        self.controller.vnext_settings = receipt.envelope
+        self.controller._vnext_settings_authoritative = True
+        self.controller.settings = copy.deepcopy(projected)
+        self.committed_settings = copy.deepcopy(projected)
+        self.controller._remember_canonical_legacy_projection(projected)
+        if self.controller._canonical_mutation_depth > 0:
+            self.controller._rebase_canonical_mutation_rollback(
+                receipt=receipt,
+                projected=projected,
+            )
 
 
 def _apply_managed_pending_delivery_ack_patch(
@@ -694,6 +792,78 @@ def _apply_managed_identity_delta(settings: AppSettings, values: Mapping[str, ob
 def _restore_managed_identity(settings: AppSettings, snapshot: object) -> None:
     for field_name, value in asdict(snapshot).items():
         setattr(settings.managed_identity, field_name, copy.deepcopy(value))
+
+
+@dataclass(slots=True)
+class _OverlayOscSurfaceRuntimeApply:
+    controller: GuiController
+    repository: _ControllerSettingsPatchRepository
+    runtime: SurfaceRuntimeTransactionPort
+
+    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
+        before = self.repository.last_loaded_receipt
+        if before is None:
+            raise RuntimeError("overlay runtime apply requires the authoritative prior receipt")
+        execution = await self.runtime.apply_surface_runtime(
+            before=before,
+            after=request.receipt,
+            provenance=RuntimeMutationProvenance(
+                "overlay_osc_output",
+                "settings_surface",
+                request.receipt.reason,
+                request.receipt.correlation_id,
+            ),
+            operational=self.controller.runtime_operational_snapshot(),
+        )
+        transaction = execution.transaction
+        return RuntimeApplyResult(
+            status=(
+                RUNTIME_APPLY_STATUS_APPLIED
+                if transaction.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+                else RUNTIME_APPLY_STATUS_FAILED
+            ),
+            message=transaction.message,
+            diagnostics=transaction.diagnostics,
+        )
+
+
+@dataclass(slots=True)
+class _UnavailableOverlayOscRuntimeApply:
+    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
+        _ = request
+        return _runtime_apply_failed_result(
+            operation="apply_overlay_osc_output_runtime",
+            code="overlay_osc_output_runtime_apply_exception",
+            surface="overlay_osc_output",
+        )
+
+
+@dataclass(slots=True)
+class _ApplicationHostSurfaceRuntimeApply:
+    controller: GuiController
+    repository: _ControllerSettingsPatchRepository
+    surface: str
+
+    async def apply_runtime(self, request: RuntimeApplyRequest) -> RuntimeApplyResult:
+        before = self.repository.last_loaded_receipt
+        if before is None:
+            raise RuntimeError("runtime apply requires the authoritative prior receipt")
+        execution = await self.controller.application_runtime_host.apply_committed_runtime(
+            before=before,
+            after=request.receipt,
+            surface=self.surface,
+            operational=self.controller.runtime_operational_snapshot(),
+        )
+        return RuntimeApplyResult(
+            (
+                RUNTIME_APPLY_STATUS_APPLIED
+                if execution.transaction.status
+                == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+                else RUNTIME_APPLY_STATUS_FAILED
+            ),
+            execution.transaction.message,
+            execution.transaction.diagnostics,
+        )
 
 
 @dataclass(slots=True)
@@ -842,8 +1012,16 @@ class GuiController:
     config_path: Path
     allow_stable_settings_import: bool = False
     settings_mutation_service: SettingsMutationService | None = None
+    surface_runtime_transactions: SurfaceRuntimeTransactionPort | None = None
+    overlay_commands: OverlayApplicationCommandPort | None = None
+    overlay_application_state: OverlayApplicationStatePort | None = None
     provider_verifier: _ControllerProviderVerifier | None = None
     telemetry_client: TranslationSuccessTelemetryClientPort | None = None
+    application_runtime_host: object | None = None
+    application_adapters: object | None = None
+    self_stt_commands: SelfSTTCommandPort | None = None
+    self_stt_state: SelfSTTStatePort | None = None
+    self_stt_provider_application: SelfSTTProviderApplicationPort | None = None
     canonical_settings_persistence: CanonicalSettingsPersistencePort[
         AppSettings, AppSettingsVNext
     ] = field(
@@ -859,6 +1037,7 @@ class GuiController:
         default=False,
         repr=False,
     )
+    _overlay_application_shutdown_started: bool = field(init=False, default=False, repr=False)
     _canonical_mutation_rollback_snapshot: AppSettingsVNext | None = field(
         init=False,
         default=None,
@@ -894,10 +1073,15 @@ class GuiController:
         init=False,
         default=None,
     )
+    last_openrouter_pkce_result: OpenRouterPkceResult | None = field(init=False, default=None)
+    _settings_commit_lock: asyncio.Lock | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     clock: SystemClock = SystemClock()
     _managed_openrouter_release_service: ManagedOpenRouterReleaseService | None = None
-    _openrouter_pkce_client: OpenRouterPKCEClient | None = None
-    _oauth_runtime: OAuthRuntime | None = field(init=False, default=None)
+    _oauth_runtime: object | None = field(init=False, default=None)
 
     sender: VrchatOscUdpSender | None = None
     osc: ChatboxPaginator | None = None
@@ -908,20 +1092,8 @@ class GuiController:
         default_factory=ProviderRuntimeRebuildService,
         repr=False,
     )
-    _peer_capture_target_resolution: PeerCaptureTargetResolutionService = field(
-        init=False,
-        default_factory=PeerCaptureTargetResolutionService,
-        repr=False,
-    )
     _peer_runtime: PeerChannelRuntime | None = None
-    receiver: VrcOscReceiver | None = None
-    _vrc_mic_receiver_runtime: VrcMicReceiverRuntime | None = field(
-        init=False,
-        default=None,
-        repr=False,
-    )
-    vrc_mic_state: VrcMicState | None = None
-    vrc_mic_audio_gate: VrcMicAudioGate | None = None
+    vrc_audio_gate: AudioCaptureGatePort | None = None
 
     _bridge_task: asyncio.Task[None] | None = None
     _mic_task: asyncio.Task[None] | None = None
@@ -934,7 +1106,7 @@ class GuiController:
         repr=False,
     )
     _microphone_test_meter_level: float = field(init=False, default=0.0)
-    _microphone_test_runtime: MicTestRuntime | None = field(init=False, default=None)
+    _microphone_test_runtime: object | None = field(init=False, default=None)
     _microphone_test_lifecycle_lock: asyncio.Lock | None = field(
         init=False,
         default=None,
@@ -944,13 +1116,17 @@ class GuiController:
     _debug_stt_fault_profile: str = field(init=False, default="none")
     _vad: VadGating | None = None
     _stt_desired: bool = False
+    _stt_activation_generation: int = field(init=False, default=0)
+    _stt_activation_starting: bool = field(init=False, default=False)
+    _stt_activation_failed: bool = field(init=False, default=False)
+    _peer_activation_generation: int = field(init=False, default=0)
+    _peer_activation_starting: bool = field(init=False, default=False)
+    _peer_process_warning_reason: str | None = field(init=False, default=None)
+    _process_discovery_preparation_scheduled: bool = field(init=False, default=False)
     _stt_switch_lock: asyncio.Lock | None = None
     _stt_switch_task: asyncio.Task[None] | None = None
     _stt_restart_requested: bool = False
     _stt_force_immediate: bool = False
-    _stt_activation_generation: int = field(init=False, default=0)
-    _stt_activation_starting: bool = field(init=False, default=False)
-    _stt_activation_failed: bool = field(init=False, default=False)
     _last_stt_runtime_signature: tuple[object, ...] | None = None
     _last_self_stt_runtime_signature: tuple[object, ...] | None = None
     _last_peer_stt_runtime_signature: tuple[object, ...] | None = None
@@ -960,10 +1136,6 @@ class GuiController:
     _last_microphone_test_audio_settings_signature: tuple[object, ...] | None = None
     _last_peer_translation_enabled: bool | None = None
     _last_peer_translation_activation_requested: bool | None = None
-    _peer_activation_generation: int = field(init=False, default=0)
-    _peer_activation_starting: bool = field(init=False, default=False)
-    _process_idle_preparation_scheduled: bool = field(init=False, default=False)
-    _peer_process_warning_reason: str | None = field(init=False, default=None)
     _last_vrc_mic_sync_enabled: bool | None = None
     _settings_view_order22_baseline: _SettingsPathSnapshot | None = field(
         init=False,
@@ -980,9 +1152,8 @@ class GuiController:
         default=None,
         repr=False,
     )
-    _vrc_receiver_lock: asyncio.Lock | None = None
     _ui_event_bridge: UIEventBridge | None = None
-    _clipboard_runtime: ClipboardRuntime | None = field(init=False, default=None)
+    _clipboard_runtime: object | None = field(init=False, default=None)
     _clipboard_watcher_lock: asyncio.Lock | None = field(init=False, default=None)
     _strict_runtime_errors_for_clipboard_watcher: bool = field(
         init=False,
@@ -994,17 +1165,13 @@ class GuiController:
         default_factory=lambda: LocalSTTInstallState(status="ready"),
     )
     _local_stt_runtime_status: str = field(init=False, default="ready")
-    _local_stt_download_runtime: LocalSTTDownloadRuntime | None = field(
+    _local_stt_download_runtime: object | None = field(
         init=False,
         default=None,
     )
     _local_stt_download_percent: int | None = field(init=False, default=None)
     _local_stt_pending_enable_after_install: bool = field(init=False, default=False)
     _local_stt_pending_peer_enable_after_install: bool = field(init=False, default=False)
-    # Overlay runtime internals are owned by OverlayRuntimeHandle.
-    _overlay_runtime: OverlayRuntimeHandle | None = None
-    _overlay_lock: asyncio.Lock | None = None
-    _active_overlay_target: str | None = field(init=False, default=None)
     _desktop_bounds_persist_task: asyncio.Task[None] | None = field(
         init=False,
         default=None,
@@ -1046,7 +1213,7 @@ class GuiController:
     )
     _translation_toggle_intent_enabled: bool = field(init=False, default=False)
     _translation_toggle_generation: int = field(init=False, default=0)
-    _github_star_prompt_runtime: GithubStarPromptRuntime | None = field(
+    _github_star_prompt_runtime: object | None = field(
         init=False,
         default=None,
         repr=False,
@@ -1069,6 +1236,19 @@ class GuiController:
     )
     overlay_calibration: OverlayCalibration = field(default_factory=OverlayCalibration)
     _overlay_calibration_draft: OverlayCalibration | None = None
+
+    def _get_settings_commit_lock(self) -> asyncio.Lock:
+        if self._settings_commit_lock is None:
+            self._settings_commit_lock = asyncio.Lock()
+        return self._settings_commit_lock
+
+    def current_legacy_settings(self) -> AppSettings | None:
+        return self.settings
+
+    def current_stt_fault_profile(self) -> str:
+        if self._debug_audio_fault_allowed():
+            return self._debug_stt_fault_profile
+        return "none"
 
     @property
     def effective_peer_translation_enabled(self) -> bool:
@@ -1142,15 +1322,12 @@ class GuiController:
     def build_overlay_peer_consumer_contract(self) -> OverlayPeerConsumerContract | None:
         if self.settings is None:
             return None
-        peer_effective = self._effective_peer_translation_enabled_for(self.settings)
-        if peer_effective or not self.settings.ui.peer_translation_enabled:
-            self._peer_process_warning_reason = None
         return build_overlay_peer_consumer_contract(
             overlay_intent_enabled=bool(self.settings.ui.overlay_enabled),
             overlay_state=self.overlay_state,
             overlay_failure_reason=self.failure_reason,
             peer_intent_enabled=bool(self.settings.ui.peer_translation_enabled),
-            peer_effective_enabled=peer_effective,
+            peer_effective_enabled=self._effective_peer_translation_enabled_for(self.settings),
             peer_warning_reason=self._peer_process_warning_reason,
             peer_activation_starting=self._peer_activation_starting,
         )
@@ -1164,29 +1341,9 @@ class GuiController:
     async def _drain_self_stt_for_toggle_off(self, *, force_immediate: bool = False) -> None:
         if self.hub is None:
             return
-        if not force_immediate:
-            drain = getattr(self.hub, "drain_self_stt_for_toggle_off", None)
-            if callable(drain):
-                release_backend_after = (
-                    LOCAL_QWEN_IDLE_RELEASE_SECONDS
-                    if self.settings is not None
-                    and self.settings.provider.stt == STTProviderName.LOCAL_QWEN
-                    else None
-                )
-                await drain(release_backend_after=release_backend_after)
-                return
-        else:
+        if force_immediate:
             self.log_detailed("[STT] Force immediate toggle-off requested")
-        stt = getattr(self.hub, "stt", None)
-        if stt is not None:
-            await stt.close()
-            if (
-                self.settings is not None
-                and self.settings.provider.stt == STTProviderName.LOCAL_QWEN
-            ):
-                schedule_release = getattr(self.hub, "schedule_self_stt_idle_release", None)
-                if callable(schedule_release):
-                    await schedule_release(release_backend_after=LOCAL_QWEN_IDLE_RELEASE_SECONDS)
+        await self.hub.clear_self_stt_for_toggle_off()
 
     async def _refresh_overlay_runtime_dependencies(self) -> None:
         if self.settings is None or self.hub is None:
@@ -1196,7 +1353,7 @@ class GuiController:
         self._sync_effective_hub_flags(self.settings)
         self._refresh_overlay_peer_consumers()
 
-    async def start(self) -> None:
+    async def prepare_presentation(self) -> None:
         self.settings = self._load_or_init_settings(self.config_path)
         self.vnext_settings = self._load_canonical_vnext_settings(self.config_path, self.settings)
         self._vnext_settings_authoritative = True
@@ -1225,7 +1382,17 @@ class GuiController:
         self._refresh_local_stt_runtime_state()
 
         assert self.hub is not None
+        if self.overlay_commands is not None:
+            self.overlay_commands.bind_runtime_host(self.hub)
+            self.overlay_commands.bind_desktop_operational_state(
+                self.persist_desktop_overlay_bounds,
+                self.reset_desktop_overlay_position,
+            )
+            if self.overlay_application_state is not None:
+                self.overlay_application_state.subscribe(self._on_overlay_application_state)
 
+    async def start_rendering(self) -> None:
+        runtime_logging = self.runtime_logging
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
             # Set needs_key flags based on saved verification status & key existence
@@ -1261,30 +1428,25 @@ class GuiController:
                 dash.translation_needs_key = False
 
             # Set initial enabled states (all start as off/gray)
-            dash.set_translation_enabled(False)
+            translation = self.application_runtime_host.translation_snapshot()
+            dash.set_translation_enabled(translation.effective_enabled)
             dash.set_stt_enabled(False)
-            self.hub.translation_enabled = False
             await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=False)
-
-        await self.hub.start(auto_flush_osc=True)
 
         bridge = self._create_ui_event_bridge(runtime_logging=runtime_logging)
         self._start_ui_event_bridge_task(bridge)
         await self._sync_clipboard_watcher()
-        self._schedule_process_discovery_idle_preparation()
 
-    def _schedule_process_discovery_idle_preparation(self) -> None:
-        if self._process_idle_preparation_scheduled:
-            return
-        self._process_idle_preparation_scheduled = True
-        run_task = getattr(self.page, "run_task", None)
-        if callable(run_task):
-            with contextlib.suppress(Exception):
-                run_task(self._prepare_process_discovery_idle)
-
-    async def _prepare_process_discovery_idle(self) -> None:
-        with contextlib.suppress(Exception):
-            await asyncio.to_thread(lambda: tuple(PsutilCurrentUserProcessSnapshots().snapshots()))
+    async def start(self) -> None:
+        await self.prepare_presentation()
+        if self.overlay_commands is not None:
+            await self.overlay_commands.startup()
+        owned_parts = getattr(self.application_runtime_host, "parts", None)
+        if owned_parts is not None and owned_parts.hub is self.hub:
+            await self.application_runtime_host.start(auto_flush_osc=True)
+        elif self.hub is not None:
+            await self.hub.start(auto_flush_osc=True)
+        await self.start_rendering()
 
     def _create_ui_event_bridge(self, *, runtime_logging) -> UIEventBridge:  # noqa: ANN001
         assert self.hub is not None
@@ -1679,7 +1841,7 @@ class GuiController:
     ) -> bool | tuple[str, dict[str, object]]:
         if not self._managed_china_auth_relevant_for_translation_enable() or self.settings is None:
             return "qq_auth.error.retry", {}
-        service = self._managed_openrouter_release_service
+        service = await self._resolve_managed_auth_service()
         broker_client = getattr(service, "client", None)
         if broker_client is None:
             return "qq_auth.error.retry", {}
@@ -1708,10 +1870,7 @@ class GuiController:
         )
         if _settings_mutation_committed(result):
             self._set_managed_trial_pending_auth(False)
-            if self.hub is not None and self.hub.llm is None:
-                await self._rebuild_llm_provider()
-            else:
-                self._schedule_managed_trial_usage_refresh()
+            self._schedule_managed_trial_usage_refresh()
             return True
         message = result.message
         if message is None:
@@ -1739,7 +1898,7 @@ class GuiController:
         referral_id: str | None = None,
     ) -> bool:
         self.last_discord_managed_auth_referral_bonus_applied = False
-        release_service = self._managed_openrouter_release_service
+        release_service = await self._resolve_managed_auth_service()
         if release_service is None or self.settings is None:
             self._discord_managed_auth_in_progress = False
             self._set_managed_trial_pending_auth(False)
@@ -1826,13 +1985,6 @@ class GuiController:
                 self.last_discord_managed_auth_referral_bonus_applied = bool(
                     getattr(issue, "referral_bonus_applied", False)
                 )
-                if self.hub is None:
-                    self._show_short_message("discord_auth.error.retry")
-                    return False
-                await self._rebuild_llm_provider()
-                if self.hub.llm is None:
-                    self._show_short_message("discord_auth.error.retry")
-                    return False
                 result_referral_id = normalize_owned_referral_id(
                     getattr(issue, "referral_id", None)
                 )
@@ -1920,14 +2072,6 @@ class GuiController:
             self.last_discord_managed_auth_referral_bonus_applied = (
                 getattr(result, "referral_bonus_applied", False) is True
             )
-            if self.hub is None:
-                self._show_short_message("discord_auth.error.retry")
-                return False
-            if self.hub.llm is None:
-                await self._rebuild_llm_provider()
-            if self.hub.llm is None:
-                self._show_short_message("discord_auth.error.retry")
-                return False
             result_referral_id = normalize_owned_referral_id(getattr(result, "referral_id", None))
             self._set_managed_usage_view_state(
                 view_settings=getattr(self.app, "view_settings", None),
@@ -2311,11 +2455,13 @@ class GuiController:
             self.persist_github_star_prompt_translation_success_observed()
         )
 
-    def _get_github_star_prompt_runtime(self) -> GithubStarPromptRuntime:
+    def _get_github_star_prompt_runtime(self):  # noqa: ANN201
         if self._github_star_prompt_runtime is None:
-            self._github_star_prompt_runtime = GithubStarPromptRuntime(
-                diagnostics_sink=self._github_star_prompt_runtime_diagnostics_sink,
+            adapters = self._require_application_adapters()
+            adapters.bind_controller_github_diagnostics(
+                self._github_star_prompt_runtime_diagnostics_sink
             )
+            self._github_star_prompt_runtime = adapters.controller_github_prompt
         return self._github_star_prompt_runtime
 
     def _github_star_prompt_runtime_diagnostics_sink(
@@ -2327,32 +2473,6 @@ class GuiController:
             f"[Lifecycle][GithubStarPromptRuntime] event={event} metadata={dict(metadata)}",
             level=logging.WARNING,
         )
-
-    async def _close_github_star_prompt_runtime_for_release(
-        self,
-        failures: list[Exception],
-    ) -> None:
-        runtime = self._github_star_prompt_runtime
-        if runtime is None:
-            return
-        try:
-            await runtime.close()
-        except Exception as exc:
-            failures.append(exc)
-
-    async def _close_app_github_star_prompt_runtime_for_release(
-        self,
-        failures: list[Exception],
-    ) -> None:
-        close_prompt_runtime = getattr(self.app, "close_github_star_prompt_runtime", None)
-        if not callable(close_prompt_runtime):
-            return
-        try:
-            result = close_prompt_runtime()
-            if inspect.isawaitable(result):
-                await result
-        except Exception as exc:
-            failures.append(exc)
 
     def schedule_github_star_prompt_translation_success_observed(self) -> bool:
         if self.settings is None:
@@ -2400,21 +2520,51 @@ class GuiController:
             level=logging.INFO,
         )
 
+    async def set_telemetry_consent(self, consent: str) -> bool:
+        repositories = create_canonical_state_repositories(self.config_path)
+        owner = TelemetryOperationalStateOwner(repositories.unit_of_work)
+        snapshot = await owner.set_consent(consent)
+        if snapshot is None:
+            self._telemetry_diagnostics_sink(
+                "consent_persist_failed",
+                {"phase": "consent_persist"},
+            )
+            return False
+        try:
+            projected = await asyncio.to_thread(load_settings, self.config_path)
+        except Exception:
+            self._telemetry_diagnostics_sink(
+                "consent_projection_failed",
+                {"phase": "consent_projection"},
+            )
+            return False
+        self.settings = projected
+        self.vnext_settings = await asyncio.to_thread(
+            self._load_canonical_vnext_settings,
+            self.config_path,
+            projected,
+        )
+        self._remember_canonical_legacy_projection(projected)
+        return True
+
     async def record_telemetry_translation_success_day(
         self,
     ) -> TranslationSuccessTelemetryResult:
         if self.settings is None:
             return TranslationSuccessTelemetryResult(status="skipped_no_settings")
 
-        async def _persist(updated: AppSettings) -> bool:
-            await self.apply_settings(updated)
-            return self.last_settings_mutation_result is not None and _settings_mutation_committed(
-                self.last_settings_mutation_result
-            )
+        repositories = create_canonical_state_repositories(self.config_path)
+        owner = TelemetryOperationalStateOwner(
+            repositories.unit_of_work,
+        )
 
+        telemetry_snapshot = await owner.load()
+        if telemetry_snapshot is None:
+            self._telemetry_diagnostics_sink("state_load_failed", {"phase": "state_load"})
+            return TranslationSuccessTelemetryResult(status="state_load_failed")
         return await self._get_telemetry_service().record_translation_success_day(
-            self.settings,
-            persist_sent_date=_persist,
+            telemetry_snapshot,
+            persist_sent_date=owner.mark_translation_success_date_sent,
         )
 
     async def _preserve_github_star_prompt_observation_before_settings_replace(
@@ -2553,7 +2703,7 @@ class GuiController:
     ) -> ManagedOpenRouterStatusRefreshResult:
         current_referral_id = self._current_owned_referral_id()
         if service is None:
-            service = self._managed_openrouter_release_service
+            service = self._current_managed_release_service()
         if service is None:
             return ManagedOpenRouterStatusRefreshResult(
                 referral_id=current_referral_id,
@@ -2608,7 +2758,7 @@ class GuiController:
         remaining_percent: int | None,
         current_referral_id: str | None,
     ) -> None:
-        service = self._managed_openrouter_release_service
+        service = self._current_managed_release_service()
         if service is None:
             return
         refresh_status = getattr(service, "refresh_managed_status", None)
@@ -2625,7 +2775,7 @@ class GuiController:
                 result = await self._refresh_managed_status_best_effort(
                     service=service,
                 )
-                if service is not self._managed_openrouter_release_service:
+                if service is not self._current_managed_release_service():
                     return
                 if (
                     self.settings is None
@@ -2777,7 +2927,7 @@ class GuiController:
         )
 
         if auto_show_founder_letter and is_effectively_exhausted(usage_metadata):
-            self._disable_translation_for_managed_exhaustion(
+            await self._disable_translation_for_managed_exhaustion(
                 reopen_founder_letter=should_auto_show_founder_letter(
                     build_managed_identity_state_port(
                         self.settings,
@@ -2809,7 +2959,7 @@ class GuiController:
         with contextlib.suppress(Exception):
             self._save_settings()
 
-    def _disable_translation_for_managed_exhaustion(
+    async def _disable_translation_for_managed_exhaustion(
         self,
         *,
         reopen_founder_letter: bool,
@@ -2818,8 +2968,12 @@ class GuiController:
         self._set_managed_trial_pending_auth(False)
         if reopen_founder_letter:
             self._show_founder_letter_dialog()
-        if self.hub is not None:
-            self.hub.translation_enabled = False
+        if self.application_runtime_host is not None:
+            from puripuly_heart.app.ports.translation_application import SetTranslationEnabled
+
+            await self.application_runtime_host.set_translation_enabled(
+                SetTranslationEnabled(False)
+            )
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
             dash.set_translation_enabled(False)
@@ -2832,7 +2986,7 @@ class GuiController:
         if not is_effectively_exhausted(self._managed_trial_usage_metadata):
             return False
 
-        self._disable_translation_for_managed_exhaustion(reopen_founder_letter=True)
+        await self._disable_translation_for_managed_exhaustion(reopen_founder_letter=True)
         return True
 
     def _build_llm_provider_signature(self, settings: AppSettings) -> tuple[object, ...]:
@@ -2979,7 +3133,7 @@ class GuiController:
             self._peer_translation_activation_requested_for(settings)
             and self._effective_peer_overlay_enabled_for(settings)
             and self.hub is not None
-            and self._current_overlay_bridge_for_direct_runtime_command() is not None
+            and self.overlay_state == "connected"
         )
 
     def _is_qwen_llm(self, settings: object) -> bool:
@@ -3002,218 +3156,25 @@ class GuiController:
             return OVERLAY_TARGET_STEAMVR
         return self._normalized_overlay_target(resolved_settings.overlay.target)
 
-    def _new_overlay_runtime_handle(self) -> OverlayRuntimeHandle:
-        runtime = OverlayRuntimeHandle(shutdown_grace_s=OVERLAY_SHUTDOWN_GRACE_S)
-        self._overlay_runtime = runtime
-        return runtime
+    def _on_overlay_application_state(self, snapshot: OverlayLifecycleSnapshot) -> None:
+        previous_state = self.overlay_state
+        if previous_state == snapshot.state and self.failure_reason == snapshot.failure_reason:
+            return
+        self.overlay_state = snapshot.state
+        self.failure_reason = snapshot.failure_reason
+        self.auto_restart_scheduled = False
+        self._log_overlay_state_transition(previous_state, self.overlay_state)
+        self._sync_effective_hub_flags()
+        self._notify_overlay_state()
+        if snapshot.state == "connected":
+            run_task = getattr(self.page, "run_task", None)
+            if callable(run_task):
+                run_task(self._refresh_overlay_runtime_dependencies)
 
-    def _ensure_overlay_runtime_handle(self) -> OverlayRuntimeHandle:
-        runtime = self._overlay_runtime
-        if runtime is None:
-            runtime = self._new_overlay_runtime_handle()
-        return runtime
-
-    def _overlay_runtime_is_current(
-        self,
-        runtime: OverlayRuntimeHandle,
-        *,
-        overlay_instance_id: str | None = None,
-    ) -> bool:
-        if self._overlay_runtime is not runtime:
-            return False
-        if overlay_instance_id is None:
-            return True
-        return runtime.is_current_instance_id(overlay_instance_id)
-
-    def _overlay_runtime_has_resources(self, runtime: OverlayRuntimeHandle | None) -> bool:
-        if runtime is None:
-            return False
-        return any(
-            resource is not None
-            for resource in (
-                runtime.presenter,
-                runtime.bridge,
-                runtime.process_manager,
-                runtime.diagnostics,
-                runtime.renderer_events,
-                runtime.start_task,
-                runtime.monitor_task,
-                runtime.renderer_event_task,
-            )
-        )
-
-    async def _close_stale_overlay_start_runtime(
-        self,
-        runtime: OverlayRuntimeHandle,
-    ) -> None:
-        stale_presenter = runtime.presenter
-        stale_diagnostics = runtime.diagnostics
-        try:
-            await runtime.close(
-                preserve_presenter_state=True,
-                hub=self.hub,
-                emit_shutdown=False,
-            )
-        except Exception as exc:
-            self.log_detailed(
-                "[Overlay] Stale overlay start cleanup reported failure",
-                level=logging.WARNING,
-                exception=exc,
-            )
-        if self.hub is not None:
-            if getattr(self.hub, "overlay_sink", None) is stale_presenter:
-                self.hub.overlay_sink = None
-            if getattr(self.hub, "overlay_diagnostics", None) is stale_diagnostics:
-                self.hub.overlay_diagnostics = None
-
-    def _overlay_runtime_is_active(self) -> bool:
-        runtime = self._overlay_runtime
-        start_task = runtime.start_task if runtime is not None else None
-        return bool(
-            self.overlay_state in {"starting", "connected"}
-            or (runtime is not None and runtime.bridge is not None)
-            or (runtime is not None and runtime.process_manager is not None)
-            or (start_task is not None and not start_task.done())
-        )
-
-    def _current_overlay_presenter_for_direct_runtime_command(self) -> OverlayPresenter | None:
-        runtime = self._overlay_runtime
-        if runtime is None or self.overlay_state not in {"starting", "connected"}:
+    def _overlay_active_target(self) -> str | None:
+        if self.overlay_application_state is None:
             return None
-        return cast(OverlayPresenter | None, runtime.current_presenter_for_ingress())
-
-    def _current_overlay_bridge_for_direct_runtime_command(self) -> OverlayBridge | None:
-        runtime = self._overlay_runtime
-        if runtime is None:
-            return None
-        return cast(OverlayBridge | None, runtime.current_bridge_for_runtime_command())
-
-    def _previous_overlay_target_for_apply(self) -> str:
-        if self._overlay_runtime_is_active() and self._active_overlay_target is not None:
-            return self._active_overlay_target
-        return self._overlay_target_for_settings(self.settings)
-
-    def _overlay_process_runner_for_target(
-        self,
-        target: str,
-        *,
-        task_factory: object | None = None,
-    ) -> OverlayProcessRunner:
-        if target == OVERLAY_TARGET_DESKTOP:
-            return self._instantiate_overlay_process_runner(
-                DesktopFletOverlayRunner,
-                task_factory=task_factory,
-            )
-        return self._instantiate_overlay_process_runner(
-            DefaultOverlayProcessRunner,
-            task_factory=task_factory,
-        )
-
-    @staticmethod
-    def _instantiate_overlay_process_runner(
-        runner_cls: Callable[..., OverlayProcessRunner],
-        *,
-        task_factory: object | None,
-    ) -> OverlayProcessRunner:
-        try:
-            return runner_cls(task_factory=task_factory)
-        except TypeError:
-            runner = runner_cls()
-            with contextlib.suppress(Exception):
-                setattr(runner, "task_factory", task_factory)
-            return runner
-
-    def _build_initial_desktop_runtime_controls(
-        self,
-        settings: AppSettings,
-    ) -> list[dict[str, object]]:
-        desktop_settings = copy.deepcopy(settings.overlay.desktop_flet)
-        desktop_settings.validate()
-        bounds = self._desktop_launch_bounds_for_current_launch(desktop_settings)
-        visual = desktop_settings.visual
-        interaction_mode = DESKTOP_INTERACTION_MODE_EDIT
-        self.log_detailed(
-            "[DesktopOverlay][Launch] "
-            f"target=desktop locked={desktop_settings.locked} "
-            f"interaction_mode={interaction_mode} "
-            f"size_preset={desktop_settings.size_preset} "
-            f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
-            f"height={bounds['height']} "
-            f"text_scale={visual.text_scale} "
-            f"background_alpha={visual.background_alpha} "
-            f"outline_width={visual.outline_width}"
-        )
-        return [
-            {
-                "command": "apply_window_bounds",
-                "x": bounds["x"],
-                "y": bounds["y"],
-                "width": bounds["width"],
-                "height": bounds["height"],
-            },
-            {
-                "command": "apply_visual_config",
-                "text_scale": visual.text_scale,
-                "background_alpha": visual.background_alpha,
-                "outline_width": visual.outline_width,
-            },
-            {"command": "set_interaction_mode", "mode": interaction_mode},
-        ]
-
-    def _build_initial_desktop_runtime_controls_from_resolved_config(
-        self,
-        config: ResolvedOverlayConfig,
-    ) -> list[dict[str, object]]:
-        desktop_options = config.desktop_overlay_options
-        position = desktop_options.get("position")
-        if not isinstance(position, Mapping):
-            position = {}
-        visual_options = desktop_options.get("visual")
-        if not isinstance(visual_options, Mapping):
-            visual_options = {}
-
-        width, height = self._desktop_dimensions_for_size_preset(desktop_options.get("size_preset"))
-        x = position.get("x")
-        y = position.get("y")
-        if self._is_finite_non_bool_number(x) and self._is_finite_non_bool_number(y):
-            bounds = {"x": x, "y": y, "width": width, "height": height}
-        else:
-            bounds = self._desktop_centered_bounds_for_dimensions(width=width, height=height)
-
-        text_scale = visual_options.get("text_scale", DESKTOP_FLET_DEFAULT_TEXT_SCALE)
-        background_alpha = visual_options.get(
-            "background_alpha",
-            DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA,
-        )
-        outline_width = visual_options.get("outline_width")
-        interaction_mode = DESKTOP_INTERACTION_MODE_EDIT
-        self.log_detailed(
-            "[DesktopOverlay][Launch] "
-            f"target=desktop locked={bool(desktop_options.get('locked', False))} "
-            f"interaction_mode={interaction_mode} "
-            f"size_preset={desktop_options.get('size_preset')} "
-            f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
-            f"height={bounds['height']} "
-            f"text_scale={text_scale} "
-            f"background_alpha={background_alpha} "
-            f"outline_width={outline_width}"
-        )
-        return [
-            {
-                "command": "apply_window_bounds",
-                "x": bounds["x"],
-                "y": bounds["y"],
-                "width": bounds["width"],
-                "height": bounds["height"],
-            },
-            {
-                "command": "apply_visual_config",
-                "text_scale": text_scale,
-                "background_alpha": background_alpha,
-                "outline_width": outline_width,
-            },
-            {"command": "set_interaction_mode", "mode": interaction_mode},
-        ]
+        return self.overlay_application_state.lifecycle_snapshot().active_target
 
     @staticmethod
     def _desktop_dimensions_for_size_preset(size_preset: object) -> tuple[int, int]:
@@ -3351,27 +3312,8 @@ class GuiController:
         )
 
     def _drain_pending_desktop_user_bounds_events(self) -> None:
-        runtime = self._overlay_runtime
-        queue = runtime.renderer_events_or_none() if runtime is not None else None
-        if queue is None:
-            return
-        retained: list[dict[str, object]] = []
-        dropped = 0
-        while True:
-            try:
-                event = queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            if self._is_desktop_user_window_bounds_event(event):
-                dropped += 1
-                continue
-            retained.append(event)
-        for event in retained:
-            queue.put_nowait(event)
-        if dropped:
-            self.log_detailed(
-                f"[DesktopOverlay][Bounds] drained_pending_user_bounds count={dropped}"
-            )
+        if self.overlay_commands is not None:
+            self.overlay_commands.drain_pending_desktop_user_bounds_events()
 
     def _set_desktop_overlay_interaction_mode(self, mode: object) -> bool:
         if not isinstance(mode, str) or mode not in DESKTOP_INTERACTION_MODES:
@@ -3395,10 +3337,7 @@ class GuiController:
             return
         if self.overlay_state != "connected":
             return
-        if (
-            self._active_overlay_target != OVERLAY_TARGET_DESKTOP
-            or self._current_overlay_bridge_for_direct_runtime_command() is None
-        ):
+        if self._overlay_active_target() != OVERLAY_TARGET_DESKTOP or self.overlay_commands is None:
             return
 
         mode = DESKTOP_INTERACTION_MODE_PASS_THROUGH if locked else DESKTOP_INTERACTION_MODE_EDIT
@@ -3427,16 +3366,12 @@ class GuiController:
         await self._handle_desktop_overlay_reset_requested()
 
     async def _broadcast_desktop_runtime_control(self, payload: dict[str, object]) -> bool:
-        if self._active_overlay_target != OVERLAY_TARGET_DESKTOP:
+        if self._overlay_active_target() != OVERLAY_TARGET_DESKTOP:
             return False
-        bridge = self._current_overlay_bridge_for_direct_runtime_command()
-        if bridge is None:
-            return False
-        broadcast = getattr(bridge, "broadcast_desktop_runtime_control", None)
-        if not callable(broadcast):
+        if self.overlay_commands is None:
             return False
         try:
-            await broadcast(payload)
+            return await self.overlay_commands.send_desktop_control(payload)
         except Exception as exc:
             self.log_detailed(
                 "[Overlay] Failed to send desktop runtime control",
@@ -3444,7 +3379,7 @@ class GuiController:
                 exception=exc,
             )
             return False
-        return True
+        return False
 
     async def _broadcast_desktop_window_bounds_control(
         self,
@@ -3492,10 +3427,14 @@ class GuiController:
         overlay_instance_id: str | None = None,
     ) -> None:
         if overlay_instance_id is not None:
-            runtime = self._overlay_runtime
-            if runtime is None or not runtime.is_current_instance_id(overlay_instance_id):
+            snapshot = (
+                self.overlay_application_state.lifecycle_snapshot()
+                if self.overlay_application_state is not None
+                else None
+            )
+            if snapshot is None or snapshot.overlay_instance_id != overlay_instance_id:
                 return
-        if self._active_overlay_target != OVERLAY_TARGET_DESKTOP:
+        if self._overlay_active_target() != OVERLAY_TARGET_DESKTOP:
             return
         if not isinstance(event, dict):
             return
@@ -3596,15 +3535,15 @@ class GuiController:
             self._pending_desktop_bounds = None
             if bounds is None:
                 return
-            await self._persist_desktop_bounds(bounds)
+            await self.persist_desktop_overlay_bounds(bounds)
         except asyncio.CancelledError:
             raise
         finally:
             if self._desktop_bounds_persist_task is current_task:
                 self._desktop_bounds_persist_task = None
 
-    async def _persist_desktop_bounds(self, bounds: dict[str, int | float]) -> None:
-        if self.settings is None or self._active_overlay_target != OVERLAY_TARGET_DESKTOP:
+    async def persist_desktop_overlay_bounds(self, bounds: dict[str, int | float]) -> None:
+        if self.settings is None or self._overlay_active_target() != OVERLAY_TARGET_DESKTOP:
             return
         if self._desktop_bounds_from_payload({"event": "window_bounds_changed", **bounds}) is None:
             return
@@ -3635,8 +3574,8 @@ class GuiController:
             self._overlay_target_for_settings(self.settings) == OVERLAY_TARGET_DESKTOP
         )
         desktop_renderer_active = bool(
-            self._active_overlay_target == OVERLAY_TARGET_DESKTOP
-            and self._current_overlay_bridge_for_direct_runtime_command() is not None
+            self._overlay_active_target() == OVERLAY_TARGET_DESKTOP
+            and self.overlay_state == "connected"
         )
         if not configured_for_desktop and not desktop_renderer_active:
             return
@@ -3725,8 +3664,8 @@ class GuiController:
     ) -> bool:
         return bool(
             settings.ui.overlay_enabled
-            and self._active_overlay_target == OVERLAY_TARGET_DESKTOP
-            and self._current_overlay_bridge_for_direct_runtime_command() is not None
+            and self._overlay_active_target() == OVERLAY_TARGET_DESKTOP
+            and self.overlay_state == "connected"
         )
 
     def _desktop_center_preserving_bounds_for_size_preset_change(
@@ -3746,52 +3685,6 @@ class GuiController:
             "height": next_height,
         }
 
-    def _prepare_desktop_runtime_settings_update(
-        self,
-        previous_settings: AppSettings | None,
-        next_settings: AppSettings,
-    ) -> list[dict[str, object]]:
-        if previous_settings is None:
-            return []
-        previous_desktop = copy.deepcopy(previous_settings.overlay.desktop_flet)
-        previous_desktop.validate()
-        next_desktop = next_settings.overlay.desktop_flet
-        next_desktop.validate()
-
-        if not self._desktop_runtime_is_running_for_settings_update(next_settings):
-            return []
-
-        controls: list[dict[str, object]] = []
-        if previous_desktop.size_preset != next_desktop.size_preset:
-            self._discard_pending_desktop_bounds_persistence()
-            self._drain_pending_desktop_user_bounds_events()
-            bounds = self._desktop_center_preserving_bounds_for_size_preset_change(
-                previous_desktop_settings=previous_desktop,
-                next_size_preset=next_desktop.size_preset,
-            )
-            if previous_desktop.position.x is not None and previous_desktop.position.y is not None:
-                next_desktop.position.x = bounds["x"]
-                next_desktop.position.y = bounds["y"]
-                next_desktop.position.validate()
-            controls.append({"command": "apply_window_bounds", **bounds})
-
-        previous_visual = previous_desktop.visual
-        next_visual = next_desktop.visual
-        if (
-            previous_visual.text_scale != next_visual.text_scale
-            or previous_visual.background_alpha != next_visual.background_alpha
-            or previous_visual.outline_width != next_visual.outline_width
-        ):
-            controls.append(
-                {
-                    "command": "apply_visual_config",
-                    "text_scale": next_visual.text_scale,
-                    "background_alpha": next_visual.background_alpha,
-                    "outline_width": next_visual.outline_width,
-                }
-            )
-        return controls
-
     def _sync_desktop_overlay_interaction_mode_from_settings(
         self,
         settings: AppSettings,
@@ -3799,23 +3692,11 @@ class GuiController:
         if self._overlay_target_for_settings(settings) != OVERLAY_TARGET_DESKTOP:
             return
         if (
-            self._active_overlay_target == OVERLAY_TARGET_DESKTOP
-            and self._current_overlay_bridge_for_direct_runtime_command() is not None
+            self._overlay_active_target() == OVERLAY_TARGET_DESKTOP
+            and self.overlay_state == "connected"
         ):
             return
         self._set_desktop_overlay_interaction_mode(DESKTOP_INTERACTION_MODE_EDIT)
-
-    async def _broadcast_desktop_runtime_control_payloads(
-        self,
-        payloads: list[dict[str, object]],
-    ) -> None:
-        for payload in payloads:
-            if payload.get("command") == "apply_window_bounds":
-                bounds = self._desktop_bounds_from_payload(payload)
-                if bounds is not None:
-                    await self._broadcast_desktop_window_bounds_control(bounds)
-                continue
-            await self._broadcast_desktop_runtime_control(payload)
 
     async def _apply_desktop_size_preset_persistence_adjustment(
         self,
@@ -3847,7 +3728,7 @@ class GuiController:
         backend = resolve_peer_stt_runtime_config_from_vnext(vnext_settings)
         provider_signature = build_peer_stt_provider_signature_from_vnext(vnext_settings)
         desktop_audio = vnext_settings.intent.desktop_audio
-        capture_target = resolve_desktop_audio_capture_target(desktop_audio.capture_target)
+        capture_target = self._resolved_peer_capture_target(settings)
         return PeerRuntimeConfig(
             backend=backend,
             output_device=desktop_audio.output_device,
@@ -3855,33 +3736,24 @@ class GuiController:
             vad_hangover_ms=desktop_audio.vad_hangover_ms,
             vad_pre_roll_ms=desktop_audio.vad_pre_roll_ms,
             provider_signature=provider_signature,
+            capture_target=capture_target,
             runtime_signature=(
                 backend.source_language,
                 desktop_audio.output_device,
-                capture_target,
                 desktop_audio.vad_speech_threshold,
                 desktop_audio.vad_hangover_ms,
                 desktop_audio.vad_pre_roll_ms,
+                *((capture_target,) if capture_target.kind == "process" else ()),
                 provider_signature,
             ),
-            capture_target=capture_target,
-        )
-
-    def _resolve_peer_capture_target(
-        self,
-        settings: AppSettings,
-    ) -> ResolvedDesktopAudioCaptureTarget:
-        persisted_capture_target = getattr(settings.desktop_audio, "runtime_capture_target", None)
-        if not isinstance(persisted_capture_target, ResolvedDesktopAudioCaptureTarget):
-            persisted_capture_target = None
-        return self._peer_capture_target_resolution.resolve(
-            legacy_output_device=settings.desktop_audio.output_device,
-            persisted_capture_target=persisted_capture_target,
         )
 
     async def _close_peer_runtime_for_release(self, failures: list[Exception]) -> None:
         peer_runtime = self._peer_runtime
         if peer_runtime is None:
+            return
+        owned_parts = getattr(self.application_runtime_host, "parts", None)
+        if owned_parts is not None and owned_parts.peer_runtime is peer_runtime:
             return
         try:
             await peer_runtime.close()
@@ -3896,82 +3768,73 @@ class GuiController:
         if hub is None:
             return
         try:
-            await hub.stop()
+            owned_parts = getattr(self.application_runtime_host, "parts", None)
+            if owned_parts is not None and owned_parts.hub is hub:
+                await self.application_runtime_host.shutdown()
+            else:
+                await hub.stop()
         except Exception as exc:
             failures.append(exc)
             return
         if self.hub is hub:
             self.hub = None
 
-    async def _close_vrc_mic_receiver_runtime_for_release(
-        self,
-        failures: list[Exception],
-    ) -> None:
-        self._last_vrc_mic_sync_enabled = False
-        if self.vrc_mic_audio_gate is not None:
-            self.vrc_mic_audio_gate.set_enabled(False)
-            self.vrc_mic_audio_gate.set_receiver_active(False)
-
-        runtime = self._vrc_mic_receiver_runtime
-        if runtime is None:
-            receiver = self.receiver
-            if receiver is not None:
-                try:
-                    receiver.stop()
-                except Exception as exc:
-                    failures.append(exc)
-                    return
-                self.receiver = None
-            return
-
-        try:
-            await runtime.close()
-        except Exception as exc:
-            failures.append(exc)
-            remaining_receiver = getattr(runtime, "receiver", self.receiver)
-            self.receiver = remaining_receiver
-            return
-
-        if self._vrc_mic_receiver_runtime is runtime:
-            self._vrc_mic_receiver_runtime = None
-        self.receiver = None
-
-    async def stop(self) -> None:
-        cleanup_failures: list[Exception] = []
+    async def freeze_application_ingress(self) -> None:
         await self.release_manual_typing()
-        await self._close_app_github_star_prompt_runtime_for_release(cleanup_failures)
-        await self._close_github_star_prompt_runtime_for_release(cleanup_failures)
-        await self._close_clipboard_runtime()
-        await self._close_app_oauth_runtime_for_release(cleanup_failures)
-        await self._close_oauth_runtime_for_release(cleanup_failures)
-        await self._cancel_local_stt_download()
-        await self._close_microphone_test_runtime_for_release(cleanup_failures)
+
+    async def stop_legacy_application_adapters(self) -> None:
+        cleanup_failures: list[Exception] = []
         try:
             await self.set_stt_enabled(False)
         except Exception as exc:
             cleanup_failures.append(exc)
-        await self._close_vrc_mic_receiver_runtime_for_release(cleanup_failures)
-        await self._shutdown_overlay_runtime(preserve_failure_reason=True)
-        await self._close_peer_runtime_for_release(cleanup_failures)
+        _raise_lifecycle_cleanup_failures(
+            "GUI application adapter cleanup failed",
+            cleanup_failures,
+        )
 
-        await self._stop_hub_for_release(cleanup_failures)
+    async def stop_rendering(self, failures: tuple[BaseException, ...] = ()) -> None:
+        cleanup_failures: list[Exception] = []
         if self.hub is None:
             self._bridge_task = None
             self._ui_event_bridge = None
-
-        if self.sender is not None:
-            with contextlib.suppress(Exception):
-                self.sender.close()
-            self.sender = None
+        self.sender = None
         self.osc = None
-        await self._replace_managed_openrouter_release_service(None)
+        self._managed_openrouter_release_service = None
         if self._runtime_logging is not None:
             try:
                 self._runtime_logging.close_after_producers_stop(
-                    cleanup_failures=tuple(cleanup_failures)
+                    cleanup_failures=tuple(
+                        failure for failure in failures if isinstance(failure, Exception)
+                    )
                 )
             except Exception as exc:
                 cleanup_failures.append(exc)
+        _raise_lifecycle_cleanup_failures(
+            "GUI presentation stop cleanup failed",
+            cleanup_failures,
+        )
+
+    async def stop(self) -> None:
+        cleanup_failures: list[Exception] = []
+        await self.freeze_application_ingress()
+        try:
+            await self.stop_legacy_application_adapters()
+        except Exception as exc:
+            cleanup_failures.append(exc)
+        if self.overlay_commands is not None and not self._overlay_application_shutdown_started:
+            self._overlay_application_shutdown_started = True
+            try:
+                await self.overlay_commands.shutdown()
+            except Exception as exc:
+                cleanup_failures.append(exc)
+        await self._close_peer_runtime_for_release(cleanup_failures)
+
+        await self._stop_hub_for_release(cleanup_failures)
+        try:
+            await self.stop_rendering(tuple(cleanup_failures))
+        except Exception as exc:
+            cleanup_failures.append(exc)
         _raise_lifecycle_cleanup_failures(
             "GUI controller stop cleanup failed",
             cleanup_failures,
@@ -3982,13 +3845,7 @@ class GuiController:
             return
 
         self.log_basic(f"[Overlay] Toggle request: enabled={enabled}")
-        runtime = self._overlay_runtime
-        self.log_detailed(
-            "[Overlay] Toggle detail: "
-            f"current_state={self.overlay_state} "
-            f"has_bridge={runtime is not None and runtime.bridge is not None} "
-            f"has_manager={runtime is not None and runtime.process_manager is not None}"
-        )
+        self.log_detailed(f"[Overlay] Toggle detail: current_state={self.overlay_state}")
         self.settings.ui.overlay_enabled = bool(enabled)
         if not enabled:
             self.settings.ui.peer_translation_enabled = False
@@ -3996,11 +3853,19 @@ class GuiController:
             self._last_peer_translation_activation_requested = False
         self._refresh_overlay_peer_consumers()
 
-        if enabled:
-            await self._begin_overlay_start()
+        if self.overlay_commands is None:
+            if enabled:
+                self.on_overlay_start_failed("unknown")
             return
-
-        await self._shutdown_overlay_runtime(preserve_failure_reason=True)
+        if self.hub is not None:
+            self.overlay_commands.bind_runtime_host(self.hub)
+        self.overlay_commands.configure_intent(
+            self.settings,
+            enabled=enabled,
+            runtime_logging_mode=self.runtime_logging_mode,
+            interaction_mode=self.desktop_overlay_interaction_mode,
+        )
+        await self.overlay_commands.set_enabled(enabled)
 
     async def set_peer_translation_enabled(self, enabled: bool) -> None:
         if self.settings is None:
@@ -4008,7 +3873,7 @@ class GuiController:
 
         enabled = bool(enabled)
         self._peer_activation_generation += 1
-        activation_generation = self._peer_activation_generation
+        generation = self._peer_activation_generation
         self.log_basic(f"[Peer] Toggle request: enabled={enabled}")
         self.log_detailed(
             "[Peer] Toggle detail: "
@@ -4030,50 +3895,36 @@ class GuiController:
         if enabled and not self.settings.ui.overlay_enabled:
             self.settings.ui.overlay_enabled = True
         self.settings.ui.peer_translation_enabled = enabled
+        if not enabled:
+            self._peer_activation_starting = False
         self._last_peer_translation_enabled = enabled
         self._last_peer_translation_activation_requested = (
             self._peer_translation_activation_requested_for(self.settings)
         )
-        self._peer_activation_starting = enabled
-        self._refresh_overlay_peer_consumers()
         if enabled:
-            ready = await self._ensure_peer_local_stt_ready()
-            if activation_generation != self._peer_activation_generation:
+            self._peer_activation_starting = True
+            self._refresh_overlay_peer_consumers()
+            if not await self._ensure_peer_local_stt_ready():
+                if generation == self._peer_activation_generation:
+                    self._peer_activation_starting = False
+                    self._refresh_overlay_peer_consumers()
                 return
-            if not ready:
-                self._peer_activation_starting = False
+            if generation != self._peer_activation_generation:
+                return
         self._clear_local_stt_pending_enable_if_provider_switched_away()
         self._sync_local_stt_notice()
-        self._refresh_overlay_peer_consumers()
 
         if enabled and self.overlay_state not in {"starting", "connected"}:
-            await self._begin_overlay_start()
+            await self.set_overlay_enabled(True)
         else:
             await self._refresh_overlay_runtime_dependencies()
-        if activation_generation != self._peer_activation_generation:
+        if generation != self._peer_activation_generation:
             return
-        self._sync_effective_hub_flags(self.settings)
         self._peer_activation_starting = False
+        self._sync_effective_hub_flags(self.settings)
         if enabled:
             self._enqueue_peer_translation_disclosure()
         self._refresh_overlay_peer_consumers()
-
-    async def retry_peer_process_capture(self) -> bool:
-        if (
-            self.settings is None
-            or self._peer_runtime is None
-            or not self._peer_runtime_should_be_active(self.settings)
-        ):
-            return False
-        if not await self._ensure_peer_local_stt_ready():
-            return False
-        config = self._build_peer_runtime_config(self.settings)
-        retried = await self._peer_runtime.retry_process_capture(config=config)
-        if retried:
-            self._peer_process_warning_reason = None
-        self._sync_effective_hub_flags(self.settings)
-        self._refresh_overlay_peer_consumers()
-        return retried
 
     def _enqueue_peer_translation_disclosure(self) -> None:
         hub = self.hub
@@ -4092,388 +3943,6 @@ class GuiController:
         self._sync_effective_hub_flags()
         self._notify_overlay_state()
 
-    def on_overlay_runtime_disconnected(self) -> None:
-        self.on_overlay_start_failed("runtime_disconnected")
-
-    def on_overlay_runtime_crashed(self) -> None:
-        self.on_overlay_start_failed("runtime_crashed")
-
-    async def _begin_overlay_start(self) -> None:
-        if self._overlay_lock is None:
-            self._overlay_lock = asyncio.Lock()
-
-        async with self._overlay_lock:
-            if self.overlay_state in {"starting", "connected"}:
-                return
-
-            previous_runtime = self._overlay_runtime
-            teardown_succeeded = await self._teardown_overlay_runtime(
-                preserve_presenter_state=True,
-            )
-            if not teardown_succeeded:
-                return
-            preserved_presenter = None
-            if previous_runtime is not None and previous_runtime.is_closed:
-                preserved_presenter = cast(
-                    OverlayPresenter | None,
-                    previous_runtime.detach_preserved_presenter(),
-                )
-            runtime = self._new_overlay_runtime_handle()
-            if preserved_presenter is not None:
-                runtime.adopt_presenter(preserved_presenter)
-            self._active_overlay_target = self._overlay_target_for_settings(self.settings)
-            previous_state = self.overlay_state
-            self.overlay_state = "starting"
-            self.auto_restart_scheduled = False
-            self._log_overlay_state_transition(previous_state, self.overlay_state)
-            self._notify_overlay_state()
-            runtime.create_start_task(self._run_overlay_start(runtime))
-
-    async def _apply_overlay_retry_ownership(
-        self,
-        runtime: OverlayRuntimeHandle,
-        presenter: OverlayPresenter,
-        manager: OverlayProcessManager,
-        *,
-        confirmed: bool,
-    ) -> None:
-        if not self._overlay_runtime_is_current(runtime) or runtime.process_manager is not manager:
-            return
-        await presenter.update_native_retry_ownership(confirmed)
-
-    async def _run_overlay_start(self, runtime: OverlayRuntimeHandle | None = None) -> None:
-        if runtime is None:
-            runtime = self._overlay_runtime
-            if runtime is None:
-                runtime = self._new_overlay_runtime_handle()
-        overlay_instance_id: str | None = None
-        try:
-            if self.settings is None or self.hub is None:
-                self._active_overlay_target = None
-                if self._overlay_runtime_is_current(runtime):
-                    self.on_overlay_start_failed("unknown")
-                return
-
-            presenter = cast(OverlayPresenter | None, runtime.presenter)
-            overlay_instance_id = f"overlay-{secrets.token_hex(8)}"
-            runtime.set_overlay_instance_id(overlay_instance_id)
-            diagnostics = OverlayDiagnosticsRecorder(overlay_instance_id=overlay_instance_id)
-            runtime.attach_diagnostics(diagnostics)
-            resolved_overlay_config = resolve_overlay_config(self.settings)
-            overlay_target = self._active_overlay_target or self._normalized_overlay_target(
-                resolved_overlay_config.target
-            )
-            self._active_overlay_target = overlay_target
-            peer_presentation_refresh_burst = overlay_target != OVERLAY_TARGET_DESKTOP
-            self_presentation_refresh_burst = overlay_target != OVERLAY_TARGET_DESKTOP
-            self.log_detailed(
-                "[Overlay][Start] "
-                f"target={overlay_target} "
-                f"overlay_instance_id={overlay_instance_id} "
-                f"logging_mode={self.runtime_logging_mode} "
-                f"peer_presentation_refresh_burst={peer_presentation_refresh_burst} "
-                f"self_presentation_refresh_burst={self_presentation_refresh_burst}"
-            )
-
-            if presenter is None:
-                presenter = OverlayPresenter(
-                    calibration=self.overlay_calibration.copy(),
-                    clock=self.clock,
-                    diagnostics=diagnostics,
-                    runtime_log_detailed=self.log_detailed,
-                    show_translation=resolved_overlay_config.show_translation,
-                    show_peer_original=resolved_overlay_config.show_peer_original,
-                    task_factory=runtime.create_child_task,
-                    peer_presentation_refresh_burst=peer_presentation_refresh_burst,
-                    self_presentation_refresh_burst=self_presentation_refresh_burst,
-                )
-            else:
-                presenter.runtime_log_detailed = self.log_detailed
-            presenter = cast(OverlayPresenter, runtime.adopt_presenter(presenter))
-            presenter.runtime_log_detailed = self.log_detailed
-            if overlay_target != OVERLAY_TARGET_DESKTOP:
-                await presenter.update_native_retry_ownership(False)
-            await presenter.update_calibration(self.overlay_calibration.copy())
-            await presenter.update_display_preferences(
-                show_translation=resolved_overlay_config.show_translation,
-                show_peer_original=resolved_overlay_config.show_peer_original,
-            )
-            await presenter.update_peer_presentation_refresh_burst(peer_presentation_refresh_burst)
-            await presenter.update_self_presentation_refresh_burst(self_presentation_refresh_burst)
-            bridge = OverlayBridge(
-                session_token=secrets.token_urlsafe(16),
-                initial_snapshot=presenter.snapshot(),
-                overlay_instance_id=overlay_instance_id,
-                diagnostics=diagnostics,
-                runtime_logging_mode=self.runtime_logging_mode,
-                desktop_runtime_controls_enabled=overlay_target == OVERLAY_TARGET_DESKTOP,
-                task_factory=runtime.create_child_task,
-            )
-            if overlay_target == OVERLAY_TARGET_DESKTOP:
-                initial_desktop_controls = (
-                    self._build_initial_desktop_runtime_controls_from_resolved_config(
-                        resolved_overlay_config
-                    )
-                )
-                initial_interaction_control = initial_desktop_controls[-1]
-                self._set_desktop_overlay_interaction_mode(initial_interaction_control.get("mode"))
-                for payload in initial_desktop_controls:
-                    self._track_desktop_apply_window_bounds_control(payload)
-                bridge.set_initial_desktop_runtime_controls(initial_desktop_controls)
-            runtime.attach_bridge(bridge)
-            await bridge.start()
-            if not self._overlay_runtime_is_current(
-                runtime,
-                overlay_instance_id=overlay_instance_id,
-            ):
-                await self._close_stale_overlay_start_runtime(runtime)
-                return
-            current_presenter = cast(
-                OverlayPresenter | None,
-                runtime.current_presenter_for_ingress(),
-            )
-            if current_presenter is not presenter:
-                await self._close_stale_overlay_start_runtime(runtime)
-                return
-            presenter = current_presenter
-            presenter.attach_bridge(bridge)
-            latest_snapshot = presenter.snapshot()
-            if bridge.snapshot() != latest_snapshot:
-                await bridge.replace_snapshot(latest_snapshot)
-            runtime.attach_diagnostics(diagnostics)
-            self.hub.overlay_sink = presenter
-            self.hub.overlay_diagnostics = diagnostics
-
-            renderer_events: asyncio.Queue[dict[str, object]] | None = None
-            if overlay_target == OVERLAY_TARGET_DESKTOP:
-                renderer_events = asyncio.Queue(maxsize=64)
-                runtime.attach_renderer_events(renderer_events)
-                runtime.create_renderer_event_task(
-                    self._consume_desktop_renderer_events(
-                        renderer_events,
-                        overlay_instance_id=overlay_instance_id,
-                    )
-                )
-            else:
-                runtime.attach_renderer_events(None)
-
-            manager = OverlayProcessManager(
-                process_runner=self._overlay_process_runner_for_target(
-                    overlay_target,
-                    task_factory=runtime.create_child_task,
-                ),
-                bridge_url=bridge.url,
-                bridge_messages=bridge.messages,
-                session_token=bridge.session_token,
-                locale=self.settings.ui.locale,
-                startup_timeout_ms=OVERLAY_STARTUP_TIMEOUT_MS,
-                renderer_events=renderer_events,
-                overlay_instance_id=overlay_instance_id,
-                logging_mode=self.runtime_logging_mode,
-                diagnostics=diagnostics,
-                task_factory=runtime.create_child_task,
-                retry_ownership_changed=(
-                    None
-                    if overlay_target == OVERLAY_TARGET_DESKTOP
-                    else lambda confirmed: self._apply_overlay_retry_ownership(
-                        runtime,
-                        presenter,
-                        manager,
-                        confirmed=confirmed,
-                    )
-                ),
-            )
-            runtime.attach_process_manager(manager)
-            await manager.start()
-
-            if not self._overlay_runtime_is_current(
-                runtime,
-                overlay_instance_id=overlay_instance_id,
-            ):
-                await self._close_stale_overlay_start_runtime(runtime)
-                return
-
-            if runtime.process_manager is not manager:
-                return
-
-            if manager.state != "connected":
-                await self._handle_overlay_start_failure(manager.failure_reason)
-                return
-
-            self._mark_overlay_connected()
-            await self._refresh_overlay_runtime_dependencies()
-            monitor_task = getattr(manager, "_monitor_task", None)
-            if monitor_task is not None:
-                runtime.create_monitor_task(
-                    self._watch_overlay_runtime(
-                        manager,
-                        monitor_task,
-                        runtime=runtime,
-                        overlay_instance_id=overlay_instance_id,
-                    )
-                )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            if not self._overlay_runtime_is_current(
-                runtime,
-                overlay_instance_id=overlay_instance_id,
-            ):
-                self.log_detailed(
-                    "[Overlay] Ignoring stale overlay runtime start failure",
-                    level=logging.WARNING,
-                    exception=exc,
-                )
-                await self._close_stale_overlay_start_runtime(runtime)
-                return
-            self.log_detailed(
-                "[Overlay] Failed to start overlay runtime",
-                level=logging.ERROR,
-                exception=exc,
-            )
-            await self._handle_overlay_start_failure("unknown")
-
-    async def _watch_overlay_runtime(
-        self,
-        manager: OverlayProcessManager,
-        monitor_task: asyncio.Task[None],
-        *,
-        runtime: OverlayRuntimeHandle | None = None,
-        overlay_instance_id: str | None = None,
-    ) -> None:
-        if runtime is None:
-            runtime = self._overlay_runtime
-        try:
-            await monitor_task
-            if runtime is not None and not self._overlay_runtime_is_current(
-                runtime,
-                overlay_instance_id=overlay_instance_id,
-            ):
-                return
-            if runtime is None or runtime.process_manager is not manager:
-                return
-            if manager.state != "failed":
-                return
-
-            reason = self._normalize_overlay_failure_reason(manager.failure_reason)
-            if reason == "runtime_disconnected":
-                self.on_overlay_runtime_disconnected()
-            elif reason == "runtime_crashed":
-                self.on_overlay_runtime_crashed()
-            else:
-                self.on_overlay_start_failed(reason)
-            await self._teardown_overlay_runtime(preserve_presenter_state=True)
-            await self._refresh_overlay_runtime_dependencies()
-        except asyncio.CancelledError:
-            raise
-
-    async def _handle_overlay_start_failure(self, failure_reason: str | None) -> None:
-        self.on_overlay_start_failed(failure_reason)
-        await self._teardown_overlay_runtime(preserve_presenter_state=True)
-        await self._refresh_overlay_runtime_dependencies()
-
-    async def _shutdown_overlay_runtime(self, *, preserve_failure_reason: bool) -> None:
-        if self._overlay_lock is None:
-            self._overlay_lock = asyncio.Lock()
-
-        self.log_basic("[Overlay] Shutdown requested")
-        runtime = self._overlay_runtime
-        self.log_detailed(
-            "[Overlay] Shutdown detail: "
-            f"preserve_failure_reason={preserve_failure_reason} "
-            f"state={self.overlay_state} "
-            f"has_bridge={runtime is not None and runtime.bridge is not None} "
-            f"has_manager={runtime is not None and runtime.process_manager is not None} "
-            f"presenter_attached={runtime is not None and runtime.presenter is not None}"
-        )
-        async with self._overlay_lock:
-            runtime = self._overlay_runtime
-            has_runtime = self._overlay_runtime_has_resources(runtime)
-            if not has_runtime and self.overlay_state == "off":
-                return
-
-            previous_state = self.overlay_state
-            self.overlay_state = "stopping"
-            self.auto_restart_scheduled = False
-            self._log_overlay_state_transition(previous_state, self.overlay_state)
-            self._notify_overlay_state()
-
-            teardown_succeeded = await self._teardown_overlay_runtime(
-                preserve_presenter_state=False,
-                emit_shutdown=True,
-            )
-            if not teardown_succeeded and self._overlay_runtime_has_resources(
-                self._overlay_runtime
-            ):
-                previous_state = self.overlay_state
-                self.overlay_state = "failed"
-                if not preserve_failure_reason or self.failure_reason is None:
-                    self.failure_reason = self._normalize_overlay_failure_reason(None)
-                self._log_overlay_state_transition(previous_state, self.overlay_state)
-                self._sync_effective_hub_flags()
-                await self._refresh_overlay_runtime_dependencies()
-                self._notify_overlay_state()
-                return
-            previous_state = self.overlay_state
-            self.overlay_state = "off"
-            if not preserve_failure_reason:
-                self.failure_reason = None
-            self._log_overlay_state_transition(previous_state, self.overlay_state)
-            self._sync_effective_hub_flags()
-            await self._refresh_overlay_runtime_dependencies()
-            self._notify_overlay_state()
-
-    async def _emit_overlay_shutdown(self) -> None:
-        presenter = self._current_overlay_presenter_for_direct_runtime_command()
-        if presenter is None:
-            return
-        with contextlib.suppress(Exception):
-            await presenter.broadcast_shutdown()
-            await asyncio.sleep(OVERLAY_SHUTDOWN_GRACE_S)
-
-    async def _teardown_overlay_runtime(
-        self,
-        *,
-        preserve_presenter_state: bool,
-        emit_shutdown: bool = False,
-    ) -> bool:
-        runtime = self._ensure_overlay_runtime_handle()
-
-        await self._cancel_desktop_bounds_persistence()
-        close_succeeded = True
-        try:
-            await runtime.close(
-                preserve_presenter_state=preserve_presenter_state,
-                hub=self.hub,
-                emit_shutdown=emit_shutdown,
-            )
-        except Exception as exc:
-            close_succeeded = False
-            message = "[Overlay] Overlay runtime close reported cleanup failure"
-            detailed_emitted = self.log_detailed(
-                message,
-                level=logging.WARNING,
-                exception=exc,
-            )
-            if not detailed_emitted:
-                self.log_basic(message, level=logging.WARNING)
-        if close_succeeded and not self._overlay_runtime_has_resources(runtime):
-            self._overlay_runtime = None
-        self._active_overlay_target = None
-        self._desktop_suppressed_bounds_signatures.clear()
-        if not preserve_presenter_state:
-            self._set_desktop_overlay_interaction_mode(DESKTOP_INTERACTION_MODE_EDIT)
-        return close_succeeded
-
-    def _mark_overlay_connected(self) -> None:
-        previous_state = self.overlay_state
-        self.overlay_state = "connected"
-        self.failure_reason = None
-        self.auto_restart_scheduled = False
-        self._log_overlay_state_transition(previous_state, self.overlay_state)
-        self._sync_effective_hub_flags()
-        self._notify_overlay_state()
-
     def _normalize_overlay_failure_reason(self, failure_reason: str | None) -> str:
         if isinstance(failure_reason, str) and failure_reason in _OVERLAY_FAILURE_REASONS:
             return failure_reason
@@ -4485,18 +3954,11 @@ class GuiController:
             bridge.report_overlay_state(self.overlay_state, failure_reason=self.failure_reason)
 
     def _log_overlay_state_transition(self, previous_state: str, next_state: str) -> None:
-        runtime = self._overlay_runtime
-        manager = runtime.process_manager if runtime is not None else None
         transition_message = f"[Overlay] State transition: {previous_state} -> {next_state}"
         if self.failure_reason is not None:
             transition_message = f"{transition_message} failure_reason={self.failure_reason}"
         self.log_basic(transition_message)
-        self.log_detailed(
-            "[Overlay] State detail: "
-            f"presenter_attached={runtime is not None and runtime.presenter is not None} "
-            f"bridge_attached={runtime is not None and runtime.bridge is not None} "
-            f"manager_state={manager.state if manager is not None else None}"
-        )
+        self.log_detailed(f"[Overlay] State detail: active_target={self._overlay_active_target()}")
 
     def begin_overlay_calibration(self) -> OverlayCalibration:
         if self._overlay_calibration_draft is None:
@@ -4530,7 +3992,6 @@ class GuiController:
         self.overlay_calibration = self._overlay_calibration_draft.copy()
         self._overlay_calibration_draft = None
         self._schedule_overlay_calibration_persistence(self.overlay_calibration.copy())
-        self._schedule_overlay_calibration_emit()
         return self.overlay_calibration.copy()
 
     async def _apply_overlay_calibration_persistence(
@@ -4580,34 +4041,6 @@ class GuiController:
             return
         self.overlay_calibration = resolved_settings.overlay.calibration.copy()
 
-    async def _emit_overlay_calibration_update(self) -> None:
-        presenter = self._current_overlay_presenter_for_direct_runtime_command()
-        if presenter is None:
-            return
-        with contextlib.suppress(Exception):
-            await presenter.update_calibration(self.overlay_calibration.copy())
-
-    def _schedule_overlay_calibration_emit(self) -> None:
-        if self._current_overlay_presenter_for_direct_runtime_command() is None:
-            return
-        run_task = getattr(self.page, "run_task", None)
-        if callable(run_task):
-            try:
-                run_task(self._emit_overlay_calibration_update)
-                return
-            except Exception as exc:
-                self.log_detailed(
-                    "[Overlay] Failed to schedule calibration update via page.run_task",
-                    level=logging.WARNING,
-                    exception=exc,
-                )
-                return
-
-        self.log_detailed(
-            "[Overlay] Skipping calibration update; page.run_task unavailable",
-            level=logging.WARNING,
-        )
-
     def begin_overlay_calibration_for_test(self) -> None:
         self.begin_overlay_calibration()
 
@@ -4624,7 +4057,7 @@ class GuiController:
         request_generation = self._record_translation_toggle_intent(enabled)
         if not enabled:
             self._set_managed_trial_pending_auth(False)
-        if self.hub is None:
+        if self.hub is None or self.application_runtime_host is None:
             return False
         self.log_basic(f"[Translation] Toggle request: enabled={enabled}")
         self.log_detailed(
@@ -4632,6 +4065,12 @@ class GuiController:
             f"current_enabled={self.hub.translation_enabled} "
             f"llm_available={self.hub.llm is not None}"
         )
+        if enabled:
+            resolve_managed = getattr(
+                self.application_runtime_host, "resolve_managed_release_service", None
+            )
+            if callable(resolve_managed):
+                await resolve_managed()
         if enabled and await self._handle_managed_translation_enable(request_generation) is False:
             return False
         if enabled and not self._translation_toggle_intent_matches(
@@ -4642,8 +4081,12 @@ class GuiController:
                 "[Translation] Skipping stale enable request after newer toggle intent"
             )
             return False
-        if enabled and self.hub.llm is None:
-            self.hub.translation_enabled = False
+        from puripuly_heart.app.ports.translation_application import SetTranslationEnabled
+
+        command_result = await self.application_runtime_host.set_translation_enabled(
+            SetTranslationEnabled(enabled)
+        )
+        if command_result.status != "applied":
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 dash.set_translation_enabled(False)
@@ -4662,20 +4105,7 @@ class GuiController:
             else:
                 self.log_basic(f"[Translation] Enabled with provider: {provider}")
 
-        # Clear context history when toggling translation
-        self.hub.clear_context()
-        self.hub.translation_enabled = bool(enabled)
-        if enabled and self.hub.llm is not None:
-            llm = self.hub.llm
-            if isinstance(llm, SemaphoreLLMProvider):
-                llm = llm.inner
-            warmup = getattr(llm, "warmup", None)
-            if callable(warmup):
-                with contextlib.suppress(Exception):
-                    result = warmup()
-                    if inspect.isawaitable(result):
-                        await result
-        return bool(self.hub.translation_enabled)
+        return command_result.snapshot.effective_enabled
 
     async def set_stt_enabled(self, enabled: bool, *, force_immediate: bool = False) -> None:
         self.log_basic(f"[STT] Toggle request: enabled={enabled}")
@@ -4684,11 +4114,9 @@ class GuiController:
             f"desired_before={self._stt_desired} overlay_state={self.overlay_state}"
         )
         self._stt_activation_generation += 1
-        activation_generation = self._stt_activation_generation
-        self._stt_activation_starting = bool(enabled)
-        self._stt_activation_failed = False
-        self._sync_local_stt_notice()
+        generation = self._stt_activation_generation
         self._stt_desired = bool(enabled)
+        self._stt_activation_failed = False
         self._stt_force_immediate = force_immediate
         if not enabled:
             self._reset_local_stt_pending_enable_after_install()
@@ -4716,8 +4144,6 @@ class GuiController:
                 if dash is not None:
                     dash.set_stt_enabled(False)
                 self._show_short_stt_message("local_stt.download_in_progress")
-                self._stt_activation_starting = False
-                self._sync_local_stt_notice()
                 return
             if current_status in ("missing", "invalid", "download_failed"):
                 self._handle_local_stt_unavailable(
@@ -4725,18 +4151,43 @@ class GuiController:
                     resume_self=True,
                     resume_peer=self._peer_local_stt_requested(self.settings),
                 )
-                self._stt_activation_starting = False
-                self._sync_local_stt_notice()
                 return
 
         # Mark promo eligible when user explicitly enables STT via button
         if enabled and self.hub is not None:
             self.hub.mark_promo_eligible()
 
-        await self._ensure_stt_switch()
-        if activation_generation == self._stt_activation_generation:
-            self._stt_activation_starting = False
+        if self.self_stt_commands is None:
+            await self._ensure_stt_switch()
+            return
+        config = None
+        if enabled and self.settings is not None:
+            config = SelfChannelConfig(
+                target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                runtime_signature=self._build_self_stt_runtime_signature(self.settings),
+                local_qwen=self.settings.provider.stt == STTProviderName.LOCAL_QWEN,
+            )
+        if enabled:
+            self._stt_activation_starting = True
             self._sync_local_stt_notice()
+        result = await self.self_stt_commands.execute(
+            SetSelfSTTEnabled(enabled, config, force_immediate)
+        )
+        if generation != self._stt_activation_generation:
+            return
+        self._stt_activation_starting = False
+        self._stt_activation_failed = getattr(result, "status", "applied") == "preparation_failed"
+        self._render_self_stt_snapshot(result.snapshot)
+        self._sync_local_stt_notice()
+
+    def _render_self_stt_snapshot(self, snapshot: SelfChannelSnapshot) -> None:
+        self._stt_desired = snapshot.desired_enabled
+        dash = getattr(self.app, "view_dashboard", None)
+        if dash is not None:
+            dash.set_stt_enabled(snapshot.desired_enabled)
+            dash.set_stt_needs_key(
+                self._dashboard_stt_needs_key(stt_available=snapshot.provider_available)
+            )
 
     def _show_short_stt_message(self, message_key: str) -> None:
         self._show_short_message(message_key)
@@ -4771,7 +4222,7 @@ class GuiController:
             return True
         if await self._should_route_managed_trans_to_founder_letter():
             return False
-        service = self._managed_openrouter_release_service
+        service = self._current_managed_release_service()
         if service is None:
             return True
         discord_claim_guard: ManagedAuthClaimGuard | None = None
@@ -4827,7 +4278,9 @@ class GuiController:
         if diagnostics_text:
             self.log_basic(f"[ManagedAuth] {diagnostics_text}", level=logging.ERROR)
         await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=False)
-        self.hub.translation_enabled = False
+        from puripuly_heart.app.ports.translation_application import SetTranslationEnabled
+
+        await self.application_runtime_host.set_translation_enabled(SetTranslationEnabled(False))
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
             dash.set_translation_enabled(False)
@@ -4840,6 +4293,236 @@ class GuiController:
         self._show_short_message(result.message_key, **dict(result.message_kwargs))
         return False
 
+    def _resolved_peer_capture_target(
+        self,
+        settings: AppSettings | None = None,
+    ) -> ResolvedDesktopAudioCaptureTarget:
+        current = settings or self.settings
+        if current is None:
+            return ResolvedDesktopAudioCaptureTarget(kind="default_output_device")
+        target = current.desktop_audio.runtime_capture_target
+        if isinstance(target, ResolvedDesktopAudioCaptureTarget):
+            return target
+        if current.desktop_audio.output_device:
+            return ResolvedDesktopAudioCaptureTarget(
+                kind="named_output_device",
+                device_name=current.desktop_audio.output_device,
+            )
+        return ResolvedDesktopAudioCaptureTarget(kind="default_output_device")
+
+    def loopback_capture_summary(self, settings: AppSettings | None = None) -> str:
+        target = self._resolved_peer_capture_target(settings)
+        if target.kind == "named_output_device":
+            return target.device_name or t("settings.default_option")
+        if target.kind == "process":
+            return self._process_option_label(self._process_target_from_resolved(target), "")
+        return t("settings.default_option")
+
+    def list_loopback_capture_options(self) -> list[OptionItem]:
+        return [*self.list_loopback_process_options(), *self.list_loopback_device_options()]
+
+    def list_loopback_process_options(self) -> list[OptionItem]:
+        section = t("settings.desktop_audio.section.process")
+        seen: set[str] = set()
+        options = [
+            OptionItem(
+                value=self._encode_process_capture_option(candidate.target),
+                label=self._process_option_label(candidate.target, candidate.name),
+                description="",
+                disabled=not candidate.enabled,
+                section=section,
+            )
+            for candidate in ProcessCaptureResolver(
+                snapshots=PsutilCurrentUserProcessSnapshots()
+            ).enumerate_candidates()
+        ]
+        seen.update(option.value for option in options)
+        current = self.current_loopback_capture_option_value()
+        if current.startswith("process:") and current not in seen:
+            target = self._decode_capture_option(current).process
+            if target is not None:
+                options.insert(
+                    0,
+                    OptionItem(
+                        value=current,
+                        label=self._process_option_label(target, ""),
+                        description="",
+                        disabled=False,
+                        section=section,
+                    ),
+                )
+        options.sort(key=lambda option: option.disabled)
+        return options
+
+    def list_loopback_device_options(self) -> list[OptionItem]:
+        section = t("settings.desktop_audio.section.device")
+        options = [
+            OptionItem(
+                value="device:",
+                label=t("settings.default_option"),
+                description="",
+                disabled=False,
+                section=section,
+            )
+        ]
+        options.extend(
+            OptionItem(
+                value=f"device:{device}",
+                label=device,
+                description="",
+                disabled=False,
+                section=section,
+            )
+            for device in self._enumerate_loopback_device_names()
+        )
+        return options
+
+    def current_loopback_capture_option_value(
+        self,
+        settings: AppSettings | None = None,
+    ) -> str:
+        target = self._resolved_peer_capture_target(settings)
+        if target.kind == "process":
+            return self._encode_process_capture_option(self._process_target_from_resolved(target))
+        if target.kind == "named_output_device":
+            return f"device:{target.device_name or ''}"
+        return "device:"
+
+    async def apply_loopback_capture_option(self, value: str) -> None:
+        if self.settings is None:
+            return
+        updated = await asyncio.to_thread(
+            persist_desktop_audio_capture_target,
+            self.config_path,
+            self.settings,
+            self._decode_capture_option(value),
+        )
+        updated.ui.overlay_enabled = self.settings.ui.overlay_enabled
+        updated.ui.peer_translation_enabled = self.settings.ui.peer_translation_enabled
+        self.settings = updated
+        await self._refresh_peer_stt_runtime()
+        self._sync_effective_hub_flags(updated)
+        self._refresh_overlay_peer_consumers()
+        view_settings = getattr(self.app, "view_settings", None)
+        refresh = getattr(view_settings, "refresh_loopback_capture_target", None)
+        if callable(refresh):
+            refresh(updated)
+
+    async def retry_peer_process_capture(self) -> bool:
+        if self.settings is None:
+            return False
+        if (
+            self._peer_process_warning_reason is None
+            and self._resolved_peer_capture_target().kind != "process"
+        ):
+            return False
+        runtime = self._peer_runtime
+        retry = getattr(runtime, "retry_process_capture", None)
+        if callable(retry):
+            result = await retry(config=self._build_peer_runtime_config(self.settings))
+        else:
+            await self._refresh_peer_stt_runtime()
+            result = True
+        if result:
+            self._peer_process_warning_reason = None
+            self._refresh_overlay_peer_consumers()
+        return bool(result)
+
+    def peer_warning_action_is_retry(self) -> bool:
+        return bool(
+            self.settings is not None
+            and self.settings.ui.peer_translation_enabled
+            and self._peer_process_warning_reason is not None
+            and self._peer_process_warning_reason.startswith("process_")
+        )
+
+    def _on_peer_runtime_diagnostic(self, diagnostic: PeerRuntimeDiagnostic) -> None:
+        if diagnostic.capture_kind != "process":
+            return
+        if diagnostic.reason is PeerRuntimeFailureReason.PROCESS_TARGET_UNAVAILABLE:
+            suffix = diagnostic.process_unavailable_reason or "no_process"
+            self._peer_process_warning_reason = f"process_unavailable_{suffix}"
+        else:
+            self._peer_process_warning_reason = diagnostic.reason.value
+        self._refresh_overlay_peer_consumers()
+
+    @staticmethod
+    def _encode_process_capture_option(target: ProcessCaptureTargetIntent) -> str:
+        if target.kind == "discord":
+            return f"process:discord:{target.discord_channel}"
+        if target.kind == "vrchat":
+            return f"process:vrchat:{target.executable_identity}"
+        return f"process:generic:{target.executable_identity}"
+
+    @staticmethod
+    def _decode_capture_option(value: str) -> CaptureTargetIntent:
+        if value.startswith("process:"):
+            kind, _, identity = value[len("process:") :].partition(":")
+            if kind == "discord":
+                process = ProcessCaptureTargetIntent.discord(identity)
+            elif kind == "vrchat":
+                process = ProcessCaptureTargetIntent.vrchat(identity)
+            else:
+                process = ProcessCaptureTargetIntent.generic_executable(identity)
+            return CaptureTargetIntent.process_target(process)
+        device = value[len("device:") :] if value.startswith("device:") else value
+        if device:
+            return CaptureTargetIntent.named_output_device(device)
+        return CaptureTargetIntent.default_output_device()
+
+    @staticmethod
+    def _process_target_from_resolved(
+        target: ResolvedDesktopAudioCaptureTarget,
+    ) -> ProcessCaptureTargetIntent:
+        if target.process_kind == "discord":
+            return ProcessCaptureTargetIntent.discord(target.discord_channel or "")
+        if target.process_kind == "vrchat":
+            return ProcessCaptureTargetIntent.vrchat(target.executable_identity or "")
+        return ProcessCaptureTargetIntent.generic_executable(target.executable_identity or "")
+
+    @staticmethod
+    def _process_option_label(target: ProcessCaptureTargetIntent, fallback_name: str) -> str:
+        if target.kind == "vrchat":
+            label = t("settings.desktop_audio.process.vrchat")
+        elif target.kind == "discord":
+            labels = {
+                "stable": "settings.desktop_audio.process.discord_stable",
+                "ptb": "settings.desktop_audio.process.discord_ptb",
+                "canary": "settings.desktop_audio.process.discord_canary",
+            }
+            label = t(labels.get(target.discord_channel or "stable", labels["stable"]))
+        elif fallback_name:
+            return fallback_name
+        else:
+            name = (target.executable_identity or "").rsplit("\\", 1)[-1]
+            label = name[:-4] if name.lower().endswith(".exe") else name
+            label = label or t("settings.default_option")
+        if fallback_name and target.kind in {"vrchat", "discord"}:
+            suffix = fallback_name.rsplit(" (", 1)
+            if len(suffix) == 2 and suffix[1].endswith(")") and suffix[1][:-1].isdigit():
+                return f"{label} ({suffix[1]}"
+        return label
+
+    @staticmethod
+    def _enumerate_loopback_device_names() -> list[str]:
+        manager = None
+        names: list[str] = []
+        try:
+            import pyaudiowpatch as pyaudio
+
+            manager = pyaudio.PyAudio()
+            for info in manager.get_loopback_device_info_generator():
+                name = str(info.get("name", "") or "").strip()
+                if name and name not in names:
+                    names.append(name)
+        except Exception:
+            return names
+        finally:
+            if manager is not None:
+                with contextlib.suppress(Exception):
+                    manager.terminate()
+        return names
+
     def _refresh_local_stt_runtime_state(self) -> None:
         if self.settings is None:
             return
@@ -4848,9 +4531,11 @@ class GuiController:
             self._local_stt_runtime_status = self._local_stt_install_state.status
         self._sync_local_stt_notice()
 
-    def _get_local_stt_download_runtime(self) -> LocalSTTDownloadRuntime:
+    def _get_local_stt_download_runtime(self):  # noqa: ANN201
         if self._local_stt_download_runtime is None:
-            self._local_stt_download_runtime = LocalSTTDownloadRuntime()
+            self._local_stt_download_runtime = (
+                self._require_application_adapters().local_stt_download
+            )
         return self._local_stt_download_runtime
 
     def _current_local_stt_runtime_status(self) -> str:
@@ -4885,16 +4570,7 @@ class GuiController:
         if dash is None or self.settings is None:
             return
         status = self._current_local_stt_runtime_status()
-        if (
-            self._stt_activation_starting
-            and self.settings.provider.stt == STTProviderName.LOCAL_QWEN
-        ):
-            status = "starting"
-        elif (
-            self._stt_activation_failed and self.settings.provider.stt == STTProviderName.LOCAL_QWEN
-        ):
-            status = "start_failed"
-        should_show = status in {"starting", "downloading"} or (
+        should_show = status == "downloading" or (
             (
                 self.settings.provider.stt == STTProviderName.LOCAL_QWEN
                 or self._peer_local_stt_requested(self.settings)
@@ -5002,16 +4678,13 @@ class GuiController:
 
         if should_resume_self_local_stt:
             self._reset_local_stt_pending_enable_after_install()
-            await self._rebuild_stt_provider()
-            self._stt_desired = True
-            dash = getattr(self.app, "view_dashboard", None)
-            if dash is not None:
-                dash.set_stt_enabled(True)
-            await self._ensure_stt_switch()
+            await self.set_stt_enabled(True)
 
         if should_resume_peer_local_stt:
             self._reset_local_stt_pending_peer_enable_after_install()
-            await self._refresh_overlay_runtime_dependencies()
+            result = await self.application_runtime_host.resume_peer_stt()
+            if result.status != RUNTIME_APPLY_STATUS_APPLIED:
+                self._log_error("Peer STT runtime resume failed")
 
     async def _handle_local_stt_download_status(
         self,
@@ -5071,8 +4744,6 @@ class GuiController:
                 resume_self=True,
                 resume_peer=self._peer_local_stt_requested(self.settings),
             )
-        if self.hub is not None and self.hub.stt is None:
-            await self._rebuild_stt_provider()
         if self.hub is None or self.hub.stt is None:
             self._stt_desired = False
             dash = getattr(self.app, "view_dashboard", None)
@@ -5172,12 +4843,19 @@ class GuiController:
             "[STT] Replacing runtime provider detail: "
             f"desired={self._stt_desired} mic_task_active={self._mic_task is not None}"
         )
-        if self._mic_task is not None:
-            await self._stop_mic_loop()
-        self._stt_restart_requested = False
+        desired = self._stt_desired
+        if desired and self.self_stt_commands is not None:
+            result = await self.self_stt_commands.execute(SetSelfSTTEnabled(False))
+            self._render_self_stt_snapshot(result.snapshot)
         await self._rebuild_stt_provider()
-        if self._stt_desired:
-            await self._ensure_stt_switch()
+        if desired and self.self_stt_commands is not None and self.settings is not None:
+            config = SelfChannelConfig(
+                self.settings.audio.internal_sample_rate_hz,
+                self._build_self_stt_runtime_signature(self.settings),
+                self.settings.provider.stt == STTProviderName.LOCAL_QWEN,
+            )
+            result = await self.self_stt_commands.execute(SetSelfSTTEnabled(True, config))
+            self._render_self_stt_snapshot(result.snapshot)
 
     async def _run_stt_switch(self) -> None:
         if self._stt_switch_lock is None:
@@ -5185,7 +4863,7 @@ class GuiController:
         async with self._stt_switch_lock:
             while True:
                 desired = self._stt_desired
-                activation_generation = self._stt_activation_generation
+                generation = self._stt_activation_generation
                 restart = self._stt_restart_requested
                 self._stt_restart_requested = False
                 force_immediate = self._stt_force_immediate
@@ -5211,29 +4889,28 @@ class GuiController:
                             await self._drain_self_stt_for_toggle_off(
                                 force_immediate=force_immediate
                             )
-                    resume_stt = getattr(self.hub, "resume_self_stt_after_toggle_on", None)
-                    if callable(resume_stt):
-                        await resume_stt()
+                    self._stt_activation_starting = True
                     if not await self._ensure_local_stt_ready():
+                        if generation == self._stt_activation_generation:
+                            self._stt_activation_starting = False
+                            self._stt_activation_failed = True
+                            self._stt_desired = False
                         break
-                    if (
-                        activation_generation != self._stt_activation_generation
-                        or not self._stt_desired
-                    ):
+                    if generation != self._stt_activation_generation:
                         continue
                     started = await self._start_mic_loop()
-                    if activation_generation != self._stt_activation_generation:
-                        if started is not False:
-                            await self._stop_mic_loop()
-                        continue
-                    if started is False:
-                        self._stt_desired = False
+                    if not started:
+                        if generation != self._stt_activation_generation:
+                            continue
+                        self._stt_activation_starting = False
                         self._stt_activation_failed = True
+                        self._stt_desired = False
                         dash = getattr(self.app, "view_dashboard", None)
                         if dash is not None:
                             dash.set_stt_enabled(False)
-                        self._sync_local_stt_notice()
+                            dash.set_local_stt_notice("start_failed")
                         break
+                    self._stt_activation_starting = False
                     # Pre-warm STT session for faster first response
                     if (
                         self.hub is not None
@@ -5251,9 +4928,9 @@ class GuiController:
             self._clipboard_watcher_lock = asyncio.Lock()
         return self._clipboard_watcher_lock
 
-    def _get_clipboard_runtime(self) -> ClipboardRuntime:
+    def _get_clipboard_runtime(self):  # noqa: ANN201
         if self._clipboard_runtime is None:
-            self._clipboard_runtime = ClipboardRuntime(
+            self._clipboard_runtime = self._require_application_adapters().bind_clipboard(
                 watcher_factory=create_clipboard_watcher,
                 submit_handler=self._submit_clipboard_text,
             )
@@ -5289,18 +4966,6 @@ class GuiController:
                 )
             except Exception:
                 self._log_error("Clipboard watcher failed to stop")
-                if self._strict_runtime_errors_for_clipboard_watcher:
-                    raise
-
-    async def _close_clipboard_runtime(self) -> None:
-        async with self._get_clipboard_watcher_lock():
-            runtime = self._clipboard_runtime
-            if runtime is None:
-                return
-            try:
-                await runtime.close()
-            except Exception:
-                self._log_error("Clipboard runtime failed to close")
                 if self._strict_runtime_errors_for_clipboard_watcher:
                     raise
 
@@ -5636,6 +5301,13 @@ class GuiController:
             self._sync_memory_runtime_fields_from_settings(committed_settings)
 
     async def apply_settings(self, settings: AppSettings) -> None:
+        if (
+            self.settings is not None
+            and self.overlay_commands is not None
+            and self.settings.overlay.desktop_flet.size_preset
+            != settings.overlay.desktop_flet.size_preset
+        ):
+            await self.overlay_commands.prepare_desktop_size_change()
         if settings is not self.settings:
             routed = await self._apply_order22_order23_order24_settings_via_mutation_services(
                 settings
@@ -5694,26 +5366,6 @@ class GuiController:
         prev_locale = get_locale()
         prev_overlay_enabled = (
             self.settings.ui.overlay_enabled if self.settings is not None else False
-        )
-        previous_settings_for_desktop = (
-            copy.deepcopy(self.settings) if self.settings is not None else None
-        )
-        prev_overlay_target = self._previous_overlay_target_for_apply()
-        next_overlay_target = self._overlay_target_for_settings(settings)
-        if (
-            prev_overlay_target != next_overlay_target
-            and prev_overlay_enabled
-            and settings.ui.overlay_enabled
-            and self._overlay_runtime_is_active()
-        ):
-            self.log_basic(
-                "[Overlay] Target changed while running; stopping current overlay before switch"
-            )
-            settings = copy.deepcopy(settings)
-            settings.ui.overlay_enabled = False
-        desktop_runtime_controls = self._prepare_desktop_runtime_settings_update(
-            previous_settings_for_desktop,
-            settings,
         )
         prev_peer_translation_enabled = (
             self._last_peer_translation_enabled
@@ -5776,8 +5428,6 @@ class GuiController:
             )
         )
         if source_language_changed or target_language_changed:
-            presenter = self._current_overlay_presenter_for_direct_runtime_command()
-            bridge = self._current_overlay_bridge_for_direct_runtime_command()
             self.log_basic(
                 "[Settings] Applying languages: "
                 f"source={prev_source_lang}->{settings.languages.source_language} "
@@ -5786,10 +5436,7 @@ class GuiController:
             self.log_detailed(
                 "[Settings] Language apply detail: "
                 f"overlay_state={self.overlay_state} "
-                f"presenter_attached={presenter is not None} "
-                f"bridge_attached={bridge is not None} "
-                "overlay_sink_matches_presenter="
-                f"{self.hub is not None and presenter is not None and getattr(self.hub, 'overlay_sink', None) is presenter}"
+                f"overlay_target={self._overlay_active_target()}"
             )
         self.settings = settings
         self._last_microphone_test_audio_settings_signature = next_microphone_test_audio_signature
@@ -5807,7 +5454,13 @@ class GuiController:
             else:
                 if self._save_settings() is False:
                     return
-        await self._broadcast_desktop_runtime_control_payloads(desktop_runtime_controls)
+        if self.overlay_commands is not None:
+            await self.overlay_commands.apply_intent(
+                settings,
+                enabled=settings.ui.overlay_enabled,
+                runtime_logging_mode=self.runtime_logging_mode,
+                interaction_mode=self.desktop_overlay_interaction_mode,
+            )
         previous_strict_clipboard_runtime_errors = self._strict_runtime_errors_for_clipboard_watcher
         self._strict_runtime_errors_for_clipboard_watcher = strict_runtime_errors
         try:
@@ -5874,21 +5527,8 @@ class GuiController:
             if effective_peer_source_changed or effective_peer_target_changed:
                 await _clear_language_runtime_state("peer")
 
-        presenter = self._current_overlay_presenter_for_direct_runtime_command()
-        if presenter is not None:
-            await presenter.update_display_preferences(
-                show_translation=settings.overlay.show_translation,
-                show_peer_original=settings.overlay.show_peer_original,
-            )
-
         if prev_overlay_enabled != settings.ui.overlay_enabled:
             await self.set_overlay_enabled(settings.ui.overlay_enabled)
-
-        if self._last_vrc_mic_sync_enabled != settings.osc.vrc_mic_intercept:
-            if self.vrc_mic_audio_gate is not None:
-                self.vrc_mic_audio_gate.set_enabled(settings.osc.vrc_mic_intercept)
-            self.log_detailed(f"[Settings] VRC mic sync enabled: {settings.osc.vrc_mic_intercept}")
-            await self._configure_vrc_mic_receiver(enabled=settings.osc.vrc_mic_intercept)
 
         current_self_signature = self._build_self_stt_runtime_signature(settings)
         current_peer_signature = self._build_peer_stt_runtime_signature(settings)
@@ -6218,9 +5858,14 @@ class GuiController:
         runtime_apply = (
             _ControllerNoopRuntimeApply()
             if has_out_of_scope_draft
-            else _ControllerOverlayOscOutputRuntimeApply(
-                controller=self,
-                settings=committed_settings,
+            else (
+                _OverlayOscSurfaceRuntimeApply(
+                    controller=self,
+                    repository=repository,
+                    runtime=self.surface_runtime_transactions,
+                )
+                if self.surface_runtime_transactions is not None
+                else _UnavailableOverlayOscRuntimeApply()
             )
         )
         command = OverlayOscOutputSettingsMutation(values=patch_values)
@@ -6241,6 +5886,8 @@ class GuiController:
             self.settings = copy.deepcopy(base_settings)
             self._remember_settings_view_order23_baseline(self.settings)
             return True
+
+        self._sync_overlay_calibration_cache(committed_settings)
 
         if has_out_of_scope_draft:
             try:
@@ -6665,23 +6312,15 @@ class GuiController:
         has_out_of_scope_draft = _settings_snapshot_values(
             committed_settings
         ) != _settings_snapshot_values(next_settings)
-        plan = self._build_provider_runtime_apply_plan(
-            committed_settings,
-            force_rebuild_llm=False,
-            canonical_settings=self._canonical_vnext_after_legacy_delta(
-                base_settings,
-                committed_settings,
-            ),
-        )
         repository = _ControllerSettingsPatchRepository(
             controller=self,
             base_settings=base_settings,
             committed_settings=committed_settings,
         )
-        runtime_apply = _ControllerProviderRuntimeApply(
+        runtime_apply = _ApplicationHostSurfaceRuntimeApply(
             controller=self,
-            settings=committed_settings,
-            plan=plan,
+            repository=repository,
+            surface="translation_provider",
         )
         command = TranslationProviderSettingsMutation(values=patch_values)
         service = self.settings_mutation_service or SettingsMutationService(
@@ -6701,6 +6340,7 @@ class GuiController:
             return True
 
         self.settings = committed_settings
+        self._render_committed_provider_state(committed_settings)
         if has_out_of_scope_draft:
             fallback_plan = self._build_provider_runtime_apply_plan(
                 next_settings,
@@ -6773,14 +6413,6 @@ class GuiController:
         has_out_of_scope_draft = _settings_snapshot_values(
             committed_settings
         ) != _settings_snapshot_values(next_settings)
-        plan = self._build_provider_runtime_apply_plan(
-            committed_settings,
-            force_rebuild_llm=False,
-            canonical_settings=self._canonical_vnext_after_legacy_delta(
-                base_settings,
-                committed_settings,
-            ),
-        )
         repository = _ControllerSettingsPatchRepository(
             controller=self,
             base_settings=base_settings,
@@ -6790,12 +6422,10 @@ class GuiController:
         runtime_apply = (
             _ControllerNoopRuntimeApply()
             if has_out_of_scope_draft
-            else _ControllerProviderRuntimeApply(
+            else _ApplicationHostSurfaceRuntimeApply(
                 controller=self,
-                settings=committed_settings,
-                plan=plan,
+                repository=repository,
                 surface="stt_language_audio",
-                operation="apply_stt_language_audio_provider_runtime",
             )
         )
         command = SttLanguageAudioSettingsMutation(values=patch_values)
@@ -6818,59 +6448,38 @@ class GuiController:
             return True
 
         if has_out_of_scope_draft:
-            fallback_plan = self._build_provider_runtime_apply_plan(
-                next_settings,
-                force_rebuild_llm=False,
-                canonical_settings=self._canonical_vnext_after_legacy_delta(
-                    committed_settings,
-                    next_settings,
-                ),
-            )
             try:
-                await self._apply_providers_direct(
-                    next_settings,
-                    force_rebuild_llm=False,
-                    plan=fallback_plan,
-                    route_order22=False,
-                    strict_persistence_errors=True,
-                )
-            except _StrictSettingsSaveFailed:
-                await self._resync_committed_order22_provider_runtime_after_strict_save_failure(
-                    base_settings=base_settings,
-                    committed_settings=committed_settings,
-                    plan=plan,
-                )
+                self.settings = next_settings
+                self._persist_settings_at_controller_boundary(next_settings)
+                self._remember_canonical_legacy_projection(next_settings)
+                self._sync_memory_runtime_fields_from_settings(next_settings)
+            except Exception:
+                self._sync_memory_runtime_fields_from_settings(committed_settings)
                 self.last_settings_mutation_result = (
                     _stt_language_audio_save_failed_transaction_result(
                         operation="apply_stt_language_audio_provider_full_draft_save"
                     )
                 )
-            except Exception:
-                self.last_settings_mutation_result = _runtime_apply_result_as_degraded_transaction(
-                    _runtime_apply_failed_result(
-                        operation="apply_stt_language_audio_provider_runtime",
-                        code="provider_runtime_apply_exception",
-                        surface="stt_language_audio",
-                    )
-                )
-            else:
-                unavailable_result = _provider_runtime_apply_unavailable_result(
-                    controller=self,
-                    settings=next_settings,
-                    plan=fallback_plan,
-                    operation="apply_stt_language_audio_provider_runtime",
-                    surface="stt_language_audio",
-                )
-                if unavailable_result is not None:
-                    self.last_settings_mutation_result = (
-                        _runtime_apply_result_as_degraded_transaction(unavailable_result)
-                    )
         else:
             self.settings = committed_settings
+            self._render_committed_provider_state(committed_settings)
             if result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
                 self._sync_signature_caches(committed_settings)
         self._remember_settings_view_order22_baseline(self.settings)
         return True
+
+    def _render_committed_provider_state(self, settings: AppSettings) -> None:
+        self._clear_local_stt_pending_enable_if_provider_switched_away()
+        self._sync_local_stt_notice()
+        if (
+            settings.provider.llm != LLMProviderName.OPENROUTER
+            or settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED
+        ):
+            self._set_managed_trial_pending_auth(False)
+        else:
+            self._sync_managed_auth_dashboard_notice()
+        self._sync_effective_hub_flags(settings)
+        self._refresh_overlay_peer_consumers()
 
     async def _apply_providers_direct(
         self,
@@ -7003,15 +6612,47 @@ class GuiController:
     ) -> AppSettingsVNext:
         return self.canonical_settings_persistence.load(path, compatibility_settings)
 
-    def _persist_settings_at_controller_boundary(self, settings: AppSettings) -> None:
+    def _persist_settings_at_controller_boundary(
+        self,
+        settings: AppSettings,
+        *,
+        expected_revision: str | None = None,
+        reason: str | None = None,
+        correlation_id: str | None = None,
+        canonical_baseline: AppSettingsVNext | None = None,
+        force_canonical: bool = False,
+    ) -> SettingsCommitReceipt | None:
         canonical = self.vnext_settings
-        if self._canonical_persistence_port_enabled and canonical is not None:
-            self.canonical_settings_persistence.persist(
-                self.config_path,
-                canonical,
+        if (force_canonical or self._canonical_persistence_port_enabled) and canonical is not None:
+            baseline = canonical_baseline or self._canonical_mutation_rollback_snapshot
+            if baseline is None:
+                raise RuntimeError("canonical persistence delta baseline missing")
+            revision = (
+                expected_revision
+                or self.canonical_settings_persistence.load_receipt(
+                    self.config_path,
+                    reason=None,
+                    correlation_id=None,
+                ).revision
             )
-            return
+            receipt = self.canonical_settings_persistence.persist_delta(
+                self.config_path,
+                baseline=baseline,
+                next_settings=canonical,
+                expected_revision=revision,
+                reason=reason,
+                correlation_id=correlation_id,
+            )
+            self.vnext_settings = receipt.envelope
+            return receipt
         save_settings(self.config_path, settings)
+        if canonical is not None:
+            return self.canonical_settings_persistence.receipt_for(
+                canonical,
+                reason=reason,
+                correlation_id=correlation_id,
+            )
+        return None
 
     def _canonical_vnext_settings_for(self, settings: AppSettings) -> AppSettingsVNext:
         projected = self.canonical_settings_persistence.project(
@@ -7116,6 +6757,18 @@ class GuiController:
             self._canonical_mutation_rollback_pending = True
         self._canonical_mutation_depth += 1
 
+    def _rebase_canonical_mutation_rollback(
+        self,
+        *,
+        receipt: SettingsCommitReceipt,
+        projected: AppSettings,
+    ) -> None:
+        self._canonical_mutation_rollback_snapshot = receipt.envelope
+        self._canonical_mutation_rollback_legacy_snapshot = copy.deepcopy(projected)
+        self._canonical_mutation_rollback_active_settings = copy.deepcopy(projected)
+        self._canonical_mutation_rollback_authoritative = True
+        self._canonical_mutation_rollback_pending = self._canonical_mutation_depth > 0
+
     def _rollback_canonical_mutation(self) -> None:
         if not self._canonical_mutation_rollback_pending:
             return
@@ -7167,77 +6820,60 @@ class GuiController:
             self.provider_verifier = create_provider_verifier()
         return self.provider_verifier
 
-    async def _rebuild_llm_provider(self) -> None:
-        """Rebuild only the LLM provider without tearing down the entire pipeline."""
-        if self.hub is None or self.settings is None:
-            return
-
-        async def create_provider() -> object | None:
-            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-            new_managed_release_service = self._create_managed_openrouter_release_service(
-                secrets=secrets
-            )
-            await self._replace_managed_openrouter_release_service(new_managed_release_service)
-            return create_llm_provider(
-                self.settings,
-                secrets=secrets,
-                managed_release_service=self._managed_openrouter_release_service,
-                managed_delegate_ready=self._on_managed_trial_delegate_ready,
-                runtime_logging=self.runtime_logging,
-            )
-
-        outcome = await self._provider_rebuild_runtime.rebuild_llm_provider(
-            replace_provider=self.hub.replace_llm_provider,
-            create_provider=create_provider,
+    def runtime_operational_snapshot(self) -> RuntimeOperationalSnapshot:
+        hub = self.hub
+        translation = (
+            self.application_runtime_host.translation_snapshot()
+            if self.application_runtime_host is not None
+            else None
         )
-        llm = outcome.provider
+        return RuntimeOperationalSnapshot(
+            translation_enabled=bool(translation and translation.desired_enabled),
+            self_stt_enabled=self._stt_desired,
+            self_stt_running=bool(hub is not None and hub.stt is not None and self._stt_desired),
+            self_stt_staged=bool(hub is not None and hub.stt is not None and not self._stt_desired),
+            peer_stt_enabled=bool(self.settings and self.settings.ui.peer_translation_enabled),
+            peer_stt_running=bool(hub is not None and hub.peer_stt is not None),
+            peer_stt_staged=bool(hub is not None and hub.peer_stt is not None),
+            llm_available=bool(translation and translation.provider_available),
+            llm_retry_pending=bool(
+                translation and translation.desired_enabled and not translation.provider_available
+            ),
+            self_stt_available=bool(hub is not None and hub.stt is not None),
+            self_stt_retry_pending=self._last_self_stt_provider_signature == (),
+            peer_stt_available=bool(hub is not None and hub.peer_stt is not None),
+            peer_stt_retry_pending=self._last_peer_stt_provider_signature == (),
+        )
+
+    async def _rebuild_llm_provider(self) -> None:
+        if self.application_runtime_host is None:
+            return
+        from puripuly_heart.app.ports.translation_application import SetTranslationEnabled
+
+        outcome = await self.application_runtime_host.set_translation_enabled(
+            SetTranslationEnabled(True)
+        )
 
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
             dash.set_translation_needs_key(
-                (llm is None) and self._llm_provider_requires_secret(self.settings.provider.llm)
+                (not outcome.snapshot.provider_available)
+                and self.settings is not None
+                and self._llm_provider_requires_secret(self.settings.provider.llm)
             )
 
         await self._refresh_managed_trial_usage_state_best_effort()
 
-        if llm is None:
+        if not outcome.snapshot.provider_available:
             self._log_error("LLM provider not available")
             return
 
         self.log_basic("[Settings] LLM provider rebuilt successfully")
 
     async def _rebuild_stt_provider(self) -> None:
-        """Rebuild only the STT provider so later enable uses current settings."""
-        if self.hub is None or self.settings is None:
+        if self.settings is None or self.self_stt_provider_application is None:
             return
-
-        def create_provider() -> object | None:
-            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-            backend = create_stt_backend(
-                self.settings,
-                secrets=secrets,
-                diagnostics_enabled=self._detailed_audio_diag_enabled,
-            )
-            return ManagedSTTProvider(
-                backend=backend,
-                sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-                stt_provider_name=self.settings.provider.stt,
-                clock=self.clock,
-                reset_deadline_s=STT_RESET_DEADLINE_S,
-                drain_timeout_s=self.settings.stt.drain_timeout_s,
-                bridging_ms=self.settings.audio.ring_buffer_ms,
-                on_final_transcript_suppressed=self._on_final_transcript_suppressed,
-                runtime_logging=self.runtime_logging,
-                stt_input_fault_profile_provider=lambda: (
-                    self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
-                ),
-            )
-
-        outcome = await self._provider_rebuild_runtime.rebuild_stt_provider(
-            replace_provider=self.hub.replace_stt_provider,
-            create_provider=create_provider,
-        )
-        stt = outcome.provider
+        stt = await self.self_stt_provider_application.rebuild()
         self._sync_effective_hub_flags(self.settings)
 
         dash = getattr(self.app, "view_dashboard", None)
@@ -7247,7 +6883,6 @@ class GuiController:
                 dash.set_stt_enabled(False)
 
         if stt is None:
-            assert outcome.error is not None
             self._log_error("STT backend not available")
             return
 
@@ -7282,257 +6917,9 @@ class GuiController:
             ),
         )
 
-    def _on_peer_runtime_diagnostic(self, diagnostic: PeerRuntimeDiagnostic) -> None:
-        self.log_detailed(
-            "[PeerRuntime] "
-            f"reason={diagnostic.reason.value} "
-            f"capture_kind={diagnostic.capture_kind} "
-            f"unavailable_reason={diagnostic.process_unavailable_reason}"
-        )
-        if diagnostic.capture_kind == "process":
-            self._peer_process_warning_reason = self._peer_process_warning_reason_for_diagnostic(
-                diagnostic
-            )
-            self._refresh_overlay_peer_consumers()
-
-    @staticmethod
-    def _peer_process_warning_reason_for_diagnostic(
-        diagnostic: PeerRuntimeDiagnostic,
-    ) -> str:
-        if diagnostic.reason is PeerRuntimeFailureReason.PROCESS_TARGET_UNAVAILABLE:
-            unavailable = diagnostic.process_unavailable_reason or "no_process"
-            return f"process_unavailable_{unavailable}"
-        return diagnostic.reason.value
-
-    def loopback_capture_summary(self, settings: AppSettings | None = None) -> str:
-        resolved_settings = settings or self.settings
-        if resolved_settings is None:
-            return t("settings.default_option")
-        target = self._resolve_peer_capture_target(resolved_settings)
-        if target.kind == "named_output_device":
-            return target.device_name or t("settings.default_option")
-        if target.kind == "process":
-            return self._process_capture_display_name(target)
-        return t("settings.default_option")
-
-    def list_loopback_capture_options(self) -> list[OptionItem]:
-        options = self.list_loopback_process_options()
-        options.extend(self.list_loopback_device_options())
-        return options
-
-    def list_loopback_process_options(self) -> list[OptionItem]:
-        process_section = t("settings.desktop_audio.section.process")
-        options: list[OptionItem] = []
-        seen_process_values: set[str] = set()
-        for candidate in ProcessCaptureResolver(
-            snapshots=PsutilCurrentUserProcessSnapshots()
-        ).enumerate_candidates():
-            value = self._encode_process_capture_option(candidate.target)
-            seen_process_values.add(value)
-            options.append(
-                OptionItem(
-                    value=value,
-                    label=self._process_option_label(candidate.target, candidate.name),
-                    description="",
-                    disabled=not candidate.enabled,
-                    section=process_section,
-                )
-            )
-        current_value = self.current_loopback_capture_option_value()
-        if current_value.startswith("process:") and current_value not in seen_process_values:
-            process = self._decode_capture_option(current_value).process
-            if process is not None:
-                options.insert(
-                    0,
-                    OptionItem(
-                        value=current_value,
-                        label=self._process_option_label(process, ""),
-                        description="",
-                        disabled=False,
-                        section=process_section,
-                    ),
-                )
-        options.sort(key=lambda o: o.disabled)
-        return options
-
-    def list_loopback_device_options(self) -> list[OptionItem]:
-        device_section = t("settings.desktop_audio.section.device")
-        options: list[OptionItem] = [
-            OptionItem(
-                value="device:",
-                label=t("settings.default_option"),
-                description="",
-                disabled=False,
-                section=device_section,
-            )
-        ]
-        for device in self._enumerate_loopback_device_names():
-            options.append(
-                OptionItem(
-                    value=f"device:{device}",
-                    label=device,
-                    description="",
-                    disabled=False,
-                    section=device_section,
-                )
-            )
-        return options
-
-    def current_loopback_capture_option_value(self, settings: AppSettings | None = None) -> str:
-        resolved_settings = settings or self.settings
-        if resolved_settings is None:
-            return "device:"
-        target = self._resolve_peer_capture_target(resolved_settings)
-        if target.kind == "process":
-            process = self._process_target_from_resolved(target)
-            return self._encode_process_capture_option(process)
-        if target.kind == "named_output_device":
-            return f"device:{target.device_name or ''}"
-        return "device:"
-
-    async def apply_loopback_capture_option(self, value: str) -> None:
-        if self.settings is None:
-            return
-        capture_target = self._decode_capture_option(value)
-        next_settings = persist_desktop_audio_capture_target(
-            self.config_path,
-            self.settings,
-            capture_target,
-        )
-        # Keep non-capture runtime fields from the live session.
-        next_settings.ui.overlay_enabled = self.settings.ui.overlay_enabled
-        next_settings.ui.peer_translation_enabled = self.settings.ui.peer_translation_enabled
-        self.settings = next_settings
-        self.vnext_settings = self._load_canonical_vnext_settings(
-            self.config_path,
-            next_settings,
-        )
-        self._vnext_settings_authoritative = True
-        self._peer_process_warning_reason = None
-        await self._refresh_peer_stt_runtime()
-        self._sync_effective_hub_flags(self.settings)
-        self._refresh_overlay_peer_consumers()
-        view_settings = getattr(self.app, "view_settings", None)
-        if view_settings is not None:
-            with contextlib.suppress(Exception):
-                refresh_capture_target = getattr(
-                    view_settings,
-                    "refresh_loopback_capture_target",
-                    None,
-                )
-                if callable(refresh_capture_target):
-                    refresh_capture_target(self.settings)
-
-    def peer_warning_action_is_retry(self) -> bool:
-        if self.settings is None or not self.settings.ui.peer_translation_enabled:
-            return False
-        reason = self._peer_process_warning_reason
-        return reason is not None and (
-            reason.startswith("process_") or reason.startswith("process_unavailable_")
-        )
-
-    @staticmethod
-    def _encode_process_capture_option(target: ProcessCaptureTargetIntent) -> str:
-        if target.kind == "discord":
-            return f"process:discord:{target.discord_channel}"
-        if target.kind == "vrchat":
-            return f"process:vrchat:{target.executable_identity}"
-        return f"process:generic:{target.executable_identity}"
-
-    def _decode_capture_option(self, value: str) -> CaptureTargetIntent:
-        if value.startswith("process:"):
-            payload = value[len("process:") :]
-            kind, _, rest = payload.partition(":")
-            if kind == "discord":
-                return CaptureTargetIntent.process_target(ProcessCaptureTargetIntent.discord(rest))
-            if kind == "vrchat":
-                return CaptureTargetIntent.process_target(ProcessCaptureTargetIntent.vrchat(rest))
-            return CaptureTargetIntent.process_target(
-                ProcessCaptureTargetIntent.generic_executable(rest)
-            )
-        device_name = value[len("device:") :] if value.startswith("device:") else value
-        if device_name:
-            return CaptureTargetIntent.named_output_device(device_name)
-        return CaptureTargetIntent.default_output_device()
-
-    def _process_target_from_resolved(
-        self,
-        target: ResolvedDesktopAudioCaptureTarget,
-    ) -> ProcessCaptureTargetIntent:
-        if target.process_kind == "discord":
-            return ProcessCaptureTargetIntent.discord(target.discord_channel or "")
-        if target.process_kind == "vrchat":
-            return ProcessCaptureTargetIntent.vrchat(target.executable_identity or "")
-        return ProcessCaptureTargetIntent.generic_executable(target.executable_identity or "")
-
-    def _process_capture_display_name(self, target: ResolvedDesktopAudioCaptureTarget) -> str:
-        process = self._process_target_from_resolved(target)
-        return self._process_option_label(process, "")
-
-    def _process_option_label(
-        self,
-        target: ProcessCaptureTargetIntent,
-        fallback_name: str,
-    ) -> str:
-        if target.kind == "vrchat":
-            base = t("settings.desktop_audio.process.vrchat")
-        elif target.kind == "discord":
-            channel = target.discord_channel or "stable"
-            if channel == "ptb":
-                base = t("settings.desktop_audio.process.discord_ptb")
-            elif channel == "canary":
-                base = t("settings.desktop_audio.process.discord_canary")
-            else:
-                base = t("settings.desktop_audio.process.discord_stable")
-        elif fallback_name:
-            return fallback_name
-        else:
-            path = target.executable_identity or ""
-            basename = path.rsplit("\\", 1)[-1]
-            if basename.lower().endswith(".exe"):
-                basename = basename[:-4]
-            base = basename or t("settings.default_option")
-        if target.kind in {"vrchat", "discord"} and fallback_name:
-            count_suffix = fallback_name.rsplit(" (", 1)
-            if len(count_suffix) == 2 and count_suffix[1].endswith(")"):
-                count = count_suffix[1][:-1]
-                if count.isdigit():
-                    return f"{base} ({count})"
-        return base
-
-    @staticmethod
-    def _enumerate_loopback_device_names() -> list[str]:
-        names: list[str] = []
-        manager = None
-        try:
-            import pyaudiowpatch as pyaudio  # type: ignore
-
-            manager = pyaudio.PyAudio()
-            seen: set[str] = set()
-            for info in manager.get_loopback_device_info_generator():
-                name = str(info.get("name", "") or "").strip()
-                if not name or name in seen:
-                    continue
-                seen.add(name)
-                names.append(name)
-        except Exception:
-            return names
-        finally:
-            if manager is not None:
-                with contextlib.suppress(Exception):
-                    manager.terminate()
-        return names
-
-    async def _create_peer_audio_source_from_runtime_config(self, config: PeerRuntimeConfig):
+    def _create_peer_audio_source_from_runtime_config(self, config: PeerRuntimeConfig):
         if config.capture_target.kind == "process":
-            process_target = self._process_target_from_runtime_config(config)
-            resolution = await asyncio.to_thread(
-                lambda: ProcessCaptureResolver(
-                    snapshots=PsutilCurrentUserProcessSnapshots()
-                ).resolve_for_start(process_target)
-            )
-            return self._create_process_peer_audio_source(config, resolution=resolution)
-
+            return self._create_process_peer_audio_source_async(config)
         device_name = config.capture_target.device_name or config.output_device
         raw_source = DesktopLoopbackAudioSource(device_name=device_name)
         self.log_detailed(
@@ -7552,27 +6939,21 @@ class GuiController:
             log_detailed=lambda message: self.log_detailed(message),
         )
 
-    def _create_process_peer_audio_source(
-        self,
-        config: PeerRuntimeConfig,
-        *,
-        resolution=None,
-    ) -> DesktopPeerPipeline:
-        if resolution is None:
-            process_target = self._process_target_from_runtime_config(config)
-            resolution = ProcessCaptureResolver(
-                snapshots=PsutilCurrentUserProcessSnapshots()
-            ).resolve_for_start(process_target)
+    async def _create_process_peer_audio_source_async(self, config: PeerRuntimeConfig):
+        process_target = self._process_target_from_resolved(config.capture_target)
+        resolution = await asyncio.to_thread(
+            ProcessCaptureResolver(snapshots=PsutilCurrentUserProcessSnapshots()).resolve_for_start,
+            process_target,
+        )
+        return self._create_process_peer_audio_source(config, resolution=resolution)
+
+    def _create_process_peer_audio_source(self, config: PeerRuntimeConfig, *, resolution):
         if resolution.identity is None:
             assert resolution.unavailable_reason is not None
             raise ProcessCaptureTargetUnavailableError(resolution.unavailable_reason)
         raw_source = ProcessAudioCaptureSource(
             identity=resolution.identity,
             watcher=PsutilProcessIdentityWatcher(),
-        )
-        self.log_detailed(
-            "[AudioDiag][ProcessCapture][peer] "
-            f"target_kind={config.capture_target.process_kind} capture=process"
         )
         wrapped_source = self._wrap_diagnostic_audio_source(raw_source, channel_label="peer")
         return DesktopPeerPipeline(
@@ -7582,18 +6963,23 @@ class GuiController:
             log_detailed=lambda message: self.log_detailed(message),
         )
 
-    @staticmethod
-    def _process_target_from_runtime_config(
-        config: PeerRuntimeConfig,
-    ) -> ProcessCaptureTargetIntent:
-        target = config.capture_target
-        if target.kind != "process" or target.process_kind is None:
-            raise ValueError("process peer source requires a process capture target")
-        if target.process_kind == "discord":
-            return ProcessCaptureTargetIntent.discord(target.discord_channel or "")
-        if target.process_kind == "vrchat":
-            return ProcessCaptureTargetIntent.vrchat(target.executable_identity or "")
-        return ProcessCaptureTargetIntent.generic_executable(target.executable_identity or "")
+    def _schedule_process_discovery_idle_preparation(self) -> None:
+        if self._process_discovery_preparation_scheduled:
+            return
+        if not callable(getattr(self.page, "run_task", None)):
+            return
+        self._process_discovery_preparation_scheduled = True
+        self.page.run_task(self._prepare_process_discovery)
+
+    async def _prepare_process_discovery(self) -> None:
+        try:
+            await asyncio.to_thread(
+                ProcessCaptureResolver(
+                    snapshots=PsutilCurrentUserProcessSnapshots()
+                ).enumerate_candidates
+            )
+        except Exception:
+            return
 
     @property
     def debug_capture_fault_profile(self) -> str:
@@ -7669,6 +7055,7 @@ class GuiController:
         current = AudioFaultProfile(self._debug_capture_fault_profile)
         next_profile = profiles[(profiles.index(current) + 1) % len(profiles)]
         self._debug_capture_fault_profile = next_profile.value
+        self._sync_application_audio_fault_hooks()
         self.log_detailed(
             "[AudioDiag][DebugFault] "
             f"capture_profile={next_profile.value} "
@@ -7690,6 +7077,7 @@ class GuiController:
         current = AudioFaultProfile(self._debug_stt_fault_profile)
         next_profile = profiles[(profiles.index(current) + 1) % len(profiles)]
         self._debug_stt_fault_profile = next_profile.value
+        self._sync_application_audio_fault_hooks()
         self.log_detailed(
             "[AudioDiag][DebugFault] "
             f"stt_profile={next_profile.value} "
@@ -7701,7 +7089,22 @@ class GuiController:
     def clear_debug_audio_fault_profiles(self) -> None:
         self._debug_capture_fault_profile = "none"
         self._debug_stt_fault_profile = "none"
+        self._sync_application_audio_fault_hooks()
         self.log_detailed("[AudioDiag][DebugFault] capture_profile=none stt_profile=none")
+
+    def _sync_application_audio_fault_hooks(self) -> None:
+        setter = getattr(self.application_runtime_host, "set_debug_audio_faults", None)
+        if callable(setter):
+            setter(
+                capture=(
+                    self._debug_capture_fault_profile
+                    if self._debug_audio_fault_allowed()
+                    else "none"
+                ),
+                stt=(
+                    self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
+                ),
+            )
 
     def _wrap_diagnostic_audio_source(
         self,
@@ -7766,6 +7169,20 @@ class GuiController:
         desired_active = self._peer_runtime_should_be_active(self.settings)
         if desired_active and not await self._ensure_peer_local_stt_ready():
             desired_active = False
+        lease_provider = getattr(self.hub, "lease_stt_provider", None)
+        peer_lease = lease_provider("peer_stt") if callable(lease_provider) else None
+        if (
+            desired_active
+            and config.backend.provider == "local_qwen"
+            and callable(lease_provider)
+            and (peer_lease is None or peer_lease.current is None)
+        ):
+            result = await self.application_runtime_host.resume_peer_stt()
+            if result.status == RUNTIME_APPLY_STATUS_APPLIED:
+                self._last_peer_stt_runtime_signature = config.runtime_signature
+                self._sync_effective_hub_flags(self.settings)
+                return
+            desired_active = False
         await self._provider_rebuild_runtime.apply_peer_policy(
             peer_runtime=self._peer_runtime,
             config=config,
@@ -7788,7 +7205,6 @@ class GuiController:
             await self.set_stt_enabled(False)
         except Exception as exc:
             cleanup_failures.append(exc)
-        await self._configure_vrc_mic_receiver(enabled=False)
         await self._stop_hub_for_release(cleanup_failures)
         if self.hub is None:
             self._bridge_task = None
@@ -7804,9 +7220,8 @@ class GuiController:
         )
         await self._init_pipeline()
         assert self.hub is not None
-        presenter = self._current_overlay_presenter_for_direct_runtime_command()
-        if presenter is not None:
-            self.hub.overlay_sink = presenter
+        if self.overlay_commands is not None:
+            self.overlay_commands.bind_runtime_host(self.hub)
 
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
@@ -7818,17 +7233,15 @@ class GuiController:
                 self._dashboard_stt_needs_key(stt_available=self.hub.stt is not None)
             )
 
-            self.hub.translation_enabled = (
-                bool(getattr(dash, "is_translation_on", True)) and self.hub.llm is not None
-            )
-            dash.set_translation_enabled(self.hub.translation_enabled)
+            translation = self.application_runtime_host.translation_snapshot()
+            dash.set_translation_enabled(translation.effective_enabled)
 
         await self.hub.start(auto_flush_osc=True)
 
         bridge = self._create_ui_event_bridge(runtime_logging=self.runtime_logging)
         self._start_ui_event_bridge_task(bridge)
 
-        if self.overlay_state == "connected" and presenter is not None:
+        if self.overlay_state == "connected":
             await self._refresh_overlay_runtime_dependencies()
 
         if restore_stt_enabled:
@@ -7840,201 +7253,101 @@ class GuiController:
     async def _init_pipeline(self) -> None:
         assert self.settings is not None
         self._sync_signature_caches(self.settings)
-        secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-        new_managed_release_service = self._create_managed_openrouter_release_service(
-            secrets=secrets
+        if self.application_runtime_host is None:
+            raise RuntimeError("application runtime host is required")
+        subscribe_managed = getattr(
+            self.application_runtime_host, "subscribe_managed_discord_callback", None
         )
-        await self._replace_managed_openrouter_release_service(new_managed_release_service)
-
-        llm = None
-        with contextlib.suppress(Exception):
-            llm = create_llm_provider(
-                self.settings,
-                secrets=secrets,
-                managed_release_service=self._managed_openrouter_release_service,
-                managed_delegate_ready=self._on_managed_trial_delegate_ready,
-                runtime_logging=self.runtime_logging,
-            )
-
-        stt = None
-        try:
-            backend = create_stt_backend(
-                self.settings,
-                secrets=secrets,
-                diagnostics_enabled=self._detailed_audio_diag_enabled,
-            )
-            stt = ManagedSTTProvider(
-                backend=backend,
-                sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-                stt_provider_name=self.settings.provider.stt,
-                clock=self.clock,
-                reset_deadline_s=STT_RESET_DEADLINE_S,
-                drain_timeout_s=self.settings.stt.drain_timeout_s,
-                bridging_ms=self.settings.audio.ring_buffer_ms,
-                on_final_transcript_suppressed=self._on_final_transcript_suppressed,
-                runtime_logging=self.runtime_logging,
-                stt_input_fault_profile_provider=lambda: (
-                    self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
-                ),
-            )
-        except Exception:
-            self._log_error("STT backend not available")
-
-        sender = VrchatOscUdpSender(
-            host=self.settings.osc.host,
-            port=self.settings.osc.port,
-            chatbox_address=self.settings.osc.chatbox_address,
-            chatbox_send=self.settings.osc.chatbox_send,
-            chatbox_clear=self.settings.osc.chatbox_clear,
+        if callable(subscribe_managed):
+            subscribe_managed(self.handle_managed_discord_callback)
+        subscribe_dashboard = getattr(
+            self.application_runtime_host, "subscribe_dashboard_runtime_facts", None
         )
-        osc = ChatboxPaginator(
-            sender=sender,
-            clock=self.clock,
-            max_chars=self.settings.osc.chatbox_max_chars,
-            runtime_logging=self.runtime_logging,
-        )
-
-        hub = ClientHub(
-            stt=stt,
-            llm=llm,
-            osc=osc,
-            peer_stt=None,
-            clock=self.clock,
-            runtime_logging=self.runtime_logging,
-            source_language=self.settings.languages.source_language,
-            target_language=self.settings.languages.target_language,
-            peer_source_language=self.settings.languages.peer_source_language,
-            peer_target_language=self.settings.languages.peer_target_language,
-            system_prompt=self.settings.system_prompt,
-            chatbox_include_source=self.settings.osc.chatbox_include_source,
-            fallback_transcript_only=True,
-            translation_enabled=True,
-            peer_translation_enabled=False,
-            integrated_context_enabled=False,
-            low_latency_mode=self.settings.stt.low_latency_mode,
-            low_latency_merge_gap_ms=self.settings.stt.low_latency_merge_gap_ms,
-            low_latency_spec_retry_max=self.settings.stt.low_latency_spec_retry_max,
-            hangover_s=(
-                self.settings.stt.low_latency_vad_hangover_ms / 1000.0
-                if self.settings.stt.low_latency_mode
-                else DEFAULT_STABLE_VAD_HANGOVER_MS / 1000.0
-            ),
-            peer_hangover_s=self.settings.desktop_audio.vad_hangover_ms / 1000.0,
-        )
-
-        if self.vrc_mic_state is None:
-            self.vrc_mic_state = VrcMicState()
-        if self.vrc_mic_audio_gate is None:
-            self.vrc_mic_audio_gate = VrcMicAudioGate(
-                state=self.vrc_mic_state,
-                enabled=self.settings.osc.vrc_mic_intercept,
-            )
-        else:
-            self.vrc_mic_audio_gate.state = self.vrc_mic_state
-            self.vrc_mic_audio_gate.set_enabled(self.settings.osc.vrc_mic_intercept)
-        self.vrc_mic_audio_gate.set_receiver_active(self.receiver is not None)
-        self.vrc_mic_audio_gate.reset()
-
-        self.sender = sender
-        self.osc = osc
-        self.hub = hub
-
-        self._peer_runtime = PeerChannelRuntime(
-            hub=hub,
-            clock=self.clock,
-            stt_factory=self._create_peer_stt_provider_from_runtime_config,
-            source_factory=self._create_peer_audio_source_from_runtime_config,
-            vad_factory=self._create_peer_vad_from_runtime_config,
-            vad_model_resolver=ensure_silero_vad_onnx,
-            run_audio_loop=self._run_peer_audio_vad_loop,
-            diagnostic_sink=self._on_peer_runtime_diagnostic,
-            idle_release_seconds=LOCAL_QWEN_IDLE_RELEASE_SECONDS,
-        )
+        if callable(subscribe_dashboard):
+            subscribe_dashboard(self._apply_dashboard_runtime_facts)
+        parts = self.application_runtime_host.parts
+        if parts is None:
+            raise RuntimeError("application runtime host is closed")
+        self.sender = parts.sender
+        self.osc = parts.osc
+        self.hub = parts.hub
+        self._peer_runtime = parts.peer_runtime
+        bind_peer_diagnostics = getattr(self._peer_runtime, "bind_diagnostic_sink", None)
+        if callable(bind_peer_diagnostics):
+            bind_peer_diagnostics(self._on_peer_runtime_diagnostic)
+        self.self_stt_commands = self.application_runtime_host.commands
+        self.self_stt_state = self.application_runtime_host.state
+        self.self_stt_provider_application = self.application_runtime_host
+        bind_suppressed = getattr(self.application_runtime_host, "bind_final_suppressed", None)
+        if callable(bind_suppressed):
+            bind_suppressed(self._on_final_transcript_suppressed)
         self._last_peer_translation_enabled = self.settings.ui.peer_translation_enabled
-        await self._configure_vrc_mic_receiver(enabled=self.settings.osc.vrc_mic_intercept)
+
+    def _apply_dashboard_runtime_facts(self, facts: object) -> None:
+        dashboard = getattr(self.app, "view_dashboard", None)
+        if dashboard is None:
+            return
+        set_translation = getattr(dashboard, "set_translation_needs_key", None)
+        if callable(set_translation):
+            set_translation(not bool(getattr(facts, "llm_available", False)))
+        set_stt = getattr(dashboard, "set_stt_needs_key", None)
+        if callable(set_stt):
+            set_stt(not bool(getattr(facts, "self_stt_available", False)))
 
     async def _replace_managed_openrouter_release_service(
         self,
         service: ManagedOpenRouterReleaseService | None,
     ) -> None:
-        previous = self._managed_openrouter_release_service
-        self._managed_openrouter_release_service = service
-        if previous is not None and previous is not service:
-            with contextlib.suppress(Exception):
-                await previous.close()
+        _ = service
+
+    def _current_managed_release_service(self):  # noqa: ANN201
+        if self.application_runtime_host is not None:
+            service = getattr(self.application_runtime_host, "managed_release_service", None)
+            if service is not None:
+                return service
+        return self._managed_openrouter_release_service
+
+    async def _resolve_managed_auth_service(self):  # noqa: ANN201
+        if self.application_runtime_host is not None:
+            resolve = getattr(
+                self.application_runtime_host, "resolve_managed_release_service", None
+            )
+            if callable(resolve):
+                return await resolve()
+        return self._current_managed_release_service()
 
     def _create_managed_openrouter_release_service(
         self, *, secrets
     ) -> ManagedOpenRouterReleaseService | None:
-        if self.settings is None:
-            self.telemetry_client = None
-            return None
-        release_settings = self._managed_openrouter_release_settings()
-        if release_settings is None:
-            self.telemetry_client = None
-            return None
-
-        from puripuly_heart import __version__
-
-        try:
-            client = HttpManagedOpenRouterBrokerClient(
-                base_url=self.settings.openrouter.broker_base_url,
-            )
-            self.telemetry_client = client
-        except ValueError as exc:
-            logger.warning(
-                "[Managed OpenRouter] Invalid broker base URL %r; using unavailable fallback: %s",
-                self.settings.openrouter.broker_base_url,
-                exc,
-            )
-            client = UnavailableManagedOpenRouterReleaseClient()
-            self.telemetry_client = None
-
-        return ManagedOpenRouterReleaseService(
-            openrouter_config=build_openrouter_release_runtime_config(release_settings),
-            managed_state=build_managed_identity_state_port(
-                self.settings,
-                self._managed_identity_persistence_callback(self.settings),
-            ),
-            secrets=secrets,
-            client=client,
-            raw_hardware_fingerprint_provider=get_raw_hardware_fingerprint,
-            app_version=__version__,
-            on_discord_callback_received=self._on_discord_managed_auth_callback_received,
+        _ = secrets
+        return (
+            getattr(self.application_runtime_host, "managed_release_service", None)
+            if self.application_runtime_host is not None
+            else None
         )
 
-    def _get_oauth_runtime(self) -> OAuthRuntime:
+    def _require_application_adapters(self):  # noqa: ANN201
+        if self.application_adapters is None:
+            from puripuly_heart.app.services.application_adapters import (
+                ApplicationAdapterLifecycle,
+            )
+
+            self.application_adapters = ApplicationAdapterLifecycle()
+        return self.application_adapters
+
+    def _get_oauth_runtime(self):  # noqa: ANN201
         if self._oauth_runtime is None:
-            self._oauth_runtime = OAuthRuntime()
+            self._oauth_runtime = self._require_application_adapters().controller_oauth
         return self._oauth_runtime
-
-    async def _close_oauth_runtime(self) -> None:
-        runtime = self._oauth_runtime
-        if runtime is None:
-            return
-        await runtime.close()
-
-    async def _close_oauth_runtime_for_release(self, failures: list[Exception]) -> None:
-        try:
-            await self._close_oauth_runtime()
-        except Exception as exc:
-            failures.append(exc)
-
-    async def _close_app_oauth_runtime_for_release(self, failures: list[Exception]) -> None:
-        close_oauth_runtime = getattr(self.app, "close_oauth_runtime", None)
-        if not callable(close_oauth_runtime):
-            return
-        try:
-            result = close_oauth_runtime()
-            if inspect.isawaitable(result):
-                await result
-        except Exception as exc:
-            failures.append(exc)
 
     def _on_discord_managed_auth_callback_received(self) -> None:
         hook = self._discord_managed_auth_callback_received_hook
         if callable(hook):
             hook()
+
+    def handle_managed_discord_callback(self, event: object) -> None:
+        _ = event
+        self._on_discord_managed_auth_callback_received()
 
     @property
     def microphone_test_meter_level(self) -> float:
@@ -8051,9 +7364,9 @@ class GuiController:
             self._microphone_test_lifecycle_lock = asyncio.Lock()
         return self._microphone_test_lifecycle_lock
 
-    def _get_microphone_test_runtime(self) -> MicTestRuntime:
+    def _get_microphone_test_runtime(self):  # noqa: ANN201
         if self._microphone_test_runtime is None:
-            self._microphone_test_runtime = MicTestRuntime()
+            self._microphone_test_runtime = self._require_application_adapters().microphone_test
         return self._microphone_test_runtime
 
     @staticmethod
@@ -8200,7 +7513,7 @@ class GuiController:
 
     async def _recover_microphone_test_runtime_before_start(
         self,
-        runtime: MicTestRuntime,
+        runtime: object,
     ) -> bool:
         if runtime.has_active_direct_capture:
             return False
@@ -8214,20 +7527,6 @@ class GuiController:
             self._log_error(f"Microphone test cleanup retry failed: {exc}")
             return False
         return runtime.source is None and runtime.pending_frame_task is None
-
-    async def _close_microphone_test_runtime_for_release(
-        self,
-        cleanup_failures: list[Exception],
-    ) -> None:
-        runtime = self._microphone_test_runtime
-        if runtime is None:
-            return
-        try:
-            await runtime.close()
-        except Exception as exc:
-            cleanup_failures.append(exc)
-        finally:
-            self._microphone_test_meter_level = 0.0
 
     async def _set_microphone_test_meter_level(
         self,
@@ -8877,8 +8176,8 @@ class GuiController:
             await self_audio_runtime.stop()
         finally:
             self._sync_self_audio_runtime_aliases(self_audio_runtime)
-            if self.vrc_mic_audio_gate is not None:
-                self.vrc_mic_audio_gate.reset()
+            if self.vrc_audio_gate is not None:
+                self.vrc_audio_gate.reset()
 
     async def _run_mic_loop(self) -> None:
         assert self.hub is not None
@@ -8896,7 +8195,7 @@ class GuiController:
                 vad=self._vad,
                 sink=sink,
                 target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,  # type: ignore[union-attr]
-                audio_gate=self.vrc_mic_audio_gate,
+                audio_gate=self.vrc_audio_gate,
                 channel_label="self",
                 is_detailed_enabled=self._detailed_audio_diag_enabled,
                 log_detailed=lambda message: self.log_detailed(message),
@@ -8906,106 +8205,16 @@ class GuiController:
         except Exception as exc:
             self._log_error(f"Mic loop error: {exc}")
 
-    def _create_vrc_osc_receiver_for_runtime(self, **kwargs: object) -> VrcOscReceiver:
-        return VrcOscReceiver(**kwargs)  # type: ignore[arg-type]
-
-    def _get_vrc_mic_receiver_runtime(self) -> VrcMicReceiverRuntime | None:
-        if self.vrc_mic_state is None:
-            return None
-        if self._vrc_mic_receiver_runtime is None:
-            self._vrc_mic_receiver_runtime = VrcMicReceiverRuntime(
-                state=self.vrc_mic_state,
-                host=VRC_OSC_RECEIVER_HOST,
-                port=VRC_OSC_RECEIVER_PORT,
-                receiver_factory=self._create_vrc_osc_receiver_for_runtime,
-                diagnostics_sink=self._vrc_mic_receiver_runtime_diagnostics_sink,
-                state_changed=self._sync_vrc_mic_receiver_runtime_aliases,
-            )
-        return self._vrc_mic_receiver_runtime
-
-    def _sync_vrc_mic_receiver_runtime_aliases(
-        self,
-        runtime: VrcMicReceiverRuntime | None = None,
-    ) -> None:
-        owner = runtime or self._vrc_mic_receiver_runtime
-        self.receiver = getattr(owner, "receiver", None) if owner is not None else None
-
-    def _vrc_mic_receiver_runtime_diagnostics_sink(
-        self,
-        event: str,
-        metadata: Mapping[str, object],
-    ) -> None:
-        self.log_detailed(
-            f"[Lifecycle][VrcMicReceiverRuntime] event={event} metadata={dict(metadata)}",
-            level=logging.WARNING,
-        )
-
-    async def _configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
-        if self._vrc_receiver_lock is None:
-            self._vrc_receiver_lock = asyncio.Lock()
-
-        async with self._vrc_receiver_lock:
-            self._last_vrc_mic_sync_enabled = enabled
-            if self.vrc_mic_audio_gate is not None:
-                self.vrc_mic_audio_gate.set_enabled(enabled)
-
-            if not enabled:
-                stop_result = self._stop_vrc_mic_receiver()
-                if inspect.isawaitable(stop_result):
-                    await stop_result
-                return
-
-            if self.receiver is not None or self.vrc_mic_state is None:
-                if self.vrc_mic_audio_gate is not None:
-                    self.vrc_mic_audio_gate.set_receiver_active(self.receiver is not None)
-                return
-
-            runtime = self._get_vrc_mic_receiver_runtime()
-            if runtime is None:
-                if self.vrc_mic_audio_gate is not None:
-                    self.vrc_mic_audio_gate.set_receiver_active(False)
-                return
-            try:
-                receiver = await runtime.start()
-            except OSError as exc:
-                if self.vrc_mic_audio_gate is not None:
-                    self.vrc_mic_audio_gate.set_receiver_active(False)
-                self._log_error(
-                    "VRChat mic sync receiver unavailable on "
-                    f"{VRC_OSC_RECEIVER_HOST}:{VRC_OSC_RECEIVER_PORT}: {exc}"
-                )
-                return
-
-            self.receiver = receiver  # type: ignore[assignment]
-            if self.vrc_mic_audio_gate is not None:
-                self.vrc_mic_audio_gate.set_receiver_active(True)
-                self.vrc_mic_audio_gate.reset()
-
-    async def _stop_vrc_mic_receiver(self) -> None:
-        runtime = self._vrc_mic_receiver_runtime
-        if runtime is not None:
-            with contextlib.suppress(Exception):
-                await runtime.stop(strict_runtime_errors=False)
-            self._sync_vrc_mic_receiver_runtime_aliases(runtime)
-        elif self.receiver is not None:
-            with contextlib.suppress(Exception):
-                self.receiver.stop()
-            self.receiver = None
-        if self.vrc_mic_audio_gate is not None:
-            self.vrc_mic_audio_gate.set_receiver_active(False)
-
-    def _create_openrouter_pkce_client(self) -> OpenRouterPKCEClient:
-        return OpenRouterPKCEClient(callback_origin="http://localhost:3000")
-
-    def reopen_openrouter_pkce_authorization_url(self) -> bool:
-        if (
-            self._oauth_runtime is not None
-            and self._oauth_runtime.reopen_openrouter_pkce_authorization_url()
-        ):
-            return True
-        if self._openrouter_pkce_client is None:
+    async def reopen_openrouter_pkce_authorization_url(self) -> bool:
+        if self.application_runtime_host is None:
             return False
-        return self._openrouter_pkce_client.reopen_authorization_url()
+        result = await self.application_runtime_host.execute_openrouter_pkce(ReopenOpenRouterPkce())
+        return result.status == "reopened"
+
+    def openrouter_pkce_active(self) -> bool:
+        return bool(
+            self.application_runtime_host and self.application_runtime_host.openrouter_pkce_active()
+        )
 
     def build_managed_openrouter_byok_target_settings(self) -> AppSettings | None:
         """Build a BYOK OpenRouter target settings draft from the current managed state.
@@ -9070,32 +8279,6 @@ class GuiController:
         if profile.openrouter_model is None:
             raise ValueError("PKCE connection requires a BYOK OpenRouter model")
 
-        try:
-            pkce_client = self._create_openrouter_pkce_client()
-            self._openrouter_pkce_client = pkce_client
-            try:
-                result = await self._get_oauth_runtime().run_openrouter_pkce_flow(pkce_client)
-            finally:
-                self._openrouter_pkce_client = None
-        except Exception:
-            self._show_short_message("openrouter.pkce.failed")
-            self._log_error("OpenRouter PKCE flow failed")
-            self._maybe_show_founder_letter_after_pkce_failure(launch_source)
-            return False
-
-        try:
-            verified = await self._get_provider_verifier().verify_api_key(
-                "openrouter",
-                result.api_key,
-            )
-        except Exception:
-            verified = False
-        if not verified:
-            self._show_short_message("openrouter.pkce.failed")
-            self._log_error("OpenRouter PKCE key verification failed")
-            self._maybe_show_founder_letter_after_pkce_failure(launch_source)
-            return False
-
         updated = copy.deepcopy(target_settings)
         updated.provider.llm = LLMProviderName.OPENROUTER
         updated.openrouter.selection_alias = OpenRouterSelectionAlias(profile.alias)
@@ -9103,65 +8286,41 @@ class GuiController:
         updated.openrouter.llm_model = OpenRouterLLMModel(profile.openrouter_model)
         updated.api_key_verified.openrouter = True
 
-        plan = self._build_provider_runtime_apply_plan(updated, force_rebuild_llm=True)
-        secret_store = create_secret_store(self.settings.secrets, config_path=self.config_path)
-        secret_store_port = _ControllerSecretStorePortAdapter(secret_store)
-        settings_repository = _ControllerSettingsPatchRepository(
-            controller=self,
-            base_settings=self.settings,
-            committed_settings=updated,
-            surface="openrouter_pkce",
-        )
-        transaction = SecretSettingsTransaction(
-            secret_store=secret_store_port,
-            settings_repository=settings_repository,
-        )
-        runtime_apply_port = _ControllerProviderRuntimeApply(
-            controller=self,
-            settings=updated,
-            plan=plan,
-            surface="openrouter_pkce",
-            operation="openrouter_pkce_runtime_apply",
-        )
-
-        commit_result = await transaction.set_provider_secret(
-            SecretSetRequest(
-                secret_key=OPENROUTER_BYOK_API_KEY_SECRET,
-                secret_value=result.api_key,
-                settings_values=_settings_snapshot_values(updated),
-                expected_settings_revision=None,
-                reason="openrouter_pkce",
-                correlation_id=None,
-            )
-        )
-        if commit_result.status != TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
-            self._show_short_message("openrouter.pkce.failed")
-            self._log_error("OpenRouter PKCE settings commit failed")
-            self.last_settings_mutation_result = commit_result
-            self._maybe_show_founder_letter_after_pkce_failure(launch_source)
-            self._complete_canonical_mutation()
+        if self.application_runtime_host is None:
             return False
-
-        runtime_result = await runtime_apply_port.apply_runtime(
-            RuntimeApplyRequest(
-                settings_values=_settings_snapshot_values(updated),
-                reason="openrouter_pkce",
-                correlation_id=None,
+        receipt = await asyncio.to_thread(
+            self.canonical_settings_persistence.load_receipt,
+            self.config_path,
+            reason=None,
+            correlation_id=None,
+        )
+        canonical = self.canonical_settings_persistence.apply_legacy_delta(
+            canonical=receipt.envelope,
+            base_settings=self.settings,
+            next_settings=updated,
+        )
+        outcome = await self.application_runtime_host.execute_openrouter_pkce(
+            StartOpenRouterPkce(
+                self.canonical_settings_persistence.values_for(canonical),
+                receipt.revision,
+                launch_source,
+                operational=self.runtime_operational_snapshot(),
             )
         )
-        if runtime_result.status == RUNTIME_APPLY_STATUS_APPLIED:
-            self.last_settings_mutation_result = TransactionResult(
-                status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
-                message=runtime_result.message,
-                diagnostics=runtime_result.diagnostics,
-            )
-            self._complete_canonical_mutation()
-            return True
-
-        self.last_settings_mutation_result = _runtime_apply_result_as_degraded_transaction(
-            runtime_result
-        )
-        self._complete_canonical_mutation()
+        self.last_openrouter_pkce_result = outcome
+        self.last_settings_mutation_result = outcome.transaction
+        if outcome.status not in {"succeeded", "committed_degraded"}:
+            self._show_short_message("openrouter.pkce.failed")
+            self._maybe_show_founder_letter_after_pkce_failure(launch_source)
+            return False
+        committed = outcome.receipt
+        if committed is None:
+            self._show_short_message("openrouter.pkce.failed")
+            return False
+        self.vnext_settings = committed.envelope
+        self._vnext_settings_authoritative = True
+        self.settings = self.canonical_settings_persistence.legacy_projection(committed.envelope)
+        self._remember_canonical_legacy_projection(self.settings)
         return True
 
     def _maybe_show_founder_letter_after_pkce_failure(self, launch_source: str) -> None:
@@ -9270,18 +8429,11 @@ class GuiController:
     def set_runtime_logging_mode(self, mode: SessionLoggingMode | str) -> None:
         previous_mode = self.runtime_logging.mode
         self.runtime_logging.set_mode(mode)
-        normalized_mode = self.runtime_logging.mode.value
         if (
             previous_mode is not SessionLoggingMode.DETAILED
             and self.runtime_logging.mode is SessionLoggingMode.DETAILED
         ):
             self._schedule_audio_environment_snapshot()
-        runtime = self._overlay_runtime
-        manager = runtime.process_manager if runtime is not None else None
-        if manager is not None:
-            set_logging_mode = getattr(manager, "set_logging_mode", None)
-            if callable(set_logging_mode):
-                set_logging_mode(normalized_mode)
         self._schedule_overlay_runtime_logging_mode_update()
 
     def _schedule_audio_environment_snapshot(self) -> None:
@@ -9335,13 +8487,12 @@ class GuiController:
             self.log_detailed(line)
 
     async def _emit_overlay_runtime_logging_mode_update(self) -> None:
-        bridge = self._current_overlay_bridge_for_direct_runtime_command()
-        if bridge is None:
+        if self.overlay_commands is None:
             return
-        await bridge.broadcast_runtime_control(logging_mode=self.runtime_logging_mode)
+        await self.overlay_commands.set_logging_mode(self.runtime_logging_mode)
 
     def _schedule_overlay_runtime_logging_mode_update(self) -> None:
-        if self._current_overlay_bridge_for_direct_runtime_command() is None:
+        if self.overlay_commands is None or self.overlay_state not in {"starting", "connected"}:
             return
 
         run_task = getattr(self.page, "run_task", None)
@@ -9609,8 +8760,12 @@ class GuiController:
             # User request: "Validation Fail -> Orange". Implicitly, if it's ON and fails, maybe we should turn it OFF?
             # For now, setting needs_key=True ensures that if they try to toggle, it warns.
             # If it is currently ON, we might want to flag it.
-            if self.hub:
-                self.hub.translation_enabled = False  # Disable internally
+            if self.application_runtime_host is not None:
+                from puripuly_heart.app.ports.translation_application import SetTranslationEnabled
+
+                await self.application_runtime_host.set_translation_enabled(
+                    SetTranslationEnabled(False)
+                )
             dash.set_translation_enabled(False)  # Visually turn off
         else:
             dash.set_translation_needs_key(False)

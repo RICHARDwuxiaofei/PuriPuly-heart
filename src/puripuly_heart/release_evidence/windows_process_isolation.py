@@ -564,7 +564,26 @@ async def _run_native(thresholds: IsolationThresholds, runtime_dir: Path) -> dic
 
     class Hub:
         def __init__(self) -> None:
-            self.peer_stt = None
+            self.peer_stt = Provider(events)
+
+        def lease_stt_provider(self, _slot):  # noqa: ANN001, ANN201
+            provider = self.peer_stt
+
+            class Lease:
+                slot = "peer_stt"
+                identity = "process-isolation-provider"
+                generation = 0
+                current = provider
+
+                @property
+                def is_current(self) -> bool:
+                    return provider is self_outer.peer_stt
+
+            self_outer = self
+            return Lease()
+
+        async def handle_peer_vad_event(self, _event, *, stt_provider=None) -> None:  # noqa: ANN001
+            _ = stt_provider
 
         async def replace_peer_stt_provider(self, provider, *, start=True) -> None:  # noqa: ANN001
             previous, self.peer_stt = self.peer_stt, provider
@@ -694,9 +713,9 @@ async def _run_native(thresholds: IsolationThresholds, runtime_dir: Path) -> dic
         loop_task_at_warning.append(initial_loop_task is not None and initial_loop_task.done())
 
     runtime = PeerChannelRuntime(
-        hub=Hub(),
+        hub=(hub := Hub()),
         clock=Clock(),
-        stt_factory=lambda _config, _failure: Provider(events),
+        provider_read_port=hub,
         source_factory=source_factory,
         vad_factory=lambda _config, _path: object(),
         vad_model_resolver=lambda: runtime_dir / "unused-vad.onnx",

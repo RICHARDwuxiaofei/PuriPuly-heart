@@ -9,6 +9,10 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.app.adapters.settings_vnext_canonical_persistence import (
+    SettingsVNextCanonicalPersistenceAdapter,
+)
+from puripuly_heart.app.ports.settings_repository import SettingsCommitReceipt
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
@@ -17,6 +21,11 @@ from puripuly_heart.config.settings import (
     from_dict,
     materialize_translation_settings,
     to_dict,
+)
+from puripuly_heart.config.settings_vnext.facade import save_vnext_settings
+from puripuly_heart.config.settings_vnext.migration import (
+    from_legacy_app_settings,
+    to_legacy_dict,
 )
 from puripuly_heart.domain.events import UIEvent, UIEventType
 from puripuly_heart.domain.models import Translation
@@ -71,8 +80,6 @@ def _patch_stop_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(GuiController, "_stop_clipboard_watcher", _async_noop)
     monkeypatch.setattr(GuiController, "_cancel_local_stt_download", _async_noop)
     monkeypatch.setattr(GuiController, "set_stt_enabled", _async_noop)
-    monkeypatch.setattr(GuiController, "_configure_vrc_mic_receiver", _async_noop)
-    monkeypatch.setattr(GuiController, "_shutdown_overlay_runtime", _async_noop)
     monkeypatch.setattr(
         GuiController,
         "_replace_managed_openrouter_release_service",
@@ -182,6 +189,14 @@ def test_user_owned_cloud_translation_success_observation_persists_through_setti
         saved_payloads.append(to_dict(updated))
 
     monkeypatch.setattr(controller_module, "save_settings", fake_save_settings)
+    monkeypatch.setattr(
+        SettingsVNextCanonicalPersistenceAdapter,
+        "persist_delta",
+        lambda _self, _path, *, baseline, next_settings, expected_revision, reason, correlation_id: (
+            saved_payloads.append(to_legacy_dict(next_settings))
+            or SettingsCommitReceipt(next_settings, "sha256:test", reason, correlation_id)
+        ),
+    )
 
     assert controller.record_github_star_prompt_translation_success_observed() is True
 
@@ -339,9 +354,16 @@ async def test_event_bridge_schedules_github_star_observation_after_translation_
 @pytest.mark.asyncio
 async def test_event_bridge_records_successful_translation_for_user_owned_cloud_connection(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     settings = _settings_for_connection(TranslationConnection.OPENROUTER)
     controller = _controller_for(settings)
+    controller.config_path = tmp_path / "settings.json"
+    controller.vnext_settings = from_legacy_app_settings(settings)
+    controller._vnext_settings_authoritative = True
+    controller._canonical_persistence_port_enabled = True
+    controller._remember_canonical_legacy_projection(settings)
+    assert save_vnext_settings(controller.config_path, controller.vnext_settings).ok
     saved_payloads: list[dict[str, object]] = []
 
     class Dashboard:
@@ -352,6 +374,14 @@ async def test_event_bridge_records_successful_translation_for_user_owned_cloud_
         saved_payloads.append(to_dict(updated))
 
     monkeypatch.setattr(controller_module, "save_settings", fake_save_settings)
+    monkeypatch.setattr(
+        SettingsVNextCanonicalPersistenceAdapter,
+        "persist_delta",
+        lambda _self, _path, *, baseline, next_settings, expected_revision, reason, correlation_id: (
+            saved_payloads.append(to_legacy_dict(next_settings))
+            or SettingsCommitReceipt(next_settings, "sha256:test", reason, correlation_id)
+        ),
+    )
 
     app = SimpleNamespace(
         controller=controller,
@@ -377,6 +407,7 @@ async def test_event_bridge_records_successful_translation_for_user_owned_cloud_
         )
     )
 
+    await asyncio.sleep(0.1)
     await _wait_until(lambda: bool(saved_payloads))
 
     assert settings.ui.github_star_prompt_translation_success_observed is True
@@ -501,12 +532,16 @@ async def test_stop_cancels_pending_github_star_observation_via_runtime_owner(
     stop_task = asyncio.create_task(controller.stop())
     await asyncio.sleep(0)
 
-    assert not stop_task.done()
+    assert stop_task.done()
     assert settings.ui.github_star_prompt_translation_success_observed is True
+
+    close_task = asyncio.create_task(controller.application_adapters.close())
+    await asyncio.sleep(0)
+    assert not close_task.done()
 
     release_first_to_thread.set()
     try:
-        await asyncio.wait_for(stop_task, timeout=1.0)
+        await asyncio.wait_for(close_task, timeout=1.0)
 
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(persist_task, timeout=1.0)
@@ -516,6 +551,8 @@ async def test_stop_cancels_pending_github_star_observation_via_runtime_owner(
     finally:
         if not stop_task.done():
             stop_task.cancel()
+        if not close_task.done():
+            close_task.cancel()
             await asyncio.gather(stop_task, return_exceptions=True)
         if not persist_task.done():
             persist_task.cancel()

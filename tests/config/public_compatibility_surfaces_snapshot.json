@@ -670,6 +670,7 @@
       "default.txt"
     ],
     "llm_provider_prompt_keys": [
+      "cerebras",
       "deepseek",
       "gemini",
       "local_llm",
@@ -729,7 +730,8 @@
     "resolved_llm_config_fields": [
       "primary",
       "fallback",
-      "concurrency_limit"
+      "concurrency_limit",
+      "qwen_low_latency_mode"
     ],
     "resolved_credential_requirement_fields": [
       "source",
