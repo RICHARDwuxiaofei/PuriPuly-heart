@@ -19726,6 +19726,77 @@ async def test_apply_settings_pushes_updated_overlay_snapshot_to_bridge_and_rest
 
 
 @pytest.mark.asyncio
+async def test_self_local_qwen_toggle_off_schedules_ten_minute_release() -> None:
+    release_delays: list[float | None] = []
+
+    class Hub:
+        async def drain_self_stt_for_toggle_off(
+            self,
+            *,
+            release_backend_after: float | None = None,
+        ) -> None:
+            release_delays.append(release_backend_after)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN
+    controller.hub = Hub()
+
+    await controller._drain_self_stt_for_toggle_off()
+
+    assert release_delays == [600.0]
+
+
+@pytest.mark.asyncio
+async def test_self_non_local_provider_toggle_off_does_not_schedule_release() -> None:
+    release_delays: list[float | None] = []
+
+    class Hub:
+        async def drain_self_stt_for_toggle_off(
+            self,
+            *,
+            release_backend_after: float | None = None,
+        ) -> None:
+            release_delays.append(release_backend_after)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.DEEPGRAM
+    controller.hub = Hub()
+
+    await controller._drain_self_stt_for_toggle_off()
+
+    assert release_delays == [None]
+
+
+@pytest.mark.asyncio
+async def test_self_local_qwen_rebuilds_after_idle_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warmup_calls = 0
+
+    class Provider:
+        async def warmup(self) -> None:
+            nonlocal warmup_calls
+            warmup_calls += 1
+
+    hub = SimpleNamespace(stt=None)
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN
+    controller.hub = hub
+
+    async def rebuild(_self) -> None:
+        hub.stt = Provider()
+
+    monkeypatch.setattr(GuiController, "_current_local_stt_runtime_status", lambda _self: "ready")
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", rebuild)
+
+    assert await controller._ensure_local_stt_ready() is True
+    assert warmup_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_apply_settings_pushes_peer_overlay_snapshot_preferences_to_bridge_and_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

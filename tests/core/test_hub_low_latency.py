@@ -313,6 +313,7 @@ async def test_hub_exposes_named_provider_runtime_handles_and_shutdown_policies(
     assert handles["self_stt"].resource_fields == (
         "provider",
         "event_task",
+        "idle_release_task",
         "generation",
     )
     assert "STT toggle-off drains" in handles["self_stt"].toggle_off_policy

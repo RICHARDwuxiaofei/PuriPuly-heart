@@ -84,9 +84,11 @@ class _PeerHubVadSink:
 class PeerChannelRuntime:
     resource_fields = (
         "_stt",
+        "_retained_stt",
         "_audio_source",
         "_vad",
         "_loop_task",
+        "_idle_release_task",
         "_generation",
         "_desired_active",
         "_lock",
@@ -109,6 +111,8 @@ class PeerChannelRuntime:
         vad_model_resolver: Callable[[], Path],
         run_audio_loop: Callable[..., Awaitable[None]],
         diagnostic_sink: Callable[[PeerRuntimeDiagnostic], object] | None = None,
+        idle_release_seconds: float | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.hub = hub
         self.clock = clock
@@ -118,6 +122,8 @@ class PeerChannelRuntime:
         self._vad_model_resolver = vad_model_resolver
         self._run_audio_loop = run_audio_loop
         self._diagnostic_sink = diagnostic_sink
+        self._idle_release_seconds = idle_release_seconds
+        self._sleep = sleep
 
         self._config: PeerRuntimeConfig | None = None
         self._stt: object | None = None
@@ -125,6 +131,9 @@ class PeerChannelRuntime:
         self._audio_source: object | None = None
         self._vad: object | None = None
         self._loop_task: asyncio.Task[None] | None = None
+        self._idle_release_task: asyncio.Task[None] | None = None
+        self._idle_release_started = False
+        self._idle_release_deadline: float | None = None
         self._signature: tuple[object, ...] | None = None
         self._provider_signature: tuple[object, ...] | None = None
         self._state = PeerChannelRuntimeState.STOPPED
@@ -138,6 +147,7 @@ class PeerChannelRuntime:
         self._retired_peer_providers: list[object] = []
         self._last_failure: PeerRuntimeDiagnostic | None = None
         self._last_failure_unavailable_reason: str | None = None
+        self._last_idle_release_error_type: str | None = None
         self._retry_required_capture_target: ResolvedDesktopAudioCaptureTarget | None = None
         self._deferred_loop_diagnostics: dict[asyncio.Task[None], PeerRuntimeDiagnostic] = {}
 
@@ -164,9 +174,30 @@ class PeerChannelRuntime:
             "stop_ingress": self.stop_ingress,
             "shutdown_policy": self.shutdown_policy,
             "late_callback_rule": self.late_callback_rule,
+            "idle_release_error_type": self._last_idle_release_error_type,
         }
 
     async def apply_policy(self, *, config: PeerRuntimeConfig, desired_active: bool) -> None:
+        async with self._lock:
+            if (
+                not desired_active
+                and not self._desired_active
+                and self._state == PeerChannelRuntimeState.STOPPED
+                and self._retained_stt is not None
+                and self._provider_signature == config.provider_signature
+                and self._idle_release_task is not None
+            ):
+                return
+            if desired_active:
+                self._idle_release_deadline = None
+            elif config.backend.provider.value != "local_qwen" or self._provider_signature not in (
+                None,
+                config.provider_signature,
+            ):
+                self._idle_release_deadline = None
+            elif self._idle_release_seconds is not None and self._idle_release_deadline is None:
+                self._idle_release_deadline = self.clock.now() + self._idle_release_seconds
+        await self._cancel_idle_release_task()
         async with self._lock:
             if self._closed:
                 return
@@ -229,6 +260,8 @@ class PeerChannelRuntime:
                 self._activation_events.pop(generation, None)
 
     async def retry_process_capture(self, *, config: PeerRuntimeConfig) -> bool:
+        self._idle_release_deadline = None
+        await self._cancel_idle_release_task()
         async with self._lock:
             if (
                 config.capture_target.kind != "process"
@@ -264,6 +297,8 @@ class PeerChannelRuntime:
                 await stt.warmup()
 
     async def close(self) -> None:
+        self._idle_release_deadline = None
+        await self._cancel_idle_release_task()
         async with self._lock:
             self._closed = True
             self._generation += 1
@@ -506,13 +541,14 @@ class PeerChannelRuntime:
                 and self._stt is stt
                 and self._audio_source is source
             ):
-                loop_task = asyncio.create_task(
+                loop_task = self._create_task(
                     self._run_peer_loop_guarded(
                         source=source,
                         vad=vad,
                         target_sample_rate_hz=config.backend.sample_rate_hz,
                         generation=generation,
-                    )
+                    ),
+                    task_name="session-loop",
                 )
                 loop_task.add_done_callback(self._on_loop_task_done)
                 self._loop_task = loop_task
@@ -795,6 +831,11 @@ class PeerChannelRuntime:
             if self._generation == generation:
                 self._state = PeerChannelRuntimeState.STOPPED
         self._raise_cleanup_failures("peer channel dormant teardown failed", failures)
+        await self._schedule_idle_release(
+            stt=stt,
+            provider_signature=config.provider_signature,
+            generation=generation,
+        )
         return True
 
     async def _retire_unattached_provider_for_reuse(self, stt: object) -> None:
@@ -805,6 +846,97 @@ class PeerChannelRuntime:
         result = discard_pending_events()
         if inspect.isawaitable(result):
             await result
+
+    async def _schedule_idle_release(
+        self,
+        *,
+        stt: object,
+        provider_signature: tuple[object, ...],
+        generation: int,
+    ) -> None:
+        if self._idle_release_seconds is None:
+            return
+        async with self._lock:
+            if (
+                self._closed
+                or self._desired_active
+                or self._generation != generation
+                or self._retained_stt is not stt
+                or self._provider_signature != provider_signature
+            ):
+                return
+            self._last_idle_release_error_type = None
+            self._idle_release_started = False
+            delay_seconds = max(
+                0.0,
+                (self._idle_release_deadline or self.clock.now()) - self.clock.now(),
+            )
+            task = self._create_task(
+                self._release_dormant_provider_after(
+                    stt=stt,
+                    provider_signature=provider_signature,
+                    generation=generation,
+                    delay_seconds=delay_seconds,
+                ),
+                task_name="idle-release",
+            )
+            self._idle_release_task = task
+            task.add_done_callback(self._on_idle_release_task_done)
+
+    async def _release_dormant_provider_after(
+        self,
+        *,
+        stt: object,
+        provider_signature: tuple[object, ...],
+        generation: int,
+        delay_seconds: float,
+    ) -> None:
+        await self._sleep(delay_seconds)
+        self._idle_release_started = True
+        async with self._activation_lock:
+            async with self._lock:
+                if (
+                    self._closed
+                    or self._desired_active
+                    or self._generation != generation
+                    or self._retained_stt is not stt
+                    or self._provider_signature != provider_signature
+                ):
+                    return
+                self._retained_stt = None
+                self._provider_signature = None
+            try:
+                if getattr(self.hub, "peer_stt", None) is stt:
+                    await self._replace_peer_stt_provider(None, start=False)
+                else:
+                    await self._close_peer_provider_for_discard(stt)
+            except Exception:
+                self._retain_retired_peer_provider(stt)
+                raise
+
+    async def _cancel_idle_release_task(self) -> None:
+        task = self._idle_release_task
+        if task is None:
+            return
+        self._idle_release_task = None
+        if task is asyncio.current_task():
+            return
+        if not task.done() and not self._idle_release_started:
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    def _on_idle_release_task_done(self, task: asyncio.Task[None]) -> None:
+        if not task.cancelled():
+            exception = task.exception()
+            if exception is not None:
+                self._last_idle_release_error_type = type(exception).__name__
+        if self._idle_release_task is task:
+            self._idle_release_task = None
+            self._idle_release_deadline = None
+        self._idle_release_started = False
+
+    def _create_task(self, coroutine: Awaitable[None], *, task_name: str) -> asyncio.Task[None]:
+        return asyncio.create_task(coroutine, name=f"PeerChannelRuntime:{task_name}")
 
     async def _cleanup_failed_startup(
         self,

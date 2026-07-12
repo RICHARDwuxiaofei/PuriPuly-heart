@@ -61,6 +61,22 @@ class QueueEventsProvider(RetriableCloseProvider):
             yield item
 
 
+class DormantBackendProvider:
+    def __init__(self, *, close_backend_failures: int = 0) -> None:
+        self.close_calls = 0
+        self.close_backend_calls = 0
+        self.close_backend_failures = close_backend_failures
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+    async def close_backend(self) -> None:
+        self.close_backend_calls += 1
+        if self.close_backend_failures > 0:
+            self.close_backend_failures -= 1
+            raise RuntimeError("backend close failed")
+
+
 async def wait_until(predicate: Callable[[], bool], *, timeout_s: float = 1.0) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_s
@@ -181,3 +197,138 @@ async def test_failed_event_task_exception_is_retrieved_by_owner_done_callback()
     assert handled_exceptions == [failure]
     assert handle.event_task is None
     assert owner_exception_requests == 1
+
+
+@pytest.mark.asyncio
+async def test_dormant_provider_backend_is_released_after_idle_ttl() -> None:
+    sleep_started = asyncio.Event()
+    release_sleep = asyncio.Event()
+    delays: list[float] = []
+
+    async def controlled_sleep(delay: float) -> None:
+        delays.append(delay)
+        sleep_started.set()
+        await release_sleep.wait()
+
+    provider = DormantBackendProvider()
+    handle = ProviderRuntimeHandle(name="self_stt", provider=provider, sleep=controlled_sleep)
+
+    await handle.drain_for_toggle_off(release_backend_after=600.0)
+    await sleep_started.wait()
+    await handle.drain_for_toggle_off(release_backend_after=600.0)
+
+    assert provider.close_calls == 2
+    assert provider.close_backend_calls == 0
+    assert handle.provider is provider
+    assert delays == [600.0]
+
+    release_sleep.set()
+    await wait_until(lambda: not handle.has_resources)
+
+    assert provider.close_backend_calls == 1
+    assert handle.has_resources is False
+
+
+@pytest.mark.asyncio
+async def test_reenable_cancels_dormant_backend_release() -> None:
+    sleep_started = asyncio.Event()
+    release_sleep = asyncio.Event()
+
+    async def controlled_sleep(_delay: float) -> None:
+        sleep_started.set()
+        await release_sleep.wait()
+
+    provider = DormantBackendProvider()
+    handle = ProviderRuntimeHandle(name="self_stt", provider=provider, sleep=controlled_sleep)
+
+    await handle.drain_for_toggle_off(release_backend_after=600.0)
+    await sleep_started.wait()
+    assert await handle.start_if_provider(provider) is True
+    release_sleep.set()
+    await asyncio.sleep(0)
+
+    assert handle.provider is provider
+    assert provider.close_backend_calls == 0
+
+    await handle.close()
+    assert provider.close_backend_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_idle_timer_and_closes_backend_once() -> None:
+    sleep_started = asyncio.Event()
+    release_sleep = asyncio.Event()
+
+    async def controlled_sleep(_delay: float) -> None:
+        sleep_started.set()
+        await release_sleep.wait()
+
+    provider = DormantBackendProvider()
+    handle = ProviderRuntimeHandle(name="self_stt", provider=provider, sleep=controlled_sleep)
+
+    await handle.drain_for_toggle_off(release_backend_after=600.0)
+    await sleep_started.wait()
+    await handle.close()
+    release_sleep.set()
+    await asyncio.sleep(0)
+
+    assert provider.close_backend_calls == 1
+    assert handle.has_resources is False
+
+
+@pytest.mark.asyncio
+async def test_provider_replacement_closes_dormant_backend_immediately() -> None:
+    sleep_started = asyncio.Event()
+    release_sleep = asyncio.Event()
+
+    async def controlled_sleep(_delay: float) -> None:
+        sleep_started.set()
+        await release_sleep.wait()
+
+    old_provider = DormantBackendProvider()
+    new_provider = DormantBackendProvider()
+    handle = ProviderRuntimeHandle(name="self_stt", provider=old_provider, sleep=controlled_sleep)
+
+    await handle.drain_for_toggle_off(release_backend_after=600.0)
+    await sleep_started.wait()
+    await handle.replace_provider(new_provider, start=False)
+
+    assert old_provider.close_backend_calls == 1
+    assert new_provider.close_backend_calls == 0
+    assert handle.provider is new_provider
+
+    release_sleep.set()
+    await handle.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_idle_release_detaches_provider_and_retries_on_shutdown() -> None:
+    release_sleep = asyncio.Event()
+    observed: list[Exception] = []
+
+    async def controlled_sleep(_delay: float) -> None:
+        await release_sleep.wait()
+
+    async def handle_exception(exc: Exception) -> None:
+        observed.append(exc)
+
+    provider = DormantBackendProvider(close_backend_failures=1)
+    handle = ProviderRuntimeHandle(
+        name="self_stt",
+        provider=provider,
+        exception_handler=handle_exception,
+        sleep=controlled_sleep,
+    )
+
+    await handle.drain_for_toggle_off(release_backend_after=600.0)
+    release_sleep.set()
+    await wait_until(lambda: handle.provider is None)
+
+    assert provider.close_backend_calls == 1
+    assert len(observed) == 1
+    assert handle.has_resources is True
+
+    await handle.close()
+
+    assert provider.close_backend_calls == 2
+    assert handle.has_resources is False

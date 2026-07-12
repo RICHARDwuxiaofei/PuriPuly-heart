@@ -242,6 +242,7 @@ from puripuly_heart.core.overlay.process import (
 )
 from puripuly_heart.core.runtime.clipboard import ClipboardRuntime
 from puripuly_heart.core.runtime.github_star_prompt import GithubStarPromptRuntime
+from puripuly_heart.core.runtime.local_qwen_lifecycle import LOCAL_QWEN_IDLE_RELEASE_SECONDS
 from puripuly_heart.core.runtime.local_stt_download import LocalSTTDownloadRuntime
 from puripuly_heart.core.runtime.logging import RuntimeLoggingService
 from puripuly_heart.core.runtime.mic_test import MicTestRuntime
@@ -1166,13 +1167,26 @@ class GuiController:
         if not force_immediate:
             drain = getattr(self.hub, "drain_self_stt_for_toggle_off", None)
             if callable(drain):
-                await drain()
+                release_backend_after = (
+                    LOCAL_QWEN_IDLE_RELEASE_SECONDS
+                    if self.settings is not None
+                    and self.settings.provider.stt == STTProviderName.LOCAL_QWEN
+                    else None
+                )
+                await drain(release_backend_after=release_backend_after)
                 return
         else:
             self.log_detailed("[STT] Force immediate toggle-off requested")
         stt = getattr(self.hub, "stt", None)
         if stt is not None:
             await stt.close()
+            if (
+                self.settings is not None
+                and self.settings.provider.stt == STTProviderName.LOCAL_QWEN
+            ):
+                schedule_release = getattr(self.hub, "schedule_self_stt_idle_release", None)
+                if callable(schedule_release):
+                    await schedule_release(release_backend_after=LOCAL_QWEN_IDLE_RELEASE_SECONDS)
 
     async def _refresh_overlay_runtime_dependencies(self) -> None:
         if self.settings is None or self.hub is None:
@@ -5057,6 +5071,8 @@ class GuiController:
                 resume_self=True,
                 resume_peer=self._peer_local_stt_requested(self.settings),
             )
+        if self.hub is not None and self.hub.stt is None:
+            await self._rebuild_stt_provider()
         if self.hub is None or self.hub.stt is None:
             self._stt_desired = False
             dash = getattr(self.app, "view_dashboard", None)
@@ -5195,6 +5211,9 @@ class GuiController:
                             await self._drain_self_stt_for_toggle_off(
                                 force_immediate=force_immediate
                             )
+                    resume_stt = getattr(self.hub, "resume_self_stt_after_toggle_on", None)
+                    if callable(resume_stt):
+                        await resume_stt()
                     if not await self._ensure_local_stt_ready():
                         break
                     if (
@@ -7929,6 +7948,7 @@ class GuiController:
             vad_model_resolver=ensure_silero_vad_onnx,
             run_audio_loop=self._run_peer_audio_vad_loop,
             diagnostic_sink=self._on_peer_runtime_diagnostic,
+            idle_release_seconds=LOCAL_QWEN_IDLE_RELEASE_SECONDS,
         )
         self._last_peer_translation_enabled = self.settings.ui.peer_translation_enabled
         await self._configure_vrc_mic_receiver(enabled=self.settings.osc.vrc_mic_intercept)

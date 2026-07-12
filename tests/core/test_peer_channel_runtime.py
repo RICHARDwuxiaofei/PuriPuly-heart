@@ -432,6 +432,19 @@ class DormantReuseHub(DummyHub):
             await previous.close()
 
 
+class IdleReleaseHub(DormantReuseHub):
+    async def replace_peer_stt_provider(self, stt: object | None) -> None:
+        previous = self.peer_stt
+        await DummyHub.replace_peer_stt_provider(self, stt)
+        if previous is None or previous is stt:
+            return
+        close_backend = getattr(previous, "close_backend", None)
+        if callable(close_backend):
+            await close_backend()
+        else:
+            await previous.close()
+
+
 @pytest.mark.asyncio
 async def test_local_qwen_provider_is_warmed_reused_replaced_and_closed_at_shutdown() -> None:
     hub = DormantReuseHub()
@@ -476,6 +489,208 @@ async def test_local_qwen_provider_is_warmed_reused_replaced_and_closed_at_shutd
 
     await runtime.close()
     assert providers[1].close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_peer_dormant_backend_is_released_after_idle_ttl() -> None:
+    sleep_started = asyncio.Event()
+    release_sleep = asyncio.Event()
+    delays: list[float] = []
+
+    async def controlled_sleep(delay: float) -> None:
+        delays.append(delay)
+        sleep_started.set()
+        await release_sleep.wait()
+
+    provider = BlockingLifecycleSTT()
+    hub = IdleReleaseHub()
+    runtime = PeerChannelRuntime(
+        hub=hub,
+        clock=FakeClock(),
+        stt_factory=lambda config, on_terminal_failure: provider,
+        source_factory=lambda config: DummySource(),
+        vad_factory=lambda config, model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=fake_run_audio_loop,
+        idle_release_seconds=600.0,
+        sleep=controlled_sleep,
+    )
+    config = make_local_qwen_runtime_config()
+
+    provider.warmup_release.set()
+    await runtime.apply_policy(config=config, desired_active=True)
+    await runtime.apply_policy(config=config, desired_active=False)
+    await sleep_started.wait()
+    await runtime.apply_policy(config=config, desired_active=False)
+
+    assert provider.close_backend_calls == 0
+    assert runtime._retained_stt is provider
+    assert delays == [600.0]
+
+    release_sleep.set()
+    await wait_until(lambda: hub.peer_stt is None)
+
+    assert provider.close_backend_calls == 1
+    assert runtime._retained_stt is None
+    assert runtime._provider_signature is None
+
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_peer_reenable_cancels_idle_release_and_reuses_provider() -> None:
+    sleep_started = asyncio.Event()
+    release_sleep = asyncio.Event()
+
+    async def controlled_sleep(_delay: float) -> None:
+        sleep_started.set()
+        await release_sleep.wait()
+
+    provider = BlockingLifecycleSTT()
+    provider.warmup_release.set()
+    providers: list[BlockingLifecycleSTT] = []
+    hub = IdleReleaseHub()
+    runtime = PeerChannelRuntime(
+        hub=hub,
+        clock=FakeClock(),
+        stt_factory=lambda config, on_terminal_failure: providers.append(provider) or provider,
+        source_factory=lambda config: DummySource(),
+        vad_factory=lambda config, model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=fake_run_audio_loop,
+        idle_release_seconds=600.0,
+        sleep=controlled_sleep,
+    )
+    config = make_local_qwen_runtime_config()
+
+    await runtime.apply_policy(config=config, desired_active=True)
+    await runtime.apply_policy(config=config, desired_active=False)
+    await sleep_started.wait()
+    await runtime.apply_policy(config=config, desired_active=True)
+    release_sleep.set()
+    await asyncio.sleep(0)
+
+    assert providers == [provider]
+    assert hub.peer_stt is provider
+    assert provider.close_backend_calls == 0
+    assert runtime.state == PeerChannelRuntimeState.RUNNING
+
+    await runtime.close()
+    assert provider.close_backend_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_peer_provider_change_cancels_ttl_and_closes_old_backend() -> None:
+    sleep_started = asyncio.Event()
+    release_sleep = asyncio.Event()
+
+    async def controlled_sleep(_delay: float) -> None:
+        sleep_started.set()
+        await release_sleep.wait()
+
+    first = BlockingLifecycleSTT()
+    second = BlockingLifecycleSTT()
+    first.warmup_release.set()
+    second.warmup_release.set()
+    providers = iter((first, second))
+    hub = IdleReleaseHub()
+    runtime = PeerChannelRuntime(
+        hub=hub,
+        clock=FakeClock(),
+        stt_factory=lambda config, on_terminal_failure: next(providers),
+        source_factory=lambda config: DummySource(),
+        vad_factory=lambda config, model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=fake_run_audio_loop,
+        idle_release_seconds=600.0,
+        sleep=controlled_sleep,
+    )
+
+    await runtime.apply_policy(config=make_local_qwen_runtime_config(), desired_active=True)
+    await runtime.apply_policy(config=make_local_qwen_runtime_config(), desired_active=False)
+    await sleep_started.wait()
+    await runtime.apply_policy(
+        config=make_local_qwen_runtime_config(model="replacement"),
+        desired_active=True,
+    )
+
+    assert first.close_backend_calls == 1
+    assert second.close_backend_calls == 0
+    assert hub.peer_stt is second
+
+    release_sleep.set()
+    await runtime.close()
+    assert second.close_backend_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_peer_shutdown_cancels_idle_timer_and_closes_backend_once() -> None:
+    sleep_started = asyncio.Event()
+    release_sleep = asyncio.Event()
+
+    async def controlled_sleep(_delay: float) -> None:
+        sleep_started.set()
+        await release_sleep.wait()
+
+    provider = BlockingLifecycleSTT()
+    provider.warmup_release.set()
+    runtime = PeerChannelRuntime(
+        hub=IdleReleaseHub(),
+        clock=FakeClock(),
+        stt_factory=lambda config, on_terminal_failure: provider,
+        source_factory=lambda config: DummySource(),
+        vad_factory=lambda config, model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=fake_run_audio_loop,
+        idle_release_seconds=600.0,
+        sleep=controlled_sleep,
+    )
+    config = make_local_qwen_runtime_config()
+
+    await runtime.apply_policy(config=config, desired_active=True)
+    await runtime.apply_policy(config=config, desired_active=False)
+    await sleep_started.wait()
+    await runtime.close()
+    release_sleep.set()
+    await asyncio.sleep(0)
+
+    assert provider.close_backend_calls == 1
+    assert runtime._idle_release_task is None
+
+
+@pytest.mark.asyncio
+async def test_peer_failed_idle_release_is_retried_during_shutdown() -> None:
+    release_sleep = asyncio.Event()
+
+    async def controlled_sleep(_delay: float) -> None:
+        await release_sleep.wait()
+
+    provider = RetriableBackendClosingSTT(close_backend_failures=1)
+    runtime = PeerChannelRuntime(
+        hub=IdleReleaseHub(),
+        clock=FakeClock(),
+        stt_factory=lambda config, on_terminal_failure: provider,
+        source_factory=lambda config: DummySource(),
+        vad_factory=lambda config, model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=fake_run_audio_loop,
+        idle_release_seconds=600.0,
+        sleep=controlled_sleep,
+    )
+    config = make_local_qwen_runtime_config()
+
+    await runtime.apply_policy(config=config, desired_active=True)
+    await runtime.apply_policy(config=config, desired_active=False)
+    release_sleep.set()
+    await wait_until(lambda: runtime._last_idle_release_error_type == "RuntimeError")
+
+    assert runtime._retired_peer_providers == [provider]
+    assert provider.close_backend_calls == 1
+
+    await runtime.close()
+
+    assert provider.close_backend_calls == 2
+    assert runtime._retired_peer_providers == []
 
 
 @pytest.mark.asyncio
@@ -1269,9 +1484,11 @@ def test_peer_channel_runtime_exposes_named_owner_inventory_and_policies() -> No
     assert snapshot["owner"] == "PeerChannelRuntime"
     assert snapshot["resource_fields"] == (
         "_stt",
+        "_retained_stt",
         "_audio_source",
         "_vad",
         "_loop_task",
+        "_idle_release_task",
         "_generation",
         "_desired_active",
         "_lock",
