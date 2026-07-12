@@ -17,7 +17,8 @@
   <a href="README.md">🇺🇸 English</a> ·
   <a href="README.ko.md">🇰🇷 한국어</a> ·
   <a href="README.ja.md">🇯🇵 日本語</a> ·
-  🇨🇳 简体中文
+  🇨🇳 简体中文 ·
+  <a href="README.ru.md">🇷🇺 Русский</a>
 </h2>
 
 ---
@@ -496,12 +497,13 @@ pnpm --filter @puripuly-heart/broker run dev
 ## 贡献者
 
 [RICHARDwuxiaofei](https://github.com/RICHARDwuxiaofei)
+[fzcfweasdferttgg-png](https://github.com/fzcfweasdferttgg-png)
 
 ---
 
 ## Special Thanks
 
-SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์, EA\_PE, Ephedrine, ~ eri ~
+SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์, EA\_PE, Ephedrine, ~ eri ~, fzcfweasdferttgg-png
 
 ---
 

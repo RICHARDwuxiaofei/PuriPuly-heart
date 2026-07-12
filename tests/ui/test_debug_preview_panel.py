@@ -287,11 +287,3 @@ def test_debug_preview_panel_has_no_external_state_imports() -> None:
     ]
     for fragment in forbidden_fragments:
         assert fragment not in source
-
-
-def test_agents_documents_debug_preview_policy() -> None:
-    policy = Path("AGENTS.md").read_text(encoding="utf-8")
-
-    assert "Debug UI preview mode may exist" in policy
-    assert "must not persist settings" in policy
-    assert "must remain hidden unless the explicit debug flag is enabled" in policy

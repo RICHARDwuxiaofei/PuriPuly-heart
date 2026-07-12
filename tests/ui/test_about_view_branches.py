@@ -165,6 +165,7 @@ def test_about_view_special_thanks_name_keys_exist_in_locale_bundles(locale: str
         "about.special_thanks.name.ea_pe": "EA_PE",
         "about.special_thanks.name.ephedrine": "Ephedrine",
         "about.special_thanks.name.eri": "~ eri ~",
+        "about.special_thanks.name.fzcfweasdferttgg_png": "fzcfweasdferttgg-png",
     }
 
     bundle = i18n_module._load_bundle(locale)
