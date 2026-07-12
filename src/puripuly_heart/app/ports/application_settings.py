@@ -378,6 +378,8 @@ class SettingsCommandResult:
     snapshot: ApplicationSettingsSnapshot
     message: UserMessageRef | None = None
     diagnostics: ErrorDiagnostics | None = None
+    cancellation_count: int = 0
+    committed_revision: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, str):
@@ -479,6 +481,13 @@ class OperationalStateSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class OperationalCommandResult:
+    status: str
+    snapshot: OperationalStateSnapshot
+    diagnostics: ErrorDiagnostics | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SetSecretCommand:
     key: str
     value: str = field(repr=False, compare=False)
@@ -534,7 +543,7 @@ class ApplicationSettingsQueryPort(Protocol):
 class OperationalStateCommandPort(Protocol):
     async def execute_operational(
         self, command: OperationalStateCommand
-    ) -> OperationalStateSnapshot: ...
+    ) -> OperationalCommandResult: ...
 
 
 class OperationalStateQueryPort(Protocol):

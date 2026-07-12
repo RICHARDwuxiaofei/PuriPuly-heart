@@ -1674,11 +1674,17 @@ def test_application_settings_command_codecs_are_additive_typed_contracts() -> N
     assert "PersistedOperationalState" not in sources[0]
     assert "UserIntentSettings" not in sources[0]
     production_sources = (
-        path.read_text(encoding="utf-8")
+        (path, path.read_text(encoding="utf-8"))
         for path in SOURCE_PACKAGE_ROOT.rglob("*.py")
         if path not in {port_path, codec_path}
     )
-    assert all("application_settings_codecs" not in source for source in production_sources)
+    approved_consumers = {
+        SOURCE_PACKAGE_ROOT / "app" / "services" / "canonical_application_settings.py",
+    }
+    assert all(
+        "application_settings_codecs" not in source or path in approved_consumers
+        for path, source in production_sources
+    )
 
 
 def test_retired_controller_runtime_apply_adapters_do_not_return_as_aliases() -> None:

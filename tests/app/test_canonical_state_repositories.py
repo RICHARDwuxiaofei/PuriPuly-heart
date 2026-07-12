@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import multiprocessing
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -14,18 +16,34 @@ from puripuly_heart.app.adapters.canonical_state_repository import (
     CanonicalStateUnitOfWork,
 )
 from puripuly_heart.app.ports.canonical_state_repository import CanonicalEnvelopeSnapshot
+from puripuly_heart.app.ports.settings_repository import SettingsRevisionConflict
 from puripuly_heart.app.services.telemetry_operational_state import (
     TelemetryOperationalStateOwner,
 )
 from puripuly_heart.app.wiring_composition import create_canonical_state_repositories
 from puripuly_heart.config.settings_vnext import compat as compat_module
-from puripuly_heart.config.settings_vnext.facade import save_vnext_settings
+from puripuly_heart.config.settings_vnext.facade import load_vnext_settings, save_vnext_settings
 from puripuly_heart.config.settings_vnext.schema import (
     AppSettingsVNext,
     TelemetryConsentIntent,
     TelemetryOperationalState,
 )
 from puripuly_heart.core.telemetry import PersistTranslationSuccessDateCommand
+
+
+def _competing_cas(path_text: str, revision: str, locale: str, queue, start) -> None:
+    repositories = create_canonical_state_repositories(Path(path_text))
+    current = repositories.intent.load().value
+    queue.put("ready")
+    start.wait(timeout=10)
+    try:
+        repositories.intent.save(
+            replace(current, ui=replace(current.ui, locale=locale)),
+            expected_revision=revision,
+        )
+        queue.put("saved")
+    except CanonicalStateRevisionConflict:
+        queue.put("conflict")
 
 
 def test_distinct_owners_share_one_envelope_and_revision(tmp_path) -> None:
@@ -48,6 +66,18 @@ def test_distinct_owners_share_one_envelope_and_revision(tmp_path) -> None:
 
     with pytest.raises(CanonicalStateRevisionConflict):
         repositories.operational_state.save(state.value, expected_revision=state.revision)
+
+
+def test_revision_conflict_preserves_legacy_base_and_typed_authority() -> None:
+    assert issubclass(CanonicalStateRevisionConflict, SettingsRevisionConflict)
+    legacy = CanonicalStateRevisionConflict("legacy conflict")
+    assert legacy.authoritative is None
+    envelope = AppSettingsVNext()
+    typed = CanonicalStateRevisionConflict(
+        CanonicalEnvelopeSnapshot(envelope.intent, envelope.state, "r1")
+    )
+    assert typed.authoritative is not None
+    assert typed.authoritative.revision == "r1"
 
 
 def test_generic_intent_commit_rejects_telemetry_consent_change(tmp_path) -> None:
@@ -99,12 +129,12 @@ def test_failed_atomic_save_preserves_previous_envelope(tmp_path, monkeypatch) -
     snapshot = repositories.intent.load()
     replace_reached = False
 
-    def fail_replace(self, target):
+    def fail_replace(source, target):
         nonlocal replace_reached
         replace_reached = True
         raise OSError("isolated forced replace failure")
 
-    monkeypatch.setattr(type(path), "replace", fail_replace)
+    monkeypatch.setattr("puripuly_heart.config.settings_vnext.compat.os.replace", fail_replace)
     with pytest.raises(CanonicalStateRepositoryError):
         repositories.intent.save(
             replace(snapshot.value, ui=replace(snapshot.value.ui, locale="ja")),
@@ -142,6 +172,33 @@ def test_path_scoped_cas_prevents_lost_updates_across_repository_instances(tmp_p
             outcomes.append("conflict")
     assert sorted(outcomes) == ["conflict", "saved"]
     assert not path.with_suffix(".json.tmp").exists()
+
+
+def test_cross_process_cas_has_exactly_one_winner_and_no_temp_leak(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    assert save_vnext_settings(path, AppSettingsVNext()).ok
+    revision = create_canonical_state_repositories(path).intent.load().revision
+    context = multiprocessing.get_context("spawn")
+    queue = context.Queue()
+    start = context.Event()
+    processes = [
+        context.Process(target=_competing_cas, args=(str(path), revision, locale, queue, start))
+        for locale in ("ja", "ko")
+    ]
+    for process in processes:
+        process.start()
+    assert [queue.get(timeout=10) for _ in processes].count("ready") == 2
+    start.set()
+    for process in processes:
+        process.join(timeout=15)
+        assert process.exitcode == 0
+    assert sorted(queue.get(timeout=2) for _ in processes) == ["conflict", "saved"]
+    assert load_vnext_settings(path).settings is not None
+    assert list(tmp_path.glob(".settings.json.*.tmp")) == []
+
+
+def test_canonical_unit_of_work_declares_cross_process_path_ownership() -> None:
+    assert CanonicalStateUnitOfWork.process_ownership == "cross_process_path_scoped_os_lock"
 
 
 def test_legacy_facade_writer_participates_in_same_path_lock(tmp_path, monkeypatch) -> None:
