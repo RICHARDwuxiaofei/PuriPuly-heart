@@ -209,6 +209,9 @@ async def _product_process_source_probe(
 
 
 async def _peer_generation_probe() -> dict[str, Any]:
+    from puripuly_heart.app.adapters.peer_provider_ingress import (
+        HubPeerProviderIngressAdapter,
+    )
     from puripuly_heart.core.clock import SystemClock
     from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, _PeerHubVadSink
 
@@ -241,6 +244,7 @@ async def _peer_generation_probe() -> dict[str, Any]:
         hub=hub,
         clock=SystemClock(),
         provider_read_port=hub,
+        provider_ingress_port=HubPeerProviderIngressAdapter(hub),
         source_factory=lambda *_args: None,
         vad_factory=lambda *_args: None,
         vad_model_resolver=lambda: Path(),
@@ -262,6 +266,9 @@ async def _peer_generation_probe() -> dict[str, Any]:
 
 
 def _active_peer_publication_gate() -> tuple[Any, Any, Any, dict[str, Any]]:
+    from puripuly_heart.app.adapters.peer_provider_ingress import (
+        HubPeerProviderIngressAdapter,
+    )
     from puripuly_heart.core.clock import SystemClock
     from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, _PeerHubVadSink
 
@@ -294,6 +301,7 @@ def _active_peer_publication_gate() -> tuple[Any, Any, Any, dict[str, Any]]:
         hub=hub,
         clock=SystemClock(),
         provider_read_port=hub,
+        provider_ingress_port=HubPeerProviderIngressAdapter(hub),
         source_factory=lambda *_args: None,
         vad_factory=lambda *_args: None,
         vad_model_resolver=lambda: Path(),

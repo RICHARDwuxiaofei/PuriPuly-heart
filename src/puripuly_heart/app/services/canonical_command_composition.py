@@ -7,7 +7,6 @@ from pathlib import Path
 
 from puripuly_heart.app.ports.application_settings import (
     OperationalCommandResult,
-    OperationalStateCommand,
     OverlayOscOutputSettingsCommand,
     SettingChange,
     SettingsCommand,
@@ -24,25 +23,18 @@ from puripuly_heart.app.ports.runtime_apply import (
     RuntimeApplyRequest,
 )
 from puripuly_heart.app.ports.settings_repository import SettingsCommitReceipt
-from puripuly_heart.app.services.application_settings_codecs import (
-    FIELD_CODECS,
-    OPERATIONAL_CODECS,
-    CodecKind,
-)
 from puripuly_heart.app.services.canonical_application_settings import (
     CanonicalApplicationSettingsService,
     CanonicalOperationalStateService,
+    operational_commands_from_states,
+    surface_changes_from_intents,
     surface_for_settings_command,
 )
 from puripuly_heart.app.services.canonical_secret_commands import (
     CanonicalSecretCommandService,
     SyncSecretStorePortAdapter,
 )
-from puripuly_heart.config.settings_vnext.schema import (
-    AppSettingsVNext,
-    PersistedOperationalState,
-    UserIntentSettings,
-)
+from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext, UserIntentSettings
 from puripuly_heart.core.messages import (
     RUNTIME_APPLY_STATUS_APPLIED,
     RUNTIME_APPLY_STATUS_FAILED,
@@ -81,79 +73,6 @@ _SURFACE_TO_COMMAND: Mapping[str, type[SettingsCommand]] = {
     "overlay_osc_output": OverlayOscOutputSettingsCommand,
     "ui_prompt_clipboard_state": UiPromptClipboardSettingsCommand,
 }
-
-_OPERATIONAL_COMMAND_TYPES: Mapping[object, type[OperationalStateCommand]] = {
-    codec.canonical_path: codec.command_type for codec in OPERATIONAL_CODECS.values()
-}
-
-
-def _get(value: object, path: tuple[str, ...]) -> object:
-    for part in path:
-        value = getattr(value, part)
-    return value
-
-
-def _codec_value(kind: CodecKind, value: object):
-    from puripuly_heart.app.ports.application_settings import (
-        JsonScalarEntry,
-        LocalExtraBodyValue,
-        StringListMapValue,
-        StringMapValue,
-    )
-
-    if kind == CodecKind.STRING_LIST:
-        return tuple(value)  # type: ignore[arg-type]
-    if kind == CodecKind.STRING_MAP:
-        return StringMapValue(tuple(sorted(value.items())))  # type: ignore[union-attr]
-    if kind == CodecKind.STRING_LIST_MAP:
-        return StringListMapValue(
-            tuple(sorted((key, tuple(items)) for key, items in value.items()))  # type: ignore[union-attr]
-        )
-    if kind == CodecKind.LOCAL_EXTRA_BODY:
-        return LocalExtraBodyValue(
-            tuple(JsonScalarEntry(key, item) for key, item in sorted(value.items()))  # type: ignore[union-attr]
-        )
-    return value
-
-
-def surface_changes_from_intents(
-    before: UserIntentSettings,
-    after: UserIntentSettings,
-    surface: str,
-) -> tuple[SettingChange, ...]:
-    owner = _SURFACE_TO_ENUM[surface]
-    changes: list[SettingChange] = []
-    for field, codec in FIELD_CODECS.items():
-        if codec.owner != owner:
-            continue
-        before_values = tuple(
-            _codec_value(codec.kind, _get(before, path)) for path in codec.canonical_paths
-        )
-        after_values = tuple(
-            _codec_value(codec.kind, _get(after, path)) for path in codec.canonical_paths
-        )
-        before_decoded = codec.decode(before_values)
-        after_decoded = codec.decode(after_values)
-        if before_decoded != after_decoded:
-            changes.append(SettingChange(field, after_decoded))
-    return tuple(changes)
-
-
-def operational_commands_from_states(
-    before: PersistedOperationalState,
-    after: PersistedOperationalState,
-    *,
-    expected_revision: str,
-) -> tuple[OperationalStateCommand, ...]:
-    commands: list[OperationalStateCommand] = []
-    for codec in OPERATIONAL_CODECS.values():
-        before_value = _get(before, codec.canonical_path)
-        after_value = _get(after, codec.canonical_path)
-        if before_value == after_value:
-            continue
-        command_type = codec.command_type
-        commands.append(command_type(after_value, expected_revision))  # type: ignore[call-arg,misc]
-    return tuple(commands)
 
 
 def settings_command_for_surface(

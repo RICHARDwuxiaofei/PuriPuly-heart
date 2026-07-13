@@ -572,6 +572,126 @@ async def test_language_change_updates_next_self_translation_request_target() ->
 
 
 @pytest.mark.asyncio
+async def test_peer_ingress_release_serializes_with_concurrent_replacement() -> None:
+    close_started = asyncio.Event()
+    close_release = asyncio.Event()
+
+    class BlockingCloseSTT(QueueingSTT):
+        async def close(self) -> None:
+            close_started.set()
+            await close_release.wait()
+            await super().close()
+
+    old_stt = BlockingCloseSTT()
+    new_stt = QueueingSTT()
+    hub = ClientHub(
+        stt=None,
+        peer_stt=old_stt,
+        llm=StubLLM(),
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+    )
+    await hub.start(auto_flush_osc=False)
+    old_event_task = hub.provider_runtime_handles["peer_stt"].event_task
+
+    release_task = asyncio.create_task(hub.release_peer_stt_provider_ingress(old_stt))
+    await close_started.wait()
+    replacement_task = asyncio.create_task(hub.replace_peer_stt_provider(new_stt))
+    await asyncio.sleep(0)
+
+    assert not replacement_task.done()
+    close_release.set()
+    assert await release_task is True
+    await replacement_task
+
+    handle = hub.provider_runtime_handles["peer_stt"]
+    assert hub.peer_stt is new_stt
+    assert handle.provider is new_stt
+    assert handle.event_task is not None
+    assert handle.event_task is not old_event_task
+    assert old_event_task is None or old_event_task.done()
+    assert handle._retired_providers == []
+    await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_peer_ingress_release_does_not_leave_stale_replacement_state() -> None:
+    class FailFirstCloseSTT(QueueingSTT):
+        close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise RuntimeError("release failed")
+            await super().close()
+
+    old_stt = FailFirstCloseSTT()
+    new_stt = QueueingSTT()
+    hub = ClientHub(
+        stt=None,
+        peer_stt=old_stt,
+        llm=StubLLM(),
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+    )
+    await hub.start(auto_flush_osc=False)
+    old_event_task = hub.provider_runtime_handles["peer_stt"].event_task
+
+    release_task = asyncio.create_task(hub.release_peer_stt_provider_ingress(old_stt))
+    replacement_task = asyncio.create_task(hub.replace_peer_stt_provider(new_stt))
+    with pytest.raises(RuntimeError, match="release failed"):
+        await release_task
+    await replacement_task
+
+    handle = hub.provider_runtime_handles["peer_stt"]
+    assert handle.provider is new_stt
+    assert handle.event_task is not None
+    assert handle.event_task is not old_event_task
+    assert old_event_task is None or old_event_task.done()
+    assert handle._retired_providers == []
+    await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_cloud_peer_release_reinstall_restores_idempotent_event_ingress() -> None:
+    class CloudSTT(QueueingSTT):
+        backend_usable = True
+
+        async def close(self) -> None:
+            self.backend_usable = False
+            await super().close()
+
+    released = CloudSTT()
+    restored = CloudSTT()
+    hub = ClientHub(
+        stt=None,
+        peer_stt=released,
+        llm=StubLLM(),
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+    )
+    await hub.start(auto_flush_osc=False)
+
+    assert await hub.release_peer_stt_provider_ingress(released) is True
+    assert released.backend_usable is False
+    assert hub.provider_runtime_handles["peer_stt"].event_task is None
+
+    await hub.replace_peer_stt_provider(restored)
+    await hub.start_peer_stt_provider_ingress(restored)
+    ingress_task = hub.provider_runtime_handles["peer_stt"].event_task
+    await hub.start_peer_stt_provider_ingress(restored)
+
+    assert restored.backend_usable is True
+    assert ingress_task is not None
+    assert not ingress_task.done()
+    assert hub.provider_runtime_handles["peer_stt"].event_task is ingress_task
+    await restored.emit(STTSessionStateEvent(state=STTSessionState.STREAMING, channel="peer"))
+    await asyncio.sleep(0)
+    assert not ingress_task.done()
+    await hub.stop()
+
+
+@pytest.mark.asyncio
 async def test_replace_peer_stt_provider_running_restarts_event_loop_and_clears_runtime_state() -> (
     None
 ):

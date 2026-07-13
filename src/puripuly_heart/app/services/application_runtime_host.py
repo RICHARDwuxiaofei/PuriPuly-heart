@@ -533,6 +533,13 @@ class ApplicationRuntimeHost:
                 CaptureDiagnosticReason.NOT_APPLICABLE,
                 receipt.revision,
             )
+        installed = await self._install_available(receipt, ("peer_stt",))
+        if "peer_stt" not in installed or not self._provider_is_available("peer_stt"):
+            return CaptureRetryResult(
+                CaptureRetryStatus.FAILED,
+                CaptureDiagnosticReason.PROVIDER_FAILURE,
+                receipt.revision,
+            )
         succeeded = await runtime.retry_process_capture(config=config)
         diagnostic = runtime.last_failure
         if succeeded:

@@ -11,8 +11,10 @@ from puripuly_heart.app.ports.application_settings import (
     OperationalStateCommand,
     OperationalStateSnapshot,
     OverlayOscOutputSettingsCommand,
+    SettingChange,
     SettingsCommand,
     SettingsCommandResult,
+    SettingsSurface,
     SettingValue,
     StringListMapValue,
     StringMapValue,
@@ -45,7 +47,11 @@ def settings_presentation_codecs():
     return tuple(FIELD_CODECS.values())
 
 
-from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
+from puripuly_heart.config.settings_vnext.schema import (
+    AppSettingsVNext,
+    PersistedOperationalState,
+    UserIntentSettings,
+)
 from puripuly_heart.core.messages import ErrorDiagnostics
 
 
@@ -104,6 +110,50 @@ def _canonical_value(kind: CodecKind, value: SettingValue) -> object:
     if kind == CodecKind.LOCAL_EXTRA_BODY:
         return {entry.key: entry.value for entry in value.entries}  # type: ignore[union-attr]
     return value
+
+
+def surface_changes_from_intents(
+    before: UserIntentSettings,
+    after: UserIntentSettings,
+    surface: str,
+) -> tuple[SettingChange, ...]:
+    owner = {
+        "translation_provider": SettingsSurface.TRANSLATION_PROVIDER,
+        "stt_language_audio": SettingsSurface.STT_LANGUAGE_AUDIO,
+        "overlay_osc_output": SettingsSurface.OVERLAY_OSC_OUTPUT,
+        "ui_prompt_clipboard_state": SettingsSurface.UI_PROMPT_CLIPBOARD,
+    }[surface]
+    changes: list[SettingChange] = []
+    for field, codec in FIELD_CODECS.items():
+        if codec.owner != owner:
+            continue
+        before_values = tuple(
+            _codec_value(codec.kind, _get(before, path)) for path in codec.canonical_paths
+        )
+        after_values = tuple(
+            _codec_value(codec.kind, _get(after, path)) for path in codec.canonical_paths
+        )
+        before_decoded = codec.decode(before_values)
+        after_decoded = codec.decode(after_values)
+        if before_decoded != after_decoded:
+            changes.append(SettingChange(field, after_decoded))
+    return tuple(changes)
+
+
+def operational_commands_from_states(
+    before: PersistedOperationalState,
+    after: PersistedOperationalState,
+    *,
+    expected_revision: str,
+) -> tuple[OperationalStateCommand, ...]:
+    commands: list[OperationalStateCommand] = []
+    for codec in OPERATIONAL_CODECS.values():
+        before_value = _get(before, codec.canonical_path)
+        after_value = _get(after, codec.canonical_path)
+        if before_value == after_value:
+            continue
+        commands.append(codec.command_type(after_value, expected_revision))  # type: ignore[call-arg,misc]
+    return tuple(commands)
 
 
 def _intent_snapshot(envelope: CanonicalEnvelopeSnapshot) -> ApplicationSettingsSnapshot:

@@ -535,6 +535,9 @@ def _run_target_root() -> None:
 async def _run_native(thresholds: IsolationThresholds, runtime_dir: Path) -> dict[str, object]:
     import psutil
 
+    from puripuly_heart.app.adapters.peer_provider_ingress import (
+        HubPeerProviderIngressAdapter,
+    )
     from puripuly_heart.config.process_capture_resolution import ResolvedProcessCaptureIdentity
     from puripuly_heart.config.resolved import (
         ResolvedCredentialRequirement,
@@ -591,10 +594,20 @@ async def _run_native(thresholds: IsolationThresholds, runtime_dir: Path) -> dic
         async def handle_peer_vad_event(self, _event, *, stt_provider=None) -> None:  # noqa: ANN001
             _ = stt_provider
 
+        async def start_peer_stt_provider_ingress(self, provider) -> None:  # noqa: ANN001
+            if self.peer_stt is not provider:
+                raise RuntimeError("stale peer provider")
+
         async def replace_peer_stt_provider(self, provider, *, start=True) -> None:  # noqa: ANN001
             previous, self.peer_stt = self.peer_stt, provider
             if previous is not None and previous is not provider:
                 await previous.close_backend()
+
+        async def release_peer_stt_provider_ingress(self, provider) -> bool:  # noqa: ANN001
+            if self.peer_stt is not provider:
+                return False
+            await provider.close_backend()
+            return True
 
     events: list[str] = []
     samples: list[np.ndarray] = []
@@ -722,6 +735,7 @@ async def _run_native(thresholds: IsolationThresholds, runtime_dir: Path) -> dic
         hub=(hub := Hub()),
         clock=Clock(),
         provider_read_port=hub,
+        provider_ingress_port=HubPeerProviderIngressAdapter(hub),
         source_factory=source_factory,
         vad_factory=lambda _config, _path: object(),
         vad_model_resolver=lambda: runtime_dir / "unused-vad.onnx",

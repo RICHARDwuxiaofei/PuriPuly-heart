@@ -112,6 +112,7 @@ class Resolved:
     def __init__(self, events: list[str], unavailable: frozenset[str] = frozenset()) -> None:
         self.events = events
         self.unavailable = unavailable
+        self.hub: Hub | None = None
 
     async def replace_runtime_with_plan(self, request, plan) -> None:  # noqa: ANN001
         slots = tuple(
@@ -120,6 +121,10 @@ class Resolved:
         self.events.extend(f"providers_install:{request.revision}:{slot}" for slot in slots)
         if self.unavailable.intersection(slots):
             raise RuntimeError("provider unavailable")
+        if self.hub is not None:
+            for slot in slots:
+                if slot in self.hub.stt_providers:
+                    self.hub.stt_providers[slot] = object()
 
 
 class Receipts:
@@ -548,6 +553,7 @@ def _host(
 ):
     hub, peer, self_owner, sender = Hub(events), Peer(events), SelfOwner(events), Sender(events)
     composition = Composition(events, unavailable)
+    composition.resolved_adapter.hub = hub
     host = ApplicationRuntimeHost(
         parts=ApplicationRuntimeParts(sender, object(), hub, peer, self_owner),
         runtime_composition=composition,
@@ -650,6 +656,49 @@ async def test_peer_capture_retry_success_uses_runtime_owner_clear_and_never_rou
     assert result.reason.value == "success"
     assert peer.last_failure is None
     assert not hasattr(peer, "chatbox")
+
+
+@pytest.mark.asyncio
+async def test_peer_capture_retry_maps_unavailable_exact_receipt_reinstall() -> None:
+    from puripuly_heart.config.settings_vnext.schema import (
+        CaptureTargetIntent,
+        ProcessCaptureTargetIntent,
+    )
+
+    settings = AppSettingsVNext()
+    settings = replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            desktop_audio=replace(
+                settings.intent.desktop_audio,
+                capture_target=CaptureTargetIntent.process_target(
+                    ProcessCaptureTargetIntent.vrchat(r"C:\VRChat\VRChat.exe")
+                ),
+            ),
+        ),
+    )
+    events: list[str] = []
+    host, _hub, peer, _transactions = _host(
+        events,
+        SettingsCommitReceipt(settings, "capture-r3", "capture", None),
+        unavailable=frozenset({"peer_stt"}),
+    )
+    retry_calls = 0
+
+    async def retry_process_capture(*, config):  # noqa: ANN001
+        nonlocal retry_calls
+        retry_calls += 1
+        return True
+
+    peer.retry_process_capture = retry_process_capture
+    result = await host.retry_peer_process_capture()
+
+    assert result.status.value == "failed"
+    assert result.reason.value == "provider_failure"
+    assert result.canonical_revision == "capture-r3"
+    assert retry_calls == 0
+    assert events == ["providers_install:capture-r3:peer_stt"]
 
 
 @pytest.mark.asyncio

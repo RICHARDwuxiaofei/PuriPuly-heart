@@ -5,6 +5,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from puripuly_heart.app.adapters.peer_provider_ingress import HubPeerProviderIngressAdapter
 from puripuly_heart.app.adapters.resolved_runtime_resource_factory import (
     ResolvedRuntimeResourceFactory,
 )
@@ -1183,6 +1184,7 @@ def create_production_application_runtime(
         hub=hub,
         clock=clock,
         provider_read_port=hub,
+        provider_ingress_port=HubPeerProviderIngressAdapter(hub),
         source_factory=factories.peer_source,
         vad_factory=factories.peer_vad,
         vad_model_resolver=ensure_silero_vad_onnx,

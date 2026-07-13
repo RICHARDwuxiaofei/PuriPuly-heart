@@ -5,7 +5,7 @@ import inspect
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, Literal, Protocol
 
 from puripuly_heart.config.process_capture_resolution import (
     ProcessCaptureTargetUnavailableError,
@@ -26,6 +26,7 @@ class PeerChannelRuntimeState(str, Enum):
     STOPPED = "stopped"
     STARTING = "starting"
     RUNNING = "running"
+    FINALIZING = "finalizing"
     STOPPING = "stopping"
     FAULTED = "faulted"
 
@@ -104,6 +105,19 @@ class PeerSTTReadPort(Protocol):
     def lease_stt_provider(self, slot: Literal["self_stt", "peer_stt"]) -> _PeerSTTLease | None: ...
 
 
+class PeerProviderIngressPort(Protocol):
+    async def ensure_peer_provider_ingress(self, provider: object) -> None: ...
+
+    async def release_peer_provider_ingress(
+        self, provider: object
+    ) -> "PeerProviderReleaseOutcome": ...
+
+
+@dataclass(frozen=True, slots=True)
+class PeerProviderReleaseOutcome:
+    failure: BaseException | None = None
+
+
 @dataclass(slots=True)
 class _PeerHubVadSink:
     runtime: "PeerChannelRuntime"
@@ -118,6 +132,7 @@ class PeerChannelRuntime:
         "_audio_source",
         "_vad",
         "_loop_task",
+        "_failure_task",
         "_generation",
         "_desired_active",
         "_lock",
@@ -132,6 +147,7 @@ class PeerChannelRuntime:
         hub: ClientHub,
         clock: Clock,
         provider_read_port: PeerSTTReadPort,
+        provider_ingress_port: PeerProviderIngressPort,
         source_factory: Callable[[PeerRuntimeConfig], Awaitable[object] | object],
         vad_factory: Callable[[PeerRuntimeConfig, Path], object],
         vad_model_resolver: Callable[[], Path],
@@ -141,6 +157,7 @@ class PeerChannelRuntime:
         self.hub = hub
         self.clock = clock
         self._provider_read_port = provider_read_port
+        self._provider_ingress_port = provider_ingress_port
         self._source_factory = source_factory
         self._vad_factory = vad_factory
         self._vad_model_resolver = vad_model_resolver
@@ -150,6 +167,7 @@ class PeerChannelRuntime:
         self._audio_source: object | None = None
         self._vad: object | None = None
         self._loop_task: asyncio.Task[None] | None = None
+        self._failure_task: asyncio.Task[None] | None = None
         self._signature: tuple[object, ...] | None = None
         self._state = PeerChannelRuntimeState.STOPPED
         self._generation = 0
@@ -161,6 +179,8 @@ class PeerChannelRuntime:
         self._source_close_lock = asyncio.Lock()
         self._closed_source_ids: set[int] = set()
         self._last_failure: PeerRuntimeDiagnostic | None = None
+        self._last_provider_release_failure: BaseException | None = None
+        self._retry_authorized_generation: int | None = None
 
     @property
     def state(self) -> PeerChannelRuntimeState:
@@ -186,6 +206,10 @@ class PeerChannelRuntime:
     def last_failure(self) -> PeerRuntimeDiagnostic | None:
         return self._last_failure
 
+    @property
+    def last_provider_release_failure(self) -> BaseException | None:
+        return self._last_provider_release_failure
+
     def lifecycle_owner_snapshot(self) -> dict[str, object]:
         return {
             "owner": "PeerChannelRuntime",
@@ -210,6 +234,19 @@ class PeerChannelRuntime:
         release_dormant: bool = True,
     ) -> None:
         async with self._lock:
+            if (
+                desired_active
+                and self._state
+                in {
+                    PeerChannelRuntimeState.FINALIZING,
+                    PeerChannelRuntimeState.FAULTED,
+                }
+                and config.capture_target.kind == "process"
+            ):
+                if self._retry_authorized_generation != self._generation:
+                    self._config = config
+                    return
+                self._retry_authorized_generation = None
             if record_intent and desired_active != self._intent_desired_active:
                 self._intent_generation += 1
                 self._intent_desired_active = desired_active
@@ -246,11 +283,19 @@ class PeerChannelRuntime:
                 )
 
     async def retry_process_capture(self, *, config: PeerRuntimeConfig) -> bool:
-        if (
-            config.capture_target.kind != "process"
-            or self._state is not PeerChannelRuntimeState.FAULTED
-        ):
-            return False
+        async with self._lock:
+            finalizing_task = (
+                self._failure_task if self._state is PeerChannelRuntimeState.FINALIZING else None
+            )
+        if finalizing_task is not None:
+            await asyncio.gather(finalizing_task, return_exceptions=True)
+        async with self._lock:
+            if (
+                config.capture_target.kind != "process"
+                or self._state is not PeerChannelRuntimeState.FAULTED
+            ):
+                return False
+            self._retry_authorized_generation = self._generation
         await self.apply_policy(config=config, desired_active=True, record_intent=False)
         return self._state is PeerChannelRuntimeState.RUNNING
 
@@ -309,6 +354,9 @@ class PeerChannelRuntime:
             generation = self._generation
             self._desired_active = False
             self._state = PeerChannelRuntimeState.STOPPING
+            failure_task = self._failure_task
+            self._failure_task = None
+        await self._cancel_loop(failure_task)
         await self._teardown_resources(PeerChannelRuntimeState.STOPPED, generation)
 
     async def _start_generation(self, generation: int, config: PeerRuntimeConfig) -> None:
@@ -322,8 +370,7 @@ class PeerChannelRuntime:
             )
             await self._mark_faulted_if_current(generation)
             return
-        if getattr(config.backend, "provider", None) == "local_qwen":
-            await self.hub.start_peer_stt_provider_ingress(lease.current)
+        await self._provider_ingress_port.ensure_peer_provider_ingress(lease.current)
         source = None
         try:
             source = self._source_factory(config)
@@ -361,7 +408,7 @@ class PeerChannelRuntime:
                 start_loop = False
             else:
                 start_loop = True
-                task = asyncio.create_task(
+                task = self._create_owned_task(
                     self._run_peer_loop_guarded(
                         source=source,
                         vad=vad,
@@ -397,24 +444,67 @@ class PeerChannelRuntime:
             source = kwargs.get("source")
             terminal_reason = getattr(source, "terminal_reason", None)
             if terminal_reason in {"target_exited", "source_failure"}:
-                await self._mark_faulted_if_current(generation)
-                await self._publish_failure(
-                    PeerRuntimeDiagnostic(
-                        (
-                            PeerRuntimeFailureReason.PROCESS_TARGET_EXITED
-                            if terminal_reason == "target_exited"
-                            else PeerRuntimeFailureReason.PROCESS_SOURCE_FAILED
-                        ),
-                        "process",
-                    )
+                diagnostic = PeerRuntimeDiagnostic(
+                    (
+                        PeerRuntimeFailureReason.PROCESS_TARGET_EXITED
+                        if terminal_reason == "target_exited"
+                        else PeerRuntimeFailureReason.PROCESS_SOURCE_FAILED
+                    ),
+                    "process",
                 )
+                await self._schedule_failure_finalize(generation, diagnostic)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await self._mark_faulted_if_current(generation)
             config = self._config
             if config is not None:
-                await self._publish_failure(self._diagnostic_for_exception(config, exc))
+                source = kwargs.get("source")
+                if getattr(source, "terminal_reason", None) == "target_exited":
+                    diagnostic = PeerRuntimeDiagnostic(
+                        PeerRuntimeFailureReason.PROCESS_TARGET_EXITED,
+                        config.capture_target.kind,
+                    )
+                else:
+                    diagnostic = self._diagnostic_for_exception(config, exc)
+                await self._schedule_failure_finalize(generation, diagnostic)
+
+    async def _schedule_failure_finalize(
+        self, generation: int, diagnostic: PeerRuntimeDiagnostic
+    ) -> None:
+        async with self._lock:
+            if self._is_superseded(generation):
+                return
+            self._generation += 1
+            teardown_generation = self._generation
+            self._desired_active = False
+            self._signature = None
+            self._state = PeerChannelRuntimeState.FINALIZING
+            task = self._create_owned_task(self._finalize_failure(teardown_generation, diagnostic))
+            task.add_done_callback(self._on_loop_task_done)
+            self._failure_task = task
+
+    async def _finalize_failure(
+        self, teardown_generation: int, diagnostic: PeerRuntimeDiagnostic
+    ) -> None:
+        lease = self._provider_read_port.lease_stt_provider("peer_stt")
+        if lease is not None and lease.current is not None:
+            try:
+                outcome = await self._provider_ingress_port.release_peer_provider_ingress(
+                    lease.current
+                )
+            except BaseException as exc:
+                self._last_provider_release_failure = exc
+            else:
+                self._last_provider_release_failure = outcome.failure
+        async with self._lock:
+            if self._generation != teardown_generation:
+                return
+        await self._teardown_resources(PeerChannelRuntimeState.FAULTED, teardown_generation)
+        await self._publish_failure(diagnostic)
+
+    @staticmethod
+    def _create_owned_task(coroutine: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+        return asyncio.create_task(coroutine)
 
     def _diagnostic_for_exception(
         self,

@@ -198,6 +198,17 @@ class ProviderRuntimeHandle:
             await _call_async_method(provider, "close")
             await _call_async_method(provider, "discard_pending_events")
 
+    async def release_backend_if_provider(self, provider: object) -> bool:
+        async with self._lock:
+            if self.provider is not provider:
+                return False
+            self._running = False
+            await self._cancel_idle_release_task()
+            await self._cancel_event_task()
+            await self._close_provider_for_shutdown(provider)
+            self._notify_state_changed()
+            return True
+
     async def stop_ingress(self) -> None:
         async with self._lock:
             self._running = False

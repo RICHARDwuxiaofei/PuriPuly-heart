@@ -1126,6 +1126,12 @@ class ClientHub:
         await self._peer_stt_provider_runtime.start_if_provider(stt)
         self._sync_provider_runtime_aliases()
 
+    async def release_peer_stt_provider_ingress(self, stt: STTProvider) -> bool:
+        async with self._provider_transition_lock:
+            released = await self._peer_stt_provider_runtime.release_backend_if_provider(stt)
+            self._sync_provider_runtime_aliases()
+            return released
+
     async def drain_peer_stt_for_toggle_off(
         self,
         stt: STTProvider,

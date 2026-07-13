@@ -28,6 +28,7 @@
         "src/puripuly_heart/app/adapters/overlay_osc_runtime.py",
         "src/puripuly_heart/app/adapters/overlay_runtime_effects.py",
         "src/puripuly_heart/app/adapters/overlay_ui_projection.py",
+        "src/puripuly_heart/app/adapters/peer_provider_ingress.py",
         "src/puripuly_heart/app/adapters/post_commit_provider_activation.py",
         "src/puripuly_heart/app/adapters/resolved_runtime_resource_factory.py",
         "src/puripuly_heart/app/adapters/settings_vnext_canonical_persistence.py",
@@ -122,8 +123,8 @@
         "src/puripuly_heart/ui/views/dashboard.py",
         "src/puripuly_heart/ui/views/settings.py"
       ],
-      "production_source_sha256": "aafb6208061d9e0047a4486b21287f917f78d70f9ff3d9626348713d64ab547f",
-      "source_delta_sha256": "ecf100ad63626877a8b437d0d2e0953f5596b38eb88f534bab88462eefa3166e"
+      "production_source_sha256": "57d22f69420bb4cb3d33fe2818daf3bb18ab14ccff39189bd7d31c5d59fcb064",
+      "source_delta_sha256": "70840a052f15c051b09337259064a5510996d5546715e613d4306ef920565eb8"
     },
     "repair_base": "01b3973b64425c8feb9955696d5217fed5d422a4"
   },
