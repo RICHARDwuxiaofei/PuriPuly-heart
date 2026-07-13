@@ -1,5 +1,5 @@
 {
-  "current_commit": "b4ace2631793aa1a1e384c0440b8ec7f315559ae",
+  "current_commit": "6e40413a8eea0483ddf46b986a1ad9b59fcbf125",
   "environment": {
     "home": "isolated temporary directory",
     "userprofile": "isolated temporary directory",
@@ -11,8 +11,8 @@
     "network": "deterministic tier uses fakes; integration tests remain disabled"
   },
   "result": {
-    "tests": 3992,
-    "passed": 3959,
+    "tests": 4001,
+    "passed": 3968,
     "failed": 0,
     "skipped": 33
   },
