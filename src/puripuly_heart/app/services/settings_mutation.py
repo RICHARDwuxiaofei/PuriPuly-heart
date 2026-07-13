@@ -193,14 +193,22 @@ class SettingsMutationService:
                 diagnostics=validation_result.diagnostics,
             )
 
+        expected_revision = request.expected_revision
+        if expected_revision is None:
+            expected_revision = (await self.settings_repository.load_receipt()).revision
         commit_result = await self.settings_repository.save(
             SettingsCommitRequest(
                 values=request.values,
-                expected_revision=request.expected_revision,
+                expected_revision=expected_revision,
                 reason=request.reason,
+                correlation_id=request.correlation_id,
             )
         )
-        if not commit_result.succeeded or commit_result.snapshot is None:
+        if (
+            not commit_result.succeeded
+            or commit_result.snapshot is None
+            or commit_result.receipt is None
+        ):
             return TransactionResult(
                 status=TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED,
                 message=commit_result.message,
@@ -220,9 +228,7 @@ class SettingsMutationService:
         try:
             runtime_result = await self.runtime_apply.apply_runtime(
                 RuntimeApplyRequest(
-                    settings_values=snapshot.values,
-                    reason=request.reason,
-                    correlation_id=request.correlation_id,
+                    receipt=commit_result.receipt,
                 )
             )
         except Exception:

@@ -8,6 +8,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from puripuly_heart.app.ports.dashboard_application import DashboardApplicationPort
+from puripuly_heart.app.ports.ui_settings import (
+    CaptureDiagnosticReason,
+    CaptureRetryResult,
+    CaptureRetryStatus,
+)
 from puripuly_heart.release_evidence.windows_process_isolation import (
     CHANNELS,
     CONTROL_FREQUENCY_HZ,
@@ -30,7 +36,6 @@ from puripuly_heart.release_evidence.windows_process_isolation import (
     run,
     validate_direct_child_topology,
 )
-from puripuly_heart.ui.controller import GuiController
 
 THRESHOLDS = IsolationThresholds(
     target_present_amplitude_min=0.05,
@@ -130,36 +135,26 @@ def test_lifecycle_contract_requires_ordered_teardown_fresh_pid_and_gui_retry() 
 
 @pytest.mark.asyncio
 async def test_fixture_invokes_the_committed_gui_retry_action_contract() -> None:
-    class Runtime:
-        async def retry_process_capture(self, *, config) -> bool:  # noqa: ANN001
-            assert config == "fresh-resolved-config"
-            return True
-
     class GuiActionContract:
-        settings = object()
-        _peer_runtime = Runtime()
-        _peer_process_warning_reason = "process_target_exited"
-
-        def _peer_runtime_should_be_active(self, _settings) -> bool:  # noqa: ANN001
-            return True
-
-        async def _ensure_peer_local_stt_ready(self) -> bool:
-            return True
-
-        def _build_peer_runtime_config(self, _settings) -> str:  # noqa: ANN001
-            return "fresh-resolved-config"
-
-        def _sync_effective_hub_flags(self, _settings) -> None:  # noqa: ANN001
-            return None
-
-        def _refresh_overlay_peer_consumers(self) -> None:
-            return None
+        async def retry_capture(self) -> CaptureRetryResult:
+            return CaptureRetryResult(
+                CaptureRetryStatus.SUCCEEDED,
+                CaptureDiagnosticReason.SUCCESS,
+                "revision",
+            )
 
     action = GuiActionContract()
 
-    assert GUI_PROCESS_RETRY_ACTION is GuiController.retry_peer_process_capture
+    assert GUI_PROCESS_RETRY_ACTION is DashboardApplicationPort.retry_capture
     assert await invoke_gui_process_retry(action) is True
-    assert action._peer_process_warning_reason is None
+
+
+def test_checked_in_native_evidence_names_application_retry_contract() -> None:
+    path = Path("docs/release-evidence/windows-process-isolation-host.json")
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+
+    assert evidence["lifecycle"]["retry_action"] == ("DashboardApplicationPort.retry_capture")
+    assert evidence["lifecycle"]["retry_succeeded"] is True
 
 
 def test_fixture_builds_the_committed_resolved_process_target_contract() -> None:

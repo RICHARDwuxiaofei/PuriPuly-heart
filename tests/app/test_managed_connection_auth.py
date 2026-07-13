@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import importlib
 from collections.abc import Mapping
-from dataclasses import FrozenInstanceError, dataclass, fields, is_dataclass
+from dataclasses import FrozenInstanceError, dataclass, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,7 @@ from puripuly_heart.app.services.managed_auth_claims import (
     OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
     ManagedAuthClaimGuard,
 )
+from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core import messages
 
 SERVICE_MODULE = "puripuly_heart.app.services.managed_connection_auth"
@@ -104,6 +105,7 @@ class RecordingBrokerClient:
         events: list[tuple[str, str]] | None = None,
         raise_on_issue: bool = False,
         ack_result: broker_client.ManagedKeyDeliveryAckResult | None = None,
+        on_issue: Any | None = None,
     ) -> None:
         self.result = result
         self.events = events if events is not None else []
@@ -112,6 +114,7 @@ class RecordingBrokerClient:
             succeeded=True,
             status="acknowledged",
         )
+        self.on_issue = on_issue
         self.requests: list[broker_client.BrokerIssueRequest] = []
         self.ack_requests: list[broker_client.ManagedKeyDeliveryAckRequest] = []
 
@@ -125,6 +128,8 @@ class RecordingBrokerClient:
             raise RuntimeError(RAW_EXCEPTION_TEXT)
         if self.result is None:
             pytest.fail("RecordingBrokerClient requires a configured result")
+        if self.on_issue is not None:
+            self.on_issue()
         return self.result
 
     async def acknowledge_managed_key_delivery(
@@ -245,11 +250,55 @@ class RecordingSettingsRepository:
         self.saved_requests.append(request)
         if self.raise_on_save:
             raise RuntimeError(RAW_EXCEPTION_TEXT)
-        if self.results:
-            return self.results.pop(0)
-        if self.result is None:
+        result = self.results.pop(0) if self.results else self.result
+        if result is None:
             pytest.fail("RecordingSettingsRepository requires a configured result")
-        return self.result
+        if result.succeeded and result.receipt is None:
+            return settings_repository.SettingsCommitResult(
+                succeeded=True,
+                snapshot=result.snapshot,
+                message=result.message,
+                diagnostics=result.diagnostics,
+                receipt=settings_repository.SettingsCommitReceipt(
+                    _receipt_envelope_for(request.values),
+                    f"settings-r{len(self.saved_requests) + 1}",
+                    request.reason,
+                    request.correlation_id,
+                ),
+            )
+        return result
+
+
+def _receipt_envelope_for(values: Mapping[str, object]) -> AppSettingsVNext:
+    envelope = AppSettingsVNext()
+    state = values.get("state")
+    managed_values = state.get("managed_connection") if isinstance(state, Mapping) else None
+    if not isinstance(managed_values, Mapping):
+        return envelope
+    managed = envelope.state.managed_connection
+    updates = {
+        field_name: managed_values[field_name]
+        for field_name in (
+            "release_token",
+            "release_token_expires_at",
+            "active_managed_credential_ref",
+            "active_managed_expires_at",
+            "referral_id",
+            "local_managed_claim_sources",
+            "pending_delivery_ack_source",
+            "pending_delivery_ack_delivery_id",
+            "pending_delivery_ack_managed_credential_ref",
+            "pending_delivery_ack_expires_at",
+        )
+        if field_name in managed_values
+    }
+    return replace(
+        envelope,
+        state=replace(
+            envelope.state,
+            managed_connection=replace(managed, **updates),
+        ),
+    )
 
 
 @dataclass
@@ -820,6 +869,9 @@ async def test_delivery_ack_pending_metadata_persists_before_ack_and_clears_afte
         "save_settings",
     ]
     first_save, second_save = repository.saved_requests
+    assert first_save.expected_revision == "settings-r1"
+    assert second_save.expected_revision == "settings-r2"
+    assert first_save.correlation_id == second_save.correlation_id == "corr-managed-auth"
     pending = first_save.values["state"]["managed_connection"]  # type: ignore[index]
     assert pending["pending_delivery_ack_source"] == "discord"
     assert pending["pending_delivery_ack_delivery_id"] == metadata.delivery_id
@@ -827,6 +879,7 @@ async def test_delivery_ack_pending_metadata_persists_before_ack_and_clears_afte
     assert "delivery_ack_token" not in repr(first_save.values)
     cleared = second_save.values["state"]["managed_connection"]  # type: ignore[index]
     assert cleared["pending_delivery_ack_source"] is None
+    assert "active_managed_credential_ref" not in cleared
     assert broker.ack_requests[0].delivery_id == metadata.delivery_id
     assert "delivery-token-discord-1" not in repr(broker.ack_requests[0])
     assert "delivery-token-discord-1" not in store.values.values()
@@ -985,8 +1038,129 @@ async def test_success_records_and_persists_discord_claim_after_settings_commit(
 
     assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
     assert managed_state.local_managed_claim_sources == (MANAGED_AUTH_CLAIM_SOURCE_DISCORD,)
-    assert managed_state.persist_calls == 1
+    assert managed_state.persist_calls == 0
+    first_save, claim_save = repository.saved_requests
+    assert first_save.expected_revision == "settings-r1"
+    assert claim_save.expected_revision == "settings-r2"
+    assert claim_save.values["state"]["managed_connection"][  # type: ignore[index]
+        "local_managed_claim_sources"
+    ] == ("discord",)
     assert events[-1] == ("save_settings", "managed_connection_auth")
+
+
+@pytest.mark.asyncio
+async def test_initial_commit_uses_broker_applied_managed_state() -> None:
+    managed_state = RecordingManagedState()
+
+    def apply_broker_state() -> None:
+        managed_state.active_managed_credential_ref = "broker-ref"
+        managed_state.active_managed_expires_at = "2026-09-01T00:00:00Z"
+        managed_state.founder_letter_seen_credential_ref = "founder-ref"
+        managed_state.referral_id = "7654321"
+        managed_state.release_token = "release-token"
+        managed_state.release_token_expires_at = "2026-08-01T00:00:00Z"
+        managed_state.verified_hardware_hash = "hardware-hash"
+        managed_state.verified_hardware_hash_salt_version = 7
+        managed_state.local_managed_claim_sources = ("discord",)
+
+    apply_broker_state()
+    auth = _service_module()
+    merged = auth._settings_values_with_post_broker_managed_state(  # noqa: SLF001
+        _request().settings_values,
+        managed_state,
+    )
+    assert merged["state"]["managed_connection"][  # type: ignore[index]
+        "local_managed_claim_sources"
+    ] == ["discord"]
+
+    store = RecordingSecretStore()
+    repository = RecordingSettingsRepository(_commit_success())
+    result = await _service(
+        identity=RecordingLocalIdentity(_identity_success()),
+        discord=RecordingDiscordAuth(_discord_success()),
+        broker=RecordingBrokerClient(_broker_success(), on_issue=apply_broker_state),
+        store=store,
+        repository=repository,
+        claim_guard=ManagedAuthClaimGuard(managed_state, store),
+    ).authorize(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    initial = repository.saved_requests[0].values["state"]["managed_connection"]  # type: ignore[index]
+    assert initial["active_managed_credential_ref"] == "broker-ref"
+    assert initial["active_managed_expires_at"] == "2026-09-01T00:00:00Z"
+    assert initial["founder_letter_seen_credential_ref"] == "founder-ref"
+    assert initial["referral_id"] == "7654321"
+    assert initial["release_token"] == "release-token"
+    assert initial["release_token_expires_at"] == "2026-08-01T00:00:00Z"
+    assert initial["verified_hardware_hash"] == "hardware-hash"
+    assert initial["verified_hardware_hash_salt_version"] == 7
+    assert initial["local_managed_claim_sources"] == ("discord",)
+
+
+@pytest.mark.asyncio
+async def test_same_source_reauth_uses_authoritative_receipt_claim_state() -> None:
+    managed_state = RecordingManagedState(
+        local_managed_claim_sources=(MANAGED_AUTH_CLAIM_SOURCE_DISCORD,)
+    )
+    first = _commit_success()
+    first = settings_repository.SettingsCommitResult(
+        succeeded=True,
+        snapshot=first.snapshot,
+        message=first.message,
+        diagnostics=first.diagnostics,
+        receipt=settings_repository.SettingsCommitReceipt(
+            AppSettingsVNext(),
+            "settings-r2",
+            "managed_connection_auth",
+            "corr-managed-auth",
+        ),
+    )
+    store = RecordingSecretStore()
+    repository = RecordingSettingsRepository(
+        None,
+        results=[first, _commit_success()],
+    )
+
+    result = await _service(
+        identity=RecordingLocalIdentity(_identity_success()),
+        discord=RecordingDiscordAuth(_discord_success()),
+        broker=RecordingBrokerClient(_broker_success()),
+        store=store,
+        repository=repository,
+        claim_guard=ManagedAuthClaimGuard(managed_state, store),
+    ).authorize(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    assert len(repository.saved_requests) == 2
+    claim_save = repository.saved_requests[1]
+    assert claim_save.expected_revision == "settings-r2"
+    assert claim_save.values["state"]["managed_connection"][  # type: ignore[index]
+        "local_managed_claim_sources"
+    ] == ("discord",)
+
+
+@pytest.mark.asyncio
+async def test_claim_commit_failure_restores_prior_managed_state() -> None:
+    managed_state = RecordingManagedState()
+    store = RecordingSecretStore()
+    repository = RecordingSettingsRepository(
+        None,
+        results=[_commit_success(), _commit_failure()],
+    )
+
+    result = await _service(
+        identity=RecordingLocalIdentity(_identity_success()),
+        discord=RecordingDiscordAuth(_discord_success()),
+        broker=RecordingBrokerClient(_broker_success()),
+        store=store,
+        repository=repository,
+        claim_guard=ManagedAuthClaimGuard(managed_state, store),
+    ).authorize(_request())
+
+    assert result.status == messages.TRANSACTION_STATUS_REMOTE_ACTIVE_LOCAL_MISSING
+    assert managed_state.local_managed_claim_sources == ()
+    assert len(repository.saved_requests) == 2
+    assert repository.saved_requests[1].expected_revision == "settings-r2"
 
 
 @pytest.mark.asyncio

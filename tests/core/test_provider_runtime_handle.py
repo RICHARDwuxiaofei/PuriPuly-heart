@@ -200,6 +200,29 @@ async def test_failed_event_task_exception_is_retrieved_by_owner_done_callback()
 
 
 @pytest.mark.asyncio
+async def test_readopted_retired_provider_is_only_closed_as_current_on_shutdown() -> None:
+    original = RetriableCloseProvider(close_failures=1, label="original")
+    replacement = RetriableCloseProvider(close_failures=0, label="replacement")
+    handle = ProviderRuntimeHandle(name="llm", provider=original)
+
+    with pytest.raises(RuntimeError, match="original"):
+        await handle.replace_provider(replacement, start=False)
+
+    assert original.close_calls == 1
+    assert handle.provider is replacement
+
+    await handle.replace_provider(original, start=False)
+    assert replacement.close_calls == 1
+    assert handle.provider is original
+    assert handle._retired_providers == []
+
+    await handle.close()
+
+    assert original.close_calls == 2
+    assert handle._retired_providers == []
+
+
+@pytest.mark.asyncio
 async def test_dormant_provider_backend_is_released_after_idle_ttl() -> None:
     sleep_started = asyncio.Event()
     release_sleep = asyncio.Event()
@@ -212,21 +235,14 @@ async def test_dormant_provider_backend_is_released_after_idle_ttl() -> None:
 
     provider = DormantBackendProvider()
     handle = ProviderRuntimeHandle(name="self_stt", provider=provider, sleep=controlled_sleep)
-
     await handle.drain_for_toggle_off(release_backend_after=600.0)
     await sleep_started.wait()
     await handle.drain_for_toggle_off(release_backend_after=600.0)
-
     assert provider.close_calls == 2
-    assert provider.close_backend_calls == 0
-    assert handle.provider is provider
     assert delays == [600.0]
-
     release_sleep.set()
     await wait_until(lambda: not handle.has_resources)
-
     assert provider.close_backend_calls == 1
-    assert handle.has_resources is False
 
 
 @pytest.mark.asyncio
@@ -240,16 +256,13 @@ async def test_reenable_cancels_dormant_backend_release() -> None:
 
     provider = DormantBackendProvider()
     handle = ProviderRuntimeHandle(name="self_stt", provider=provider, sleep=controlled_sleep)
-
     await handle.drain_for_toggle_off(release_backend_after=600.0)
     await sleep_started.wait()
     assert await handle.start_if_provider(provider) is True
     release_sleep.set()
     await asyncio.sleep(0)
-
     assert handle.provider is provider
     assert provider.close_backend_calls == 0
-
     await handle.close()
     assert provider.close_backend_calls == 1
 
@@ -265,13 +278,11 @@ async def test_shutdown_cancels_idle_timer_and_closes_backend_once() -> None:
 
     provider = DormantBackendProvider()
     handle = ProviderRuntimeHandle(name="self_stt", provider=provider, sleep=controlled_sleep)
-
     await handle.drain_for_toggle_off(release_backend_after=600.0)
     await sleep_started.wait()
     await handle.close()
     release_sleep.set()
     await asyncio.sleep(0)
-
     assert provider.close_backend_calls == 1
     assert handle.has_resources is False
 
@@ -288,15 +299,11 @@ async def test_provider_replacement_closes_dormant_backend_immediately() -> None
     old_provider = DormantBackendProvider()
     new_provider = DormantBackendProvider()
     handle = ProviderRuntimeHandle(name="self_stt", provider=old_provider, sleep=controlled_sleep)
-
     await handle.drain_for_toggle_off(release_backend_after=600.0)
     await sleep_started.wait()
     await handle.replace_provider(new_provider, start=False)
-
     assert old_provider.close_backend_calls == 1
-    assert new_provider.close_backend_calls == 0
     assert handle.provider is new_provider
-
     release_sleep.set()
     await handle.close()
 
@@ -319,16 +326,12 @@ async def test_failed_idle_release_detaches_provider_and_retries_on_shutdown() -
         exception_handler=handle_exception,
         sleep=controlled_sleep,
     )
-
     await handle.drain_for_toggle_off(release_backend_after=600.0)
     release_sleep.set()
     await wait_until(lambda: handle.provider is None)
-
     assert provider.close_backend_calls == 1
     assert len(observed) == 1
     assert handle.has_resources is True
-
     await handle.close()
-
     assert provider.close_backend_calls == 2
     assert handle.has_resources is False

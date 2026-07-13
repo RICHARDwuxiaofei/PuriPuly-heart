@@ -32,11 +32,8 @@ LEGACY_TASK_CREATION_ALLOWLIST = Counter(
         ("src/puripuly_heart/core/overlay/presenter.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/overlay/process.py", ASYNCIO_CREATE_TASK): 2,
         ("src/puripuly_heart/providers/stt/soniox.py", ASYNCIO_CREATE_TASK): 3,
-        ("src/puripuly_heart/ui/app.py", RUN_TASK): 15,
+        ("src/puripuly_heart/ui/app.py", RUN_TASK): 19,
         ("src/puripuly_heart/ui/components/settings/api_key_field.py", RUN_TASK): 1,
-        ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 3,
-        ("src/puripuly_heart/ui/controller.py", LOOP_CREATE_TASK): 5,
-        ("src/puripuly_heart/ui/controller.py", BARE_RUN_TASK): 5,
         ("src/puripuly_heart/ui/desktop_overlay.py", ASYNCIO_CREATE_TASK): 11,
         ("src/puripuly_heart/ui/desktop_overlay.py", BARE_RUN_TASK): 1,
         ("src/puripuly_heart/core/osc/receiver.py", LOOP_CREATE_TASK): 1,
@@ -45,6 +42,7 @@ LEGACY_TASK_CREATION_ALLOWLIST = Counter(
 
 NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST = Counter(
     {
+        ("src/puripuly_heart/main.py", RUN_TASK): 1,
         ("src/puripuly_heart/core/runtime/peer_channel.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/provider_handle.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/self_audio.py", ASYNCIO_CREATE_TASK): 1,
@@ -59,11 +57,24 @@ NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST = Counter(
         ("src/puripuly_heart/core/runtime/local_stt_download.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/mic_test.py", ASYNCIO_CREATE_TASK): 2,
         ("src/puripuly_heart/core/runtime/receiver.py", ASYNCIO_CREATE_TASK): 1,
+        (
+            "src/puripuly_heart/app/services/openrouter_pkce_owner.py",
+            ASYNCIO_CREATE_TASK,
+        ): 2,
         ("src/puripuly_heart/ui/desktop_overlay_repro.py", ASYNCIO_CREATE_TASK): 3,
+        ("src/puripuly_heart/ui/views/application_settings.py", RUN_TASK): 1,
     }
 )
 
 TASK_CREATION_ALLOWLIST_RATIONALES = {
+    (
+        "src/puripuly_heart/main.py",
+        RUN_TASK,
+    ): "application entry schedules its owned Flet disconnect callback and also awaits shutdown before return",
+    (
+        "src/puripuly_heart/app/services/openrouter_pkce_owner.py",
+        ASYNCIO_CREATE_TASK,
+    ): "OpenRouterPkceOwner owns one named flow task and awaits cancellation during close",
     (
         "src/puripuly_heart/core/llm/fallback_racing.py",
         ASYNCIO_CREATE_TASK,
@@ -101,21 +112,13 @@ TASK_CREATION_ALLOWLIST_RATIONALES = {
         RUN_TASK,
     ): "Flet UI callbacks, including peer-auto activation, must use page.run_task for async controller/service calls; each call remains UI-bound, not a background owner bypass",
     (
+        "src/puripuly_heart/ui/views/application_settings.py",
+        RUN_TASK,
+    ): "Flet settings callbacks use page.run_task while UiSettingsApplication owns and settles the underlying interaction lifecycle",
+    (
         "src/puripuly_heart/ui/components/settings/api_key_field.py",
         RUN_TASK,
     ): "Flet API-key field callback uses page.run_task at the UI boundary for async verification",
-    (
-        "src/puripuly_heart/ui/controller.py",
-        ASYNCIO_CREATE_TASK,
-    ): "controller has exactly three bounded UI task handles for status refresh, desktop-bounds persistence, and STT switching",
-    (
-        "src/puripuly_heart/ui/controller.py",
-        LOOP_CREATE_TASK,
-    ): "controller has exactly five loop-bound UI scheduling call sites for overlay state/logging updates, fallback task dispatch, and the owner-scoped manual typing idle timeout",
-    (
-        "src/puripuly_heart/ui/controller.py",
-        BARE_RUN_TASK,
-    ): "controller has exactly five injected UI task-runner call sites for overlay/calibration/runtime callback scheduling",
     (
         "src/puripuly_heart/ui/desktop_overlay.py",
         ASYNCIO_CREATE_TASK,
@@ -280,11 +283,11 @@ def test_order34_named_owner_allowlist_does_not_claim_stt_controller_legacy_task
     assert stt_controller_tasks not in NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST
 
 
-def test_order37_named_owner_allowlist_preserves_remaining_legacy_ui_task_debt() -> None:
+def test_order37_named_owner_allowlist_removes_legacy_controller_task_debt() -> None:
     assert (
         "src/puripuly_heart/ui/controller.py",
         ASYNCIO_CREATE_TASK,
-    ) in LEGACY_TASK_CREATION_ALLOWLIST
+    ) not in LEGACY_TASK_CREATION_ALLOWLIST
     assert ("src/puripuly_heart/ui/app.py", RUN_TASK) in LEGACY_TASK_CREATION_ALLOWLIST
     assert (
         "src/puripuly_heart/core/managed_openrouter_release.py",
@@ -327,5 +330,5 @@ def test_order39_named_owner_allowlist_adds_receiver_and_prompt_owners() -> None
     assert (
         "src/puripuly_heart/ui/controller.py",
         ASYNCIO_CREATE_TASK,
-    ) in LEGACY_TASK_CREATION_ALLOWLIST
+    ) not in LEGACY_TASK_CREATION_ALLOWLIST
     assert ("src/puripuly_heart/ui/app.py", RUN_TASK) in LEGACY_TASK_CREATION_ALLOWLIST

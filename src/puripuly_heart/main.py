@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import inspect
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -104,24 +105,233 @@ def _run_gui(
     debug_ui_preview: bool,
     allow_stable_settings_import: bool,
 ) -> int:
+    return asyncio.run(
+        _run_gui_async(
+            config_path,
+            debug_ui_preview=debug_ui_preview,
+            allow_stable_settings_import=allow_stable_settings_import,
+        )
+    )
+
+
+async def _run_gui_async(
+    config_path: Path,
+    *,
+    debug_ui_preview: bool,
+    allow_stable_settings_import: bool,
+) -> int:
     import flet as ft
 
-    from puripuly_heart.ui.app import main_gui
+    from puripuly_heart.app.adapters.overlay_lifecycle_production import (
+        resolve_overlay_lifecycle_configuration,
+    )
+    from puripuly_heart.app.services.application_adapters import ApplicationAdapterLifecycle
+    from puripuly_heart.app.services.application_construction import ApplicationConstructionScope
+    from puripuly_heart.app.services.application_lifecycle import (
+        ApplicationLifecycleOwner,
+        ApplicationStartupError,
+    )
+    from puripuly_heart.app.wiring_composition import (
+        create_application_runtime_production_composition,
+        create_overlay_production_composition,
+    )
+    from puripuly_heart.ui import app as ui_app
+    from puripuly_heart.ui.debug_settings import InertDebugUiSettingsApplication
     from puripuly_heart.ui.fonts import assets_dir
 
-    async def _target(page: ft.Page):
+    initial_settings = _call_load_settings_or_default(
+        config_path, allow_stable_settings_import=allow_stable_settings_import
+    )
+    lifecycle_holders = []
+    construction_scopes = []
+    disconnect_completions = []
+    target_failures = []
+
+    async def _target_impl(page: ft.Page):
+        construction_scope = ApplicationConstructionScope()
+        construction_scopes.append(construction_scope)
+        composition = construction_scope.construct(
+            "overlay",
+            lambda: create_overlay_production_composition(
+                configuration=resolve_overlay_lifecycle_configuration(initial_settings)
+            ),
+            close_name="shutdown",
+            owned_resource=lambda result: result.commands,
+        )
+        runtime_composition = construction_scope.construct(
+            "runtime",
+            lambda: create_application_runtime_production_composition(
+                config_path,
+                initial_settings,
+                audio_gate=composition.audio_gate,
+                overlay_runtime=composition.runtime,
+                overlay_commands=composition.commands,
+                overlay_application_state=composition.state,
+                debug_audio_faults_enabled=debug_ui_preview,
+            ),
+            close_name="close",
+        )
+        application_runtime_host = runtime_composition.runtime_host
+        application_adapters = construction_scope.construct(
+            "application_adapters",
+            ApplicationAdapterLifecycle,
+            close_name="close",
+        )
+        application_lifecycle = ApplicationLifecycleOwner()
+        lifecycle_holders.append(application_lifecycle)
+        application_lifecycle.adopt_overlay(construction_scope.release("overlay"))
+        application_lifecycle.adopt_runtime(construction_scope.release("runtime"))
+        application_lifecycle.adopt_application_adapters(
+            construction_scope.release("application_adapters")
+        )
         kwargs = {
             "config_path": config_path,
             "debug_ui_preview": debug_ui_preview,
         }
-        parameters = inspect.signature(main_gui).parameters
+        parameters = inspect.signature(ui_app.main_gui).parameters
+        accepts_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        )
+        if "overlay_commands" in parameters or accepts_kwargs:
+            kwargs["overlay_commands"] = composition.commands
+        if "overlay_application_state" in parameters or accepts_kwargs:
+            kwargs["overlay_application_state"] = composition.state
+        if "surface_runtime_transactions" in parameters or accepts_kwargs:
+            kwargs["surface_runtime_transactions"] = composition.transactions
+        if "overlay_ui_projection" in parameters or accepts_kwargs:
+            kwargs["overlay_ui_projection"] = composition.ui_projection
+        if "vrc_audio_gate" in parameters or accepts_kwargs:
+            kwargs["vrc_audio_gate"] = composition.audio_gate
+        if "application_runtime_host" in parameters or accepts_kwargs:
+            kwargs["application_runtime_host"] = application_runtime_host
+        if "application_adapters" in parameters or accepts_kwargs:
+            kwargs["application_adapters"] = application_adapters
+        if "ui_settings" in parameters or accepts_kwargs:
+            kwargs["ui_settings"] = (
+                InertDebugUiSettingsApplication()
+                if debug_ui_preview
+                else runtime_composition.ui_settings
+            )
+        if "dashboard" in parameters or accepts_kwargs:
+            kwargs["dashboard"] = runtime_composition.dashboard
+        if "defer_startup" in parameters or accepts_kwargs:
+            kwargs["defer_startup"] = True
         if "allow_stable_settings_import" in parameters or any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         ):
             kwargs["allow_stable_settings_import"] = allow_stable_settings_import
-        return await main_gui(page, **kwargs)
+        try:
+            app = await ui_app.main_gui(page, **kwargs)
+            if app is None:
+                return None
+            create_presentation_lifecycle = getattr(app, "create_presentation_lifecycle", None)
+            if not callable(create_presentation_lifecycle):
+                raise RuntimeError("GUI did not provide a dashboard presentation lifecycle")
+            application_lifecycle.adopt_presentation(create_presentation_lifecycle())
+        except BaseException as construction_failure:
+            try:
+                await application_lifecycle.stop()
+            except BaseException as cleanup_failure:
+                failure = ApplicationStartupError(
+                    "application construction and cleanup failed",
+                    [construction_failure, cleanup_failure],
+                )
+                target_failures.append(failure)
+                raise failure from construction_failure
+            target_failures.append(construction_failure)
+            raise
+        try:
+            await application_lifecycle.start()
+        except BaseException as startup_failure:
+            target_failures.append(startup_failure)
+            raise
 
-    ft.app(target=_target, assets_dir=str(assets_dir()))
+        async def stop_application() -> None:
+            await application_lifecycle.stop()
+
+        def on_disconnect(_event) -> None:  # noqa: ANN001
+            completion = page.run_task(stop_application)
+            disconnect_completions.append(completion)
+
+        page.on_disconnect = on_disconnect
+        complete_startup = getattr(ui_app, "complete_main_gui_startup", None)
+        if callable(complete_startup):
+            await complete_startup(app, page)
+        return app
+
+    async def _target(page: ft.Page):
+        try:
+            return await _target_impl(page)
+        except BaseException as target_failure:
+            cleanup_failures = []
+            if lifecycle_holders:
+                lifecycle = lifecycle_holders[-1]
+                if not getattr(lifecycle, "_closed", False):
+                    try:
+                        await lifecycle.stop()
+                    except BaseException as cleanup_failure:
+                        cleanup_failures.append(cleanup_failure)
+            if construction_scopes:
+                try:
+                    await construction_scopes[-1].close()
+                except BaseException as cleanup_failure:
+                    cleanup_failures.append(cleanup_failure)
+            failure = target_failure
+            if cleanup_failures and not isinstance(target_failure, ApplicationStartupError):
+                failure = ApplicationStartupError(
+                    "application target and cleanup failed",
+                    [target_failure, *cleanup_failures],
+                )
+            if not any(existing is failure for existing in target_failures):
+                target_failures.append(failure)
+            if failure is target_failure:
+                raise
+            raise failure from target_failure
+
+    app_async = getattr(ft, "app_async", None)
+    if not callable(app_async):
+        ft.app(target=_target, assets_dir=str(assets_dir()))
+        return 0
+    failures = []
+
+    def record_failure(failure) -> None:  # noqa: ANN001
+        if not any(existing is failure for existing in failures):
+            failures.append(failure)
+
+    try:
+        await app_async(target=_target, assets_dir=str(assets_dir()))
+        for failure in target_failures:
+            record_failure(failure)
+        for completion in disconnect_completions:
+            try:
+                if isinstance(completion, asyncio.Future):
+                    await completion
+                else:
+                    await asyncio.wrap_future(completion)
+            except BaseException as exc:
+                record_failure(exc)
+    except BaseException as exc:
+        record_failure(exc)
+        for failure in target_failures:
+            record_failure(failure)
+    finally:
+        for _attempt in range(2):
+            for lifecycle in lifecycle_holders:
+                if getattr(lifecycle, "_closed", False):
+                    continue
+                try:
+                    await lifecycle.stop()
+                except BaseException as exc:
+                    record_failure(exc)
+            for construction_scope in construction_scopes:
+                try:
+                    await construction_scope.close()
+                except BaseException as exc:
+                    record_failure(exc)
+    if len(failures) == 1:
+        raise failures[0]
+    if failures:
+        raise BaseExceptionGroup("GUI application lifecycle failed", failures)
     return 0
 
 

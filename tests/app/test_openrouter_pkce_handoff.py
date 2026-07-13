@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import hashlib
 import importlib
 from collections.abc import Mapping
@@ -15,6 +16,7 @@ from puripuly_heart.app.ports import (
     secret_store,
     settings_repository,
 )
+from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core import messages
 
 SERVICE_MODULE = "puripuly_heart.app.services.openrouter_pkce_handoff"
@@ -162,6 +164,7 @@ class RecordingSettingsRepository:
         events: list[tuple[str, str]] | None = None,
     ) -> None:
         self.result = result
+        self.returned_result = result
         self.events = events if events is not None else []
         self.saved_requests: list[settings_repository.SettingsCommitRequest] = []
 
@@ -174,6 +177,21 @@ class RecordingSettingsRepository:
     ) -> settings_repository.SettingsCommitResult:
         self.events.append(("save", request.reason or ""))
         self.saved_requests.append(request)
+        if self.result.succeeded and self.result.receipt is None:
+            self.returned_result = settings_repository.SettingsCommitResult(
+                succeeded=self.result.succeeded,
+                snapshot=self.result.snapshot,
+                message=self.result.message,
+                diagnostics=self.result.diagnostics,
+                receipt=settings_repository.SettingsCommitReceipt(
+                    AppSettingsVNext(),
+                    self.result.snapshot.revision if self.result.snapshot is not None else "r2",
+                    request.reason,
+                    request.correlation_id,
+                ),
+            )
+            return self.returned_result
+        self.returned_result = self.result
         return self.result
 
 
@@ -624,13 +642,7 @@ async def test_success_verifies_saves_secret_and_settings_then_applies_runtime()
     assert "api_key" not in evidence
     runtime_request = _only_item(runtime.requests, label="runtime apply requests")
     _assert_no_raw_secret_values(runtime_request, label="runtime apply request")
-    assert runtime_request.settings_values["intent"]["translation"]["connection"] == "byok"  # type: ignore[index]
-    assert (
-        _provider_verification_entry(
-            runtime_request.settings_values, "openrouter", label="runtime apply request"
-        )
-        == entry
-    )
+    assert runtime_request.receipt is repository.returned_result.receipt
 
 
 @pytest.mark.asyncio
@@ -676,7 +688,7 @@ async def test_success_preserves_existing_nested_operational_state_payloads() ->
     }
     assert _provider_verification_entry(saved_request.values, "openrouter")["status"] == "verified"
     runtime_request = _only_item(runtime.requests, label="runtime apply requests")
-    assert runtime_request.settings_values == saved_request.values
+    assert runtime_request.receipt is repository.returned_result.receipt
     assert "openrouter" not in existing_settings_values["state"]["provider_verification"]
 
 
@@ -731,7 +743,7 @@ async def test_success_replaces_existing_same_provider_verification_entry() -> N
         pytest.fail("verification evidence details should be a mapping")
     assert "stale_evidence" not in evidence
     runtime_request = _only_item(runtime.requests, label="runtime apply requests")
-    assert runtime_request.settings_values == saved_request.values
+    assert runtime_request.receipt is repository.returned_result.receipt
 
 
 @pytest.mark.asyncio
@@ -906,8 +918,8 @@ async def test_runtime_apply_non_applied_status_is_degraded_without_rollback(
     )
     _assert_no_items(store.restores, label="secret restores")
     assert result.diagnostics is not None
-    assert result.diagnostics.component == "openrouter_pkce_handoff"
-    assert result.diagnostics.operation == "runtime_apply"
+    assert result.diagnostics.component == "runtime_apply_adapter"
+    assert result.diagnostics.operation == "apply_runtime"
     assert result.diagnostics.code == "runtime_apply_degraded"
     assert result.diagnostics.content_policy == messages.CONTENT_POLICY_METADATA_ONLY
     assert result.diagnostics.fields["runtime_status"] == runtime_status
@@ -952,3 +964,82 @@ async def test_runtime_apply_exception_is_degraded_without_rollback_or_raw_excep
     assert result.diagnostics.code == "runtime_apply_exception"
     assert result.diagnostics.content_policy == messages.CONTENT_POLICY_METADATA_ONLY
     assert "runtime failed after local commit" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_settings_save_restores_previous_secret() -> None:
+    events: list[tuple[str, str]] = []
+
+    class CancellingRepository(RecordingSettingsRepository):
+        async def save(self, request):  # noqa: ANN001, ANN201
+            self.events.append(("save", request.reason or ""))
+            raise asyncio.CancelledError
+
+    verifier = RecordingProviderVerifier(_verification_result(), events=events)
+    store = RecordingSecretStore({"openrouter_api_key": RAW_PREVIOUS_SECRET}, events=events)
+    repository = CancellingRepository(_commit_success(), events=events)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _service(
+            verifier=verifier,
+            store=store,
+            repository=repository,
+            runtime=RecordingRuntimeApply(events=events),
+        ).complete_handoff(_request())
+
+    assert events == [
+        ("verify", "openrouter"),
+        ("snapshot", "openrouter_api_key"),
+        ("set", "openrouter_api_key"),
+        ("save", "openrouter_pkce_handoff"),
+        ("restore", "openrouter_api_key"),
+    ]
+    _assert_secret_value_matches(
+        store.secrets["openrouter_api_key"],
+        RAW_PREVIOUS_SECRET,
+        label="restored cancellation secret",
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_secret_write_restores_previous_secret() -> None:
+    class CancellingStore(RecordingSecretStore):
+        async def set_secret(self, key: str, value: str):  # noqa: ANN201
+            self.secrets[key] = value
+            self.events.append(("set", key))
+            raise asyncio.CancelledError
+
+    events: list[tuple[str, str]] = []
+    store = CancellingStore({"openrouter_api_key": RAW_PREVIOUS_SECRET}, events=events)
+    with pytest.raises(asyncio.CancelledError):
+        await _service(
+            verifier=RecordingProviderVerifier(_verification_result(), events=events),
+            store=store,
+            repository=RecordingSettingsRepository(_commit_success(), events=events),
+            runtime=RecordingRuntimeApply(events=events),
+        ).complete_handoff(_request())
+    assert events[-1] == ("restore", "openrouter_api_key")
+    _assert_secret_value_matches(
+        store.secrets["openrouter_api_key"],
+        RAW_PREVIOUS_SECRET,
+        label="restored post-write cancellation secret",
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_commit_is_committed_degraded_with_exact_receipt() -> None:
+    class CancellingRuntime(RecordingRuntimeApply):
+        async def apply_runtime(self, request):  # noqa: ANN001, ANN201
+            self.requests.append(request)
+            raise asyncio.CancelledError
+
+    repository = RecordingSettingsRepository(_commit_success())
+    result = await _service(
+        verifier=RecordingProviderVerifier(_verification_result()),
+        store=RecordingSecretStore({"openrouter_api_key": RAW_PREVIOUS_SECRET}),
+        repository=repository,
+        runtime=CancellingRuntime(),
+    ).complete_handoff(_request())
+    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
+    assert result.receipt is repository.returned_result.receipt
+    assert result.reconciliation_required is True

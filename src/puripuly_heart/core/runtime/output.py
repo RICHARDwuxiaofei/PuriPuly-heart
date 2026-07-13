@@ -155,6 +155,14 @@ class OutputRuntime:
         )
         return self._ui_event_bridge_task
 
+    async def stop_ui_event_bridge(self) -> None:
+        failures: list[Exception] = []
+        await self._cancel_ui_event_bridge_task(failures)
+        await self._close_ui_event_bridge_adapter(failures)
+        self._drain_completed_task_failures(failures)
+        if failures:
+            _raise_output_runtime_failures(failures)
+
     async def close(self) -> None:
         if self._state == "closed" and not self.has_resources:
             return

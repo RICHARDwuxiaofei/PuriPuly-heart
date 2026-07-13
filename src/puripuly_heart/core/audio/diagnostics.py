@@ -284,6 +284,11 @@ class DiagnosticAudioSource(AudioSource):
             return normalize_audio_fault_profile(self.fault_profile_provider())
         return normalize_audio_fault_profile(self.fault_profile)
 
+    @property
+    def terminal_reason(self) -> str | None:
+        value = getattr(self.source, "terminal_reason", None)
+        return value if isinstance(value, str) else None
+
     async def frames(self) -> AsyncIterator[AudioFrameF32]:
         async for frame in self.source.frames():
             profile = self._safe_current_fault_profile()

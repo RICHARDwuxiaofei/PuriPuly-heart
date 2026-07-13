@@ -122,6 +122,7 @@ class QqManagedAuthDialog:
         self._is_open = True
 
     def set_waiting(self) -> None:
+        self.clear_credential()
         self._is_waiting = True
         self._set_fields_disabled(True)
         self._set_error_key(None)
@@ -145,6 +146,7 @@ class QqManagedAuthDialog:
         self._update_page_if_possible()
 
     def set_error(self, message_key: str, **message_kwargs: object) -> None:
+        self.clear_credential()
         self._is_waiting = False
         self._set_fields_disabled(False)
         if self._body_text is not None:
@@ -170,10 +172,15 @@ class QqManagedAuthDialog:
         self._update_page_if_possible()
 
     def close(self) -> None:
+        self.clear_credential()
         if self._dialog is None or not self._is_open:
             return
         self._page.close(self._dialog)
         self._is_open = False
+
+    def clear_credential(self) -> None:
+        if self._credential_field is not None:
+            self._credential_field.value = ""
 
     def _build_text_field(
         self,

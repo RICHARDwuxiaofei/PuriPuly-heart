@@ -193,6 +193,9 @@ CURRENT_OPERATIONAL_STATE_DESTINATIONS = {
     "managed_identity.pending_delivery_ack_delivery_id": (
         "state.managed_connection.pending_delivery_ack_delivery_id"
     ),
+    "managed_identity.pending_delivery_ack_delivered": (
+        "state.managed_connection.pending_delivery_ack_delivered"
+    ),
     "managed_identity.pending_delivery_ack_expires_at": (
         "state.managed_connection.pending_delivery_ack_expires_at"
     ),
@@ -436,6 +439,7 @@ def maximal_v24_settings_fixture() -> dict[str, Any]:
         "fixture-pending-credential-ref"
     )
     settings.managed_identity.pending_delivery_ack_expires_at = "2026-07-10T00:00:00Z"
+    settings.managed_identity.pending_delivery_ack_delivered = True
     settings.telemetry.consent = "allow"
     settings.telemetry_state.anonymous_id = "fixture-telemetry-anonymous-id"
     settings.telemetry_state.sent_translation_success_dates_utc = ["2026-07-01", "2026-07-02"]
