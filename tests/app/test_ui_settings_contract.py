@@ -38,7 +38,10 @@ from puripuly_heart.app.services.ui_settings import (
     UiSettingsApplication,
     normalize_pkce_intent,
 )
-from puripuly_heart.app.wiring_composition import create_application_runtime_production_composition
+from puripuly_heart.app.wiring_composition import (
+    create_application_runtime_production_composition,
+    create_overlay_production_composition,
+)
 from puripuly_heart.config.settings_vnext.facade import save_vnext_settings
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 
@@ -427,6 +430,31 @@ async def test_production_wiring_constructs_starts_cancels_and_closes_without_ui
             if isinstance(node, ast.ImportFrom)
         ]
         assert not any(module and module.startswith("puripuly_heart.ui") for module in imports)
+
+
+@pytest.mark.asyncio
+async def test_production_wiring_reads_overlay_lifecycle_from_application_state(tmp_path):
+    path = tmp_path / "settings.json"
+    settings = AppSettingsVNext()
+    assert save_vnext_settings(path, settings).ok
+    overlay = create_overlay_production_composition()
+    overlay.runtime.lifecycle_state = "connected"
+    composition = create_application_runtime_production_composition(
+        path,
+        settings,
+        audio_gate=overlay.audio_gate,
+        overlay_runtime=overlay.runtime,
+        overlay_commands=overlay.commands,
+        overlay_application_state=overlay.state,
+    )
+
+    try:
+        snapshot = await composition.ui_settings.snapshot()
+        assert snapshot.runtime.overlay_state == "connected"
+        assert snapshot.runtime.overlay_active is True
+    finally:
+        await composition.close()
+        await overlay.commands.shutdown()
 
 
 @pytest.mark.asyncio

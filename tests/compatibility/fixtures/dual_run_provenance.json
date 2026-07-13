@@ -135,8 +135,8 @@
         "src/puripuly_heart/ui/views/dashboard.py",
         "src/puripuly_heart/ui/views/settings.py"
       ],
-      "production_source_sha256": "dcad2a8a3a444a45c11465b3a3c7042c9351be9c6b4b701fb210e2561daebc62",
-      "source_delta_sha256": "64a65a6cb61ff43156fb3e2e78f2a9b891e339d9da00176165e2c085bce1b981"
+      "production_source_sha256": "bf09b1a8d52406738607ae39a5de0fe0cf85e5a03561a7c69011c490508ee13b",
+      "source_delta_sha256": "72d65f669e1231365312f69b4e8a7dd15411c6b2494cd1315dd9403800b3857a"
     },
     "repair_base": "01b3973b64425c8feb9955696d5217fed5d422a4"
   },

@@ -306,7 +306,7 @@ def create_application_runtime_production_composition(
             provider_verifier=create_provider_verifier(),
             runtime_host=runtime_host,
             telemetry_owner=telemetry_owner,
-            overlay=overlay_runtime,
+            overlay=overlay_application_state,
             microphone=microphone,
             persistence=persistence,
             owned_services=(microphone,),
