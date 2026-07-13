@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -15,6 +16,7 @@ from puripuly_heart.app.services.application_runtime_host import (
     ApplicationRuntimeParts,
 )
 from puripuly_heart.app.services.canonical_runtime_resolution import CanonicalRuntimeConfigResolver
+from puripuly_heart.app.wiring_composition import ApplicationRuntimeProductionComposition
 from puripuly_heart.config.settings import AppSettings
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core.messages import RUNTIME_APPLY_STATUS_APPLIED, RuntimeApplyResult
@@ -953,36 +955,83 @@ def test_production_host_has_no_ui_dependency_and_main_owns_construction() -> No
         encoding="utf-8"
     )
     main_source = (root / "main.py").read_text(encoding="utf-8")
-    controller_source = (root / "ui" / "controller.py").read_text(encoding="utf-8")
-    stt_route = controller_source[
-        controller_source.index(
-            "async def _apply_stt_language_audio_provider_settings"
-        ) : controller_source.index("async def _apply_providers_direct")
-    ]
+    controller_path = root / "ui" / "controller.py"
 
     assert "puripuly_heart.ui" not in host_source
-    assert "ClientHub(" not in controller_source
+    assert not controller_path.exists()
     assert '"runtime"' in main_source
     assert "lambda: create_application_runtime_production_composition(" in main_source
     assert "adopt_runtime" in main_source
     assert 'kwargs["application_runtime_host"] = application_runtime_host' in main_source
     assert "audio_gate=composition.audio_gate" in main_source
-    assert "_ControllerProviderRuntimeApply" not in stt_route
-    assert "_apply_provider_runtime_plan" not in stt_route
 
-    translation_route = controller_source[
-        controller_source.index(
-            "async def _apply_translation_provider_settings_via_mutation_service"
-        ) : controller_source.index(
-            "async def _apply_stt_language_audio_provider_settings_via_mutation_service"
-        )
-    ]
-    assert "_ApplicationHostSurfaceRuntimeApply" in translation_route
-    assert "_ControllerProviderRuntimeApply" not in translation_route
-    assert "create_llm_provider(" not in controller_source
-    assert "hub.translation_enabled =" not in controller_source
-    assert "translation_enabled=True" not in controller_source
-    assert "ManagedOpenRouterReleaseService(" not in controller_source
+
+@pytest.mark.asyncio
+async def test_manual_submit_keeps_typing_until_translation_settles() -> None:
+    typing: list[tuple[str, bool]] = []
+    release = asyncio.Event()
+    utterance_id = uuid4()
+
+    async def translation() -> None:
+        await release.wait()
+
+    task = asyncio.create_task(translation())
+
+    class Hub:
+        self_runtime = SimpleNamespace(translation_tasks={utterance_id: task})
+
+        async def submit_text(self, text: str, *, source: str):  # noqa: ANN201
+            assert (text, source) == ("hello", "You")
+            return utterance_id
+
+    host = ApplicationRuntimeHost.__new__(ApplicationRuntimeHost)
+    host._parts = SimpleNamespace(
+        hub=Hub(),
+        osc=SimpleNamespace(
+            set_typing_reason=lambda reason, active: typing.append((reason, active))
+        ),
+    )
+    host._manual_submit_generation = 0
+    host._manual_input_generation = 0
+    host._manual_input_idle_task = None
+
+    submit = asyncio.create_task(host.submit_manual_self_text(" hello "))
+    await asyncio.sleep(0)
+    assert typing[-1][1] is True
+    release.set()
+
+    assert await submit == "applied"
+    assert typing[-1][1] is False
+
+
+@pytest.mark.asyncio
+async def test_production_composition_close_retries_only_failed_dashboard_teardown() -> None:
+    calls = {"dashboard": 0, "settings": 0, "runtime": 0}
+
+    class Dashboard:
+        async def close(self) -> None:
+            calls["dashboard"] += 1
+            if calls["dashboard"] == 1:
+                raise RuntimeError("dashboard close")
+
+    class Settings:
+        async def close(self) -> None:
+            calls["settings"] += 1
+
+    class Runtime:
+        async def shutdown(self) -> None:
+            calls["runtime"] += 1
+
+    composition = ApplicationRuntimeProductionComposition(
+        Runtime(), object(), object(), object(), Settings(), Dashboard()
+    )
+
+    with pytest.raises(RuntimeError, match="dashboard close"):
+        await composition.close()
+    await composition.close()
+    await composition.close()
+
+    assert calls == {"dashboard": 2, "settings": 1, "runtime": 1}
 
 
 @pytest.mark.asyncio

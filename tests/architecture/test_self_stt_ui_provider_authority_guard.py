@@ -5,23 +5,19 @@ from pathlib import Path
 
 
 def test_ui_does_not_construct_replace_or_close_self_stt_provider() -> None:
-    source = Path("src/puripuly_heart/ui/controller.py").read_text(encoding="utf-8")
+    source = Path("src/puripuly_heart/ui/app.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
 
     assert "create_stt_backend" not in source
     assert "self_audio_lifecycle=" not in source
     assert "self_ingress=" not in source
     assert "application_runtime_host.compose" not in source
-    rebuild = next(
-        node
+    forbidden_attributes = {"replace_stt_provider", "close_backend"}
+    assert not {
+        node.attr
         for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "_rebuild_stt_provider"
-    )
-    rebuild_source = ast.get_source_segment(source, rebuild) or ""
-    assert "ManagedSTTProvider(" not in rebuild_source
-    assert "replace_stt_provider" not in rebuild_source
-    assert ".close(" not in rebuild_source
+        if isinstance(node, ast.Attribute) and node.attr in forbidden_attributes
+    }
 
 
 def test_application_host_service_depends_on_ports_not_concrete_adapters() -> None:

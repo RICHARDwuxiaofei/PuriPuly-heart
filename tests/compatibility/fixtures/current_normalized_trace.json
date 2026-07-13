@@ -35,7 +35,7 @@
     "unknown": ""
   },
   "provenance": {
-    "source_manifest_sha256": "d607ff7fc5bd42807c7d8ed5e25fb7c2959ba4d5b0b817942794230381de0cf8"
+    "source_manifest_sha256": "0470c1f27071a47ecaf9306f9997038b847faefe5bf69f3efb689c44de408bfc"
   },
   "settings_defaults": {
     "connection": "managed",

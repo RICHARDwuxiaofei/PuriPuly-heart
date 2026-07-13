@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from puripuly_heart.app.ports.application_settings import (
     ApplicationSettingsSnapshot,
+    GithubStarOpenedCommand,
     LocalExtraBodyValue,
     OperationalCommandResult,
     OperationalStateCommand,
@@ -344,35 +345,54 @@ class CanonicalOperationalStateService:
                     runtime_outcome="no_runtime_change",
                 )
             try:
-                codec = next(
-                    codec
-                    for codec in OPERATIONAL_CODECS.values()
-                    if isinstance(command, codec.command_type)
-                )
-                path, value = codec.encode(command)
-                current_value = _get(envelope.operational_state, path)
-                current_receipt = _envelope_receipt(
-                    envelope,
-                    reason=type(command).__name__,
-                    correlation_id=None,
-                )
-                if current_value == value:
-                    return OperationalCommandResult(
-                        "no_change",
-                        _operational_snapshot(envelope),
-                        receipt=current_receipt,
-                        runtime_outcome="no_runtime_change",
-                        committed_revision=envelope.revision,
-                        no_op=True,
+                if isinstance(command, GithubStarOpenedCommand):
+                    state = _set(
+                        envelope.operational_state,
+                        ("github_star_prompt", "last_shown_at"),
+                        command.last_shown_at,
                     )
-                state = _set(envelope.operational_state, path, value)
-                receipt = await self._repository.commit_operational_state(
-                    state,  # type: ignore[arg-type]
-                    expected_revision=command.expected_revision,
-                    reason=type(command).__name__,
-                    correlation_id=None,
-                )
-                cancellation_count = 0
+                    state = _set(
+                        state,
+                        ("github_star_prompt", "show_count"),
+                        command.show_count,
+                    )
+                    receipt = await self._repository.commit_operational_state(
+                        state,  # type: ignore[arg-type]
+                        expected_revision=command.expected_revision,
+                        reason=type(command).__name__,
+                        correlation_id=None,
+                    )
+                    cancellation_count = 0
+                else:
+                    codec = next(
+                        codec
+                        for codec in OPERATIONAL_CODECS.values()
+                        if isinstance(command, codec.command_type)
+                    )
+                    path, value = codec.encode(command)
+                    current_value = _get(envelope.operational_state, path)
+                    current_receipt = _envelope_receipt(
+                        envelope,
+                        reason=type(command).__name__,
+                        correlation_id=None,
+                    )
+                    if current_value == value:
+                        return OperationalCommandResult(
+                            "no_change",
+                            _operational_snapshot(envelope),
+                            receipt=current_receipt,
+                            runtime_outcome="no_runtime_change",
+                            committed_revision=envelope.revision,
+                            no_op=True,
+                        )
+                    state = _set(envelope.operational_state, path, value)
+                    receipt = await self._repository.commit_operational_state(
+                        state,  # type: ignore[arg-type]
+                        expected_revision=command.expected_revision,
+                        reason=type(command).__name__,
+                        correlation_id=None,
+                    )
+                    cancellation_count = 0
             except (StopIteration, TypeError, ValueError):
                 return OperationalCommandResult(
                     "invalid",

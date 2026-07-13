@@ -6,9 +6,9 @@ import pytest
 
 ft = pytest.importorskip("flet")
 
-from puripuly_heart.ui.overlay_peer_contract import (
-    OverlayPeerConsumerContract,
-    OverlayPeerToggleContract,
+from puripuly_heart.app.ports.dashboard_application import (
+    DashboardOverlayPeerPresentation,
+    DashboardTogglePresentation,
 )
 from puripuly_heart.ui.views import dashboard as dashboard_module
 from tests.helpers.flet_page import attach_dummy_page
@@ -173,6 +173,16 @@ def _button_labels(row) -> list[str]:
     return [slot.content.label for slot in row.controls]
 
 
+def _toggle_presentation(
+    *,
+    status_text: str = "",
+    helper_text: str = "",
+    **values,
+) -> DashboardTogglePresentation:
+    _ = (status_text, helper_text)
+    return DashboardTogglePresentation(**values)
+
+
 def _make_overlay_peer_contract(
     *,
     overlay_intent_enabled: bool,
@@ -183,9 +193,9 @@ def _make_overlay_peer_contract(
     peer_effective_enabled: bool,
     peer_status_text: str,
     peer_helper_text: str = "",
-) -> OverlayPeerConsumerContract:
-    return OverlayPeerConsumerContract(
-        overlay=OverlayPeerToggleContract(
+) -> DashboardOverlayPeerPresentation:
+    return DashboardOverlayPeerPresentation(
+        overlay=_toggle_presentation(
             intent_enabled=overlay_intent_enabled,
             effective_enabled=overlay_state == "connected",
             action_enabled=True,
@@ -197,7 +207,7 @@ def _make_overlay_peer_contract(
             status_text=overlay_status_text,
             helper_text=overlay_helper_text,
         ),
-        peer=OverlayPeerToggleContract(
+        peer=_toggle_presentation(
             intent_enabled=peer_intent_enabled,
             effective_enabled=peer_effective_enabled,
             action_enabled=True,
@@ -684,7 +694,7 @@ def test_dashboard_overlay_peer_buttons_render_consumer_contract_state_only(
         peer_helper_text="Overlay is starting",
     )
 
-    view.set_overlay_peer_contract(contract)
+    view.set_overlay_peer_presentation(contract)
 
     assert view.overlay_button.states[-1] == {
         "is_on": False,
@@ -714,9 +724,9 @@ def test_dashboard_overlay_failure_notice_is_lowest_priority_notice_source(
         default="Overlay failed: runtime_unavailable",
     )
 
-    view.set_overlay_peer_contract(
-        OverlayPeerConsumerContract(
-            overlay=OverlayPeerToggleContract(
+    view.set_overlay_peer_presentation(
+        DashboardOverlayPeerPresentation(
+            overlay=_toggle_presentation(
                 intent_enabled=True,
                 effective_enabled=False,
                 action_enabled=True,
@@ -724,7 +734,7 @@ def test_dashboard_overlay_failure_notice_is_lowest_priority_notice_source(
                 status_text="Failed: runtime unavailable",
                 failure_reason="runtime_unavailable",
             ),
-            peer=OverlayPeerToggleContract(
+            peer=_toggle_presentation(
                 intent_enabled=False,
                 effective_enabled=False,
                 action_enabled=True,
@@ -756,9 +766,9 @@ def test_dashboard_steamvr_overlay_failure_notice_uses_actionable_reason_without
         default="steamvr_not_running",
     )
 
-    view.set_overlay_peer_contract(
-        OverlayPeerConsumerContract(
-            overlay=OverlayPeerToggleContract(
+    view.set_overlay_peer_presentation(
+        DashboardOverlayPeerPresentation(
+            overlay=_toggle_presentation(
                 intent_enabled=True,
                 effective_enabled=False,
                 action_enabled=True,
@@ -766,7 +776,7 @@ def test_dashboard_steamvr_overlay_failure_notice_uses_actionable_reason_without
                 status_text="stale contract literal",
                 failure_reason="steamvr_not_running",
             ),
-            peer=OverlayPeerToggleContract(
+            peer=_toggle_presentation(
                 intent_enabled=False,
                 effective_enabled=False,
                 action_enabled=True,
@@ -783,9 +793,9 @@ def test_dashboard_overlay_failure_notice_relocalizes_on_apply_locale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view = _make_dashboard(monkeypatch)
-    view.set_overlay_peer_contract(
-        OverlayPeerConsumerContract(
-            overlay=OverlayPeerToggleContract(
+    view.set_overlay_peer_presentation(
+        DashboardOverlayPeerPresentation(
+            overlay=_toggle_presentation(
                 intent_enabled=True,
                 effective_enabled=False,
                 action_enabled=True,
@@ -793,7 +803,7 @@ def test_dashboard_overlay_failure_notice_relocalizes_on_apply_locale(
                 status_text="stale contract literal",
                 failure_reason="runtime_disconnected",
             ),
-            peer=OverlayPeerToggleContract(
+            peer=_toggle_presentation(
                 intent_enabled=False,
                 effective_enabled=False,
                 action_enabled=True,
@@ -832,7 +842,7 @@ def test_dashboard_overlay_and_peer_buttons_toggle_live_from_contract_intent(
     view.on_toggle_peer_translation = lambda enabled: peer_toggles.append(enabled)
     view.on_toggle_overlay = lambda enabled: overlay_toggles.append(enabled)
 
-    view.set_overlay_peer_contract(
+    view.set_overlay_peer_presentation(
         _make_overlay_peer_contract(
             overlay_intent_enabled=False,
             overlay_state="off",
@@ -845,7 +855,7 @@ def test_dashboard_overlay_and_peer_buttons_toggle_live_from_contract_intent(
     view.peer_button.on_click()
     view.overlay_button.on_click()
 
-    view.set_overlay_peer_contract(
+    view.set_overlay_peer_presentation(
         _make_overlay_peer_contract(
             overlay_intent_enabled=True,
             overlay_state="connected",

@@ -117,7 +117,7 @@ def _changed_production_files() -> tuple[str, ...]:
 
 
 def _source_delta_digest(
-    records: list[tuple[str, bytes | None, bytes]],
+    records: list[tuple[str, bytes | None, bytes | None]],
 ) -> str:
     digest = hashlib.sha256()
     for relative, base_bytes, current_bytes in sorted(records):
@@ -129,9 +129,12 @@ def _source_delta_digest(
             digest.update(b"base-present\0")
             digest.update(base_bytes)
             digest.update(b"\0")
-        digest.update(b"current-present\0")
-        digest.update(current_bytes)
-        digest.update(b"\0")
+        if current_bytes is None:
+            digest.update(b"current-absent\0")
+        else:
+            digest.update(b"current-present\0")
+            digest.update(current_bytes)
+            digest.update(b"\0")
     return digest.hexdigest()
 
 
@@ -151,7 +154,14 @@ def _base_blob(relative: str) -> bytes | None:
 
 def _manifest_source_delta_digest(files: list[str]) -> str:
     return _source_delta_digest(
-        [(relative, _base_blob(relative), (ROOT / relative).read_bytes()) for relative in files]
+        [
+            (
+                relative,
+                _base_blob(relative),
+                (ROOT / relative).read_bytes() if (ROOT / relative).exists() else None,
+            )
+            for relative in files
+        ]
     )
 
 
@@ -499,7 +509,8 @@ def test_dual_run_provenance_names_fixed_sources_and_reproduced_traces() -> None
     for relative in repair_manifest["files"]:
         digest.update(relative.encode())
         digest.update(b"\0")
-        digest.update((ROOT / relative).read_bytes())
+        path = ROOT / relative
+        digest.update(path.read_bytes() if path.exists() else b"current-absent")
         digest.update(b"\0")
     assert digest.hexdigest() == repair_manifest["production_source_sha256"]
     assert (

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import copy
 from dataclasses import replace
 from pathlib import Path
 
@@ -17,7 +16,6 @@ from puripuly_heart.app.ports.application_settings import (
     SecretSourceStatus,
     SetSecretCommand,
     SettingChange,
-    SettingsCommandResult,
     SettingsField,
     TranslationProviderSettingsCommand,
     UiPromptClipboardSettingsCommand,
@@ -48,10 +46,8 @@ from puripuly_heart.app.wiring_composition import (
     create_application_runtime_production_composition,
 )
 from puripuly_heart.config.settings import (
-    AppSettings,
     SecretsBackend,
     SecretsSettings,
-    TranslationModel,
 )
 from puripuly_heart.config.settings_vnext.facade import save_vnext_settings
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
@@ -63,7 +59,6 @@ from puripuly_heart.core.messages import (
 from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntimeState, PeerPolicySnapshot
 from puripuly_heart.core.runtime.self_audio import SelfChannelSnapshot, SelfChannelState
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
-from puripuly_heart.ui.controller import GuiController
 
 
 class RecordingHost:
@@ -577,71 +572,6 @@ async def test_first_surface_revision_conflict_has_no_partial_commit(tmp_path) -
         TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
         TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
     }
-
-
-@pytest.mark.asyncio
-async def test_controller_production_path_adopts_only_partial_authoritative_projection(
-    tmp_path,
-) -> None:
-    path = tmp_path / "settings.json"
-    _seed_settings(path)
-    host = RecordingHost()
-    composition = _bind(
-        create_canonical_command_composition(
-            state_path=path,
-            runtime_host=host,
-            secrets=InMemorySecretStore(),
-        ),
-        host,
-    )
-    original = composition.settings_commands.execute
-    calls = 0
-
-    async def conflict_second(command):  # noqa: ANN001
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            snapshot = await composition.settings_commands.snapshot()
-            return SettingsCommandResult(
-                "conflict",
-                snapshot,
-            )
-        return await original(command)
-
-    composition.settings_commands.execute = conflict_second  # type: ignore[method-assign]
-    controller = GuiController(page=object(), app=object(), config_path=path)
-    controller.application_runtime_host = host
-    base = AppSettings()
-    base.ui.overlay_enabled = True
-    base.ui.peer_translation_enabled = True
-    draft = copy.deepcopy(base)
-    draft.translation.model = TranslationModel.DEEPSEEK_V4_FLASH
-    draft.languages.source_language = "en"
-    draft.ui.locale = "ja"
-    controller.settings = base
-
-    result = await controller._execute_production_settings_delta(
-        base_settings=base,
-        next_settings=draft,
-    )
-
-    assert result is not None
-    assert controller.last_production_dispatch is not None
-    assert controller.last_production_dispatch.partial_commit is True
-    persisted = await composition.current_receipt()
-    projected = controller.canonical_settings_persistence.legacy_projection(persisted.envelope)
-    projected.ui.overlay_enabled = True
-    projected.ui.peer_translation_enabled = True
-    assert controller.settings == projected
-    assert draft == projected
-    assert projected.translation.model == TranslationModel.DEEPSEEK_V4_FLASH
-    assert projected.languages.source_language != "en"
-    assert projected.ui.locale != "ja"
-    assert controller.settings.ui.overlay_enabled is True
-    assert controller.settings.ui.peer_translation_enabled is True
-    assert draft.ui.overlay_enabled is True
-    assert draft.ui.peer_translation_enabled is True
-    assert persisted.envelope.intent.ui.locale != "ja"
 
 
 @pytest.mark.asyncio

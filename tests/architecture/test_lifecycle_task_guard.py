@@ -32,13 +32,8 @@ LEGACY_TASK_CREATION_ALLOWLIST = Counter(
         ("src/puripuly_heart/core/overlay/presenter.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/overlay/process.py", ASYNCIO_CREATE_TASK): 2,
         ("src/puripuly_heart/providers/stt/soniox.py", ASYNCIO_CREATE_TASK): 3,
-        ("src/puripuly_heart/ui/app.py", RUN_TASK): 18,
+        ("src/puripuly_heart/ui/app.py", RUN_TASK): 19,
         ("src/puripuly_heart/ui/components/settings/api_key_field.py", RUN_TASK): 1,
-        ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 3,
-        ("src/puripuly_heart/ui/controller.py", LOOP_CREATE_TASK): 5,
-        ("src/puripuly_heart/ui/controller.py", BARE_RUN_TASK): 4,
-        ("src/puripuly_heart/ui/controller.py", RUN_TASK): 1,
-        ("src/puripuly_heart/ui/views/settings.py", RUN_TASK): 1,
         ("src/puripuly_heart/ui/desktop_overlay.py", ASYNCIO_CREATE_TASK): 11,
         ("src/puripuly_heart/ui/desktop_overlay.py", BARE_RUN_TASK): 1,
         ("src/puripuly_heart/core/osc/receiver.py", LOOP_CREATE_TASK): 1,
@@ -124,26 +119,6 @@ TASK_CREATION_ALLOWLIST_RATIONALES = {
         "src/puripuly_heart/ui/components/settings/api_key_field.py",
         RUN_TASK,
     ): "Flet API-key field callback uses page.run_task at the UI boundary for async verification",
-    (
-        "src/puripuly_heart/ui/controller.py",
-        ASYNCIO_CREATE_TASK,
-    ): "controller has exactly three bounded UI task handles for status refresh, desktop-bounds persistence, and STT switching",
-    (
-        "src/puripuly_heart/ui/controller.py",
-        LOOP_CREATE_TASK,
-    ): "controller has exactly five loop-bound UI scheduling call sites for overlay state/logging updates, fallback task dispatch, and the owner-scoped manual typing idle timeout",
-    (
-        "src/puripuly_heart/ui/controller.py",
-        BARE_RUN_TASK,
-    ): "controller has exactly four injected UI task-runner call sites for overlay/calibration/runtime callback scheduling",
-    (
-        "src/puripuly_heart/ui/controller.py",
-        RUN_TASK,
-    ): "Flet controller schedules one bounded idle process-discovery preparation task through page.run_task",
-    (
-        "src/puripuly_heart/ui/views/settings.py",
-        RUN_TASK,
-    ): "Flet settings callback uses page.run_task to load process-capture choices without blocking rendering",
     (
         "src/puripuly_heart/ui/desktop_overlay.py",
         ASYNCIO_CREATE_TASK,
@@ -308,11 +283,11 @@ def test_order34_named_owner_allowlist_does_not_claim_stt_controller_legacy_task
     assert stt_controller_tasks not in NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST
 
 
-def test_order37_named_owner_allowlist_preserves_remaining_legacy_ui_task_debt() -> None:
+def test_order37_named_owner_allowlist_removes_legacy_controller_task_debt() -> None:
     assert (
         "src/puripuly_heart/ui/controller.py",
         ASYNCIO_CREATE_TASK,
-    ) in LEGACY_TASK_CREATION_ALLOWLIST
+    ) not in LEGACY_TASK_CREATION_ALLOWLIST
     assert ("src/puripuly_heart/ui/app.py", RUN_TASK) in LEGACY_TASK_CREATION_ALLOWLIST
     assert (
         "src/puripuly_heart/core/managed_openrouter_release.py",
@@ -355,5 +330,5 @@ def test_order39_named_owner_allowlist_adds_receiver_and_prompt_owners() -> None
     assert (
         "src/puripuly_heart/ui/controller.py",
         ASYNCIO_CREATE_TASK,
-    ) in LEGACY_TASK_CREATION_ALLOWLIST
+    ) not in LEGACY_TASK_CREATION_ALLOWLIST
     assert ("src/puripuly_heart/ui/app.py", RUN_TASK) in LEGACY_TASK_CREATION_ALLOWLIST

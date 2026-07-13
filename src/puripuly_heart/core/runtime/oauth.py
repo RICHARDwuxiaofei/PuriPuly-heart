@@ -87,6 +87,13 @@ class OAuthRuntime:
         task.add_done_callback(self._on_auth_task_done)
         return task
 
+    async def cancel_auth_task(self, task_name: str) -> None:
+        task = self._auth_tasks.get(task_name)
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
     def attach_loopback_listener(self, listener: object, *, listener_name: str) -> None:
         if self._closing or self._closed:
             raise RuntimeError("OAuthRuntime is closed to new loopback listeners")

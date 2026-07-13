@@ -201,8 +201,8 @@ async def test_default_seam_is_inert_and_does_not_call_host_or_sync(tmp_path: Pa
 
 def test_ui_modules_only_accept_port_and_do_not_construct_app_adapters_or_repositories() -> None:
     root = Path(__file__).parents[2] / "src" / "puripuly_heart" / "ui"
-    source = (root / "controller.py").read_text(encoding="utf-8")
-    source += (root / "app.py").read_text(encoding="utf-8")
+    assert not (root / "controller.py").exists()
+    source = (root / "app.py").read_text(encoding="utf-8")
     assert "app.adapters" not in source
     assert "create_additive_runtime_composition" not in source
 

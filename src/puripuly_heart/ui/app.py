@@ -1,6 +1,5 @@
 import asyncio
 import contextlib
-import copy
 import inspect
 import logging
 import tempfile
@@ -10,6 +9,25 @@ from pathlib import Path
 import flet as ft
 
 from puripuly_heart.app.language_selection import LanguageSelectionChange
+from puripuly_heart.app.ports.dashboard_application import (
+    ChangeDashboardLanguages,
+    DashboardApplicationPort,
+    SetManualInputActivity,
+    SetOverlayEnabled,
+    SetPeerEulaAccepted,
+    SetPeerTranslationEnabled,
+    SetRuntimeLoggingMode,
+    SetSelfSttEnabled,
+    SetTelemetryConsent,
+    SetTranslationEnabled,
+    SubmitManualSelfText,
+)
+from puripuly_heart.app.ports.managed_authentication_application import (
+    EphemeralSecretLease,
+    ManagedAuthenticationStatus,
+    StartDiscordManagedAuthentication,
+    StartQqManagedAuthentication,
+)
 from puripuly_heart.app.ports.overlay_application import (
     AudioCaptureGatePort,
     OverlayApplicationCommandPort,
@@ -17,10 +35,6 @@ from puripuly_heart.app.ports.overlay_application import (
 )
 from puripuly_heart.app.ports.post_commit_runtime import SurfaceRuntimeTransactionPort
 from puripuly_heart.app.services.ui_settings import UiSettingsApplication
-from puripuly_heart.config.settings import (
-    AppSettings,
-    LLMProviderName,
-)
 from puripuly_heart.core.discord_oauth_loopback import (
     render_discord_oauth_callback_completion_page,
 )
@@ -39,7 +53,7 @@ from puripuly_heart.ui.components.peer_translation_eula_dialog import PeerTransl
 from puripuly_heart.ui.components.qq_managed_auth_dialog import QqManagedAuthDialog
 from puripuly_heart.ui.components.telemetry_consent_dialog import TelemetryConsentDialog
 from puripuly_heart.ui.components.title_bar import TitleBar
-from puripuly_heart.ui.controller import GuiController
+from puripuly_heart.ui.event_bridge import ApplicationUIEventBridgeFactory
 from puripuly_heart.ui.fonts import font_for_language, register_fonts
 from puripuly_heart.ui.i18n import (
     get_locale,
@@ -58,6 +72,16 @@ from puripuly_heart.ui.views.dashboard import DashboardView
 from puripuly_heart.ui.views.logs import LogsView
 
 logger = logging.getLogger(__name__)
+MANAGED_AUTH_DYNAMIC_I18N_KEYS = (
+    "peer_translation.disclosure",
+    "qq_auth.error.already_claimed_discord",
+    "qq_auth.error.broker_unavailable",
+    "qq_auth.error.lifetime_used",
+    "qq_auth.error.rate_limited",
+    "qq_auth.error.secret_write_failed",
+    "qq_auth.error.settings_commit_failed",
+    "qq_managed_auth.error.retry",
+)
 
 DEFAULT_WINDOW_WIDTH = 1136
 DEFAULT_WINDOW_HEIGHT = 850
@@ -130,70 +154,27 @@ class TranslatorApp:
         application_runtime_host: object | None = None,
         application_adapters: object | None = None,
         ui_settings: UiSettingsApplication,
+        dashboard: DashboardApplicationPort,
     ):
         self.page = page
-        controller_kwargs = {
-            "page": page,
-            "app": self,
-            "config_path": config_path,
-        }
-        parameters = inspect.signature(GuiController).parameters
-        if "overlay_commands" in parameters or any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-        ):
-            controller_kwargs["overlay_commands"] = overlay_commands
-        if "overlay_application_state" in parameters or any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-        ):
-            controller_kwargs["overlay_application_state"] = overlay_application_state
-        if "surface_runtime_transactions" in parameters or any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-        ):
-            controller_kwargs["surface_runtime_transactions"] = surface_runtime_transactions
-        if "vrc_audio_gate" in parameters or any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-        ):
-            controller_kwargs["vrc_audio_gate"] = vrc_audio_gate
-        if "allow_stable_settings_import" in parameters or any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-        ):
-            controller_kwargs["allow_stable_settings_import"] = allow_stable_settings_import
-        if application_runtime_host is not None:
-            controller_kwargs["application_runtime_host"] = application_runtime_host
-        if application_adapters is not None:
-            controller_kwargs["application_adapters"] = application_adapters
-        self.controller = GuiController(**controller_kwargs)
+        self.dashboard = dashboard
         self.overlay_commands = overlay_commands
         self.overlay_state = "off"
         self.overlay_failure_reason: str | None = None
-        self.overlay_peer_contract = None
         self.debug_ui_preview = bool(debug_ui_preview)
         self.debug_preview_panel: DebugPreviewPanel | None = None
         self._application_adapters = application_adapters
         self.ui_settings = ui_settings
-        self._oauth_runtime = (
-            None if application_adapters is None else application_adapters.ui_oauth
-        )
-        self._discord_managed_auth_generation = 0
-        self._discord_managed_auth_cancelled = False
-        self._discord_managed_auth_task_handle = None
-        self._qq_managed_auth_generation = 0
-        self._qq_managed_auth_cancelled = False
-        self._qq_managed_auth_task_handle = None
         self._github_star_prompt_launch_pending = True
-        self._github_star_prompt_runtime = (
-            None if application_adapters is None else application_adapters.ui_github_prompt
-        )
-        if application_adapters is not None:
-            application_adapters.bind_ui_github_diagnostics(
-                self._github_star_prompt_runtime_diagnostics_sink
-            )
+        self._github_star_prompt_presentation = None
+        self._managed_authentication_presentation = None
         self._launch_high_priority_feedback_shown = False
         self._launch_high_priority_feedback_reason: str | None = None
         self._launch_high_priority_snackbar = None
         self._github_star_prompt_shown_this_launch = False
         self._microphone_test_dialog: MicrophoneTestDialog | None = None
         self._telemetry_consent_dialog: TelemetryConsentDialog | None = None
+        self._dashboard_snapshot = None
         self._setup_page()
         self._build_layout()
         if overlay_ui_projection is not None:
@@ -217,8 +198,49 @@ class TranslatorApp:
         self.view_settings.on_snackbar = self._show_settings_snackbar
         self.view_settings.on_locale_changed = self._on_settings_locale_changed
         self.view_logs.on_mode_change = self._on_runtime_logging_mode_change
-        self.view_logs.set_runtime_logging_mode(self.controller.runtime_logging_mode)
+        self.view_logs.set_runtime_logging_mode(self.dashboard.runtime_logging_mode)
         self.view_dashboard.runtime_log_detailed = self._log_detailed
+
+    def create_presentation_lifecycle(self):  # noqa: ANN201
+        return self.dashboard.create_presentation_lifecycle(
+            view=self,
+            bridge_factory=ApplicationUIEventBridgeFactory(self),
+        )
+
+    async def prepare_dashboard(self) -> None:
+        snapshot = await self.dashboard.snapshot()
+        self._dashboard_snapshot = snapshot
+        self._github_star_prompt_presentation = (
+            await self.dashboard.github_star_prompt_presentation()
+        )
+        self._managed_authentication_presentation = (
+            await self.dashboard.managed_authentication_presentation()
+        )
+        self.view_dashboard.set_translation_enabled(snapshot.translation_enabled)
+        self.view_dashboard.set_stt_enabled(snapshot.self_stt_enabled)
+        self.view_dashboard.set_overlay_peer_presentation(snapshot.overlay_peer)
+        self.view_logs.set_runtime_logging_mode(snapshot.runtime_logging_mode)
+
+    async def start_dashboard(self) -> None:
+        return None
+
+    def on_managed_authentication_presentation(self, presentation) -> None:  # noqa: ANN001
+        self._managed_authentication_presentation = presentation
+        dialog = getattr(self, "_discord_managed_auth_dialog", None)
+        if dialog is None:
+            return
+        dialog.set_reopen_available(
+            presentation.browser_reopen_available,
+            self._reopen_discord_managed_auth_browser,
+        )
+        if presentation.callback_received:
+            dialog.set_callback_received()
+
+    async def freeze_dashboard_ingress(self) -> None:
+        await self.dashboard.cancel_managed_authentication()
+
+    async def stop_dashboard(self, failures: tuple[BaseException, ...]) -> None:
+        _ = failures
 
     def _show_settings_snackbar(self, message: str, severity: str) -> None:
         color = {
@@ -227,6 +249,16 @@ class TranslatorApp:
             "error": ft.Colors.RED_700,
         }.get(severity)
         self._show_snackbar(message, color)
+
+    def add_history_entry(
+        self,
+        source: str,
+        text: str,
+        *,
+        translated: bool = False,
+        language_code: str | None = None,
+    ) -> None:
+        self.view_dashboard.history_items.append((source, text, translated, language_code))
 
     def _on_settings_locale_changed(self, _locale: str) -> None:
         self.apply_locale()
@@ -381,51 +413,12 @@ class TranslatorApp:
         *,
         delay_s: float = GITHUB_STAR_PROMPT_DELAY_S,
     ) -> bool:
-        runtime = self._get_github_star_prompt_runtime()
         try:
-            task = runtime.start_launch_prompt(
-                lambda generation: self._run_github_star_prompt_after_launch(
-                    delay_s=delay_s,
-                    generation=generation,
-                )
-            )
-        except RuntimeError:
-            return False
-        return await task
-
-    async def _run_github_star_prompt_after_launch(
-        self,
-        *,
-        delay_s: float,
-        generation: int,
-    ) -> bool:
-        try:
-            controller = getattr(self, "controller", None)
-            persist_eligible_launch = getattr(
-                controller,
-                "persist_github_star_prompt_eligible_launch",
-                None,
-            )
-            if not callable(persist_eligible_launch):
-                return False
-            launch_gate_satisfied = await persist_eligible_launch()
+            result = await self.dashboard.run_delayed_github_star_launch(delay_s)
+            self._github_star_prompt_presentation = result.presentation
             if self._launch_feedback_conflicts_with_github_star_prompt():
                 return False
-            if not launch_gate_satisfied:
-                return False
-            should_show = getattr(controller, "should_show_github_star_prompt", None)
-            if not callable(should_show) or not should_show():
-                return False
-            if not self._is_current_github_star_prompt_generation(generation):
-                return False
-
-            await asyncio.sleep(delay_s)
-
-            if not self._is_current_github_star_prompt_generation(generation):
-                return False
-            if self._launch_feedback_conflicts_with_github_star_prompt():
-                return False
-            if not should_show():
+            if result.status.value != "applied" or not result.presentation.should_show:
                 return False
             return await self._open_github_star_prompt_snackbar(
                 should_open=lambda: not self._launch_feedback_conflicts_with_github_star_prompt()
@@ -433,59 +426,26 @@ class TranslatorApp:
         finally:
             self._github_star_prompt_launch_pending = False
 
-    def _get_github_star_prompt_runtime(self):  # noqa: ANN201
-        runtime = getattr(self, "_github_star_prompt_runtime", None)
-        if runtime is None:
-            from puripuly_heart.app.services.application_adapters import (
-                ApplicationAdapterLifecycle,
-            )
-
-            adapters = ApplicationAdapterLifecycle()
-            adapters.bind_ui_github_diagnostics(self._github_star_prompt_runtime_diagnostics_sink)
-            self._application_adapters = adapters
-            runtime = adapters.ui_github_prompt
-            self._github_star_prompt_runtime = runtime
-        return runtime
-
-    def _is_current_github_star_prompt_generation(self, generation: int) -> bool:
-        runtime = getattr(self, "_github_star_prompt_runtime", None)
-        return runtime is not None and runtime.is_current_generation(generation)
-
-    def _github_star_prompt_runtime_diagnostics_sink(
-        self,
-        event: str,
-        metadata,
-    ) -> None:  # noqa: ANN001
-        self._log_detailed(
-            f"[Lifecycle][GithubStarPromptRuntime] event={event} metadata={dict(metadata)}",
-            level=logging.WARNING,
-        )
-
     async def close_github_star_prompt_runtime(self) -> None:
-        adapters = getattr(self, "_application_adapters", None)
-        if adapters is not None:
-            await adapters.cancel_ui_github_prompt()
-        else:
-            runtime = getattr(self, "_github_star_prompt_runtime", None)
-            if runtime is not None:
-                await runtime.close()
+        await self.dashboard.cancel_github_star_launch()
         self._github_star_prompt_launch_pending = False
 
     async def _open_github_star_prompt_snackbar(self, *, should_open=None) -> bool:  # noqa: ANN001
         if getattr(self, "_github_star_prompt_shown_this_launch", False):
             return False
-        controller = getattr(self, "controller", None)
-        persist_opened = getattr(controller, "persist_github_star_prompt_opened", None)
-        if not callable(persist_opened) or not await persist_opened(should_open=should_open):
+        if should_open is not None and not should_open():
+            return False
+        result = await self.dashboard.record_github_star_opened()
+        self._github_star_prompt_presentation = result.presentation
+        if result.status.value != "applied":
             return False
 
         snackbar = None
 
         def _open_repository(_event) -> None:  # noqa: ANN001
             async def _persist_click() -> None:
-                persist_clicked = getattr(controller, "persist_github_star_prompt_clicked", None)
-                if callable(persist_clicked):
-                    await persist_clicked()
+                result = await self.dashboard.record_github_star_clicked()
+                self._github_star_prompt_presentation = result.presentation
 
             self._queue_settings_mutation_task(_persist_click)
             webbrowser.open(GITHUB_STAR_REPOSITORY_URL)
@@ -655,19 +615,19 @@ class TranslatorApp:
         )
 
     def _preview_capture_fault_cycle(self) -> None:
-        profile = self.controller.cycle_debug_capture_fault_profile()
+        profile = self.dashboard.cycle_debug_capture_fault_profile()
         self._show_snackbar(
             t("debug_preview.capture_fault_snackbar", profile=profile), ft.Colors.ORANGE_700
         )
 
     def _preview_stt_fault_cycle(self) -> None:
-        profile = self.controller.cycle_debug_stt_fault_profile()
+        profile = self.dashboard.cycle_debug_stt_fault_profile()
         self._show_snackbar(
             t("debug_preview.stt_fault_snackbar", profile=profile), ft.Colors.ORANGE_700
         )
 
     def _preview_audio_fault_clear(self) -> None:
-        self.controller.clear_debug_audio_fault_profiles()
+        self.dashboard.clear_debug_audio_fault_profiles()
         self._show_snackbar(t("debug_preview.audio_fault_clear"), ft.Colors.GREEN_700)
 
     def _show_peer_translation_eula(self, on_accept) -> None:
@@ -680,8 +640,8 @@ class TranslatorApp:
         dialog.open()
 
     def maybe_show_telemetry_consent_dialog(self) -> bool:
-        settings = getattr(self.controller, "settings", None)
-        if settings is None or settings.telemetry.consent != "unknown":
+        snapshot = self._dashboard_snapshot
+        if snapshot is None or snapshot.telemetry_consent not in {"unknown", "unset"}:
             return False
         dialog = TelemetryConsentDialog(
             self.page,
@@ -698,14 +658,10 @@ class TranslatorApp:
             return
 
         async def _task() -> None:
-            settings = getattr(self.controller, "settings", None)
-            if settings is None:
+            result = await self.dashboard.set_telemetry_consent(SetTelemetryConsent(consent))
+            if result.status.value != "applied":
                 return
-            if not await self.controller.set_telemetry_consent(consent):
-                return
-            sync_telemetry = getattr(self.view_settings, "sync_telemetry_settings", None)
-            if callable(sync_telemetry) and self.controller.settings is not None:
-                sync_telemetry(self.controller.settings)
+            self._dashboard_snapshot = await self.dashboard.snapshot()
 
         self.page.run_task(_task)
 
@@ -722,13 +678,18 @@ class TranslatorApp:
 
     def _accept_peer_translation_eula_and_enable(self) -> None:
         async def _task():
-            settings = getattr(self.controller, "settings", None)
-            apply_settings = getattr(self.controller, "apply_settings", None)
-            if settings is not None and callable(apply_settings):
-                updated = copy.deepcopy(settings)
-                updated.ui.peer_translation_eula_accepted = True
-                await apply_settings(updated)
-            await self.controller.set_peer_translation_enabled(True)
+            snapshot = self._dashboard_snapshot or await self.dashboard.snapshot()
+            result = await self.dashboard.set_peer_eula(
+                SetPeerEulaAccepted(True, snapshot.settings.operational_revision)
+            )
+            if result.status.value != "applied":
+                return
+            self._dashboard_snapshot = await self.dashboard.snapshot()
+            peer_result = await self.dashboard.set_peer_translation_enabled(
+                SetPeerTranslationEnabled(True)
+            )
+            self._dashboard_snapshot = peer_result.snapshot
+            self.view_dashboard.set_overlay_peer_presentation(peer_result.snapshot.overlay_peer)
 
         self.page.run_task(_task)
 
@@ -826,7 +787,6 @@ class TranslatorApp:
         self.page.theme = get_app_theme(font_family=font_for_language(get_locale()))
         self.title_bar.set_title(t("app.title"))
         self.view_dashboard.apply_locale()
-        self.refresh_overlay_peer_contract()
         self.view_logs.apply_locale()
         debug_preview_panel = getattr(self, "debug_preview_panel", None)
         apply_debug_locale = getattr(debug_preview_panel, "apply_locale", None)
@@ -834,61 +794,15 @@ class TranslatorApp:
             apply_debug_locale()
         self.page.update()
 
-    def refresh_overlay_peer_contract(self) -> None:
-        controller = getattr(self, "controller", None)
-        build_contract = getattr(controller, "build_overlay_peer_consumer_contract", None)
-        if not callable(build_contract):
-            return
-        contract = build_contract()
-        self.overlay_peer_contract = contract
-        if contract is None:
-            return
-        view_settings = getattr(self, "view_settings", None)
-        set_settings_contract = getattr(view_settings, "set_overlay_peer_contract", None)
-        if callable(set_settings_contract):
-            set_settings_contract(contract)
-        view_dashboard = getattr(self, "view_dashboard", None)
-        set_dashboard_contract = getattr(view_dashboard, "set_overlay_peer_contract", None)
-        if callable(set_dashboard_contract):
-            set_dashboard_contract(contract)
-
-    def _on_desktop_overlay_lock_change(self, locked: bool) -> None:
-        async def _task():
-            await self.controller.set_desktop_overlay_captions_locked(bool(locked))
-            self._refresh_settings_desktop_overlay_state()
-
-        self.page.run_task(_task)
-
-    def _on_desktop_overlay_size_change(self, size_preset: str) -> None:
-        async def _task():
-            await self.controller.set_desktop_overlay_size_preset(size_preset)
-            self._refresh_settings_desktop_overlay_state()
-
-        self.page.run_task(_task)
-
     def _on_desktop_overlay_recovery_action(self, action: str) -> None:
         if action not in {"retry", "reopen"}:
             return
 
         async def _task():
-            await self.controller.set_overlay_enabled(True)
+            result = await self.dashboard.set_overlay_enabled(SetOverlayEnabled(True))
+            self._dashboard_snapshot = result.snapshot
 
         self.page.run_task(_task)
-
-    def _on_desktop_overlay_position_reset(self) -> None:
-        async def _task():
-            await self.controller.reset_desktop_overlay_position()
-            self._refresh_settings_desktop_overlay_state()
-
-        self.page.run_task(_task)
-
-    def _refresh_settings_desktop_overlay_state(self) -> None:
-        controller = getattr(self, "controller", None)
-        settings = getattr(controller, "settings", None)
-        view_settings = getattr(self, "view_settings", None)
-        sync_settings = getattr(view_settings, "sync_desktop_overlay_settings", None)
-        if settings is not None and callable(sync_settings):
-            sync_settings(settings)
 
     def on_desktop_overlay_state_changed(
         self,
@@ -900,13 +814,13 @@ class TranslatorApp:
 
     def _on_manual_submit(self, _source: str, text: str) -> None:
         async def _task():
-            await self.controller.submit_text(text)
+            await self.dashboard.submit_manual_self_text(SubmitManualSelfText(text))
 
         self.page.run_task(_task)
 
     def _on_message_input_activity(self, has_text: bool) -> None:
         async def _task():
-            self.controller.set_manual_input_activity(has_text)
+            self.dashboard.set_manual_input_activity(SetManualInputActivity(has_text))
 
         self.page.run_task(_task)
 
@@ -928,20 +842,10 @@ class TranslatorApp:
             handler()
 
     def _log_basic(self, message: str, *, level: int = logging.INFO) -> None:
-        controller = getattr(self, "controller", None)
-        log_basic = getattr(controller, "log_basic", None)
-        if callable(log_basic):
-            log_basic(message, level=level)
-            return
-        logger.log(level, message)
+        self.dashboard.log_basic(message, level=level)
 
     def _log_detailed(self, message: str, *, level: int = logging.INFO) -> None:
-        controller = getattr(self, "controller", None)
-        log_detailed = getattr(controller, "log_detailed", None)
-        if callable(log_detailed):
-            log_detailed(message, level=level)
-            return
-        logger.log(level, message)
+        self.dashboard.log_detailed(message, level=level)
 
     def _revert_dashboard_translation_toggle(self) -> None:
         self._set_dashboard_translation_visual_state(False)
@@ -956,25 +860,12 @@ class TranslatorApp:
                 logger.exception("Failed to update dashboard translation toggle")
 
     def _dashboard_managed_auth_action(self) -> str:
-        action = getattr(self.controller, "dashboard_managed_auth_action", None)
-        if not callable(action):
-            return "continue"
-        try:
-            return str(action())
-        except Exception:
-            logger.exception("Failed to evaluate managed auth dashboard gate")
-            return "prompt"
+        presentation = self._managed_authentication_presentation
+        return "prompt" if presentation is None else presentation.action
 
     def _dashboard_managed_auth_prompt_kind(self) -> str:
-        prompt_kind = getattr(self.controller, "dashboard_managed_auth_prompt_kind", None)
-        if not callable(prompt_kind):
-            return "discord"
-        try:
-            resolved = str(prompt_kind())
-        except Exception:
-            logger.warning("Failed to evaluate managed auth prompt kind")
-            return "discord"
-        return "qq" if resolved == "qq" else "discord"
+        presentation = self._managed_authentication_presentation
+        return "discord" if presentation is None else presentation.prompt.value
 
     def _on_translation_toggle(self, enabled: bool) -> bool:
         self._log_basic(f"[Dashboard] Translation toggle requested: enabled={enabled}")
@@ -995,7 +886,11 @@ class TranslatorApp:
                 return False
 
         async def _task():
-            await self.controller.set_translation_enabled(enabled)
+            await self.dashboard.set_translation_enabled(SetTranslationEnabled(enabled))
+            self._dashboard_snapshot = await self.dashboard.snapshot()
+            self.view_dashboard.set_translation_enabled(
+                self._dashboard_snapshot.translation_enabled
+            )
 
         self.page.run_task(_task)
         return True
@@ -1009,7 +904,9 @@ class TranslatorApp:
         )
 
         async def _task():
-            await self.controller.set_stt_enabled(enabled)
+            await self.dashboard.set_self_stt_enabled(SetSelfSttEnabled(enabled))
+            self._dashboard_snapshot = await self.dashboard.snapshot()
+            self.view_dashboard.set_stt_enabled(self._dashboard_snapshot.self_stt_enabled)
 
         self.page.run_task(_task)
 
@@ -1022,7 +919,9 @@ class TranslatorApp:
         )
 
         async def _task():
-            await self.controller.set_overlay_enabled(enabled)
+            result = await self.dashboard.set_overlay_enabled(SetOverlayEnabled(enabled))
+            self._dashboard_snapshot = result.snapshot
+            self.view_dashboard.set_overlay_peer_presentation(result.snapshot.overlay_peer)
 
         self.page.run_task(_task)
 
@@ -1034,19 +933,17 @@ class TranslatorApp:
             f"failure_reason={getattr(self, 'overlay_failure_reason', None)}"
         )
 
-        controller = getattr(self, "controller", None)
-        settings = getattr(controller, "settings", None)
-        ui_settings = getattr(settings, "ui", None)
-        if (
-            enabled
-            and ui_settings is not None
-            and not getattr(ui_settings, "peer_translation_eula_accepted", False)
-        ):
+        snapshot = self._dashboard_snapshot
+        if enabled and snapshot is not None and not snapshot.peer_eula_accepted:
             self._show_peer_translation_eula(self._accept_peer_translation_eula_and_enable)
             return
 
         async def _task():
-            await self.controller.set_peer_translation_enabled(enabled)
+            result = await self.dashboard.set_peer_translation_enabled(
+                SetPeerTranslationEnabled(enabled)
+            )
+            self._dashboard_snapshot = result.snapshot
+            self.view_dashboard.set_overlay_peer_presentation(result.snapshot.overlay_peer)
 
         self.page.run_task(_task)
 
@@ -1054,13 +951,7 @@ class TranslatorApp:
         self._log_basic("[Dashboard] Peer process capture retry requested")
 
         async def _task():
-            await self.controller.retry_peer_process_capture()
-
-        self._queue_settings_mutation_task(_task)
-
-    def _on_apply_loopback_capture_option(self, value: str) -> None:
-        async def _task():
-            await self.controller.apply_loopback_capture_option(value)
+            await self.dashboard.retry_capture()
 
         self._queue_settings_mutation_task(_task)
 
@@ -1068,13 +959,14 @@ class TranslatorApp:
         self,
         change: LanguageSelectionChange,
     ) -> None:
-        if self.controller.settings is None:
+        snapshot = self._dashboard_snapshot
+        if snapshot is None:
             return
-        settings = self.controller.settings
-        previous_source_code = settings.languages.source_language
-        previous_target_code = settings.languages.target_language
-        previous_peer_source_code = getattr(settings.languages, "peer_source_language", "")
-        previous_peer_target_code = getattr(settings.languages, "peer_target_language", "")
+        languages = snapshot.settings.languages
+        previous_source_code = languages.source
+        previous_target_code = languages.target
+        previous_peer_source_code = languages.peer_source or ""
+        previous_peer_target_code = languages.peer_target or ""
         self._log_basic(
             "[Dashboard] Language change requested: "
             f"source={previous_source_code}->{change.source_code} "
@@ -1089,7 +981,7 @@ class TranslatorApp:
         # Check STT provider compatibility and show warning if needed
         warning = None
         if change.source_code != previous_source_code:
-            stt_provider = settings.provider.stt.value
+            stt_provider = snapshot.settings.stt.self_provider
             warning = get_stt_compatibility_warning(change.source_code, stt_provider)
         if warning:
             snackbar = ft.SnackBar(
@@ -1104,191 +996,23 @@ class TranslatorApp:
             self.page.open(snackbar)
 
         async def _task():
-            await self.controller.on_dashboard_language_change(change)
-
-        self._queue_settings_mutation_task(_task)
-
-    def _on_settings_changed(self, settings) -> None:
-        async def _task():
-            await self.controller.apply_settings(settings)
-            self._sync_microphone_test_dialog_if_inactive()
-
-        self._queue_settings_mutation_task(_task)
-
-    def _on_start_microphone_test(self) -> None:
-        async def _task():
-            dialog = self._get_microphone_test_dialog()
-            dialog.reset()
-            dialog.open()
-            start_microphone_test = self.controller.start_microphone_test
-            if _callable_accepts_keyword(start_microphone_test, "meter_callback"):
-                start_result = start_microphone_test(meter_callback=dialog.set_level)
-            else:
-                start_result = start_microphone_test()
-            started = await start_result if inspect.isawaitable(start_result) else start_result
-            if not started:
-                dialog.show_failure()
-                return
-
-        self._queue_settings_mutation_task(_task)
-
-    def _on_stop_microphone_test(self) -> None:
-        async def _task() -> None:
-            stop_microphone_test = getattr(self.controller, "stop_microphone_test", None)
-            if callable(stop_microphone_test):
-                result = stop_microphone_test()
-                if inspect.isawaitable(result):
-                    await result
-            self._close_microphone_test_dialog()
-
-        self._queue_settings_mutation_task(_task)
-
-    def _get_microphone_test_dialog(self) -> MicrophoneTestDialog:
-        dialog = getattr(self, "_microphone_test_dialog", None)
-        if dialog is None:
-            dialog = MicrophoneTestDialog(
-                self.page,
-                on_close=self._on_microphone_test_dialog_dismiss,
+            result = await self.dashboard.change_languages(
+                ChangeDashboardLanguages(change, snapshot.settings.canonical_revision)
             )
-            self._microphone_test_dialog = dialog
-        return dialog
-
-    def _close_microphone_test_dialog(self) -> None:
-        dialog = getattr(self, "_microphone_test_dialog", None)
-        if dialog is None:
-            return
-        dialog.close(notify=False)
-        dialog.reset()
-
-    def _on_microphone_test_dialog_dismiss(self) -> None:
-        self._on_stop_microphone_test()
-
-    def _sync_microphone_test_dialog_if_inactive(self) -> None:
-        controller = getattr(self, "controller", None)
-        if bool(getattr(controller, "microphone_test_active", False)):
-            return
-        self._close_microphone_test_dialog()
-
-    def _on_prompt_apply_settings(self, settings) -> None:
-        async def _task():
-            merged_settings = self.controller.merge_settings_tab_apply_with_current_languages(
-                settings
-            )
-            await self.controller.apply_settings(merged_settings)
+            if result.status.value == "applied":
+                self._dashboard_snapshot = await self.dashboard.snapshot()
 
         self._queue_settings_mutation_task(_task)
 
     def _on_runtime_logging_mode_change(self, mode: str) -> None:
-        self.controller.set_runtime_logging_mode(mode)
-        self.view_logs.set_runtime_logging_mode(self.controller.runtime_logging_mode)
-
-    def _on_providers_changed(self) -> None:
-        pending_settings = None
-        view_settings = getattr(self, "view_settings", None)
-        consume_provider_apply_settings = getattr(
-            view_settings,
-            "consume_provider_apply_settings",
-            None,
-        )
-        if callable(consume_provider_apply_settings) and getattr(
-            view_settings,
-            "has_provider_changes",
-            False,
-        ):
-            pending_settings = consume_provider_apply_settings()
-            view_settings.has_provider_changes = False
-
-        async def _task():
-            if pending_settings is None:
-                await self.controller.apply_providers()
-            else:
-                await self.controller.apply_providers(pending_settings)
-
-        self._queue_settings_mutation_task(_task)
-
-    def _on_local_llm_secret_changed(self) -> None:
-        async def _task():
-            settings = getattr(self.controller, "settings", None)
-            if settings is None or settings.provider.llm != LLMProviderName.LOCAL_LLM:
-                return
-            await self.controller.apply_providers(force_rebuild_llm=True)
-
-        self._queue_settings_mutation_task(_task)
-
-    def _on_request_openrouter_pkce(
-        self,
-        target_settings: AppSettings,
-        *,
-        launch_source: str = "settings",
-    ) -> None:
-        active_state = getattr(self.controller, "openrouter_pkce_active", None)
-        if callable(active_state) and active_state():
-            reopen_authorization_url = getattr(
-                self.controller,
-                "reopen_openrouter_pkce_authorization_url",
-                None,
-            )
-            if callable(reopen_authorization_url):
-                self.page.run_task(reopen_authorization_url)
-            return
-
-        async def _task() -> None:
-            ok = await self.controller.connect_openrouter_via_pkce(
-                target_settings=target_settings,
-                launch_source=launch_source,
-            )
-            if ok:
-                refresh_after_openrouter_pkce_success = getattr(
-                    self.view_settings,
-                    "refresh_after_openrouter_pkce_success",
-                    None,
-                )
-                if callable(refresh_after_openrouter_pkce_success):
-                    refresh_after_openrouter_pkce_success(
-                        self.controller.settings,
-                        config_path=self.controller.config_path,
-                    )
-                self._show_snackbar(t("openrouter.pkce.connected"), COLOR_SUCCESS)
-
-        self._queue_settings_mutation_task(_task)
+        self.dashboard.set_runtime_logging_mode(SetRuntimeLoggingMode(mode))
+        self.view_logs.set_runtime_logging_mode(self.dashboard.runtime_logging_mode)
 
     def _close_discord_managed_auth_dialog(self) -> None:
         dialog = getattr(self, "_discord_managed_auth_dialog", None)
         close = getattr(dialog, "close", None)
         if callable(close):
             close()
-
-    def _get_oauth_runtime(self):  # noqa: ANN201
-        runtime = getattr(self, "_oauth_runtime", None)
-        if runtime is None:
-            from puripuly_heart.app.services.application_adapters import (
-                ApplicationAdapterLifecycle,
-            )
-
-            adapters = getattr(self, "_application_adapters", None)
-            if adapters is None:
-                adapters = ApplicationAdapterLifecycle()
-                self._application_adapters = adapters
-            runtime = adapters.ui_oauth
-            self._oauth_runtime = runtime
-        return runtime
-
-    async def close_oauth_runtime(self) -> None:
-        self._discord_managed_auth_cancelled = True
-        self._qq_managed_auth_cancelled = True
-        self._discord_managed_auth_generation = (
-            int(getattr(self, "_discord_managed_auth_generation", 0)) + 1
-        )
-        self._qq_managed_auth_generation = int(getattr(self, "_qq_managed_auth_generation", 0)) + 1
-        self._discord_managed_auth_task_handle = None
-        self._qq_managed_auth_task_handle = None
-        adapters = getattr(self, "_application_adapters", None)
-        if adapters is not None:
-            await adapters.cancel_ui_oauth()
-            return
-        runtime = getattr(self, "_oauth_runtime", None)
-        if runtime is not None:
-            await runtime.close()
 
     def show_discord_managed_auth_dialog(self, preview: bool = False) -> None:
         if not preview:
@@ -1339,146 +1063,63 @@ class TranslatorApp:
             if callable(close):
                 close()
 
-    def _next_qq_managed_auth_generation(self) -> int:
-        generation = int(getattr(self, "_qq_managed_auth_generation", 0)) + 1
-        self._qq_managed_auth_generation = generation
-        self._qq_managed_auth_cancelled = False
-        return generation
-
-    def _is_current_qq_managed_auth_generation(self, generation: int) -> bool:
-        return bool(
-            generation == getattr(self, "_qq_managed_auth_generation", None)
-            and not getattr(self, "_qq_managed_auth_cancelled", False)
-        )
-
     def _start_qq_managed_auth(self) -> None:
         dialog = getattr(self, "_qq_managed_auth_dialog", None)
         qq_identity = getattr(dialog, "qq_identity", "")
         credential = getattr(dialog, "credential", "")
+        dialog.clear_credential()
         set_waiting = getattr(dialog, "set_waiting", None)
         if callable(set_waiting):
             set_waiting()
-        generation = self._next_qq_managed_auth_generation()
 
         async def _task() -> None:
-            controller = getattr(self, "controller", None)
-            start_auth = getattr(controller, "start_qq_managed_auth_from_dialog", None)
-            if not callable(start_auth):
-                return
-            if not self._is_current_qq_managed_auth_generation(generation):
-                return
             try:
-                result = await start_auth(
-                    qq_identity=qq_identity,
-                    credential=credential,
+                result = await self.dashboard.start_qq_managed_authentication(
+                    StartQqManagedAuthentication(
+                        qq_identity, EphemeralSecretLease.from_text(credential)
+                    )
                 )
             except asyncio.CancelledError:
                 return
             except Exception:
                 self._log_basic("[ManagedAuth] QQ auth task failed", level=logging.ERROR)
                 result = None
-            if not self._is_current_qq_managed_auth_generation(generation):
-                return
-            if result is True:
-                enable_translation = getattr(controller, "set_translation_enabled", None)
-                if callable(enable_translation):
-                    enable_result = await enable_translation(True)
-                    if not self._is_current_qq_managed_auth_generation(generation):
-                        return
-                    if not self._translation_enable_succeeded(controller, enable_result):
-                        set_error = getattr(dialog, "set_error", None)
-                        if callable(set_error):
-                            set_error("qq_auth.error.retry")
-                        self._qq_managed_auth_task_handle = None
-                        return
+            if result is not None:
+                self._managed_authentication_presentation = result.presentation
+            if result is not None and result.status == ManagedAuthenticationStatus.APPLIED:
+                enable_result = await self.dashboard.set_translation_enabled(
+                    SetTranslationEnabled(True)
+                )
+                if not self._translation_enable_succeeded(self.dashboard, enable_result):
+                    set_error = getattr(dialog, "set_error", None)
+                    if callable(set_error):
+                        set_error("qq_auth.error.retry")
+                    return
                 self._close_qq_managed_auth_dialog()
                 self._show_snackbar(t("qq_auth.success"), COLOR_SUCCESS)
                 self._set_dashboard_translation_visual_state(True)
-                self._qq_managed_auth_task_handle = None
-                self._get_oauth_runtime().clear_external_task(
-                    "qq-managed-auth-dialog",
-                )
                 return
             message_key = "qq_auth.error.retry"
             message_kwargs: dict[str, object] = {}
-            if isinstance(result, tuple) and result:
-                message_key = str(result[0])
-                if len(result) > 1 and isinstance(result[1], dict):
-                    message_kwargs = dict(result[1])
+            if result is not None and result.detail_code:
+                message_key = result.detail_code
             set_error = getattr(dialog, "set_error", None)
             if callable(set_error):
                 set_error(message_key, **message_kwargs)
-            if self._is_current_qq_managed_auth_generation(generation):
-                self._qq_managed_auth_task_handle = None
-                self._get_oauth_runtime().clear_external_task(
-                    "qq-managed-auth-dialog",
-                )
 
-        self._qq_managed_auth_task_handle = self._get_oauth_runtime().start_external_task(
-            task_runner=self.page.run_task,
-            task_factory=_task,
-            task_name="qq-managed-auth-dialog",
-            generation=generation,
-        )
+        self.page.run_task(_task)
 
     def _cancel_qq_managed_auth(self) -> None:
-        self._qq_managed_auth_cancelled = True
-        task_handle = getattr(self, "_qq_managed_auth_task_handle", None)
-        runtime = getattr(self, "_oauth_runtime", None)
-        if runtime is not None:
-            runtime.cancel_external_task(
-                task_handle,
-                task_name="qq-managed-auth-dialog",
-            )
-        cancel = getattr(task_handle, "cancel", None)
-        if callable(cancel):
-            with contextlib.suppress(Exception):
-                cancel()
-        self._qq_managed_auth_task_handle = None
         self._close_qq_managed_auth_dialog()
-
-    def _run_optional_discord_auth_controller_hook(self, hook_name: str) -> None:
-        controller = getattr(self, "controller", None)
-        hook = getattr(controller, hook_name, None)
-        if not callable(hook):
-            return
-        result = hook()
-        if inspect.isawaitable(result):
-
-            async def _task() -> None:
-                await result
-
-            self.page.run_task(_task)
+        self.page.run_task(self.dashboard.cancel_managed_authentication)
 
     def _supports_discord_managed_auth_reopen(self) -> bool:
-        controller = getattr(self, "controller", None)
-        reopen = getattr(controller, "reopen_discord_managed_auth_browser", None)
-        return callable(reopen)
+        presentation = self._managed_authentication_presentation
+        return bool(presentation is not None and presentation.browser_reopen_available)
 
-    def _next_discord_managed_auth_generation(self) -> int:
-        generation = int(getattr(self, "_discord_managed_auth_generation", 0)) + 1
-        self._discord_managed_auth_generation = generation
-        self._discord_managed_auth_cancelled = False
-        return generation
-
-    def _is_current_discord_managed_auth_generation(self, generation: int) -> bool:
-        runtime = getattr(self, "_oauth_runtime", None)
-        runtime_open = runtime is None or not runtime.is_closed
-        return bool(
-            generation == getattr(self, "_discord_managed_auth_generation", None)
-            and not getattr(self, "_discord_managed_auth_cancelled", False)
-            and runtime_open
-        )
-
-    def _translation_enable_succeeded(self, controller: object, result: object) -> bool:
-        if result is False:
-            return False
-        hub = getattr(controller, "hub", None)
-        if hub is not None:
-            return bool(
-                getattr(hub, "llm", None) is not None and getattr(hub, "translation_enabled", False)
-            )
-        return result is True
+    def _translation_enable_succeeded(self, dashboard: object, result: object) -> bool:
+        _ = dashboard
+        return getattr(result, "status", None) == "applied"
 
     def _start_discord_managed_auth(self) -> None:
         dialog = getattr(self, "_discord_managed_auth_dialog", None)
@@ -1489,33 +1130,19 @@ class TranslatorApp:
         set_waiting = getattr(dialog, "set_waiting", None)
         if callable(set_waiting):
             set_waiting()
-        generation = self._next_discord_managed_auth_generation()
 
         async def _task() -> None:
-            controller = getattr(self, "controller", None)
-            start_auth = getattr(controller, "start_discord_managed_auth_from_dialog", None)
-            if not callable(start_auth):
-                return
-            if not self._is_current_discord_managed_auth_generation(generation):
-                return
-
-            def _mark_callback_received() -> None:
-                self.mark_discord_managed_auth_callback_received(generation)
-
             try:
-                ok = await start_auth(
-                    on_callback_received=_mark_callback_received,
-                    referral_id=referral_id,
+                result = await self.dashboard.start_discord_managed_authentication(
+                    StartDiscordManagedAuthentication(referral_id)
                 )
-                if not ok or not self._is_current_discord_managed_auth_generation(generation):
+                self._managed_authentication_presentation = result.presentation
+                if result.status != ManagedAuthenticationStatus.APPLIED:
                     return
-                enable_translation = getattr(controller, "set_translation_enabled", None)
-                if not callable(enable_translation):
-                    return
-                enable_result = await enable_translation(True)
-                if not self._is_current_discord_managed_auth_generation(generation):
-                    return
-                if not self._translation_enable_succeeded(controller, enable_result):
+                enable_result = await self.dashboard.set_translation_enabled(
+                    SetTranslationEnabled(True)
+                )
+                if not self._translation_enable_succeeded(self.dashboard, enable_result):
                     return
             except asyncio.CancelledError:
                 return
@@ -1524,57 +1151,22 @@ class TranslatorApp:
                 return
             self._close_discord_managed_auth_dialog()
             self._show_snackbar(t("discord_auth.success"), COLOR_SUCCESS)
-            if (
-                getattr(controller, "last_discord_managed_auth_referral_bonus_applied", False)
-                is True
-            ):
+            if self._managed_authentication_presentation.referral_bonus_applied:
                 self._show_snackbar(t("discord_auth.referral_reward_applied"), COLOR_SUCCESS)
             self._set_dashboard_translation_visual_state(True)
-            if self._is_current_discord_managed_auth_generation(generation):
-                self._discord_managed_auth_task_handle = None
-                self._get_oauth_runtime().clear_external_task(
-                    "discord-managed-auth-dialog",
-                )
 
-        self._discord_managed_auth_task_handle = self._get_oauth_runtime().start_external_task(
-            task_runner=self.page.run_task,
-            task_factory=_task,
-            task_name="discord-managed-auth-dialog",
-            generation=generation,
-        )
-
-    def mark_discord_managed_auth_callback_received(self, generation: int | None = None) -> None:
-        if generation is not None and not self._is_current_discord_managed_auth_generation(
-            generation
-        ):
-            return
-        dialog = getattr(self, "_discord_managed_auth_dialog", None)
-        if getattr(dialog, "is_open", True) is False:
-            return
-        if getattr(dialog, "is_waiting", True) is False:
-            return
-        set_callback_received = getattr(dialog, "set_callback_received", None)
-        if callable(set_callback_received):
-            set_callback_received()
+        self.page.run_task(_task)
 
     def _reopen_discord_managed_auth_browser(self) -> None:
-        self._run_optional_discord_auth_controller_hook("reopen_discord_managed_auth_browser")
+        async def _task() -> None:
+            result = await self.dashboard.reopen_discord_managed_authentication()
+            self._managed_authentication_presentation = result.presentation
+
+        self.page.run_task(_task)
 
     def _cancel_discord_managed_auth(self) -> None:
-        self._discord_managed_auth_cancelled = True
-        task_handle = getattr(self, "_discord_managed_auth_task_handle", None)
-        runtime = getattr(self, "_oauth_runtime", None)
-        if runtime is not None:
-            runtime.cancel_external_task(
-                task_handle,
-                task_name="discord-managed-auth-dialog",
-            )
-        cancel = getattr(task_handle, "cancel", None)
-        if callable(cancel):
-            with contextlib.suppress(Exception):
-                cancel()
-        self._discord_managed_auth_task_handle = None
         self._close_discord_managed_auth_dialog()
+        self.page.run_task(self.dashboard.cancel_managed_authentication)
 
     def _on_discord_managed_auth_byok(self) -> None:
         self._start_settings_pkce("discord_auth")
@@ -1597,88 +1189,6 @@ class TranslatorApp:
         self._founder_letter_dialog = dialog
         dialog.open()
 
-    def _api_key_verification_matches_current_field(self, provider: str, key: str) -> bool:
-        field_by_provider = {
-            "deepgram": "_deepgram_key",
-            "soniox": "_soniox_key",
-            "google": "_google_key",
-            "openrouter": "_openrouter_key",
-            "deepseek": "_deepseek_key",
-            "cerebras": "_cerebras_key",
-            "alibaba_beijing": "_alibaba_key_beijing",
-            "alibaba_singapore": "_alibaba_key_singapore",
-        }
-        field_name = field_by_provider.get(provider)
-        if field_name is None:
-            return True
-
-        field = getattr(getattr(self, "view_settings", None), field_name, None)
-        if field is None:
-            return True
-
-        current_key = getattr(field, "value", None)
-        if current_key is None:
-            return True
-
-        return current_key == key
-
-    async def _on_verify_api_key(self, provider: str, key: str) -> tuple[bool, str]:
-        success, msg = await self.controller.verify_api_key(provider, key)
-
-        if not self._api_key_verification_matches_current_field(provider, key):
-            return success, msg
-
-        # Save verification result to settings
-        setattr(self.controller.settings.api_key_verified, provider, success)
-        self.controller.persist_settings()
-
-        # Sync verification result with dashboard needs_key flags (UI update on user click)
-        if provider in ("deepgram", "soniox", "qwen_asr"):
-            self.view_dashboard.set_stt_needs_key(not success, update_ui=False)
-        elif provider in (
-            "google",
-            "openrouter",
-            "deepseek",
-            "cerebras",
-            "alibaba_beijing",
-            "alibaba_singapore",
-        ):
-            self.view_dashboard.set_translation_needs_key(not success, update_ui=False)
-
-        return success, msg
-
-    def _on_secret_cleared(self, key: str) -> None:
-        """Reset verification status when API key is cleared."""
-        # Map secret key name to provider name
-        key_to_provider = {
-            "deepgram_api_key": "deepgram",
-            "soniox_api_key": "soniox",
-            "google_api_key": "google",
-            "openrouter_api_key": "openrouter",
-            "deepseek_api_key": "deepseek",
-            "cerebras_api_key": "cerebras",
-            "alibaba_api_key": "alibaba_beijing",  # Use beijing as default
-            "alibaba_api_key_beijing": "alibaba_beijing",
-            "alibaba_api_key_singapore": "alibaba_singapore",
-        }
-        provider = key_to_provider.get(key)
-        if provider:
-            setattr(self.controller.settings.api_key_verified, provider, False)
-            self.controller.persist_settings()
-
-            # Update dashboard needs_key flag
-            if provider in ("deepgram", "soniox"):
-                self.view_dashboard.set_stt_needs_key(True, update_ui=False)
-            elif provider in (
-                "google",
-                "openrouter",
-                "deepseek",
-                "cerebras",
-                "alibaba_beijing",
-                "alibaba_singapore",
-            ):
-                self.view_dashboard.set_translation_needs_key(True, update_ui=False)
-
     def _show_snackbar(self, message: str, bgcolor, duration: int = 4000) -> None:
         """Show a snackbar above the bottom nav."""
         snackbar = ft.SnackBar(
@@ -1696,26 +1206,28 @@ class TranslatorApp:
         self._show_snackbar(message, bgcolor)
 
     def clear_managed_auth_pending_state(self) -> None:
-        self.controller.clear_managed_auth_pending_state()
+        self.page.run_task(self.dashboard.cancel_managed_authentication)
 
     def get_event_language_codes(self) -> tuple[str | None, str | None]:
-        return self.controller.get_event_language_codes()
+        snapshot = self._dashboard_snapshot
+        if snapshot is None:
+            return None, None
+        return snapshot.settings.languages.source, snapshot.settings.languages.target
 
     def is_event_translation_enabled(self) -> bool:
-        return bool(self.controller.hub.translation_enabled)
+        snapshot = self._dashboard_snapshot
+        return bool(snapshot is not None and snapshot.translation_enabled)
 
     def get_event_stt_state(self) -> object | None:
-        stt = self.controller.hub.stt
-        return stt.state if stt is not None else None
+        snapshot = self._dashboard_snapshot
+        return None if snapshot is None else snapshot.self_stt_state
 
     def on_github_star_translation_success(self) -> None:
-        self.controller.schedule_github_star_prompt_translation_success_observed()
+        self.dashboard.observe_github_star_translation_success()
 
     def on_telemetry_translation_success(self) -> None:
         async def _task() -> None:
-            record = getattr(self.controller, "record_telemetry_translation_success_day", None)
-            if callable(record):
-                await record()
+            await self.dashboard.record_telemetry_translation_success_day()
 
         self._queue_settings_mutation_task(_task)
 
@@ -1732,7 +1244,6 @@ class TranslatorApp:
         self._log_detailed(
             f"[Overlay] State detail: overlay_state={state} failure_reason={failure_reason}"
         )
-        self.refresh_overlay_peer_contract()
 
 
 async def main_gui(
@@ -1749,6 +1260,7 @@ async def main_gui(
     application_runtime_host: object | None = None,
     application_adapters: object | None = None,
     ui_settings: UiSettingsApplication,
+    dashboard: DashboardApplicationPort,
     defer_startup: bool = False,
 ):
     parameters = inspect.signature(TranslatorApp).parameters
@@ -1766,6 +1278,7 @@ async def main_gui(
         "application_runtime_host": application_runtime_host,
         "application_adapters": application_adapters,
         "ui_settings": ui_settings,
+        "dashboard": dashboard,
     }
     app_kwargs = {
         name: value for name, value in candidates.items() if name in parameters or accepts_kwargs
@@ -1776,7 +1289,6 @@ async def main_gui(
         app_kwargs["allow_stable_settings_import"] = allow_stable_settings_import
     app = TranslatorApp(page, **app_kwargs)
     if not defer_startup:
-        await app.controller.start()
         await complete_main_gui_startup(app, page)
     return app
 

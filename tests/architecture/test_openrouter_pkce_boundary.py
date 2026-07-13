@@ -4,7 +4,7 @@ import ast
 from pathlib import Path
 
 
-def test_ui_and_controller_do_not_own_openrouter_pkce_resources() -> None:
+def test_ui_does_not_own_openrouter_pkce_resources() -> None:
     root = Path(__file__).resolve().parents[2]
     forbidden = {
         "OpenRouterPKCEClient",
@@ -13,11 +13,7 @@ def test_ui_and_controller_do_not_own_openrouter_pkce_resources() -> None:
         "_create_callback_listener",
         "callback_origin",
     }
-    for relative in (
-        "src/puripuly_heart/ui/app.py",
-        "src/puripuly_heart/ui/controller.py",
-        "src/puripuly_heart/ui/views/settings.py",
-    ):
+    for relative in ("src/puripuly_heart/ui/app.py",):
         source = (root / relative).read_text(encoding="utf-8")
         tree = ast.parse(source)
         names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)} | {
@@ -56,24 +52,3 @@ def test_pkce_handoff_uses_its_exact_runtime_apply_port() -> None:
         encoding="utf-8"
     )
     assert ") -> OpenRouterPkceRuntimeApplyResult:" in adapter
-
-
-def test_pkce_controller_tests_have_no_unconditional_early_return() -> None:
-    root = Path(__file__).resolve().parents[2]
-    path = root / "tests/ui/test_controller_branch_paths.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    names = {
-        "test_connect_openrouter_via_pkce_stores_key_sets_alias_and_marks_verified",
-        "test_connect_openrouter_via_pkce_rejects_unverified_exchanged_key",
-        "test_connect_openrouter_via_pkce_rebuilds_llm_when_signature_is_unchanged",
-        "test_connect_openrouter_via_pkce_leaves_settings_unchanged_on_failure",
-        "test_connect_openrouter_via_pkce_reopens_letter_context_on_letter_failure",
-        "test_connect_openrouter_via_pkce_returns_degraded_on_runtime_apply_failure",
-        "test_connect_openrouter_via_pkce_restores_secret_on_settings_commit_failure",
-    }
-    found: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
-            found.add(node.name)
-            assert not any(isinstance(statement, ast.Return) for statement in node.body), node.name
-    assert found == names

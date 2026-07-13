@@ -1,5 +1,37 @@
 from __future__ import annotations
 
+RETAINED_DYNAMIC_SETTINGS_I18N_KEYS = (
+    "settings.clipboard_auto_translate.off",
+    "settings.clipboard_auto_translate.on",
+    "settings.custom_vocabulary.add_action",
+    "settings.custom_vocabulary.add_placeholder",
+    "settings.custom_vocabulary.description",
+    "settings.custom_vocabulary.empty",
+    "settings.custom_vocabulary.remove_hint",
+    "settings.local_llm.api_key.description",
+    "settings.local_llm.api_key.save_failed",
+    "settings.local_llm.base_url.invalid",
+    "settings.local_llm.connection",
+    "settings.local_llm.extra_body.description",
+    "settings.local_llm.extra_body.invalid_json",
+    "settings.local_llm.extra_body.must_be_object",
+    "settings.local_llm.extra_body.not_serializable",
+    "settings.local_llm.extra_body.reserved_key",
+    "settings.local_llm.extra_body.sensitive_key",
+    "settings.local_llm.model.required",
+    "settings.managed_key.invite_progress.label",
+    "settings.managed_key.referral_id.empty",
+    "settings.managed_key.referral_id.helper",
+    "settings.managed_key.referral_id.label",
+    "settings.managed_key.referral_id.pending_helper",
+    "settings.managed_key.title",
+    "settings.qwen_region",
+    "settings.section.custom_vocabulary",
+    "settings.section.peer_vad_sensitivity",
+    "settings.translation_connection.ollama.description",
+    "snackbar.custom_vocabulary_limit",
+)
+
 import logging
 from typing import Awaitable, Callable, TypeVar
 

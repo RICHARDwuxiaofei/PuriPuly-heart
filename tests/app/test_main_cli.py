@@ -76,7 +76,7 @@ def _install_async_gui_harness(monkeypatch, tmp_path, calls, *, on_main_gui=None
         async def shutdown(self) -> None:
             calls["overlay_stop"] = int(calls.get("overlay_stop", 0)) + 1
 
-    class Controller:
+    class PresentationLifecycle:
         async def prepare_presentation(self) -> None:
             calls["presentation_prepare"] = True
 
@@ -116,6 +116,7 @@ def _install_async_gui_harness(monkeypatch, tmp_path, calls, *, on_main_gui=None
             runtime_host=runtime,
             canonical_commands=object(),
             ui_settings=object(),
+            dashboard=object(),
             start=runtime.start,
             shutdown=runtime.shutdown,
             close=runtime.shutdown,
@@ -134,7 +135,8 @@ def _install_async_gui_harness(monkeypatch, tmp_path, calls, *, on_main_gui=None
         calls["ui_settings"] = kwargs["ui_settings"]
         if on_main_gui is not None:
             on_main_gui()
-        return SimpleNamespace(controller=Controller())
+        lifecycle = PresentationLifecycle()
+        return SimpleNamespace(create_presentation_lifecycle=lambda: lifecycle)
 
     async def complete_main_gui_startup(_app, _page) -> None:
         calls["ui_complete"] = True
@@ -260,7 +262,7 @@ def test_main_owns_gui_lifecycle_start_disconnect_and_awaited_stop(monkeypatch, 
     from puripuly_heart.app.adapters import overlay_lifecycle_production
     from puripuly_heart.ui import app as ui_app
 
-    class Controller:
+    class PresentationLifecycle:
         async def prepare_presentation(self) -> None:
             loop_ids.append(id(asyncio.get_running_loop()))
             events.append("prepare")
@@ -340,6 +342,7 @@ def test_main_owns_gui_lifecycle_start_disconnect_and_awaited_stop(monkeypatch, 
             runtime_host=runtime,
             canonical_commands=object(),
             ui_settings=object(),
+            dashboard=object(),
             start=runtime.start,
             shutdown=runtime.shutdown,
             close=runtime.shutdown,
@@ -353,7 +356,10 @@ def test_main_owns_gui_lifecycle_start_disconnect_and_awaited_stop(monkeypatch, 
     monkeypatch.setattr(
         ui_app,
         "main_gui",
-        lambda *_args, **_kwargs: asyncio.sleep(0, result=SimpleNamespace(controller=Controller())),
+        lambda *_args, **_kwargs: asyncio.sleep(
+            0,
+            result=SimpleNamespace(create_presentation_lifecycle=lambda: PresentationLifecycle()),
+        ),
     )
 
     async def complete(_app, _page) -> None:
@@ -456,6 +462,7 @@ def test_main_closes_constructed_resources_when_flet_swallows_construction_failu
             runtime_host=runtime,
             canonical_commands=object(),
             ui_settings=object(),
+            dashboard=object(),
             start=runtime.start,
             shutdown=runtime.shutdown,
             close=runtime.shutdown,
@@ -470,9 +477,9 @@ def test_main_closes_constructed_resources_when_flet_swallows_construction_failu
     async def fail_ui_construction(*_args, **_kwargs):
         if failure_stage == "ui":
             raise ValueError("presentation construction failed")
-        return SimpleNamespace(controller=Controller())
+        return SimpleNamespace(create_presentation_lifecycle=lambda: PresentationLifecycle())
 
-    class Controller:
+    class PresentationLifecycle:
         async def prepare_presentation(self) -> None:
             return None
 

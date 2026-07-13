@@ -165,6 +165,9 @@ async def _run_gui_async(
                 initial_settings,
                 audio_gate=composition.audio_gate,
                 overlay_runtime=composition.runtime,
+                overlay_commands=composition.commands,
+                overlay_application_state=composition.state,
+                debug_audio_faults_enabled=debug_ui_preview,
             ),
             close_name="close",
         )
@@ -209,6 +212,8 @@ async def _run_gui_async(
                 if debug_ui_preview
                 else runtime_composition.ui_settings
             )
+        if "dashboard" in parameters or accepts_kwargs:
+            kwargs["dashboard"] = runtime_composition.dashboard
         if "defer_startup" in parameters or accepts_kwargs:
             kwargs["defer_startup"] = True
         if "allow_stable_settings_import" in parameters or any(
@@ -219,6 +224,10 @@ async def _run_gui_async(
             app = await ui_app.main_gui(page, **kwargs)
             if app is None:
                 return None
+            create_presentation_lifecycle = getattr(app, "create_presentation_lifecycle", None)
+            if not callable(create_presentation_lifecycle):
+                raise RuntimeError("GUI did not provide a dashboard presentation lifecycle")
+            application_lifecycle.adopt_presentation(create_presentation_lifecycle())
         except BaseException as construction_failure:
             try:
                 await application_lifecycle.stop()
@@ -232,7 +241,6 @@ async def _run_gui_async(
             target_failures.append(construction_failure)
             raise
         try:
-            application_lifecycle.adopt_presentation(app.controller)
             await application_lifecycle.start()
         except BaseException as startup_failure:
             target_failures.append(startup_failure)

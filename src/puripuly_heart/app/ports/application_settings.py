@@ -465,6 +465,13 @@ class GithubStarShowCountCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class GithubStarOpenedCommand:
+    last_shown_at: str
+    show_count: int
+    expected_revision: str
+
+
+@dataclass(frozen=True, slots=True)
 class GithubStarTranslationSuccessObservedCommand:
     value: bool
     expected_revision: str
@@ -492,6 +499,7 @@ OperationalStateCommand: TypeAlias = (
     GithubStarClickedCommand
     | GithubStarLastShownAtCommand
     | GithubStarShowCountCommand
+    | GithubStarOpenedCommand
     | GithubStarTranslationSuccessObservedCommand
     | GithubStarEligibleLaunchCountCommand
     | PeerTranslationEulaAcceptedCommand

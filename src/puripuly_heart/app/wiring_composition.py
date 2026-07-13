@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -171,6 +171,8 @@ class ApplicationRuntimeProductionComposition:
     secrets: object
     persistence: object
     ui_settings: object
+    dashboard: object
+    _closed_resources: set[str] = field(default_factory=set, init=False, repr=False)
 
     async def start(self, *, auto_flush_osc: bool = True) -> None:
         await self.ui_settings.start()
@@ -182,14 +184,20 @@ class ApplicationRuntimeProductionComposition:
 
     async def close(self) -> None:
         failures: list[BaseException] = []
-        try:
-            await self.ui_settings.close()
-        except BaseException as exc:
-            failures.append(exc)
-        try:
-            await self.runtime_host.shutdown()
-        except BaseException as exc:
-            failures.append(exc)
+        resources = (
+            ("dashboard", self.dashboard, "close"),
+            ("ui_settings", self.ui_settings, "close"),
+            ("runtime_host", self.runtime_host, "shutdown"),
+        )
+        for name, resource, method_name in resources:
+            if name in self._closed_resources:
+                continue
+            try:
+                await getattr(resource, method_name)()
+            except BaseException as exc:
+                failures.append(exc)
+            else:
+                self._closed_resources.add(name)
         if len(failures) == 1:
             raise failures[0]
         if failures:
@@ -206,6 +214,9 @@ def create_application_runtime_host(
     runtime_logging=None,  # noqa: ANN001
     audio_gate=None,  # noqa: ANN001
     overlay_runtime=None,  # noqa: ANN001
+    overlay_commands=None,  # noqa: ANN001
+    overlay_application_state=None,  # noqa: ANN001
+    debug_audio_faults_enabled: bool = False,
 ):  # noqa: ANN201
     return create_application_runtime_production_composition(
         state_path,
@@ -213,6 +224,9 @@ def create_application_runtime_host(
         runtime_logging=runtime_logging,
         audio_gate=audio_gate,
         overlay_runtime=overlay_runtime,
+        overlay_commands=overlay_commands,
+        overlay_application_state=overlay_application_state,
+        debug_audio_faults_enabled=debug_audio_faults_enabled,
     ).runtime_host
 
 
@@ -223,6 +237,9 @@ def create_application_runtime_production_composition(
     runtime_logging=None,  # noqa: ANN001
     audio_gate=None,  # noqa: ANN001
     overlay_runtime=None,  # noqa: ANN001
+    overlay_commands=None,  # noqa: ANN001
+    overlay_application_state=None,  # noqa: ANN001
+    debug_audio_faults_enabled: bool = False,
 ) -> ApplicationRuntimeProductionComposition:
     from puripuly_heart.app.adapters.application_runtime_production import (
         create_production_application_runtime,
@@ -297,12 +314,62 @@ def create_application_runtime_production_composition(
         ),
         secret_keys=UI_SETTINGS_SECRET_KEYS,
     )
+    from puripuly_heart.app.adapters.managed_authentication_production import (
+        create_production_managed_authentication_application,
+    )
+    from puripuly_heart.app.services.dashboard_application import DashboardApplication
+    from puripuly_heart.app.services.github_star_prompt_application import (
+        GithubStarPromptApplication,
+    )
+    from puripuly_heart.core.runtime.github_star_prompt import GithubStarPromptRuntime
+    from puripuly_heart.core.runtime.oauth import OAuthRuntime
+
+    async def github_star_eligible() -> bool:
+        snapshot = await ui_settings.snapshot()
+        connection = snapshot.translation.connection
+        if connection in {"managed", "managed_china"}:
+            remaining = snapshot.managed.trial_remaining_percent
+            return remaining is not None and remaining <= 60
+        operational = await canonical_commands.operational_queries.operational_snapshot()
+        values = dict(operational.leaves)
+        return bool(values.get(("github_star_prompt", "translation_success_observed"), False))
+
+    github_star_prompt = GithubStarPromptApplication(
+        commands=canonical_commands.operational_commands,
+        queries=canonical_commands.operational_queries,
+        eligibility=github_star_eligible,
+        runtime=GithubStarPromptRuntime(
+            diagnostics_sink=lambda event, metadata: runtime_host.runtime_logging.log_detailed(
+                f"[Lifecycle][GithubStarPromptRuntime] event={event} metadata={dict(metadata)}"
+            )
+        ),
+    )
+    managed_authentication = create_production_managed_authentication_application(
+        runtime_host=runtime_host,
+        ui_settings=ui_settings,
+        secrets=secrets,
+        oauth_runtime=OAuthRuntime(),
+    )
+
+    dashboard = DashboardApplication(
+        runtime_host=runtime_host,
+        ui_settings=ui_settings,
+        runtime_logging=runtime_host.runtime_logging,
+        managed_authentication=managed_authentication,
+        github_star_prompt=github_star_prompt,
+        telemetry_owner=telemetry_owner,
+        overlay_commands=overlay_commands,
+        overlay_state=overlay_application_state,
+        canonical_settings=canonical_commands.current_receipt,
+        debug_audio_faults_enabled=debug_audio_faults_enabled,
+    )
     return ApplicationRuntimeProductionComposition(
         runtime_host=runtime_host,
         canonical_commands=canonical_commands,
         secrets=secrets,
         persistence=persistence,
         ui_settings=ui_settings,
+        dashboard=dashboard,
     )
 
 

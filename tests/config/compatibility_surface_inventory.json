@@ -816,7 +816,7 @@
     {
       "module": "puripuly_heart.providers.llm.gemini",
       "source_rule": "existing public test or packaging import",
-      "source_of_truth_refs": ["src/puripuly_heart/providers/llm/gemini.py", "tests/ui/test_controller_branch_paths.py"],
+      "source_of_truth_refs": ["src/puripuly_heart/providers/llm/gemini.py"],
       "runtime_all_matches_exports": false,
       "facade_contract": null,
       "exports": [{"name": "GeminiLLMProvider", "kind": "attribute"}]
@@ -960,6 +960,7 @@
         ,"puripuly_heart.app.adapters.ui_settings_interactions"
         ,"puripuly_heart.app.adapters.microphone_test_source"
         ,"puripuly_heart.app.adapters.audio_device_query"
+        ,"puripuly_heart.app.adapters.managed_authentication_production"
       ],
       "rationale": "ProviderVerifierAdapter is an app adapter implementation of the provider-verifier port; the adapter class is importable for wiring/tests but is not an external public compatibility facade."
     },

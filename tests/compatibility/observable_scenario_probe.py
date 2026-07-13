@@ -97,7 +97,7 @@ CURRENT_NODES = {
         "tests/core/test_stt_controller.py::test_toggle_off_cancels_real_controller_without_finalization_and_restarts"
     ],
     "osc_typing_enqueue_send": [
-        "tests/ui/test_controller_manual_typing.py::test_submit_typing_is_generation_safe_and_clears_after_success",
+        "tests/app/test_application_runtime_host.py::test_manual_submit_keeps_typing_until_translation_settles",
         "tests/core/test_chatbox_paginator.py::test_short_message_sends_immediately_without_cooldown",
     ],
     "output_routes": [

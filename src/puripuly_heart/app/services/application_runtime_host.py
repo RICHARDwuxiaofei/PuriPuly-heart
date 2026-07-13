@@ -19,6 +19,7 @@ from puripuly_heart.app.ports.translation_application import (
     TranslationRuntimeSnapshot,
 )
 from puripuly_heart.app.services.canonical_runtime_resolution import CanonicalRuntimeConfigResolver
+from puripuly_heart.core.lifecycle import LifecycleScope, start_lifecycle_task
 from puripuly_heart.core.messages import (
     RUNTIME_APPLY_STATUS_APPLIED,
     RUNTIME_APPLY_STATUS_FAILED,
@@ -30,6 +31,13 @@ from puripuly_heart.core.runtime.self_audio import (
     SelfChannelSnapshot,
     SetSelfSTTEnabled,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class PeerRuntimeTransitionResult:
+    status: str
+    receipt: SettingsCommitReceipt
+    reconciliation_required: bool = False
 
 
 class RuntimeHubPort(Protocol):
@@ -133,6 +141,10 @@ class ApplicationRuntimeHost:
         self._dashboard_projection = dashboard_projection
         self._canonical_commands = None
         self._secret_rebind_lock = asyncio.Lock()
+        self._manual_input_idle_task: asyncio.Task[None] | None = None
+        self._manual_submit_generation = 0
+        self._manual_input_generation = 0
+        self._manual_input_scope = LifecycleScope("application-runtime-manual-input")
 
     @property
     def parts(self) -> ApplicationRuntimeParts | None:
@@ -252,6 +264,14 @@ class ApplicationRuntimeHost:
     def bind_final_suppressed(self, callback: object) -> None:
         if self.audio_hooks is not None:
             self.audio_hooks.final_suppressed_callback = callback
+
+    @property
+    def ui_event_queue(self):  # noqa: ANN201
+        return self._require_parts().hub.ui_events
+
+    @property
+    def output_runtime(self):  # noqa: ANN201
+        return self._require_parts().hub.output_runtime
 
     def set_debug_audio_faults(self, *, capture: str, stt: str) -> None:
         if self.audio_hooks is not None:
@@ -414,24 +434,79 @@ class ApplicationRuntimeHost:
         )
         return await parts.self_stt.execute(resolved_command)
 
-    async def resume_peer_stt(self) -> RuntimeApplyResult:
+    async def resume_peer_stt(self) -> PeerRuntimeTransitionResult:
         receipt = await self._committed_settings.load_receipt()
         installed = await self._install_available(receipt, ("peer_stt",))
         if "peer_stt" not in installed:
-            return RuntimeApplyResult(RUNTIME_APPLY_STATUS_FAILED, None, None)
-        return await self._runtime_composition.resume_peer_stt(receipt)
-
-    async def retry_peer_process_capture(self):  # noqa: ANN201
-        from puripuly_heart.app.ports.ui_settings import (
-            CaptureDiagnosticReason,
-            CaptureRetryResult,
-            CaptureRetryStatus,
+            return PeerRuntimeTransitionResult(RUNTIME_APPLY_STATUS_FAILED, receipt, True)
+        result = await self._runtime_composition.resume_peer_stt(receipt)
+        return PeerRuntimeTransitionResult(
+            result.status, receipt, result.status != RUNTIME_APPLY_STATUS_APPLIED
         )
+
+    async def pause_peer_stt(self) -> PeerRuntimeTransitionResult:
+        receipt = await self._committed_settings.load_receipt()
+        config = self._peer_runtime_config(receipt)
+        await self._require_parts().peer_runtime.apply_policy(config=config, desired_active=False)
+        return PeerRuntimeTransitionResult(RUNTIME_APPLY_STATUS_APPLIED, receipt)
+
+    async def submit_manual_self_text(self, text: str) -> str:
+        normalized = text.strip()
+        if not normalized:
+            return "rejected"
+        self.set_manual_input_activity(False)
+        parts = self._require_parts()
+        self._manual_submit_generation += 1
+        reason = f"manual_submit:{self._manual_submit_generation}"
+        parts.osc.set_typing_reason(reason, True)
+        try:
+            utterance_id = await parts.hub.submit_text(normalized, source="You")
+            translation_task = parts.hub.self_runtime.translation_tasks.get(utterance_id)
+            if isinstance(translation_task, asyncio.Task):
+                settlement = asyncio.gather(translation_task, return_exceptions=True)
+            elif inspect.isawaitable(translation_task):
+                settlement = translation_task
+            else:
+                settlement = None
+            if settlement is not None:
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(settlement), timeout=30.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return "failed"
+        finally:
+            parts.osc.set_typing_reason(reason, False)
+        return "applied"
+
+    def set_manual_input_activity(self, has_text: bool) -> None:
+        task = self._manual_input_idle_task
+        self._manual_input_idle_task = None
+        if task is not None and not task.done():
+            task.cancel()
+        osc = self._require_parts().osc
+        osc.set_typing_reason("manual_input", has_text)
+        if has_text:
+            self._manual_input_generation += 1
+            self._manual_input_idle_task = start_lifecycle_task(
+                self._manual_input_scope,
+                self._clear_manual_input_after_idle(),
+                name=f"idle-timeout-{self._manual_input_generation}",
+            )
+
+    async def _clear_manual_input_after_idle(self) -> None:
+        try:
+            await asyncio.sleep(1.5)
+            self._require_parts().osc.set_typing_reason("manual_input", False)
+        finally:
+            if self._manual_input_idle_task is asyncio.current_task():
+                self._manual_input_idle_task = None
+
+    def _peer_runtime_config(self, receipt: SettingsCommitReceipt):  # noqa: ANN201
         from puripuly_heart.core.runtime.peer_channel import PeerRuntimeConfig
 
-        receipt = await self._committed_settings.load_receipt()
         peer = self._resolver.resolve(receipt).peer_stt
-        config = PeerRuntimeConfig(
+        return PeerRuntimeConfig(
             backend=peer,
             output_device=peer.output_device or "",
             vad_threshold=peer.vad_speech_threshold,
@@ -441,6 +516,16 @@ class ApplicationRuntimeHost:
             runtime_signature=(peer,),
             capture_target=peer.capture_target,
         )
+
+    async def retry_peer_process_capture(self):  # noqa: ANN201
+        from puripuly_heart.app.ports.ui_settings import (
+            CaptureDiagnosticReason,
+            CaptureRetryResult,
+            CaptureRetryStatus,
+        )
+
+        receipt = await self._committed_settings.load_receipt()
+        config = self._peer_runtime_config(receipt)
         runtime = self._require_parts().peer_runtime
         if config.capture_target.kind != "process":
             return CaptureRetryResult(
@@ -521,6 +606,16 @@ class ApplicationRuntimeHost:
         if parts is None:
             return
         failures: list[BaseException] = []
+        try:
+            await self._manual_input_scope.close()
+        except BaseException as exc:
+            failures.append(exc)
+        manual_task = self._manual_input_idle_task
+        self._manual_input_idle_task = None
+        if manual_task is not None and not manual_task.done():
+            manual_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await manual_task
         if self._openrouter_pkce is not None:
             try:
                 await self._openrouter_pkce.close()

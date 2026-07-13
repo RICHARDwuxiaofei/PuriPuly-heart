@@ -419,71 +419,7 @@ KNOWN_ALLOWED_VIOLATIONS: frozenset[ImportViolation] = frozenset(
         ),
         ImportViolation(
             rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/app.py",
-            imported="puripuly_heart.config.settings",
-            importer_layer="UI adapters/renderers",
-            imported_layer="migration/serialization",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.app.wiring",
-            importer_layer="UI adapters/renderers",
-            imported_layer="adapters",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.config.settings",
-            importer_layer="UI adapters/renderers",
-            imported_layer="migration/serialization",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.core.runtime_logging",
-            importer_layer="UI adapters/renderers",
-            imported_layer="adapters",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.core.osc.chatbox_paginator",
-            importer_layer="UI adapters/renderers",
-            imported_layer="adapters",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/controller.py",
-            imported="puripuly_heart.core.osc.udp_sender",
-            importer_layer="UI adapters/renderers",
-            imported_layer="adapters",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
             importer="src/puripuly_heart/ui/desktop_overlay.py",
-            imported="puripuly_heart.config.settings",
-            importer_layer="UI adapters/renderers",
-            imported_layer="migration/serialization",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/views/settings.py",
-            imported="puripuly_heart.app.wiring",
-            importer_layer="UI adapters/renderers",
-            imported_layer="adapters",
-            reason="UI adapters/renderers may depend on app services, snapshots, i18n, and rendered log entries, not migration internals, provider construction, or concrete resource wiring",
-        ),
-        ImportViolation(
-            rule_id="ui-adapters-avoid-provider-construction",
-            importer="src/puripuly_heart/ui/views/settings.py",
             imported="puripuly_heart.config.settings",
             importer_layer="UI adapters/renderers",
             imported_layer="migration/serialization",
@@ -577,39 +513,8 @@ LEGACY_SETTINGS_VALUE_PAYLOAD_PREFIXES = (
 
 UNKNOWN_SETTINGS_RUNTIME_CONFINEMENT_RATIONALE = "unclassified order-11 settings runtime debt"
 
-KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementViolation] = frozenset(
-    {
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
-            "src/puripuly_heart/ui/app.py",
-            "AppSettings",
-            "UI app imports AppSettings only for public compatibility type annotations and BYOK target wrapper handoff; active provider apply runtime behavior is owned by controller/app services.",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
-            "src/puripuly_heart/ui/controller.py",
-            "AppSettings",
-            "GuiController remains the UI settings/persistence boundary for loading, saving, and view synchronization while vNext serialization remains behind the public settings facade; no private legacy runtime shim may be reintroduced.",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
-            "src/puripuly_heart/ui/controller.py",
-            "load_settings",
-            "GuiController loads through the preserved public settings facade as the UI persistence boundary; facade compatibility is frozen by Gate 0 and backed by vNext serialization internally.",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
-            "src/puripuly_heart/ui/controller.py",
-            "save_settings",
-            "GuiController saves through the preserved public settings facade as the UI persistence boundary; facade compatibility is frozen by Gate 0 and backed by vNext serialization internally.",
-        ),
-        SettingsRuntimeConfinementViolation(
-            "legacy-settings-api-import",
-            "src/puripuly_heart/ui/views/settings.py",
-            "AppSettings",
-            "SettingsView remains a UI editor for the public AppSettings compatibility model while controller/app services own persistence; replacing the view draft model is deferred UI-rendering work, not active runtime resolution.",
-        ),
-    }
+KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT: frozenset[SettingsRuntimeConfinementViolation] = (
+    frozenset()
 )
 
 
@@ -1197,6 +1102,8 @@ def test_settings_public_facade_delegates_persistence_helpers_to_vnext_facade() 
 
 def test_controller_consumes_only_canonical_settings_port_and_composition_entrypoint() -> None:
     controller_path = SOURCE_PACKAGE_ROOT / "ui" / "controller.py"
+    assert not controller_path.exists()
+    return
     tree = ast.parse(controller_path.read_text(encoding="utf-8"))
     imports = {
         node.module: {alias.name for alias in node.names}
@@ -1271,6 +1178,8 @@ def test_internal_source_imports_canonical_overlay_calibration_not_ui_facade() -
 
 def test_ui_controller_uses_adapter_seam_instead_of_concrete_provider_imports() -> None:
     controller_path = SOURCE_PACKAGE_ROOT / "ui" / "controller.py"
+    assert not controller_path.exists()
+    return
     imported_modules = set(
         _imported_modules(
             "puripuly_heart.ui.controller",
@@ -1289,6 +1198,8 @@ def test_ui_controller_uses_adapter_seam_instead_of_concrete_provider_imports() 
 
 def test_ui_controller_active_overlay_logic_avoids_legacy_resource_mirrors() -> None:
     controller_path = SOURCE_PACKAGE_ROOT / "ui" / "controller.py"
+    assert not controller_path.exists()
+    return
     tree = ast.parse(controller_path.read_text(encoding="utf-8"))
     legacy_mirror_fields = {
         "_overlay_presenter",
@@ -1324,6 +1235,8 @@ def test_ui_controller_active_overlay_logic_avoids_legacy_resource_mirrors() -> 
 
 def test_ui_controller_does_not_own_overlay_lifecycle_or_concrete_resources() -> None:
     controller_path = SOURCE_PACKAGE_ROOT / "ui" / "controller.py"
+    assert not controller_path.exists()
+    return
     source = controller_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
     forbidden_methods = {
@@ -1377,7 +1290,7 @@ def test_current_concrete_osc_imports_are_adapter_boundary_violations() -> None:
         ),
     }
 
-    assert expected <= _dependency_violations()
+    assert not expected & _dependency_violations()
     assert (
         ImportViolation(
             rule_id=orchestrator_rule.rule_id,
@@ -1467,12 +1380,18 @@ def test_gate1_existing_replacement_private_shims_are_removed() -> None:
 
     offenders: list[str] = []
     for relative_path, forbidden_tokens in disallowed_private_shims.items():
-        source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        path = REPO_ROOT / relative_path
+        if not path.exists():
+            continue
+        source = path.read_text(encoding="utf-8")
         offenders.extend(
             f"{relative_path}: {token}" for token in forbidden_tokens if token in source
         )
 
     controller_path = REPO_ROOT / "src/puripuly_heart/ui/controller.py"
+    if not controller_path.exists():
+        assert offenders == []
+        return
     controller_tree = ast.parse(controller_path.read_text(encoding="utf-8"))
     for node in ast.walk(controller_tree):
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -1523,8 +1442,28 @@ def test_absolute_from_import_resolves_layer_root_namespace_candidates(
 
 def test_dependency_boundary_allowlist_matches_current_violations() -> None:
     actual = _dependency_violations()
+    c1_owned_imports = {
+        (
+            "src/puripuly_heart/app/services/canonical_command_composition.py",
+            "puripuly_heart.app.wiring",
+        ),
+        (
+            "src/puripuly_heart/app/services/canonical_command_composition.py",
+            "puripuly_heart.config.settings",
+        ),
+        (
+            "src/puripuly_heart/app/services/canonical_secret_commands.py",
+            "puripuly_heart.core.storage.secrets",
+        ),
+    }
+    c1_owned = {
+        violation
+        for violation in actual
+        if (violation.importer, violation.imported) in c1_owned_imports
+    }
+    assert {(item.importer, item.imported) for item in c1_owned} == c1_owned_imports
 
-    unexpected = sorted(actual - KNOWN_ALLOWED_VIOLATIONS)
+    unexpected = sorted(actual - KNOWN_ALLOWED_VIOLATIONS - c1_owned)
     stale = sorted(KNOWN_ALLOWED_VIOLATIONS - actual)
 
     assert not unexpected and not stale, (
@@ -1535,6 +1474,27 @@ def test_dependency_boundary_allowlist_matches_current_violations() -> None:
         "Stale allowlist entries:\n"
         f"{_format_violations(stale)}"
     )
+
+
+def test_canonical_owned_removal_integrity() -> None:
+    assert not (SOURCE_PACKAGE_ROOT / "ui" / "controller.py").exists()
+    assert not (SOURCE_PACKAGE_ROOT / "ui" / "views" / "settings.py").exists()
+    app_source = (SOURCE_PACKAGE_ROOT / "ui" / "app.py").read_text(encoding="utf-8")
+    assert "puripuly_heart.config.settings" not in app_source
+    assert "AppSettings" not in app_source
+    assert KNOWN_SETTINGS_RUNTIME_CONFINEMENT_DEBT == frozenset()
+    actual = _dependency_violations()
+    removed_importers = {
+        "src/puripuly_heart/ui/app.py",
+        "src/puripuly_heart/ui/controller.py",
+        "src/puripuly_heart/ui/views/settings.py",
+    }
+    assert not {
+        violation
+        for violation in actual
+        if violation.importer in removed_importers
+        and violation.imported in {"puripuly_heart.app.wiring", "puripuly_heart.config.settings"}
+    }
 
 
 def test_canonical_state_service_does_not_compose_concrete_adapter() -> None:
@@ -1673,65 +1633,19 @@ def test_application_settings_command_codecs_are_additive_typed_contracts() -> N
     assert "class OperationalStateCommand:" not in sources[0]
     assert "PersistedOperationalState" not in sources[0]
     assert "UserIntentSettings" not in sources[0]
-    production_sources = (
+    production_sources = tuple(
         (path, path.read_text(encoding="utf-8"))
         for path in SOURCE_PACKAGE_ROOT.rglob("*.py")
         if path not in {port_path, codec_path}
     )
-    approved_consumers = {
+    codec_consumers = {
+        path for path, source in production_sources if "application_settings_codecs" in source
+    }
+    assert codec_consumers == {
         SOURCE_PACKAGE_ROOT / "app" / "services" / "canonical_application_settings.py",
     }
-    assert all(
-        "application_settings_codecs" not in source or path in approved_consumers
-        for path, source in production_sources
-    )
 
 
 def test_retired_controller_runtime_apply_adapters_do_not_return_as_aliases() -> None:
     path = SOURCE_PACKAGE_ROOT / "app" / "services" / "provider_runtime_apply.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    definitions = {
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    assert "_ControllerProviderRuntimeApply" not in definitions
-    assert "_ControllerOverlayOscOutputRuntimeApply" not in definitions
-    assert not {
-        name
-        for name in definitions
-        if name.endswith(("ProviderRuntimeApply", "OverlayOscOutputRuntimeApply"))
-    }
-
-
-def test_c3_retained_controller_runtime_apply_paths_remain_explicit() -> None:
-    path = SOURCE_PACKAGE_ROOT / "app" / "services" / "provider_runtime_apply.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    definitions = {
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    assert {
-        "_ControllerNoopRuntimeApply",
-        "_ControllerSttLanguageAudioRuntimeApply",
-        "_ControllerUiPromptClipboardStateRuntimeApply",
-        "_provider_runtime_apply_unavailable_result",
-        "_stt_language_audio_runtime_unavailable_result",
-    } <= definitions
-
-    controller = ast.parse(
-        (SOURCE_PACKAGE_ROOT / "ui" / "controller.py").read_text(encoding="utf-8")
-    )
-    controller_definitions = {
-        node.name
-        for node in ast.walk(controller)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    assert {
-        "_apply_settings_direct",
-        "_apply_providers_direct",
-        "_apply_provider_runtime_plan",
-        "_build_provider_runtime_apply_plan",
-        "_sync_signature_caches",
-    } <= controller_definitions
+    assert not path.exists()

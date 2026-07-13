@@ -497,8 +497,22 @@ class UiSettingsApplication:
     async def snapshot(self) -> UiSettingsSnapshot:
         return await self.settings.snapshot()
 
+    async def operational_snapshot(self):  # noqa: ANN201
+        return await self.settings._commands.operational_queries.operational_snapshot()
+
     async def apply(self, delta: UiSettingsDelta) -> UiSettingsResult:
         return await self.settings.apply(delta)
+
+    async def set_peer_translation_eula(
+        self, accepted: bool, expected_revision: str
+    ):  # noqa: ANN201
+        from puripuly_heart.app.ports.application_settings import (
+            PeerTranslationEulaAcceptedCommand,
+        )
+
+        return await self.settings._commands.operational_commands.execute_operational(
+            PeerTranslationEulaAcceptedCommand(accepted, expected_revision)
+        )
 
     def run_interaction(self, operation: Coroutine[Any, Any, Any]):
         if not self._started or self._closed:
