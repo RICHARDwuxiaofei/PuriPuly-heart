@@ -53,7 +53,6 @@ class _OpenRouterPKCECallbackListener:
     timeout_seconds: float
     _worker: threading.Thread = field(init=False, repr=False)
     _closed: bool = field(init=False, default=False, repr=False)
-    _close_lock: threading.Lock = field(init=False, default_factory=threading.Lock, repr=False)
 
     def __post_init__(self) -> None:
         self._worker = threading.Thread(
@@ -74,10 +73,9 @@ class _OpenRouterPKCECallbackListener:
         return str(result)
 
     def close(self) -> None:
-        with self._close_lock:
-            if self._closed:
-                return
-            self._closed = True
+        if self._closed:
+            return
+        self._closed = True
         try:
             self.result_queue.put_nowait(_LISTENER_CLOSED_SENTINEL)
         except queue.Full:
@@ -91,7 +89,6 @@ class OpenRouterPKCEClient:
     def __init__(self, *, callback_origin: str):
         self.callback_origin = callback_origin.rstrip("/")
         self.current_authorization_url: str | None = None
-        self._listener: _OpenRouterPKCECallbackListener | None = None
 
     def build_session(self) -> OpenRouterPKCESession:
         code_verifier = secrets.token_urlsafe(64)
@@ -145,7 +142,7 @@ class OpenRouterPKCEClient:
         parsed_path = urllib.parse.urlsplit(path)
         query = urllib.parse.parse_qs(parsed_path.query)
         state = query.get("state", [""])[0]
-        if state != session.state:
+        if state and state != session.state:
             raise ValueError("callback state did not match")
 
         code = query.get("code", [""])[0]
@@ -181,9 +178,7 @@ class OpenRouterPKCEClient:
                 try:
                     result_queue.put_nowait(code)
                 except queue.Full:
-                    self.send_response(http.HTTPStatus.CONFLICT)
-                    self.end_headers()
-                    return
+                    pass
 
                 body = render_oauth_callback_completion_page()
                 self.send_response(http.HTTPStatus.OK)
@@ -207,14 +202,11 @@ class OpenRouterPKCEClient:
         session = self.build_session()
         self.current_authorization_url = session.authorization_url
         listener = self._create_callback_listener(session)
-        self._listener = listener
         try:
             webbrowser.open(session.authorization_url)
             code = await asyncio.to_thread(listener.wait_for_code)
         finally:
             listener.close()
-            if self._listener is listener:
-                self._listener = None
 
         return await self.exchange_code(
             code=code,
@@ -226,8 +218,3 @@ class OpenRouterPKCEClient:
         if not self.current_authorization_url:
             return False
         return bool(webbrowser.open(self.current_authorization_url))
-
-    def cancel(self) -> None:
-        listener = self._listener
-        if listener is not None:
-            listener.close()

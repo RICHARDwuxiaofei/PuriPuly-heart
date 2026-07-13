@@ -143,38 +143,6 @@ class FakeBackend:
         return s
 
 
-@pytest.mark.asyncio
-async def test_toggle_off_cancels_real_controller_without_finalization_and_restarts() -> None:
-    backend = FakeBackend()
-    provider = ManagedSTTProvider(backend=backend, sample_rate_hz=16000)
-    first_utterance = uuid4()
-
-    await provider.handle_vad_event(SpeechStart(first_utterance, samples(160), samples(160)))
-    await asyncio.sleep(0)
-    await provider.stop_for_toggle_off()
-    await asyncio.sleep(0)
-
-    first_session = backend.sessions[0]
-    queued_events = []
-    while not provider._events.empty():
-        queued_events.append(provider._events.get_nowait())
-    assert first_session.calls == ["stop", "close"]
-    assert not any(isinstance(event, STTFinalEvent) for event in queued_events)
-    assert provider.state is STTSessionState.DISCONNECTED
-
-    second_utterance = uuid4()
-    await provider.handle_vad_event(SpeechStart(second_utterance, samples(160), samples(160)))
-    await provider.handle_vad_event(SpeechEnd(second_utterance))
-    await provider.close()
-
-    assert len(backend.sessions) == 2
-    assert "on_speech_end" in backend.sessions[1].calls
-    assert any(
-        isinstance(event, STTFinalEvent) and event.utterance_id == second_utterance
-        for event in list(provider._events._queue)
-    )
-
-
 class ClosableFakeBackend(FakeBackend):
     def __init__(self) -> None:
         super().__init__()

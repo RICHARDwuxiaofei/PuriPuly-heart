@@ -61,14 +61,8 @@ class ManagedKeyDeliveryAckService:
             metadata.managed_credential_ref
         )
         self.managed_state.pending_delivery_ack_expires_at = metadata.expires_at
-        self.managed_state.pending_delivery_ack_delivered = False
 
     async def retry_pending(self) -> ManagedKeyDeliveryAckServiceResult:
-        return await self.acknowledge_pending(clear_on_success=True)
-
-    async def acknowledge_pending(
-        self, *, clear_on_success: bool
-    ) -> ManagedKeyDeliveryAckServiceResult:
         source = self.managed_state.pending_delivery_ack_source
         delivery_id = self.managed_state.pending_delivery_ack_delivery_id
         managed_credential_ref = self.managed_state.pending_delivery_ack_managed_credential_ref
@@ -105,12 +99,6 @@ class ManagedKeyDeliveryAckService:
             )
         )
         if ack_result.succeeded and ack_result.status in {"acknowledged", "already_acknowledged"}:
-            if not clear_on_success:
-                return ManagedKeyDeliveryAckServiceResult(
-                    succeeded=True,
-                    status=ack_result.status,
-                    ack_result=ack_result,
-                )
             try:
                 await self.clear_pending(source)
             except ManagedKeyDeliveryAckTokenClearError:
@@ -140,7 +128,6 @@ class ManagedKeyDeliveryAckService:
                     managed_credential_ref
                 )
                 self.managed_state.pending_delivery_ack_expires_at = expires_at
-                self.managed_state.pending_delivery_ack_delivered = False
                 if restore_result is None or not restore_result.succeeded:
                     return ManagedKeyDeliveryAckServiceResult(
                         succeeded=False,
@@ -196,7 +183,6 @@ class ManagedKeyDeliveryAckService:
         self.managed_state.pending_delivery_ack_delivery_id = None
         self.managed_state.pending_delivery_ack_managed_credential_ref = None
         self.managed_state.pending_delivery_ack_expires_at = None
-        self.managed_state.pending_delivery_ack_delivered = False
 
 
 async def store_pending_ack_in_settings_values(
@@ -235,7 +221,7 @@ async def store_pending_ack_in_settings_values(
 
 
 def clear_pending_ack_in_settings_values(
-    settings_values: Mapping[str, object],
+    settings_values: Mapping[str, object]
 ) -> dict[str, object]:
     values = _copy_mapping(settings_values)
     state = values.setdefault("state", {})

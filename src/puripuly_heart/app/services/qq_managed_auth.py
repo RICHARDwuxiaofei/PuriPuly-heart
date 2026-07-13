@@ -355,7 +355,6 @@ class QqManagedAuthService:
         secret_rollback_succeeded = await self._restore_secret_snapshot(secret_snapshot)
         if not secret_rollback_succeeded:
             self.managed_state.pending_delivery_ack_source = getattr(metadata, "source", None)
-            self.managed_state.pending_delivery_ack_delivered = False
             self.managed_state.pending_delivery_ack_delivery_id = getattr(
                 metadata, "delivery_id", None
             )

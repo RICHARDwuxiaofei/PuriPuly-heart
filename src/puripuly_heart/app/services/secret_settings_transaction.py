@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -15,7 +14,6 @@ from puripuly_heart.app.ports.provider_verifier import (
 )
 from puripuly_heart.app.ports.secret_store import SecretSnapshot, SecretStorePort
 from puripuly_heart.app.ports.settings_repository import (
-    SettingsCommitReceipt,
     SettingsCommitRequest,
     SettingsRepositoryPort,
 )
@@ -124,12 +122,6 @@ class DashboardNeedsKeySnapshotPublisher(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class SecretSettingsTransactionOutcome:
-    transaction_result: TransactionResult
-    receipt: SettingsCommitReceipt | None
-
-
-@dataclass(frozen=True, slots=True)
 class SecretSettingsTransaction:
     secret_store: SecretStorePort
     settings_repository: SettingsRepositoryPort
@@ -137,23 +129,13 @@ class SecretSettingsTransaction:
     provider_verifier: ProviderVerifierPort | None = None
 
     async def set_provider_secret(self, request: SecretSetRequest) -> TransactionResult:
-        return (await self.set_provider_secret_with_receipt(request)).transaction_result
-
-    async def set_provider_secret_with_receipt(
-        self, request: SecretSetRequest
-    ) -> SecretSettingsTransactionOutcome:
         try:
             snapshot = await self.secret_store.snapshot_secret(request.secret_key)
-        except BaseException as exc:
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            return SecretSettingsTransactionOutcome(
-                _secret_write_failed_result(
-                    secret_key=request.secret_key,
-                    action="set",
-                    operation="snapshot_secret",
-                ),
-                None,
+        except Exception:
+            return _secret_write_failed_result(
+                secret_key=request.secret_key,
+                action="set",
+                operation="snapshot_secret",
             )
 
         try:
@@ -161,30 +143,21 @@ class SecretSettingsTransaction:
                 request.secret_key,
                 request.secret_value,
             )
-        except BaseException as exc:
-            compensation = await self._restore_after_settings_commit_failure(
-                snapshot=snapshot,
+        except Exception:
+            return _secret_write_failed_result(
+                secret_key=request.secret_key,
                 action="set",
-                commit_message=None,
-            )
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            return SecretSettingsTransactionOutcome(
-                compensation,
-                None,
+                operation="set_secret",
             )
 
         if not write_result.succeeded:
-            return SecretSettingsTransactionOutcome(
-                _secret_write_failed_result(
-                    secret_key=request.secret_key,
-                    action="set",
-                    operation="set_secret",
-                ),
-                None,
+            return _secret_write_failed_result(
+                secret_key=request.secret_key,
+                action="set",
+                operation="set_secret",
             )
 
-        return await self._commit_settings_or_restore_secret_with_receipt(
+        return await self._commit_settings_or_restore_secret(
             request=request,
             snapshot=snapshot,
             action="set",
@@ -193,9 +166,7 @@ class SecretSettingsTransaction:
     async def clear_provider_secret(self, request: SecretClearRequest) -> TransactionResult:
         try:
             snapshot = await self.secret_store.snapshot_secret(request.secret_key)
-        except BaseException as exc:
-            if isinstance(exc, asyncio.CancelledError):
-                raise
+        except Exception:
             return _secret_write_failed_result(
                 secret_key=request.secret_key,
                 action="clear",
@@ -204,15 +175,12 @@ class SecretSettingsTransaction:
 
         try:
             write_result = await self.secret_store.clear_secret(request.secret_key)
-        except BaseException as exc:
-            compensation = await self._restore_after_settings_commit_failure(
-                snapshot=snapshot,
+        except Exception:
+            return _secret_write_failed_result(
+                secret_key=request.secret_key,
                 action="clear",
-                commit_message=None,
+                operation="clear_secret",
             )
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            return compensation
 
         if not write_result.succeeded:
             return _secret_write_failed_result(
@@ -291,15 +259,11 @@ class SecretSettingsTransaction:
             )
         )
         try:
-            expected_revision = request.expected_settings_revision
-            if expected_revision is None:
-                expected_revision = (await self.settings_repository.load_receipt()).revision
             commit_result = await self.settings_repository.save(
                 SettingsCommitRequest(
                     values=settings_values,
-                    expected_revision=expected_revision,
+                    expected_revision=request.expected_settings_revision,
                     reason=request.reason,
-                    correlation_id=request.correlation_id,
                 )
             )
         except Exception:
@@ -343,67 +307,37 @@ class SecretSettingsTransaction:
         snapshot: SecretSnapshot,
         action: str,
     ) -> TransactionResult:
-        return (
-            await self._commit_settings_or_restore_secret_with_receipt(
-                request=request, snapshot=snapshot, action=action
-            )
-        ).transaction_result
-
-    async def _commit_settings_or_restore_secret_with_receipt(
-        self,
-        *,
-        request: SecretSetRequest | SecretClearRequest,
-        snapshot: SecretSnapshot,
-        action: str,
-    ) -> SecretSettingsTransactionOutcome:
         try:
-            expected_revision = request.expected_settings_revision
-            if expected_revision is None:
-                expected_revision = (await self.settings_repository.load_receipt()).revision
             commit_result = await self.settings_repository.save(
                 SettingsCommitRequest(
                     values=request.settings_values,
-                    expected_revision=expected_revision,
+                    expected_revision=request.expected_settings_revision,
                     reason=request.reason,
-                    correlation_id=request.correlation_id,
                 )
             )
-        except BaseException as exc:
-            compensation = await self._restore_after_settings_commit_failure(
+        except Exception:
+            return await self._restore_after_settings_commit_failure(
                 snapshot=snapshot,
                 action=action,
                 commit_message=None,
             )
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            return SecretSettingsTransactionOutcome(compensation, None)
 
-        if (
-            commit_result.succeeded
-            and commit_result.snapshot is not None
-            and commit_result.receipt is not None
-        ):
+        if commit_result.succeeded and commit_result.snapshot is not None:
             await self._publish_dashboard_needs_key_snapshot(
                 request.dashboard_needs_key,
                 settings_revision=commit_result.snapshot.revision,
                 correlation_id=request.correlation_id,
             )
-            return SecretSettingsTransactionOutcome(
-                TransactionResult(
-                    status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
-                    message=commit_result.message,
-                    diagnostics=commit_result.diagnostics,
-                ),
-                commit_result.receipt,
+            return TransactionResult(
+                status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
+                message=commit_result.message,
+                diagnostics=commit_result.diagnostics,
             )
 
-        return SecretSettingsTransactionOutcome(
-            await self._restore_after_settings_commit_failure(
-                snapshot=snapshot,
-                action=action,
-                commit_message=commit_result.message,
-            ),
-            None,
+        return await self._restore_after_settings_commit_failure(
+            snapshot=snapshot,
+            action=action,
+            commit_message=commit_result.message,
         )
 
     async def _restore_after_settings_commit_failure(
@@ -416,7 +350,7 @@ class SecretSettingsTransaction:
         try:
             restore_result = await self.secret_store.restore_secret(snapshot)
             restore_succeeded = restore_result.succeeded
-        except BaseException:
+        except Exception:
             restore_succeeded = False
 
         if restore_succeeded:
@@ -458,7 +392,7 @@ class SecretSettingsTransaction:
                 replace(snapshot, settings_revision=settings_revision),
                 correlation_id=correlation_id,
             )
-        except BaseException:
+        except Exception:
             pass
 
 
@@ -636,5 +570,4 @@ __all__ = [
     "SecretClearRequest",
     "SecretSetRequest",
     "SecretSettingsTransaction",
-    "SecretSettingsTransactionOutcome",
 ]

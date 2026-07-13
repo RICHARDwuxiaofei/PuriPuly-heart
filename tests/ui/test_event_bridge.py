@@ -14,10 +14,6 @@ import pytest
 
 pytest.importorskip("flet")
 
-from puripuly_heart.app.ports.dashboard_presentation import (
-    DashboardPresentationEventContext,
-    PresentationEventBridgeRequest,
-)
 from puripuly_heart.core import messages
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseDiagnostics,
@@ -31,7 +27,6 @@ from puripuly_heart.ui.event_bridge import (
     AppConversationEventDestination,
     AppDashboardEventDestination,
     AppHistoryEventDestination,
-    ApplicationUIEventBridgeFactory,
     UIEventBridge,
 )
 from puripuly_heart.ui.event_mapping import map_ui_event
@@ -190,30 +185,43 @@ class DummyApp:
         self.history: list[tuple[str, str, bool, str | None]] = []
         self.overlay_state = "off"
         self.overlay_failure_reason: str | None = None
-        self.source_language = "ko"
-        self.target_language = "en"
-        self.translation_enabled = False
-        self.stt_state = STTSessionState.STREAMING
-        self.managed_auth_pending = False
+        self.controller = SimpleNamespace(
+            settings=SimpleNamespace(
+                languages=SimpleNamespace(source_language="ko", target_language="en")
+            ),
+            hub=SimpleNamespace(
+                translation_enabled=False,
+                stt=SimpleNamespace(state=STTSessionState.STREAMING),
+            ),
+            get_event_language_codes=lambda: ("ko", "en"),
+            managed_auth_pending=False,
+            clear_managed_auth_pending_state=lambda: self._record_clear_managed_auth_pending(),
+        )
 
     def _record_clear_managed_auth_pending(self) -> None:
         self.clear_managed_auth_pending_calls += 1
-        self.managed_auth_pending = False
+        self.controller.managed_auth_pending = False
 
     def clear_managed_auth_pending_state(self) -> None:
         self._record_clear_managed_auth_pending()
 
     def get_event_language_codes(self) -> tuple[str | None, str | None]:
-        return self.source_language, self.target_language
+        return self.controller.get_event_language_codes()
 
     def is_event_translation_enabled(self) -> bool:
-        return self.translation_enabled
+        return bool(self.controller.hub.translation_enabled)
 
     def get_event_stt_state(self) -> STTSessionState | None:
-        return self.stt_state
+        return self.controller.hub.stt.state
 
     def on_github_star_translation_success(self) -> None:
-        self.github_star_translation_success_called = True
+        scheduler = getattr(
+            self.controller,
+            "schedule_github_star_prompt_translation_success_observed",
+            None,
+        )
+        if callable(scheduler):
+            scheduler()
 
     def on_telemetry_translation_success(self) -> None:
         self.telemetry_translation_success_called = True
@@ -316,25 +324,15 @@ def make_bridge(app: object, **kwargs: object) -> UIEventBridge:
     )
 
 
-def test_event_bridge_reads_language_codes_from_typed_application_context() -> None:
+def test_event_bridge_reads_language_codes_from_controller_contract_without_settings_shape() -> (
+    None
+):
     app = DummyApp()
-
-    class Context:
-        def current_event_context(self) -> DashboardPresentationEventContext:
-            return DashboardPresentationEventContext("ja", "de", False, None, "basic")
-
-        def clear_managed_auth_pending(self) -> None:
-            return None
-
-        def observe_translation_success(self) -> None:
-            return None
-
-        async def record_translation_success(self) -> None:
-            return None
-
-    bridge = ApplicationUIEventBridgeFactory(app).create_event_bridge(
-        PresentationEventBridgeRequest(asyncio.Queue(), Context(), None)
+    app.controller = SimpleNamespace(
+        get_event_language_codes=lambda: ("ja", "de"),
+        hub=SimpleNamespace(translation_enabled=False),
     )
+    bridge = make_bridge(app, event_queue=asyncio.Queue())
 
     assert bridge._get_language_codes() == ("ja", "de")
 
@@ -580,7 +578,7 @@ async def test_event_bridge_routes_translation_and_osc_history_by_language_mode(
         UIEvent(type=UIEventType.TRANSLATION_DONE, payload="not-translation")
     )
 
-    app.translation_enabled = True
+    app.controller.hub.translation_enabled = True
     await bridge._handle_event(
         UIEvent(
             type=UIEventType.OSC_SENT,
@@ -588,7 +586,7 @@ async def test_event_bridge_routes_translation_and_osc_history_by_language_mode(
         )
     )
 
-    app.translation_enabled = False
+    app.controller.hub.translation_enabled = False
     await bridge._handle_event(
         UIEvent(
             type=UIEventType.OSC_SENT,
@@ -1642,12 +1640,12 @@ async def test_event_bridge_handles_error_and_soniox_shutdown_suppression(tmp_pa
     )
 
     try:
-        app.stt_state = STTSessionState.DRAINING
+        app.controller.hub.stt.state = STTSessionState.DRAINING
         await bridge._handle_event(
             UIEvent(type=UIEventType.ERROR, payload="Soniox 400 bad request")
         )
 
-        app.stt_state = STTSessionState.STREAMING
+        app.controller.hub.stt.state = STTSessionState.STREAMING
         await bridge._handle_event(UIEvent(type=UIEventType.ERROR, payload="General failure"))
         await bridge._handle_event(UIEvent(type=UIEventType.ERROR, payload=None))
 
@@ -1784,7 +1782,7 @@ async def test_event_bridge_routes_managed_message_report_to_snackbar_without_da
     set_locale("en")
     try:
         app = DummyApp()
-        app.managed_auth_pending = True
+        app.controller.managed_auth_pending = True
         bridge = make_bridge(app, event_queue=asyncio.Queue())
         payload = messages.UserErrorReport(
             message=messages.UserMessageRef(
@@ -1831,7 +1829,7 @@ async def test_event_bridge_routes_managed_auth_error_to_snackbar_without_dashbo
     set_locale("en")
     try:
         app = DummyApp()
-        app.managed_auth_pending = True
+        app.controller.managed_auth_pending = True
         bridge = make_bridge(app, event_queue=asyncio.Queue())
         payload = ManagedOpenRouterUserFacingError(
             message_key="managed_release.retry_after_ms",
@@ -1861,7 +1859,7 @@ async def test_event_bridge_routes_managed_auth_error_to_snackbar_without_dashbo
 @pytest.mark.asyncio
 async def test_event_bridge_keeps_general_error_display_when_managed_auth_is_pending() -> None:
     app = DummyApp()
-    app.managed_auth_pending = True
+    app.controller.managed_auth_pending = True
     bridge = make_bridge(app, event_queue=asyncio.Queue())
 
     await bridge._handle_event(

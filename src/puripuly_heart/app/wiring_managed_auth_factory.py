@@ -196,16 +196,6 @@ class ManagedIdentityStateAdapter:
     def pending_delivery_ack_expires_at(self, value: str | None) -> None:
         self._settings.managed_identity.pending_delivery_ack_expires_at = value
 
-    @property
-    def pending_delivery_ack_delivered(self) -> bool:
-        return bool(
-            getattr(self._settings.managed_identity, "pending_delivery_ack_delivered", False)
-        )
-
-    @pending_delivery_ack_delivered.setter
-    def pending_delivery_ack_delivered(self, value: bool) -> None:
-        self._settings.managed_identity.pending_delivery_ack_delivered = bool(value)
-
     def persist(self) -> None:
         self._persist(self._settings)
 
@@ -236,9 +226,6 @@ class ManagedIdentityStateAdapter:
                 "pending_delivery_ack_expires_at",
                 None,
             ),
-            pending_delivery_ack_delivered=bool(
-                getattr(managed, "pending_delivery_ack_delivered", False)
-            ),
         )
 
     def restore(self, snapshot: ManagedIdentitySnapshot) -> None:
@@ -259,7 +246,6 @@ class ManagedIdentityStateAdapter:
             snapshot.pending_delivery_ack_managed_credential_ref
         )
         managed.pending_delivery_ack_expires_at = snapshot.pending_delivery_ack_expires_at
-        managed.pending_delivery_ack_delivered = snapshot.pending_delivery_ack_delivered
 
 
 def build_managed_identity_state_port(
@@ -418,7 +404,6 @@ class DiscordManagedBrokerClientAdapter:
     app_version: str
     signed_at_provider: Callable[[], str]
     last_issue_response: ManagedOpenRouterIssueSuccess | None = None
-    apply_managed_state: bool = True
 
     async def issue_managed_connection(self, request: BrokerIssueRequest) -> BrokerIssueResult:
         missing = _missing_discord_issue_request_fields(request)
@@ -446,8 +431,7 @@ class DiscordManagedBrokerClientAdapter:
         except Exception:
             return _broker_issue_failure("discord_issue_exception")
         self.last_issue_response = issue
-        if self.apply_managed_state:
-            apply_discord_issue_result_to_managed_state(self.identity.managed_state, issue)
+        apply_discord_issue_result_to_managed_state(self.identity.managed_state, issue)
         return BrokerIssueResult(
             succeeded=True,
             broker_connection_id=issue.managed_credential_ref,

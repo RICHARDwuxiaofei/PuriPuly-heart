@@ -481,9 +481,6 @@ def from_legacy_app_settings(
                 pending_delivery_ack_expires_at=data["managed_identity"].get(
                     "pending_delivery_ack_expires_at"
                 ),
-                pending_delivery_ack_delivered=bool(
-                    data["managed_identity"].get("pending_delivery_ack_delivered", False)
-                ),
             ),
             github_star_prompt=GithubStarPromptState(
                 clicked=bool(data["ui"]["github_star_prompt_clicked"]),
@@ -739,7 +736,6 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
         "pending_delivery_ack_expires_at": (
             state.managed_connection.pending_delivery_ack_expires_at
         ),
-        "pending_delivery_ack_delivered": (state.managed_connection.pending_delivery_ack_delivered),
     }
     data["system_prompt"] = intent.prompts.system_prompt
     return data

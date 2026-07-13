@@ -10,7 +10,6 @@ from typing import get_type_hints
 
 import pytest
 
-from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core import messages
 
 FORBIDDEN_IMPORT_PREFIXES = (
@@ -134,9 +133,9 @@ def test_settings_value_dtos_deep_freeze_nested_payloads() -> None:
         reason="user_patch",
     )
     apply_request = runtime_apply.RuntimeApplyRequest(
-        receipt=settings_repository.SettingsCommitReceipt(
-            AppSettingsVNext(), "settings-r1", "settings_commit", "corr-1"
-        ),
+        settings_values=values,
+        reason="settings_commit",
+        correlation_id="corr-1",
     )
 
     values["provider"]["aliases"].append("qwen")
@@ -145,6 +144,7 @@ def test_settings_value_dtos_deep_freeze_nested_payloads() -> None:
     for frozen_values in (
         snapshot.values,
         request.values,
+        apply_request.settings_values,
     ):
         provider = frozen_values["provider"]
         assert isinstance(provider, Mapping)
@@ -160,7 +160,6 @@ def test_settings_value_dtos_deep_freeze_nested_payloads() -> None:
             provider["aliases"].append("deepseek")  # type: ignore[attr-defined]
         with pytest.raises(TypeError):
             options["streaming"] = False  # type: ignore[index]
-    assert apply_request.receipt.revision == "settings-r1"
 
 
 def test_secret_broker_provider_and_runtime_ports_expose_service_result_seams() -> None:
@@ -246,9 +245,9 @@ def test_secret_broker_provider_and_runtime_ports_expose_service_result_seams() 
         diagnostics=None,
     )
     apply_request = runtime_apply.RuntimeApplyRequest(
-        receipt=importlib.import_module(
-            "puripuly_heart.app.ports.settings_repository"
-        ).SettingsCommitReceipt(AppSettingsVNext(), "settings-r1", "settings_commit", "corr-1"),
+        settings_values={"provider": "openrouter"},
+        reason="settings_commit",
+        correlation_id="corr-1",
     )
 
     for dto in (
@@ -272,7 +271,8 @@ def test_secret_broker_provider_and_runtime_ports_expose_service_result_seams() 
         verification_request.context["verifier_context"] = "other"  # type: ignore[index]
     with pytest.raises(TypeError):
         verification_result.evidence["verifier"] = "other"  # type: ignore[index]
-    assert not hasattr(apply_request, "settings_values")
+    with pytest.raises(TypeError):
+        apply_request.settings_values["provider"] = "qwen"  # type: ignore[index]
     with pytest.raises(TypeError):
         discord_request.metadata["flow"] = "other"  # type: ignore[index]
     with pytest.raises(TypeError):

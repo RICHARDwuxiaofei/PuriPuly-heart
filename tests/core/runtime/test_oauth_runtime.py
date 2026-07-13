@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import threading
+from dataclasses import dataclass
 
 import pytest
 
+from puripuly_heart.core.openrouter_pkce import OpenRouterPKCEExchangeResult
 from puripuly_heart.core.runtime import OAuthRuntime
 
 
@@ -171,21 +173,73 @@ async def test_oauth_runtime_rejects_new_auth_tasks_after_close() -> None:
         runtime.create_auth_task(never_started(), task_name="late-auth")
 
 
-def test_oauth_runtime_has_no_openrouter_pkce_flow_owner() -> None:
+@dataclass
+class FakePKCEClient:
+    started: asyncio.Event
+    release: asyncio.Event
+    reopen_calls: int = 0
+
+    async def run_desktop_flow(self) -> OpenRouterPKCEExchangeResult:
+        self.started.set()
+        await self.release.wait()
+        return OpenRouterPKCEExchangeResult(api_key="pkce-key", user_id="user-1")
+
+    def reopen_authorization_url(self) -> bool:
+        self.reopen_calls += 1
+        return True
+
+
+@pytest.mark.asyncio
+async def test_openrouter_pkce_flow_is_owned_and_reopenable_only_while_active() -> None:
     runtime = OAuthRuntime()
-    assert not hasattr(runtime, "run_openrouter_pkce_flow")
-    assert not hasattr(runtime, "reopen_openrouter_pkce_authorization_url")
+    client = FakePKCEClient(started=asyncio.Event(), release=asyncio.Event())
+
+    task = asyncio.create_task(runtime.run_openrouter_pkce_flow(client))
+    await client.started.wait()
+
+    assert runtime.active_task_names == ("openrouter-pkce",)
+    assert runtime.reopen_openrouter_pkce_authorization_url() is True
+    assert client.reopen_calls == 1
+
+    client.release.set()
+    result = await task
+
+    assert result == OpenRouterPKCEExchangeResult(api_key="pkce-key", user_id="user-1")
+    assert runtime.active_task_names == ()
+    assert runtime.reopen_openrouter_pkce_authorization_url() is False
 
 
-def test_oauth_runtime_resource_inventory_excludes_openrouter_pkce() -> None:
+@pytest.mark.asyncio
+async def test_openrouter_pkce_rejection_does_not_leak_active_client() -> None:
     runtime = OAuthRuntime()
-    assert "_openrouter_pkce_client" not in runtime.resource_fields
+    await runtime.close()
+    client = FakePKCEClient(started=asyncio.Event(), release=asyncio.Event())
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await runtime.run_openrouter_pkce_flow(client)
+
+    assert runtime.reopen_openrouter_pkce_authorization_url() is False
+    assert client.reopen_calls == 0
 
 
-def test_oauth_runtime_snapshot_excludes_openrouter_pkce() -> None:
+@pytest.mark.asyncio
+async def test_openrouter_pkce_duplicate_rejection_preserves_existing_active_client() -> None:
     runtime = OAuthRuntime()
-    snapshot = runtime.lifecycle_owner_snapshot()
-    assert "_openrouter_pkce_client" not in snapshot["resource_fields"]
+    first_client = FakePKCEClient(started=asyncio.Event(), release=asyncio.Event())
+    second_client = FakePKCEClient(started=asyncio.Event(), release=asyncio.Event())
+
+    first_task = asyncio.create_task(runtime.run_openrouter_pkce_flow(first_client))
+    await first_client.started.wait()
+    try:
+        with pytest.raises(RuntimeError, match="already owns auth task"):
+            await runtime.run_openrouter_pkce_flow(second_client)
+
+        assert runtime.reopen_openrouter_pkce_authorization_url() is True
+        assert first_client.reopen_calls == 1
+        assert second_client.reopen_calls == 0
+    finally:
+        first_client.release.set()
+        await first_task
 
 
 def test_oauth_runtime_rejects_duplicate_external_task_without_orphaning_first() -> None:

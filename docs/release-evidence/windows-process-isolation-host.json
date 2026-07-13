@@ -1,7 +1,7 @@
 {
   "capture_construction": {
     "device_loopback_sources": 0,
-    "direct_diagnostic_pid": 29500,
+    "direct_diagnostic_pid": 35068,
     "frame_source_kind": "process",
     "native_process_specific_observations": [
       true,
@@ -10,8 +10,8 @@
     ],
     "process_sources": 3,
     "source_pids": [
-      24252,
-      44224
+      35560,
+      35244
     ]
   },
   "classification": null,
@@ -19,34 +19,34 @@
   "fixture": {
     "activation_order_verified": true,
     "child_descendant_relation_verified": true,
-    "child_os_ppid": 24252,
+    "child_os_ppid": 35560,
     "child_ready_pid_matches": true,
     "child_ready_role": "target_child",
     "control_non_descendant_verified": true,
-    "control_pid": 38532,
+    "control_pid": 39244,
     "direct_child_diagnostic": {
       "native_process_specific_mode": true,
-      "sample_frames": 57120,
-      "target_amplitude": 0.17996950175008902
+      "sample_frames": 57600,
+      "target_amplitude": 0.1799695877567466
     },
     "ready_and_activation_order_s": {
-      "control_ready": 0.7970000000204891,
-      "direct_child_proctap_activation": 1.2820000000065193,
-      "retry_root_ready": 6.10999999998603,
+      "control_ready": 2.0939999999973224,
+      "direct_child_proctap_activation": 5.0939999999973224,
+      "retry_root_ready": 10.812000000005355,
       "root_proctap_activations": [
-        2.5,
-        6.10999999998603
+        6.312000000005355,
+        10.812000000005355
       ],
-      "target_child_ready": 0.48499999998603016
+      "target_child_ready": 1.3910000000032596
     },
-    "retry_root_pid": 44224,
+    "retry_root_pid": 35244,
     "selected_tree_child_included": true,
     "signals_hz": {
       "control": 1300.0,
       "target": 700.0
     },
-    "target_child_pid": 29500,
-    "target_root_pid": 24252,
+    "target_child_pid": 35068,
+    "target_root_pid": 35560,
     "unrelated_control_excluded": true
   },
   "host": {
@@ -60,7 +60,7 @@
     "automatic_reconnect": false,
     "fresh_pid": true,
     "provider_close_before_warning": true,
-    "retry_action": "DashboardApplicationPort.retry_capture",
+    "retry_action": "GuiController.retry_peer_process_capture",
     "retry_succeeded": true,
     "source_close_before_warning": true,
     "task_completion_before_warning": true,
@@ -68,10 +68,10 @@
     "warning_after_provider_source_task_teardown": true
   },
   "measurements": {
-    "control_amplitude": 4.763076393749797e-07,
-    "control_to_target_ratio": 2.6466005885872016e-06,
+    "control_amplitude": 4.623887934914086e-07,
+    "control_to_target_ratio": 2.569260878264679e-06,
     "sample_frames": 144000,
-    "target_amplitude": 0.17996959625450717
+    "target_amplitude": 0.17996957701069016
   },
   "network_used": false,
   "schema": "puripuly-heart/windows-process-isolation/v1",

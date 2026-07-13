@@ -32,13 +32,6 @@ class SecretSnapshot:
     existed: bool
 
 
-@dataclass(frozen=True, slots=True)
-class SecretCompareAndClearResult:
-    status: str
-    key: str
-    expected_revision: str
-
-
 class SecretStorePort(Protocol):
     async def get_secret(self, key: str) -> SecretReadResult: ...
 
@@ -50,16 +43,9 @@ class SecretStorePort(Protocol):
 
     async def restore_secret(self, snapshot: SecretSnapshot) -> SecretWriteResult: ...
 
-    async def compare_and_clear_secret(
-        self,
-        key: str,
-        expected_revision: str,
-    ) -> SecretCompareAndClearResult: ...
-
 
 __all__ = [
     "SecretReadResult",
-    "SecretCompareAndClearResult",
     "SecretSnapshot",
     "SecretStorePort",
     "SecretWriteResult",

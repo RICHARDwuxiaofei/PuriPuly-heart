@@ -1064,7 +1064,6 @@ class ManagedIdentitySettings:
     pending_delivery_ack_delivery_id: str | None = None
     pending_delivery_ack_managed_credential_ref: str | None = None
     pending_delivery_ack_expires_at: str | None = None
-    pending_delivery_ack_delivered: bool = False
 
     def validate(self) -> None:
         if not isinstance(self.installation_id, str):
@@ -1109,14 +1108,6 @@ class ManagedIdentitySettings:
             value = getattr(self, key)
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"managed {key} must be a string or None")
-        if not isinstance(self.pending_delivery_ack_delivered, bool):
-            raise ValueError("managed pending_delivery_ack_delivered must be a bool")
-        if not (
-            self.pending_delivery_ack_source
-            and self.pending_delivery_ack_delivery_id
-            and self.pending_delivery_ack_managed_credential_ref
-        ):
-            self.pending_delivery_ack_delivered = False
 
 
 def _parse_telemetry_consent(value: object) -> str:
@@ -1700,9 +1691,6 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             ),
             "pending_delivery_ack_expires_at": (
                 settings.managed_identity.pending_delivery_ack_expires_at
-            ),
-            "pending_delivery_ack_delivered": (
-                settings.managed_identity.pending_delivery_ack_delivered
             ),
         },
         "system_prompt": settings.system_prompt,
@@ -4090,9 +4078,6 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             ),
             pending_delivery_ack_expires_at=_parse_optional_str(
                 managed_identity_data.get("pending_delivery_ack_expires_at")
-            ),
-            pending_delivery_ack_delivered=_parse_bool(
-                managed_identity_data.get("pending_delivery_ack_delivered", False)
             ),
         ),
         telemetry=TelemetrySettings(

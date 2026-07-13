@@ -71,37 +71,6 @@ class ManagedAuthClaimGuard:
             message_key=_message_key_for_block(normalized_requested_source, blocking_source),
         )
 
-    async def preflight_read_only(self, requested_source: str) -> TransactionResult | None:
-        normalized_requested_source = normalize_managed_claim_source(requested_source)
-        if normalized_requested_source is None:
-            return _blocked_result(
-                requested_source="unknown",
-                blocking_source="unknown",
-                code="managed_auth_claim_source_invalid",
-                message_key="managed_auth.error.claim_conflict",
-            )
-        sources = set(
-            normalize_managed_claim_sources(self.managed_state.local_managed_claim_sources)
-        )
-        for source, secret_key in (
-            (MANAGED_AUTH_CLAIM_SOURCE_DISCORD, OPENROUTER_MANAGED_API_KEY_SECRET),
-            (MANAGED_AUTH_CLAIM_SOURCE_QQ, OPENROUTER_MANAGED_QQ_API_KEY_SECRET),
-        ):
-            if await self._secret_available(secret_key):
-                sources.add(source)
-        blocking_source = local_managed_auth_blocking_source(
-            sources,
-            normalized_requested_source,
-        )
-        if blocking_source is None:
-            return None
-        return _blocked_result(
-            requested_source=normalized_requested_source,
-            blocking_source=blocking_source,
-            code="managed_auth_claim_source_blocked",
-            message_key=_message_key_for_block(normalized_requested_source, blocking_source),
-        )
-
     async def backfill_from_local_secrets(self) -> bool:
         changed = False
         for source, secret_key in (

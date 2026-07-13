@@ -508,10 +508,6 @@ class OverlayProcessManager:
             if callable(set_logging_mode):
                 set_logging_mode(self.logging_mode)
 
-    @property
-    def monitor_task(self) -> asyncio.Task[None] | None:
-        return self._monitor_task
-
     async def start(self) -> None:
         if self.state in {"starting", "connected"}:
             return

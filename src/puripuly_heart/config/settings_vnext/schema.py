@@ -790,7 +790,6 @@ class ManagedConnectionState:
     pending_delivery_ack_delivery_id: str | None = None
     pending_delivery_ack_managed_credential_ref: str | None = None
     pending_delivery_ack_expires_at: str | None = None
-    pending_delivery_ack_delivered: bool = False
 
     def __post_init__(self) -> None:
         source = _normalize_optional_state_text(self.pending_delivery_ack_source)
@@ -806,7 +805,6 @@ class ManagedConnectionState:
             delivery_id = None
             managed_credential_ref = None
             expires_at = None
-        delivered = bool(self.pending_delivery_ack_delivered) if source is not None else False
         object.__setattr__(
             self,
             "local_managed_claim_sources",
@@ -820,7 +818,6 @@ class ManagedConnectionState:
             managed_credential_ref,
         )
         object.__setattr__(self, "pending_delivery_ack_expires_at", expires_at)
-        object.__setattr__(self, "pending_delivery_ack_delivered", delivered)
 
 
 @dataclass(frozen=True, slots=True)

@@ -45,22 +45,6 @@ ResolvedOptionValue: TypeAlias = (
     ResolvedScalar | tuple["ResolvedOptionValue", ...] | Mapping[str, "ResolvedOptionValue"]
 )
 
-DESKTOP_OVERLAY_SIZE_PRESETS: Final[Mapping[str, tuple[int, int]]] = MappingProxyType(
-    {
-        "tiny": (640, 160),
-        "xsmall": (960, 240),
-        "small": (1152, 288),
-        "medium": (1344, 336),
-        "large": (1600, 400),
-        "xlarge": (1792, 448),
-    }
-)
-
-
-def resolve_desktop_overlay_size(size_preset: str) -> tuple[int, int]:
-    return DESKTOP_OVERLAY_SIZE_PRESETS.get(size_preset, DESKTOP_OVERLAY_SIZE_PRESETS["medium"])
-
-
 _RAW_SECRET_BEARING_OPTION_NAMES: Final = frozenset(
     {
         "access_token",
@@ -201,7 +185,6 @@ class ResolvedLLMConfig:
     primary: ResolvedLLMTarget
     fallback: ResolvedLLMFallbackPlan | None = None
     concurrency_limit: int = 5
-    qwen_low_latency_mode: bool = False
 
     def __post_init__(self) -> None:
         if self.concurrency_limit <= 0:
@@ -269,9 +252,6 @@ class ResolvedSTTConfig:
     custom_vocabulary_enabled: bool
     custom_terms: Mapping[str, tuple[str, ...]]
     provider_options: Mapping[str, ResolvedOptionValue]
-    capture_target: "ResolvedDesktopAudioCaptureTarget" = field(
-        default_factory=lambda: ResolvedDesktopAudioCaptureTarget(kind="default_output_device")
-    )
 
     def __post_init__(self) -> None:
         _ensure_known_value(self.channel, RUNTIME_CHANNELS, field_name="channel")
@@ -447,16 +427,7 @@ class ResolvedRuntimePolicy:
         object.__setattr__(self, "policy_options", _freeze_option_mapping(self.policy_options))
 
 
-@dataclass(frozen=True, slots=True)
-class ResolvedApplicationRuntimeConfig:
-    llm: ResolvedLLMConfig
-    self_stt: ResolvedSTTConfig
-    peer_stt: ResolvedSTTConfig
-    overlay: ResolvedOverlayConfig
-
-
 __all__ = [
-    "ResolvedApplicationRuntimeConfig",
     "CREDENTIAL_SOURCE_MANAGED",
     "CREDENTIAL_SOURCE_NONE",
     "CREDENTIAL_SOURCE_SECRET_STORE",

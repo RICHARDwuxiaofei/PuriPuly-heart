@@ -18,6 +18,7 @@ from puripuly_heart.config.settings import (
     to_dict,
 )
 from puripuly_heart.main import _load_settings_or_default
+from puripuly_heart.ui.controller import GuiController
 from tests.config.settings_vnext_test_helpers import legacy_projected_settings_file
 
 
@@ -176,6 +177,20 @@ def test_first_run_settings_without_explicit_locale_detects_system_locale(
     assert settings.ui.locale == "zh-CN"
 
 
+def test_controller_first_run_uses_detected_system_locale(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings_module, "detect_system_locale", lambda: "ko_KR", raising=False)
+    path = tmp_path / "settings.json"
+    controller = GuiController(page=object(), app=object(), config_path=path)
+
+    loaded = controller._load_or_init_settings(path)
+
+    assert loaded.ui.locale == "ko"
+    assert legacy_projected_settings_file(path)["ui"]["locale"] == "ko"
+
+
 def test_main_first_run_uses_detected_system_locale(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -237,5 +252,27 @@ def test_main_stable_import_failure_does_not_create_default_vnext_settings(
 
     with pytest.raises(RuntimeError, match="failed to import stable settings"):
         _load_settings_or_default(target_path, allow_stable_settings_import=True)
+
+    assert not target_path.exists()
+
+
+def test_controller_stable_import_failure_does_not_create_default_vnext_settings(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stable_path = tmp_path / "stable" / "settings.json"
+    target_path = tmp_path / "vnext" / "settings.json"
+    stable_path.parent.mkdir()
+    stable_path.write_text("not-json", encoding="utf-8")
+    monkeypatch.setattr(profile_bootstrap, "stable_settings_path", lambda: stable_path)
+    controller = GuiController(
+        page=object(),
+        app=object(),
+        config_path=target_path,
+        allow_stable_settings_import=True,
+    )
+
+    with pytest.raises(RuntimeError, match="failed to import stable settings"):
+        controller._load_or_init_settings(target_path)
 
     assert not target_path.exists()

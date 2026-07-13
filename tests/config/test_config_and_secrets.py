@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 
@@ -188,20 +187,18 @@ def test_save_settings_writes_via_temp_replace(tmp_path, monkeypatch: pytest.Mon
     path = tmp_path / "settings.json"
     settings = AppSettings()
     replace_calls: list[tuple[str, str]] = []
-    original_replace = os.replace
+    path_type = type(path)
+    original_replace = path_type.replace
 
-    def recording_replace(source: Path, target: Path) -> None:
-        replace_calls.append((Path(source).name, Path(target).name))
-        original_replace(source, target)
+    def recording_replace(self: Path, target: Path) -> Path:
+        replace_calls.append((self.name, Path(target).name))
+        return original_replace(self, target)
 
-    monkeypatch.setattr("puripuly_heart.config.settings_vnext.compat.os.replace", recording_replace)
+    monkeypatch.setattr(path_type, "replace", recording_replace)
 
     save_settings(path, settings)
 
-    assert len(replace_calls) == 1
-    assert replace_calls[0][0].startswith(".settings.json.")
-    assert replace_calls[0][0].endswith(".tmp")
-    assert replace_calls[0][1] == "settings.json"
+    assert replace_calls == [("settings.json.tmp", "settings.json")]
 
 
 def test_save_settings_preserves_existing_file_when_replace_fails(
@@ -210,11 +207,12 @@ def test_save_settings_preserves_existing_file_when_replace_fails(
     path = tmp_path / "settings.json"
     original_payload = {"keep": True}
     path.write_text(json.dumps(original_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    path_type = type(path)
 
-    def failing_replace(source: Path, target: Path) -> None:
+    def failing_replace(self: Path, target: Path) -> Path:
         raise RuntimeError("replace failed")
 
-    monkeypatch.setattr("puripuly_heart.config.settings_vnext.compat.os.replace", failing_replace)
+    monkeypatch.setattr(path_type, "replace", failing_replace)
 
     with pytest.raises(RuntimeError, match="replace failed"):
         save_settings(path, AppSettings())
@@ -1547,21 +1545,19 @@ def test_load_settings_rewrites_migrated_8khz_audio_via_normal_save_path(
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     replace_calls: list[tuple[str, str]] = []
-    original_replace = os.replace
+    path_type = type(path)
+    original_replace = path_type.replace
 
-    def recording_replace(source: Path, target: Path) -> None:
-        replace_calls.append((Path(source).name, Path(target).name))
-        original_replace(source, target)
+    def recording_replace(self: Path, target: Path) -> Path:
+        replace_calls.append((self.name, Path(target).name))
+        return original_replace(self, target)
 
-    monkeypatch.setattr("puripuly_heart.config.settings_vnext.compat.os.replace", recording_replace)
+    monkeypatch.setattr(path_type, "replace", recording_replace)
 
     loaded = load_settings(path)
 
     assert loaded.audio.internal_sample_rate_hz == 16000
-    assert len(replace_calls) == 1
-    assert replace_calls[0][0].startswith(".settings.json.")
-    assert replace_calls[0][0].endswith(".tmp")
-    assert replace_calls[0][1] == "settings.json"
+    assert replace_calls == [("settings.json.tmp", "settings.json")]
 
     persisted = legacy_projected_settings_file(path)
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION

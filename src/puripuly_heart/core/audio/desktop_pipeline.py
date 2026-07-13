@@ -24,11 +24,6 @@ class DesktopPeerPipeline:
     _logged_formats: set[tuple[int, int]] = field(default_factory=set, init=False, repr=False)
     _diag_accumulated_audio_ms: float = field(default=0.0, init=False, repr=False)
 
-    @property
-    def terminal_reason(self) -> str | None:
-        value = getattr(self.source, "terminal_reason", None)
-        return value if isinstance(value, str) else None
-
     async def frames(self) -> AsyncIterator[AudioFrameF32]:
         resampler: MonoFirstStreamingResampler | None = None
         source_format: tuple[int, int] | None = None

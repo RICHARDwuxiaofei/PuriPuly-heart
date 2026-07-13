@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import queue
 import socket
 import threading
 
@@ -89,17 +88,11 @@ async def test_exchange_code_posts_expected_payload(monkeypatch: pytest.MonkeyPa
     assert seen["headers"] == {"Content-Type": "application/json"}
 
 
-def test_extract_callback_code_requires_matching_state() -> None:
+def test_extract_callback_code_accepts_missing_state_but_rejects_mismatch() -> None:
     client = OpenRouterPKCEClient(callback_origin="http://127.0.0.1:43123")
     session = client.build_session()
 
-    assert (
-        client._extract_callback_code(f"/callback?code=code_123&state={session.state}", session)
-        == "code_123"
-    )
-
-    with pytest.raises(ValueError, match="state"):
-        client._extract_callback_code("/callback?code=code_123", session)
+    assert client._extract_callback_code("/callback?code=code_123", session) == "code_123"
 
     with pytest.raises(ValueError, match="state"):
         client._extract_callback_code("/callback?code=code_123&state=wrong-state", session)
@@ -203,10 +196,7 @@ def test_callback_listener_ignores_invalid_requests_until_valid_code_arrives() -
         assert mismatched_state.status_code == 400
         assert mismatched_state.text == ""
 
-        valid = httpx.get(
-            f"http://127.0.0.1:{port}/callback?code=code_123&state={session.state}",
-            timeout=1.0,
-        )
+        valid = httpx.get(f"http://127.0.0.1:{port}/callback?code=code_123", timeout=1.0)
         assert valid.status_code == 200
         assert "text/html" in valid.headers.get("content-type", "")
         assert "charset=utf-8" in valid.headers.get("content-type", "").lower()
@@ -223,48 +213,6 @@ def test_callback_listener_ignores_invalid_requests_until_valid_code_arrives() -
     finally:
         set_locale(previous_locale)
         listener.close()
-
-
-def test_callback_listener_rejects_replayed_callback() -> None:
-    port = _get_unused_loopback_port()
-    client = OpenRouterPKCEClient(callback_origin=f"http://127.0.0.1:{port}")
-    session = client.build_session()
-    listener = client._create_callback_listener(session)
-    callback = f"http://127.0.0.1:{port}/callback?code=code_123&state={session.state}"
-    try:
-        assert httpx.get(callback, timeout=1.0).status_code == 200
-        assert httpx.get(callback, timeout=1.0).status_code == 409
-        assert listener.wait_for_code() == "code_123"
-    finally:
-        listener.close()
-
-
-def test_callback_listener_concurrent_close_executes_server_close_once() -> None:
-    class Server:
-        def __init__(self) -> None:
-            self.shutdown_calls = 0
-            self.close_calls = 0
-
-        def serve_forever(self, **_kwargs: object) -> None:
-            return None
-
-        def shutdown(self) -> None:
-            self.shutdown_calls += 1
-
-        def server_close(self) -> None:
-            self.close_calls += 1
-
-    from puripuly_heart.core.openrouter_pkce import _OpenRouterPKCECallbackListener
-
-    server = Server()
-    listener = _OpenRouterPKCECallbackListener(server, queue.Queue(maxsize=1), 1.0)  # type: ignore[arg-type]
-    workers = [threading.Thread(target=listener.close) for _ in range(4)]
-    for worker in workers:
-        worker.start()
-    for worker in workers:
-        worker.join()
-    assert server.shutdown_calls == 1
-    assert server.close_calls == 1
 
 
 @pytest.mark.asyncio

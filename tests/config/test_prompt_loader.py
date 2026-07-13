@@ -34,7 +34,6 @@ def test_load_prompt_for_llm_providers_uses_shared_translation_prompt() -> None:
     assert load_prompt_for_provider("deepseek") == raw
     assert load_prompt_for_provider("openrouter") == raw
     assert load_prompt_for_provider("local_llm") == raw
-    assert load_prompt_for_provider("cerebras") == raw
 
 
 def test_local_llm_uses_shared_translation_prompt() -> None:

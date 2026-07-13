@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import copy
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Protocol
+
+from puripuly_heart.config.settings import AppSettings
 
 
 class TranslationSuccessTelemetryClientPort(Protocol):
@@ -14,20 +17,7 @@ class TranslationSuccessTelemetryClientPort(Protocol):
     ) -> bool: ...
 
 
-@dataclass(frozen=True, slots=True)
-class TranslationSuccessTelemetrySnapshot:
-    consent: str
-    anonymous_id: str | None
-    sent_dates_utc: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class PersistTranslationSuccessDateCommand:
-    active_date_utc: str
-    anonymous_id: str
-
-
-TelemetryPersistSentDate = Callable[[PersistTranslationSuccessDateCommand], Awaitable[bool]]
+TelemetryPersistSentDate = Callable[[AppSettings], Awaitable[bool]]
 TelemetryDiagnosticsSink = Callable[[str, Mapping[str, object]], None]
 
 
@@ -64,14 +54,14 @@ class TranslationSuccessTelemetryService:
 
     async def record_translation_success_day(
         self,
-        snapshot: TranslationSuccessTelemetrySnapshot,
+        settings: AppSettings,
         *,
         persist_sent_date: TelemetryPersistSentDate,
     ) -> TranslationSuccessTelemetryResult:
         active_date_utc = self._active_date_utc()
-        consent = snapshot.consent
-        identifier = snapshot.anonymous_id
-        sent_dates = set(snapshot.sent_dates_utc)
+        consent = getattr(settings.telemetry, "consent", "unknown")
+        identifier = settings.telemetry_state.anonymous_id
+        sent_dates = set(settings.telemetry_state.sent_translation_success_dates_utc)
 
         if consent != "allow":
             return self._result(
@@ -116,19 +106,12 @@ class TranslationSuccessTelemetryService:
                 reason="client_returned_false",
             )
 
-        try:
-            persisted = await persist_sent_date(
-                PersistTranslationSuccessDateCommand(active_date_utc, identifier)
-            )
-        except Exception as exc:
-            return self._result(
-                "persist_failed",
-                attempted_send=True,
-                persisted=False,
-                active_date_utc=active_date_utc,
-                reason="persistence_exception",
-                error_type=type(exc).__name__,
-            )
+        updated = copy.deepcopy(settings)
+        updated.telemetry_state.sent_translation_success_dates_utc = sorted(
+            {*updated.telemetry_state.sent_translation_success_dates_utc, active_date_utc}
+        )
+        updated.validate()
+        persisted = await persist_sent_date(updated)
         return self._result(
             "sent" if persisted else "persist_failed",
             attempted_send=True,
@@ -175,7 +158,5 @@ __all__ = [
     "NoopTranslationSuccessTelemetryClient",
     "TranslationSuccessTelemetryClientPort",
     "TranslationSuccessTelemetryResult",
-    "TranslationSuccessTelemetrySnapshot",
-    "PersistTranslationSuccessDateCommand",
     "TranslationSuccessTelemetryService",
 ]

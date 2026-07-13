@@ -158,14 +158,6 @@ class DiscordManagedAuthDialog:
         )
         self._update_page_if_possible()
 
-    def set_reopen_available(self, available: bool, action: Callable[[], None] | None) -> None:
-        self._on_reopen_browser = action if available else None
-        if self._is_open and self._is_waiting and self._dialog_result is not None:
-            waiting_buttons = self._dialog_result.set_actions(self._build_waiting_actions())
-            self._cancel_button = waiting_buttons[0]
-            self._reopen_browser_button = waiting_buttons[1] if len(waiting_buttons) > 1 else None
-            self._update_page_if_possible()
-
     def close(self) -> None:
         if self._dialog is None or not self._is_open:
             return

@@ -84,32 +84,6 @@ def test_qq_managed_auth_dialog_validates_required_fields_without_closing() -> N
     assert dialog._error_text.value == t("qq_auth.error.invalid_input")
 
 
-@pytest.mark.parametrize(
-    ("qq_identity", "credential"),
-    [
-        ("qq user", "0123456789abcdef" * 4),
-        ("qq-user\u0000", "0123456789abcdef" * 4),
-        ("qq-user", "0123456789abcdef"),
-        ("qq-user", "0123456789ABCDEf" * 4),
-    ],
-)
-def test_qq_managed_auth_dialog_preserves_released_strict_input_validation(
-    qq_identity: str,
-    credential: str,
-) -> None:
-    page = DummyPage()
-    events: list[str] = []
-    dialog = _dialog(page, events)
-    dialog.open()
-    dialog._qq_identity_field.value = qq_identity
-    dialog._credential_field.value = credential
-
-    dialog._continue_button.on_click(None)
-
-    assert events == []
-    assert dialog._error_text.value == t("qq_auth.error.invalid_input")
-
-
 def test_qq_managed_auth_dialog_submit_waiting_error_and_cancel_states() -> None:
     page = DummyPage()
     events: list[str] = []

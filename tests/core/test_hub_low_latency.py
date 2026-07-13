@@ -316,10 +316,7 @@ async def test_hub_exposes_named_provider_runtime_handles_and_shutdown_policies(
         "idle_release_task",
         "generation",
     )
-    assert (
-        "STT toggle-off immediately awaits provider.close()"
-        in handles["self_stt"].toggle_off_policy
-    )
+    assert "STT toggle-off drains" in handles["self_stt"].toggle_off_policy
     assert "await provider.close" in handles["llm"].shutdown_policy
 
     await hub.start(auto_flush_osc=False)
@@ -1297,7 +1294,7 @@ class TestRuntimeLatencyLogging:
 
             await hub._run_spec_translation(merge_id, "spec output", 1)
             assert hub._clear_spec_state(buffer, reason="spec_retry") is True
-            await hub.replace_llm_provider(None)
+            hub.llm = None
             hub.translation_enabled = False
 
             await hub._commit_merge(buffer, reason="final_no_llm")
@@ -2397,43 +2394,3 @@ class TestSpecCommitPaths:
         assert hub._merge_buffer is buffer
         buffer.finalize_wait_task.cancel()
         await asyncio.gather(buffer.finalize_wait_task, return_exceptions=True)
-
-
-def test_hub_provider_aliases_are_handle_derived_and_read_only() -> None:
-    stt = QueueingSTTProvider(channel="self")
-    peer_stt = QueueingSTTProvider(channel="peer")
-    llm = ClosingLLMProvider(response_text="translated", delay_s=0.0)
-    hub = ClientHub(stt=stt, peer_stt=peer_stt, llm=llm, osc=FakeOscQueue())
-
-    assert hub.stt is stt
-    assert hub.peer_stt is peer_stt
-    assert hub.llm is llm
-    assert object.__getattribute__(hub, "stt") is None
-    assert object.__getattribute__(hub, "peer_stt") is None
-    assert object.__getattribute__(hub, "llm") is None
-    assert object.__getattribute__(hub.self_runtime, "stt") is None
-    assert object.__getattribute__(hub.peer_runtime, "stt") is None
-
-    for name in ("stt", "peer_stt", "llm", "_stt_task", "_peer_stt_task"):
-        with pytest.raises(AttributeError, match="derived"):
-            setattr(hub, name, None)
-    for runtime in (hub.self_runtime, hub.peer_runtime):
-        with pytest.raises(AttributeError, match="derived"):
-            runtime.stt = None
-        with pytest.raises(AttributeError, match="derived"):
-            runtime.stt_task = None
-
-
-@pytest.mark.asyncio
-async def test_provider_replacement_leaves_no_hidden_alias_reference() -> None:
-    old_stt = QueueingSTTProvider(channel="self")
-    new_stt = QueueingSTTProvider(channel="self")
-    hub = ClientHub(stt=old_stt, llm=None, osc=FakeOscQueue())
-
-    await hub.replace_stt_provider(new_stt)
-
-    assert hub.stt is new_stt
-    assert hub.self_runtime.stt is new_stt
-    assert object.__getattribute__(hub, "stt") is None
-    assert object.__getattribute__(hub.self_runtime, "stt") is None
-    assert old_stt.closed is True

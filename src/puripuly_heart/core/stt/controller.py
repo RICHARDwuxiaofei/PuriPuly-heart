@@ -214,43 +214,6 @@ class ManagedSTTProvider:
         self._session_started_at = None
         await self._set_state(STTSessionState.DISCONNECTED)
 
-    async def stop_for_toggle_off(self) -> None:
-        await self._set_state(
-            STTSessionState.DRAINING if self._active_session else STTSessionState.DISCONNECTED
-        )
-
-        if self._reset_timer:
-            self._reset_timer.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._reset_timer
-            self._reset_timer = None
-
-        session = self._active_session
-        consumer_task = self._consumer_task
-        self._active_session = None
-        self._consumer_task = None
-        self._active_utterance_id = None
-        self._pending_final_utterance_ids.clear()
-        self._pending_final_utterance_times.clear()
-
-        if consumer_task is not None:
-            consumer_task.cancel()
-            await asyncio.gather(consumer_task, return_exceptions=True)
-        if session is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await session.stop()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await session.close()
-
-        if self._draining:
-            for task in list(self._draining):
-                task.cancel()
-            await asyncio.gather(*self._draining, return_exceptions=True)
-            self._draining.clear()
-
-        self._session_started_at = None
-        await self._set_state(STTSessionState.DISCONNECTED)
-
     async def close_backend(self) -> None:
         """Close active STT session and backend-level resources once.
 

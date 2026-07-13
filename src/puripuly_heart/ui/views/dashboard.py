@@ -3,7 +3,6 @@ from typing import Callable
 import flet as ft
 
 from puripuly_heart.app.language_selection import LanguageSelectionChange
-from puripuly_heart.app.ports.dashboard_application import DashboardOverlayPeerPresentation
 from puripuly_heart.core.language import get_all_language_options
 from puripuly_heart.ui.components.display_card import DisplayCard
 from puripuly_heart.ui.components.glow import create_background_glow_stack
@@ -12,6 +11,10 @@ from puripuly_heart.ui.components.language_modal import LanguageModal
 from puripuly_heart.ui.components.power_button import PowerButton
 from puripuly_heart.ui.fonts import font_for_language
 from puripuly_heart.ui.i18n import get_locale, language_name, t
+from puripuly_heart.ui.overlay_peer_contract import (
+    OverlayPeerConsumerContract,
+    is_process_capture_warning_reason,
+)
 
 DASHBOARD_LAYOUT_GAP = 12
 DASHBOARD_CONTROL_REGION_EXPAND = 45
@@ -22,46 +25,6 @@ DASHBOARD_POWER_BUTTON_ICON_SIZE = 80
 DASHBOARD_POWER_BUTTON_LABEL_SIZE = 32
 OVERLAY_FAILURE_REASON_ONLY_NOTICE_REASONS = {"steamvr_not_running"}
 PEER_SOURCE_MODE_SONIOX_AUTO = "soniox_auto"
-PEER_WARNING_I18N_KEYS = {
-    "overlay_starting": "settings.peer_translation.warning.overlay_starting",
-    "overlay_stopping": "settings.peer_translation.warning.overlay_stopping",
-    "runtime_unavailable": "settings.peer_translation.warning.runtime_unavailable",
-    "process_unavailable_ambiguous": (
-        "settings.peer_translation.warning.process_unavailable_ambiguous"
-    ),
-    "process_unavailable_unsupported_platform": (
-        "settings.peer_translation.warning.process_unavailable_unsupported_platform"
-    ),
-}
-
-
-def _peer_helper_text(presentation: DashboardOverlayPeerPresentation) -> str:
-    reason = presentation.peer.warning_reason
-    if presentation.peer.state in {"off", "on", "starting"}:
-        return ""
-    if reason == "overlay_failed":
-        failure = presentation.peer.failure_reason or "unknown"
-        return t(
-            "settings.peer_translation.warning.overlay_failed",
-            reason=t(f"settings.overlay.failure.{failure}", default=failure),
-        )
-    if reason in {
-        "overlay_starting",
-        "overlay_stopping",
-        "runtime_unavailable",
-        "process_unavailable_no_process",
-        "process_unavailable_ambiguous",
-        "process_unavailable_ineligible",
-        "process_unavailable_unsupported_platform",
-        "process_setup_failed",
-        "process_target_exited",
-        "process_source_failed",
-        "process_provider_failed",
-    }:
-        return t(PEER_WARNING_I18N_KEYS.get(reason, f"settings.peer_translation.warning.{reason}"))
-    if reason is not None and reason.startswith("process_"):
-        return t("settings.peer_translation.warning.process_capture_failed")
-    return t("settings.peer_translation.disabled.overlay_required")
 
 
 class DashboardView(ft.Column):
@@ -88,7 +51,7 @@ class DashboardView(ft.Column):
         self._managed_auth_pending = False
         self._local_stt_notice_status: str | None = None
         self._local_stt_notice_percent: int | None = None
-        self._overlay_peer_contract: DashboardOverlayPeerPresentation | None = None
+        self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
         self._process_capture_warning_active = False
         self._process_capture_warning_reason: str | None = None
         self._process_capture_warning_locale: str | None = None
@@ -535,32 +498,29 @@ class DashboardView(ft.Column):
             self._stt_showing_warning = False
         self._sync_stt_button_state()
 
-    def set_overlay_peer_presentation(self, contract: DashboardOverlayPeerPresentation) -> None:
+    def set_overlay_peer_contract(self, contract: OverlayPeerConsumerContract) -> None:
         self._overlay_peer_contract = contract
         self._sync_overlay_peer_buttons()
-        helper_text = _peer_helper_text(contract)
         process_warning = (
             contract.peer.state == "warning"
-            and bool(
-                contract.peer.warning_reason and contract.peer.warning_reason.startswith("process_")
-            )
-            and bool(helper_text)
+            and is_process_capture_warning_reason(contract.peer.warning_reason)
+            and bool(contract.peer.helper_text)
         )
         if process_warning:
             warning_changed = (
                 not self._process_capture_warning_active
                 or self._process_capture_warning_reason != contract.peer.warning_reason
                 or (
-                    self._process_capture_warning_text != helper_text
+                    self._process_capture_warning_text != contract.peer.helper_text
                     and self._process_capture_warning_locale == get_locale()
                 )
             )
             self._process_capture_warning_active = True
             self._process_capture_warning_reason = contract.peer.warning_reason
             if warning_changed:
-                self._process_capture_warning_text = helper_text
+                self._process_capture_warning_text = contract.peer.helper_text
                 self._process_capture_warning_locale = get_locale()
-                self.set_display_text(helper_text)
+                self.set_display_text(contract.peer.helper_text)
                 self._process_capture_warning_display_revision = self._primary_display_revision
             return
         if self._process_capture_warning_active:

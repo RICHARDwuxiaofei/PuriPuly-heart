@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from puripuly_heart.app.ports import provider_verifier, secret_store, settings_repository
-from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core import messages
 
 SERVICE_MODULE = "puripuly_heart.app.services.secret_settings_transaction"
@@ -161,7 +160,6 @@ class RecordingSettingsRepository:
         raise_on_save: bool = False,
     ) -> None:
         self.result = result
-        self.returned_result = result
         self.events = events if events is not None else []
         self.raise_on_save = raise_on_save
         self.saved_requests: list[settings_repository.SettingsCommitRequest] = []
@@ -177,21 +175,6 @@ class RecordingSettingsRepository:
         self.saved_requests.append(request)
         if self.raise_on_save:
             raise RuntimeError("simulated settings save failure")
-        if self.result.succeeded and self.result.receipt is None:
-            self.returned_result = settings_repository.SettingsCommitResult(
-                succeeded=self.result.succeeded,
-                snapshot=self.result.snapshot,
-                message=self.result.message,
-                diagnostics=self.result.diagnostics,
-                receipt=settings_repository.SettingsCommitReceipt(
-                    AppSettingsVNext(),
-                    self.result.snapshot.revision if self.result.snapshot is not None else "r2",
-                    request.reason,
-                    request.correlation_id,
-                ),
-            )
-            return self.returned_result
-        self.returned_result = self.result
         return self.result
 
 
@@ -847,16 +830,14 @@ async def test_successful_set_snapshots_writes_commits_then_publishes_dashboard_
     )
     _assert_no_raw_secret_values(request, label="SecretSetRequest")
 
-    outcome = await secret_settings.SecretSettingsTransaction(
+    result = await secret_settings.SecretSettingsTransaction(
         secret_store=store,
         settings_repository=repository,
         dashboard_needs_key_publisher=publisher,
-    ).set_provider_secret_with_receipt(request)
-    result = outcome.transaction_result
+    ).set_provider_secret(request)
 
     _assert_no_raw_secret_values(result, label="set success result")
     assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
-    assert outcome.receipt is repository.returned_result.receipt
     assert result.message is None
     assert result.diagnostics is None
     assert events == [

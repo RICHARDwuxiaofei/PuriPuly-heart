@@ -22,17 +22,12 @@ from typing import Literal
 
 import numpy as np
 
-from puripuly_heart.app.ports.dashboard_application import DashboardApplicationPort
-from puripuly_heart.app.ports.ui_settings import (
-    CaptureDiagnosticReason,
-    CaptureRetryResult,
-    CaptureRetryStatus,
-)
 from puripuly_heart.config.process_capture_platform import (
     PROCESS_CAPTURE_MIN_WINDOWS_BUILD,
     get_process_capture_platform_availability,
 )
 from puripuly_heart.config.resolved import ResolvedDesktopAudioCaptureTarget
+from puripuly_heart.ui.controller import GuiController
 
 EVIDENCE_SCHEMA = "puripuly-heart/windows-process-isolation/v1"
 SAMPLE_RATE_HZ = 48000
@@ -43,7 +38,7 @@ EMITTER_AMPLITUDE = 0.18
 CAPTURE_SECONDS = 3.0
 PROTOCOL_VERSION = 1
 WORKER_MODULE = "puripuly_heart.release_evidence.windows_process_isolation"
-GUI_PROCESS_RETRY_ACTION = DashboardApplicationPort.retry_capture
+GUI_PROCESS_RETRY_ACTION = GuiController.retry_peer_process_capture
 
 EvidenceStatus = Literal["passed", "failed", "blocked"]
 
@@ -172,9 +167,8 @@ def lifecycle_passes(
     )
 
 
-async def invoke_gui_process_retry(action: DashboardApplicationPort) -> bool:
-    result = await action.retry_capture()
-    return result.status == CaptureRetryStatus.SUCCEEDED
+async def invoke_gui_process_retry(action: object) -> bool:
+    return await GUI_PROCESS_RETRY_ACTION(action)
 
 
 def build_fixture_capture_target(executable: str) -> ResolvedDesktopAudioCaptureTarget:
@@ -535,9 +529,6 @@ def _run_target_root() -> None:
 async def _run_native(thresholds: IsolationThresholds, runtime_dir: Path) -> dict[str, object]:
     import psutil
 
-    from puripuly_heart.app.adapters.peer_provider_ingress import (
-        HubPeerProviderIngressAdapter,
-    )
     from puripuly_heart.config.process_capture_resolution import ResolvedProcessCaptureIdentity
     from puripuly_heart.config.resolved import (
         ResolvedCredentialRequirement,
@@ -573,41 +564,12 @@ async def _run_native(thresholds: IsolationThresholds, runtime_dir: Path) -> dic
 
     class Hub:
         def __init__(self) -> None:
-            self.peer_stt = Provider(events)
-
-        def lease_stt_provider(self, _slot):  # noqa: ANN001, ANN201
-            provider = self.peer_stt
-
-            class Lease:
-                slot = "peer_stt"
-                identity = "process-isolation-provider"
-                generation = 0
-                current = provider
-
-                @property
-                def is_current(self) -> bool:
-                    return provider is self_outer.peer_stt
-
-            self_outer = self
-            return Lease()
-
-        async def handle_peer_vad_event(self, _event, *, stt_provider=None) -> None:  # noqa: ANN001
-            _ = stt_provider
-
-        async def start_peer_stt_provider_ingress(self, provider) -> None:  # noqa: ANN001
-            if self.peer_stt is not provider:
-                raise RuntimeError("stale peer provider")
+            self.peer_stt = None
 
         async def replace_peer_stt_provider(self, provider, *, start=True) -> None:  # noqa: ANN001
             previous, self.peer_stt = self.peer_stt, provider
             if previous is not None and previous is not provider:
                 await previous.close_backend()
-
-        async def release_peer_stt_provider_ingress(self, provider) -> bool:  # noqa: ANN001
-            if self.peer_stt is not provider:
-                return False
-            await provider.close_backend()
-            return True
 
     events: list[str] = []
     samples: list[np.ndarray] = []
@@ -732,10 +694,9 @@ async def _run_native(thresholds: IsolationThresholds, runtime_dir: Path) -> dic
         loop_task_at_warning.append(initial_loop_task is not None and initial_loop_task.done())
 
     runtime = PeerChannelRuntime(
-        hub=(hub := Hub()),
+        hub=Hub(),
         clock=Clock(),
-        provider_read_port=hub,
-        provider_ingress_port=HubPeerProviderIngressAdapter(hub),
+        stt_factory=lambda _config, _failure: Provider(events),
         source_factory=source_factory,
         vad_factory=lambda _config, _path: object(),
         vad_model_resolver=lambda: runtime_dir / "unused-vad.onnx",
@@ -837,21 +798,24 @@ async def _run_native(thresholds: IsolationThresholds, runtime_dir: Path) -> dic
         retry_root_ready_s = current_root.ready_monotonic_s - fixture_started
 
         class GuiRetryAction:
+            settings = object()
+            _peer_runtime = runtime
             _peer_process_warning_reason = "process_target_exited"
 
-            async def retry_capture(self) -> CaptureRetryResult:
-                succeeded = await runtime.retry_process_capture(config=config)
-                if succeeded:
-                    self._peer_process_warning_reason = None
-                return CaptureRetryResult(
-                    CaptureRetryStatus.SUCCEEDED if succeeded else CaptureRetryStatus.FAILED,
-                    (
-                        CaptureDiagnosticReason.SUCCESS
-                        if succeeded
-                        else CaptureDiagnosticReason.TARGET_EXITED
-                    ),
-                    "native-release-evidence",
-                )
+            def _peer_runtime_should_be_active(self, _settings) -> bool:  # noqa: ANN001
+                return True
+
+            async def _ensure_peer_local_stt_ready(self) -> bool:
+                return True
+
+            def _build_peer_runtime_config(self, _settings) -> PeerRuntimeConfig:  # noqa: ANN001
+                return config
+
+            def _sync_effective_hub_flags(self, _settings) -> None:  # noqa: ANN001
+                return None
+
+            def _refresh_overlay_peer_consumers(self) -> None:
+                return None
 
         gui_action = GuiRetryAction()
         retried = await invoke_gui_process_retry(gui_action)
@@ -965,7 +929,7 @@ async def _run_native(thresholds: IsolationThresholds, runtime_dir: Path) -> dic
                     loop_task_at_warning and loop_task_at_warning[-1]
                 ),
                 "automatic_reconnect": not no_automatic_reconnect,
-                "retry_action": "DashboardApplicationPort.retry_capture",
+                "retry_action": "GuiController.retry_peer_process_capture",
                 "retry_succeeded": retried,
                 "fresh_pid": first_pid != second_pid,
             },

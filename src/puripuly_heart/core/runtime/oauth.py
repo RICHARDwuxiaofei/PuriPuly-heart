@@ -5,6 +5,8 @@ import inspect
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, TypeVar
 
+from puripuly_heart.core.openrouter_pkce import OpenRouterPKCEExchangeResult
+
 _TaskResultT = TypeVar("_TaskResultT")
 ExternalTaskRunner = Callable[[Callable[[], Awaitable[Any]]], object]
 
@@ -13,6 +15,7 @@ class OAuthRuntime:
     """Owns OAuth loopback listeners and auth-related background tasks."""
 
     resource_fields = (
+        "_openrouter_pkce_client",
         "_auth_tasks",
         "_external_task_handles",
         "_loopback_listeners",
@@ -29,6 +32,7 @@ class OAuthRuntime:
         self._task_names: dict[asyncio.Task[Any], str] = {}
         self._external_task_handles: dict[str, object] = {}
         self._loopback_listeners: dict[str, object] = {}
+        self._openrouter_pkce_client: object | None = None
         self._closing = False
         self._closed = False
         self._close_lock = asyncio.Lock()
@@ -87,13 +91,6 @@ class OAuthRuntime:
         task.add_done_callback(self._on_auth_task_done)
         return task
 
-    async def cancel_auth_task(self, task_name: str) -> None:
-        task = self._auth_tasks.get(task_name)
-        if task is None:
-            return
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-
     def attach_loopback_listener(self, listener: object, *, listener_name: str) -> None:
         if self._closing or self._closed:
             raise RuntimeError("OAuthRuntime is closed to new loopback listeners")
@@ -109,6 +106,31 @@ class OAuthRuntime:
         current = self._loopback_listeners.get(listener_name)
         if current is listener:
             self._loopback_listeners.pop(listener_name, None)
+
+    async def run_openrouter_pkce_flow(
+        self,
+        client: object,
+    ) -> OpenRouterPKCEExchangeResult:
+        run_desktop_flow = getattr(client, "run_desktop_flow")
+        task = self.create_auth_task(
+            run_desktop_flow(),
+            task_name="openrouter-pkce",
+        )
+        self._openrouter_pkce_client = client
+        try:
+            return await task
+        finally:
+            if self._openrouter_pkce_client is client:
+                self._openrouter_pkce_client = None
+
+    def reopen_openrouter_pkce_authorization_url(self) -> bool:
+        client = self._openrouter_pkce_client
+        if client is None:
+            return False
+        reopen = getattr(client, "reopen_authorization_url", None)
+        if not callable(reopen):
+            return False
+        return bool(reopen())
 
     def start_external_task(
         self,
@@ -175,12 +197,18 @@ class OAuthRuntime:
                 failures.extend(await self._close_loopback_listeners())
                 failures.extend(self._cancel_external_tasks())
                 failures.extend(await self._cancel_and_gather_auth_tasks())
+                self._openrouter_pkce_client = None
             finally:
                 self._closing = False
             _raise_cleanup_failures("OAuthRuntime close failed", failures)
 
     def _has_resources(self) -> bool:
-        return bool(self._auth_tasks or self._external_task_handles or self._loopback_listeners)
+        return bool(
+            self._auth_tasks
+            or self._external_task_handles
+            or self._loopback_listeners
+            or self._openrouter_pkce_client is not None
+        )
 
     async def _close_loopback_listeners(self) -> list[Exception]:
         failures: list[Exception] = []
