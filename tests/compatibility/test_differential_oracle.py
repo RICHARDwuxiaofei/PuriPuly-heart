@@ -152,13 +152,42 @@ def _base_blob(relative: str) -> bytes | None:
     raise RuntimeError(result.stderr.decode("utf-8", errors="replace"))
 
 
+def _current_worktree_bytes(relative: str, *, root: Path = ROOT) -> bytes | None:
+    path = root / relative
+    if not path.exists():
+        return None
+    current_bytes = path.read_bytes()
+    if path.suffix.lower() in {".json", ".py"}:
+        return current_bytes.replace(b"\r\n", b"\n")
+    return current_bytes
+
+
+def _current_file_digest(path: Path) -> str:
+    relative = path.relative_to(ROOT).as_posix()
+    current_bytes = _current_worktree_bytes(relative)
+    if current_bytes is None:
+        raise AssertionError(f"missing current file: {relative}")
+    return hashlib.sha256(current_bytes).hexdigest()
+
+
+def _manifest_production_source_digest(files: list[str]) -> str:
+    digest = hashlib.sha256()
+    for relative in files:
+        digest.update(relative.encode())
+        digest.update(b"\0")
+        current_bytes = _current_worktree_bytes(relative)
+        digest.update(current_bytes if current_bytes is not None else b"current-absent")
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _manifest_source_delta_digest(files: list[str]) -> str:
     return _source_delta_digest(
         [
             (
                 relative,
                 _base_blob(relative),
-                (ROOT / relative).read_bytes() if (ROOT / relative).exists() else None,
+                _current_worktree_bytes(relative),
             )
             for relative in files
         ]
@@ -170,6 +199,41 @@ def test_source_delta_digest_distinguishes_base_absent_from_empty_blob() -> None
     empty = _source_delta_digest([("src/new.py", b"", b"current")])
     assert absent != empty
     assert absent == _source_delta_digest([("src/new.py", None, b"current")])
+
+
+def test_current_worktree_text_bytes_normalize_only_line_endings(tmp_path: Path) -> None:
+    relative = "source.py"
+    source = tmp_path / relative
+    source.write_bytes(b"first\nsecond\n")
+    lf_bytes = _current_worktree_bytes(relative, root=tmp_path)
+    assert lf_bytes is not None
+    lf_digest = hashlib.sha256(lf_bytes).hexdigest()
+
+    source.write_bytes(b"first\r\nsecond\r\n")
+    crlf_bytes = _current_worktree_bytes(relative, root=tmp_path)
+    assert crlf_bytes == lf_bytes
+    assert hashlib.sha256(crlf_bytes).hexdigest() == lf_digest
+
+    source.write_bytes(b"first\r\nchanged\r\n")
+    edited_bytes = _current_worktree_bytes(relative, root=tmp_path)
+    assert edited_bytes != lf_bytes
+    assert hashlib.sha256(edited_bytes).hexdigest() != lf_digest
+
+    source.unlink()
+    assert _current_worktree_bytes(relative, root=tmp_path) is None
+
+    untracked = tmp_path / "untracked.json"
+    untracked.write_bytes(b'{\r\n  "present": true\r\n}\r\n')
+    assert _current_worktree_bytes("untracked.json", root=tmp_path) == (
+        b'{\n  "present": true\n}\n'
+    )
+
+
+def test_current_worktree_non_text_bytes_remain_raw(tmp_path: Path) -> None:
+    raw = b"first\r\nsecond\r\n\x00"
+    (tmp_path / "source.bin").write_bytes(raw)
+
+    assert _current_worktree_bytes("source.bin", root=tmp_path) == raw
 
 
 def _archive_fixed_source(
@@ -505,51 +569,29 @@ def test_dual_run_provenance_names_fixed_sources_and_reproduced_traces() -> None
     repair_manifest = provenance["current"]["repair_manifest"]
     assert provenance["current"]["repair_base"] == CURRENT_REPAIR_BASE
     assert _changed_production_files() == tuple(sorted(repair_manifest["files"]))
-    digest = hashlib.sha256()
-    for relative in repair_manifest["files"]:
-        digest.update(relative.encode())
-        digest.update(b"\0")
-        path = ROOT / relative
-        digest.update(path.read_bytes() if path.exists() else b"current-absent")
-        digest.update(b"\0")
-    assert digest.hexdigest() == repair_manifest["production_source_sha256"]
+    assert (
+        _manifest_production_source_digest(repair_manifest["files"])
+        == repair_manifest["production_source_sha256"]
+    )
     assert (
         _manifest_source_delta_digest(repair_manifest["files"])
         == repair_manifest["source_delta_sha256"]
     )
     assert provenance["sha256"] == {
-        "runner": hashlib.sha256(
-            Path(__file__).with_name("differential_probe.py").read_bytes()
-        ).hexdigest(),
-        "baseline_trace": hashlib.sha256(
-            (FIXTURES / "baseline_normalized_golden.json").read_bytes()
-        ).hexdigest(),
-        "current_trace": hashlib.sha256(
-            (FIXTURES / "current_normalized_trace.json").read_bytes()
-        ).hexdigest(),
-        "difference_rules": hashlib.sha256(
-            (FIXTURES / "approved_difference_rules.json").read_bytes()
-        ).hexdigest(),
+        "runner": _current_file_digest(Path(__file__).with_name("differential_probe.py")),
+        "baseline_trace": _current_file_digest(FIXTURES / "baseline_normalized_golden.json"),
+        "current_trace": _current_file_digest(FIXTURES / "current_normalized_trace.json"),
+        "difference_rules": _current_file_digest(FIXTURES / "approved_difference_rules.json"),
     }
     assert provenance["scenario_sha256"] == {
-        "runner": hashlib.sha256(
-            Path(__file__).with_name("observable_scenario_probe.py").read_bytes()
-        ).hexdigest(),
-        "structured_runner": hashlib.sha256(
-            Path(__file__).with_name("structured_scenario_probe.py").read_bytes()
-        ).hexdigest(),
-        "traces": hashlib.sha256(
-            (FIXTURES / "observable_scenario_traces.json").read_bytes()
-        ).hexdigest(),
-        "baseline_nodes": hashlib.sha256(
-            (FIXTURES / "baseline_observable_probe_nodes.json").read_bytes()
-        ).hexdigest(),
-        "current_nodes": hashlib.sha256(
-            (FIXTURES / "current_observable_probe_nodes.json").read_bytes()
-        ).hexdigest(),
-        "field_node_indexes": hashlib.sha256(
-            (FIXTURES / "observable_field_node_indexes.json").read_bytes()
-        ).hexdigest(),
+        "runner": _current_file_digest(Path(__file__).with_name("observable_scenario_probe.py")),
+        "structured_runner": _current_file_digest(
+            Path(__file__).with_name("structured_scenario_probe.py")
+        ),
+        "traces": _current_file_digest(FIXTURES / "observable_scenario_traces.json"),
+        "baseline_nodes": _current_file_digest(FIXTURES / "baseline_observable_probe_nodes.json"),
+        "current_nodes": _current_file_digest(FIXTURES / "current_observable_probe_nodes.json"),
+        "field_node_indexes": _current_file_digest(FIXTURES / "observable_field_node_indexes.json"),
     }
     skip_report = _json("deterministic_environment_and_skips.json")
     assert skip_report["skip_classes"]["unknown"]["count"] == 0

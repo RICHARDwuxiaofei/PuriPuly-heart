@@ -135,8 +135,8 @@
         "src/puripuly_heart/ui/views/dashboard.py",
         "src/puripuly_heart/ui/views/settings.py"
       ],
-      "production_source_sha256": "3bb57f486764b0a50df468010063016e6e867c2609c0255377426446907930dd",
-      "source_delta_sha256": "76b1303b1932f381cbea0e9dc4f16b256272b48282764370105d1b1005c511aa"
+      "production_source_sha256": "dcad2a8a3a444a45c11465b3a3c7042c9351be9c6b4b701fb210e2561daebc62",
+      "source_delta_sha256": "64a65a6cb61ff43156fb3e2e78f2a9b891e339d9da00176165e2c085bce1b981"
     },
     "repair_base": "01b3973b64425c8feb9955696d5217fed5d422a4"
   },
@@ -144,7 +144,7 @@
   "sha256": {
     "runner": "5f9252d28e091d21dd7f506ec2d384c2e7ab9993add235a182001dea156c7961",
     "baseline_trace": "fdb3e1f58b13b83445967733ca737f17823e385efb1f5f85442161cb4224b78e",
-    "current_trace": "3ed83af21fd6e8ebefa3c895e26eac614eee61f2dcb2d4fa824fbac568ddfdc0",
+    "current_trace": "a78918c15957949a600aae8a3479781054d52c869ef2604f4071bbf37d81103b",
     "difference_rules": "48b2c253511110aa0d7984d402bf6163206d9f729bb867a2989db977605fbe0b"
   },
   "scenario_sha256": {
