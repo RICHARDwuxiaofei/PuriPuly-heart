@@ -1589,6 +1589,57 @@ async def test_managed_release_owner_persists_managed_operational_state(
 
 
 @pytest.mark.asyncio
+async def test_managed_release_status_persist_cannot_erase_canonical_delivered_ack(
+    tmp_path: Path,
+) -> None:
+    from puripuly_heart.app.adapters.application_runtime_production import (
+        ProductionManagedReleaseServiceOwner,
+    )
+    from puripuly_heart.app.services.canonical_settings_persistence import (
+        compose_canonical_settings_persistence,
+    )
+    from puripuly_heart.config.settings_vnext.facade import save_vnext_settings
+    from puripuly_heart.core.storage.secrets import InMemorySecretStore
+
+    path = tmp_path / "settings.json"
+    settings = AppSettingsVNext()
+    settings = replace(
+        settings,
+        state=replace(
+            settings.state,
+            managed_connection=replace(
+                settings.state.managed_connection,
+                pending_delivery_ack_source="discord",
+                pending_delivery_ack_delivery_id="delivery",
+                pending_delivery_ack_managed_credential_ref="credential",
+                pending_delivery_ack_delivered=True,
+            ),
+        ),
+    )
+    assert save_vnext_settings(path, settings).ok
+    persistence = compose_canonical_settings_persistence()
+    receipt = persistence.load_receipt(path, reason="test", correlation_id=None)
+    owner = ProductionManagedReleaseServiceOwner(persistence, path, InMemorySecretStore())
+    await owner.synchronize(receipt)
+
+    stale = owner.service.managed_state
+    stale.pending_delivery_ack_source = None
+    stale.pending_delivery_ack_delivery_id = None
+    stale.pending_delivery_ack_managed_credential_ref = None
+    stale.pending_delivery_ack_delivered = False
+    stale.referral_id = "status-write"
+    stale.persist()
+
+    stored = persistence.load_receipt(path, reason="verify", correlation_id=None)
+    managed = stored.envelope.state.managed_connection
+    assert managed.referral_id == "status-write"
+    assert managed.pending_delivery_ack_source == "discord"
+    assert managed.pending_delivery_ack_delivery_id == "delivery"
+    assert managed.pending_delivery_ack_managed_credential_ref == "credential"
+    assert managed.pending_delivery_ack_delivered is True
+
+
+@pytest.mark.asyncio
 async def test_managed_service_and_provider_replace_as_one_failure_safe_transaction(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

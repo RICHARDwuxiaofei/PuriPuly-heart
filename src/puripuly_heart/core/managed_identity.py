@@ -172,6 +172,50 @@ class ManagedIdentityBundle:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedManagedIdentity:
+    bundle: ManagedIdentityBundle = field(repr=False)
+    secret_values: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+    clear_secret_keys: tuple[str, ...] = ()
+    generated: bool = False
+
+
+def prepare_managed_identity_bundle(
+    state: ManagedIdentityStatePort,
+    secret_store: SecretStore,
+) -> PreparedManagedIdentity:
+    existing = load_existing_managed_identity_bundle(state, secret_store)
+    if existing is not None:
+        return PreparedManagedIdentity(existing)
+    return prepare_replacement_managed_identity_bundle()
+
+
+def prepare_replacement_managed_identity_bundle() -> PreparedManagedIdentity:
+    installation_id = _generate_uuid7()
+    private_key = Ed25519PrivateKey.generate()
+    private_key_value = encode_base64url(
+        private_key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+    )
+    public_key_value = encode_base64url(
+        private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    )
+    binding_value = _managed_identity_binding_value(installation_id, public_key_value)
+    return PreparedManagedIdentity(
+        ManagedIdentityBundle(installation_id, public_key_value, private_key),
+        (
+            (MANAGED_DEVICE_PRIVATE_KEY_SECRET, private_key_value),
+            (MANAGED_DEVICE_PUBLIC_KEY_SECRET, public_key_value),
+            (MANAGED_IDENTITY_BINDING_SECRET, binding_value),
+        ),
+        (
+            OPENROUTER_MANAGED_API_KEY_SECRET,
+            OPENROUTER_MANAGED_USER_ID_SECRET,
+            OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+        ),
+        True,
+    )
+
+
 def canonical_verify_payload(
     *,
     installation_id: str,

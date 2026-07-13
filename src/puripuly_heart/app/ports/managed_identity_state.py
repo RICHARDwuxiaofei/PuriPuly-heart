@@ -30,6 +30,7 @@ class ManagedIdentitySnapshot:
     pending_delivery_ack_delivery_id: str | None = None
     pending_delivery_ack_managed_credential_ref: str | None = None
     pending_delivery_ack_expires_at: str | None = None
+    pending_delivery_ack_delivered: bool = False
 
 
 class ManagedIdentityStatePort(Protocol):
@@ -55,6 +56,7 @@ class ManagedIdentityStatePort(Protocol):
     pending_delivery_ack_delivery_id: str | None
     pending_delivery_ack_managed_credential_ref: str | None
     pending_delivery_ack_expires_at: str | None
+    pending_delivery_ack_delivered: bool
 
     def persist(self) -> None: ...
 

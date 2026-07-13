@@ -24,6 +24,7 @@ class ManagedAuthenticationApplication:
         browser: ManagedAuthenticationBrowserPort,
         close_authentication: Callable[[], Awaitable[None]],
         oauth_runtime,
+        recover_pending: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         self._presentation = presentation
         self._start_discord = start_discord
@@ -31,10 +32,13 @@ class ManagedAuthenticationApplication:
         self._browser = browser
         self._close_authentication = close_authentication
         self._oauth_runtime = oauth_runtime
+        self._recover_pending = recover_pending
+        self._recovery_complete = False
         self._in_progress = False
         self._generation = 0
         self._listeners: list[Callable[[ManagedAuthenticationPresentation], None]] = []
         self._last_presentation: ManagedAuthenticationPresentation | None = None
+        self.managed_transactions: object | None = None
 
     def subscribe_presentation(
         self, listener: Callable[[ManagedAuthenticationPresentation], None]
@@ -48,6 +52,8 @@ class ManagedAuthenticationApplication:
         return unsubscribe
 
     async def presentation(self) -> ManagedAuthenticationPresentation:
+        if self._recover_pending is not None and not self._recovery_complete:
+            self._recovery_complete = await self._recover_pending()
         presentation = await self._presentation()
         if self._in_progress:
             presentation = replace(presentation, action="in_progress", generation=self._generation)

@@ -175,6 +175,7 @@ def test_load_settings_backfills_managed_identity_defaults(tmp_path) -> None:
         "pending_delivery_ack_delivery_id": None,
         "pending_delivery_ack_managed_credential_ref": None,
         "pending_delivery_ack_expires_at": None,
+        "pending_delivery_ack_delivered": False,
     }
 
 

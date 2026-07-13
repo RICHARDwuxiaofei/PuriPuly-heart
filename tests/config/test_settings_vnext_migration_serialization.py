@@ -61,6 +61,22 @@ def _migration() -> ModuleType:
     return _load_module("puripuly_heart.config.settings_vnext.migration")
 
 
+def test_managed_ack_delivered_marker_round_trips_legacy_and_vnext_projection() -> None:
+    legacy = AppSettings()
+    legacy.managed_identity.pending_delivery_ack_source = "discord"
+    legacy.managed_identity.pending_delivery_ack_delivery_id = "delivery"
+    legacy.managed_identity.pending_delivery_ack_managed_credential_ref = "credential"
+    legacy.managed_identity.pending_delivery_ack_delivered = True
+
+    legacy_round_trip = from_dict(to_dict(legacy))
+    vnext = _migration().from_legacy_app_settings(legacy_round_trip)
+    projected = from_dict(_migration().to_legacy_dict(vnext))
+
+    assert legacy_round_trip.managed_identity.pending_delivery_ack_delivered is True
+    assert vnext.state.managed_connection.pending_delivery_ack_delivered is True
+    assert projected.managed_identity.pending_delivery_ack_delivered is True
+
+
 def _serialization() -> ModuleType:
     return _load_module("puripuly_heart.config.settings_vnext.serialization")
 

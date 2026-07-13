@@ -209,6 +209,7 @@ class ProductionManagedReleaseServiceOwner:
     _retirement_failures: list[object] | None = None
     _committed_settlements: list[PendingCommittedSettlement] | None = None
     authoritative_receipts: object | None = None
+    managed_transaction_port: object | None = None
 
     def __post_init__(self) -> None:
         self.callback_output = self.callback_output or ManagedDiscordCallbackOutput()
@@ -265,11 +266,58 @@ class ProductionManagedReleaseServiceOwner:
                     raise asyncio.CancelledError
                 raise
             return
+        if (
+            self.service is not None
+            and self.signature is not None
+            and signature[:4] == self.signature[:4]
+            and replacement_secrets is None
+        ):
+            from puripuly_heart.app.wiring import (
+                build_managed_identity_state_port,
+                build_openrouter_release_runtime_config,
+            )
+
+            managed_state = build_managed_identity_state_port(settings, self._persist_managed_state)
+            previous_state = self.service.managed_state
+            previous_config = self.service.openrouter_config
+            self.service.managed_state = managed_state
+            self.service.openrouter_config = build_openrouter_release_runtime_config(settings)
+            previous_receipt = self.receipt
+            self.receipt = receipt
+            try:
+                await install()
+            except RuntimeCommittedSettlementFailure as exc:
+                assert self._committed_settlements is not None
+                self._committed_settlements.append(
+                    PendingCommittedSettlement(list(exc.failed_displaced), None)
+                )
+                self.signature = signature
+                if exc.cancellation_requested:
+                    raise asyncio.CancelledError
+                raise
+            except RuntimeResourceInstallCancelled as exc:
+                if exc.provider_state_committed:
+                    self.signature = signature
+                else:
+                    self.service.managed_state = previous_state
+                    self.service.openrouter_config = previous_config
+                    self.receipt = previous_receipt
+                raise
+            except BaseException:
+                self.service.managed_state = previous_state
+                self.service.openrouter_config = previous_config
+                self.receipt = previous_receipt
+                raise
+            self.signature = signature
+            return
         candidate = create_production_managed_release_service(
             settings=settings,
             secrets=replacement_secrets or self.secrets,
             on_discord_callback_received=self.callback_output.publish,
         )
+        bind_transaction = getattr(candidate, "bind_transaction_port", None)
+        if callable(bind_transaction) and self.managed_transaction_port is not None:
+            bind_transaction(self.managed_transaction_port)
         candidate.managed_state._persist = self._persist_managed_state
         self._staged_service = candidate
         previous_receipt = self.receipt
@@ -413,6 +461,9 @@ class ProductionManagedReleaseServiceOwner:
             raise RuntimeError("stale authoritative runtime receipt")
 
     def _persist_managed_state(self, settings) -> None:  # noqa: ANN001
+        from puripuly_heart.app.adapters.canonical_state_repository import (
+            CanonicalStateRevisionConflict,
+        )
         from puripuly_heart.app.wiring_composition import create_canonical_state_repositories
         from puripuly_heart.config.settings_vnext.schema import ManagedConnectionState
 
@@ -420,33 +471,41 @@ class ProductionManagedReleaseServiceOwner:
         if receipt is None:
             raise RuntimeError("managed release state has no authoritative receipt")
         managed = settings.managed_identity
-        managed_connection = ManagedConnectionState(
-            installation_id=managed.installation_id,
-            release_token=managed.release_token,
-            release_token_expires_at=managed.release_token_expires_at,
-            verified_hardware_hash=managed.verified_hardware_hash,
-            verified_hardware_hash_salt_version=managed.verified_hardware_hash_salt_version,
-            active_managed_credential_ref=managed.active_managed_credential_ref,
-            active_managed_expires_at=managed.active_managed_expires_at,
-            founder_letter_seen_credential_ref=managed.founder_letter_seen_credential_ref,
-            referral_id=managed.referral_id,
-            local_managed_claim_sources=tuple(managed.local_managed_claim_sources),
-            pending_delivery_ack_source=managed.pending_delivery_ack_source,
-            pending_delivery_ack_delivery_id=managed.pending_delivery_ack_delivery_id,
-            pending_delivery_ack_managed_credential_ref=(
-                managed.pending_delivery_ack_managed_credential_ref
-            ),
-            pending_delivery_ack_expires_at=managed.pending_delivery_ack_expires_at,
-        )
         repository = create_canonical_state_repositories(self.state_path).operational_state
-        snapshot = repository.load()
-        repository.save(
-            replace(
-                snapshot.value,
-                managed_connection=managed_connection,
-            ),
-            expected_revision=snapshot.revision,
-        )
+        for attempt in range(2):
+            snapshot = repository.load()
+            current_ack = snapshot.value.managed_connection
+            managed_connection = ManagedConnectionState(
+                installation_id=managed.installation_id,
+                release_token=managed.release_token,
+                release_token_expires_at=managed.release_token_expires_at,
+                verified_hardware_hash=managed.verified_hardware_hash,
+                verified_hardware_hash_salt_version=managed.verified_hardware_hash_salt_version,
+                active_managed_credential_ref=managed.active_managed_credential_ref,
+                active_managed_expires_at=managed.active_managed_expires_at,
+                founder_letter_seen_credential_ref=managed.founder_letter_seen_credential_ref,
+                referral_id=managed.referral_id,
+                local_managed_claim_sources=tuple(managed.local_managed_claim_sources),
+                pending_delivery_ack_source=current_ack.pending_delivery_ack_source,
+                pending_delivery_ack_delivery_id=current_ack.pending_delivery_ack_delivery_id,
+                pending_delivery_ack_managed_credential_ref=(
+                    current_ack.pending_delivery_ack_managed_credential_ref
+                ),
+                pending_delivery_ack_expires_at=current_ack.pending_delivery_ack_expires_at,
+                pending_delivery_ack_delivered=current_ack.pending_delivery_ack_delivered,
+            )
+            try:
+                repository.save(
+                    replace(
+                        snapshot.value,
+                        managed_connection=managed_connection,
+                    ),
+                    expected_revision=snapshot.revision,
+                )
+                return
+            except CanonicalStateRevisionConflict:
+                if attempt:
+                    raise
 
     async def close(self) -> None:
         if self.closed:

@@ -198,7 +198,8 @@ class SyncSecretStorePortAdapter:
         from puripuly_heart.app.ports.secret_store import SecretReadResult
 
         value = await asyncio.to_thread(self.store.get, key)
-        return SecretReadResult(key, value, None, None, None)
+        revision = _fingerprint_revision(value) if value is not None else None
+        return SecretReadResult(key, value, revision, None, None)
 
     async def set_secret(self, key: str, value: str):
         from puripuly_heart.app.ports.secret_store import SecretWriteResult
@@ -216,7 +217,8 @@ class SyncSecretStorePortAdapter:
         from puripuly_heart.app.ports.secret_store import SecretSnapshot
 
         value = await asyncio.to_thread(self.store.get, key)
-        return SecretSnapshot(key, value, None, value is not None)
+        revision = _fingerprint_revision(value) if value is not None else None
+        return SecretSnapshot(key, value, revision, value is not None)
 
     async def restore_secret(self, snapshot):
         from puripuly_heart.app.ports.secret_store import SecretWriteResult
@@ -228,6 +230,15 @@ class SyncSecretStorePortAdapter:
             await asyncio.to_thread(self.store.delete, snapshot.key)
             revision = None
         return SecretWriteResult(True, snapshot.key, revision, None, None)
+
+    async def compare_and_clear_secret(self, key: str, expected_revision: str):
+        from puripuly_heart.app.ports.secret_store import SecretCompareAndClearResult
+
+        compare_and_clear = getattr(self.store, "compare_and_clear", None)
+        if not callable(compare_and_clear):
+            raise RuntimeError("secret store compare-and-clear is unavailable")
+        status = await asyncio.to_thread(compare_and_clear, key, expected_revision)
+        return SecretCompareAndClearResult(status, key, expected_revision)
 
 
 __all__ = [

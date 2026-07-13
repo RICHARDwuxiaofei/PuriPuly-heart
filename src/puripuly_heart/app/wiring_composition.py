@@ -349,6 +349,9 @@ def create_application_runtime_production_composition(
         ui_settings=ui_settings,
         secrets=secrets,
         oauth_runtime=OAuthRuntime(),
+        canonical_commands=canonical_commands,
+        persistence=persistence,
+        state_path=state_path,
     )
 
     dashboard = DashboardApplication(

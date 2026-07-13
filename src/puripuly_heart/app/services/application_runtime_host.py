@@ -312,6 +312,16 @@ class ApplicationRuntimeHost:
         if output is not None and callable(handler):
             output.subscribe(handler)
 
+    def bind_managed_transaction_port(self, port: object) -> None:
+        owner = getattr(self._runtime_composition, "managed_release_owner", None)
+        if owner is None:
+            return
+        owner.managed_transaction_port = port
+        service = owner.current_service()
+        bind = getattr(service, "bind_transaction_port", None)
+        if callable(bind):
+            bind(port)
+
     def subscribe_dashboard_runtime_facts(self, handler: object) -> None:
         subscribe = getattr(self._dashboard_projection, "subscribe_dashboard", None)
         if callable(subscribe) and callable(handler):
