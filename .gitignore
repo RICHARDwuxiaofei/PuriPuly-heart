@@ -251,5 +251,6 @@ docs/superpowers/specs/*
 .superpowers/
 /settings.json
 opencode.json
+.skills/
 .opencode/
 .impeccable.md
