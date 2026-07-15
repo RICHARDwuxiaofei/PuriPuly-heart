@@ -2381,8 +2381,6 @@ class SettingsView(ft.Column):
     def _sync_peer_auto_languages_editor(self, settings: AppSettings | None = None) -> None:
         if not hasattr(self, "_peer_auto_languages_editor"):
             return
-        if self.page is not None and hasattr(self._peer_auto_languages_editor, "set_page"):
-            self._peer_auto_languages_editor.set_page(self.page)
         settings = settings or self._settings
         languages = [] if settings is None else settings.languages.peer_expected_languages
         self._peer_auto_languages_editor.set_terms(list(languages))

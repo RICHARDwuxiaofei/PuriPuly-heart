@@ -42,11 +42,9 @@ class LanguageHintEditor(ft.Column):
     def __init__(
         self,
         *,
-        page: ft.Page | None = None,
         on_add: Callable[[str], None] | None = None,
         on_remove: Callable[[str], None] | None = None,
     ) -> None:
-        self._page = page
         self._on_add = on_add
         self._on_remove = on_remove
         self._terms: list[str] = []
@@ -88,9 +86,6 @@ class LanguageHintEditor(ft.Column):
             spacing=10,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
-
-    def set_page(self, page: ft.Page) -> None:
-        self._page = page
 
     def apply_locale(self) -> None:
         self._add_button.text = t("settings.peer_auto_languages.add")
@@ -158,13 +153,14 @@ class LanguageHintEditor(ft.Column):
         _update_control_if_mounted(chip)
 
     def _open_modal(self, _event: ft.ControlEvent | None = None) -> None:
-        if self._page is None:
+        page = self.page
+        if page is None:
             return
         languages = get_all_language_options()
         lang_codes = dict(languages)
         recent = [code for code in self._recent if code in lang_codes]
         modal = LanguageModal(
-            page=self._page,
+            page=page,
             languages=languages,
             on_select=self._handle_select,
         )
