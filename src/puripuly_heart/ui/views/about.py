@@ -238,6 +238,7 @@ class AboutView(ft.Column):
         "about.special_thanks.name.ephedrine",
         "about.special_thanks.name.eri",
         "about.special_thanks.name.fzcfweasdferttgg_png",
+        "about.special_thanks.name.welcius",
     ]
 
     def _build_special_thanks_card(self) -> ft.Control:
