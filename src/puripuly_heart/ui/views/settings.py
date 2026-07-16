@@ -3831,6 +3831,7 @@ class SettingsView(ft.Column):
                     initial_options,
                     self._on_loopback_audio_selected,
                     show_description=False,
+                    two_column=True,
                 )
                 modal.open(current, loading_section=process_section)
                 self.page.run_task(self._load_process_capture_options, modal, current)
@@ -3842,6 +3843,7 @@ class SettingsView(ft.Column):
                     options,
                     self._on_loopback_audio_selected,
                     show_description=False,
+                    two_column=True,
                 )
                 modal.open(current)
         else:

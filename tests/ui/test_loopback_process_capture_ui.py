@@ -463,6 +463,7 @@ def test_settings_modal_renders_process_section_before_device_and_hides_descript
         options=options,
         on_select=lambda _value: None,
         show_description=False,
+        two_column=True,
     )
     option_list = modal._build_option_list("process:vrchat:c:\\vrchat\\vrchat.exe")
 
@@ -531,6 +532,7 @@ def test_settings_modal_two_column_shows_loading_in_left_column() -> None:
             OptionItem(value="device:", label="Auto", section="Output devices"),
         ],
         on_select=lambda _value: None,
+        two_column=True,
     )
     modal._loading_section = "Applications"
 
@@ -555,6 +557,7 @@ def test_settings_modal_replace_options_updates_both_columns() -> None:
             OptionItem(value="device:", label="Auto", section="Output devices"),
         ],
         on_select=lambda _value: None,
+        two_column=True,
     )
     modal._loading_section = "Applications"
     option_list = modal._build_option_list("device:")

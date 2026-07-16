@@ -51,6 +51,7 @@ class SettingsModal:
         on_select: Callable[[str], None],
         *,
         show_description: bool = False,
+        two_column: bool = False,
     ):
         """Initialize settings modal.
 
@@ -60,12 +61,16 @@ class SettingsModal:
             options: List of OptionItem objects.
             on_select: Callback when an option is selected (receives value).
             show_description: Whether to show descriptions for options.
+            two_column: Whether to force a 2-column layout. When False, the
+                modal always renders as a single column regardless of how
+                many sections the options carry.
         """
         self._page = page
         self._title = title
         self._options = options
         self._on_select = on_select
         self._show_description = show_description
+        self._two_column = two_column
         self._dialog: ft.AlertDialog | None = None
         self._option_list: ft.ListView | ft.Row | None = None
         self._section_lists: list[tuple[str, ft.ListView]] | None = None
@@ -83,7 +88,7 @@ class SettingsModal:
         self._current = current
         self._loading_section = loading_section
         sections = self._collect_sections()
-        is_two_column = self._is_two_column(sections)
+        is_two_column = self._two_column
         option_list = self._build_option_list(current, sections, is_two_column)
 
         content_controls: list[ft.Control] = [
@@ -152,12 +157,6 @@ class SettingsModal:
                 seen.append(option.section)
         return seen
 
-    def _is_two_column(self, sections: list[str]) -> bool:
-        """Check if the modal should use 2-column layout."""
-        if len(sections) != 2:
-            return False
-        return not any(not o.section for o in self._options)
-
     def _build_option_list(
         self,
         current: str,
@@ -168,7 +167,7 @@ class SettingsModal:
         if sections is None:
             sections = self._collect_sections()
         if is_two_column is None:
-            is_two_column = self._is_two_column(sections)
+            is_two_column = self._two_column
         if is_two_column:
             return self._build_two_column_list(current, sections)
         return self._build_single_column_list(current)
