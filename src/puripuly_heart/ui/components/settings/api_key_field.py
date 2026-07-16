@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 from typing import Callable
 
 import flet as ft
@@ -28,7 +29,7 @@ class ApiKeyField(ft.Row):
         secret_key: str,
         provider: str,
         on_verify: Callable[[str, str], object] | None = None,
-        on_save: Callable[[str, str], None] | None = None,
+        on_save: Callable[[str, str], object] | None = None,
         show_snackbar: Callable[[str, str], None] | None = None,
         show_status: bool = True,
     ):
@@ -141,29 +142,26 @@ class ApiKeyField(ft.Row):
         """Handle blur event - save and verify."""
         key = self.value
 
-        if self._dirty:
+        needs_save = self._dirty
+        if needs_save:
             self._dirty = False
-            # Save user-edited values on blur.
-            if self._on_save:
-                self._on_save(self._secret_key, key)
         elif not self._show_status:
             return
 
-        # Skip verification if this field hides status or has no callback.
-        if not self._show_status or not self._on_verify:
+        if not self._show_status:
+            if needs_save and self._on_save:
+                self._on_save(self._secret_key, key)
             return
-
-        if not key:
-            self._set_status("idle")
-            self._last_verified_hash = ""
+        if not self._on_verify:
             return
 
         key_hash = self._get_key_hash(key)
-        if key_hash == self._last_verified_hash:
-            return  # Skip if same key
+        if not needs_save and key_hash == self._last_verified_hash:
+            return
 
         self._pending_key = key
         self._pending_hash = key_hash
+        self._pending_save = needs_save
         if self._is_verifying:
             return
 
@@ -172,19 +170,46 @@ class ApiKeyField(ft.Row):
 
     async def _run_verification(self) -> None:
         """Wrapper for run_task compatibility."""
-        while True:
-            key = getattr(self, "_pending_key", "")
-            key_hash = getattr(self, "_pending_hash", "")
-            if not key_hash:
-                return
-
-            self._pending_key = ""
-            self._pending_hash = ""
-            await self._verify_async(key, key_hash)
-
-    async def _verify_async(self, key: str, key_hash: str) -> None:
-        """Run verification asynchronously."""
+        if self._is_verifying:
+            return
         self._is_verifying = True
+        try:
+            while True:
+                key = getattr(self, "_pending_key", "")
+                key_hash = getattr(self, "_pending_hash", "")
+                needs_save = bool(getattr(self, "_pending_save", False))
+                if not key_hash and not needs_save:
+                    return
+
+                for pending_name in ("_pending_key", "_pending_hash", "_pending_save"):
+                    if hasattr(self, pending_name):
+                        delattr(self, pending_name)
+                if needs_save and self._on_save:
+                    save_result = self._on_save(self._secret_key, key)
+                    if inspect.isawaitable(save_result):
+                        save_result = await save_result
+                    if save_result is False:
+                        self._set_status("error")
+                        self._last_verified_hash = ""
+                        continue
+                if not key:
+                    self._set_status("idle")
+                    self._last_verified_hash = ""
+                    continue
+                await self._verify_async(key, key_hash, _manage_lifecycle=False)
+        finally:
+            self._is_verifying = False
+
+    async def _verify_async(
+        self,
+        key: str,
+        key_hash: str,
+        *,
+        _manage_lifecycle: bool = True,
+    ) -> None:
+        """Run verification asynchronously."""
+        if _manage_lifecycle:
+            self._is_verifying = True
         self._set_status("verifying")
 
         try:
@@ -217,7 +242,8 @@ class ApiKeyField(ft.Row):
                 colors.RED_400,
             )
         finally:
-            self._is_verifying = False
+            if _manage_lifecycle:
+                self._is_verifying = False
 
     def _show_snackbar(self, message: str, bgcolor) -> None:
         """Show a toast via App-level callback or fallback to page."""

@@ -3592,15 +3592,18 @@ async def test_on_verify_api_key_persists_and_updates_dashboard_flags(
             alibaba_singapore=False,
         )
     )
+    saves: list[tuple[str, str, bool]] = []
+
+    def persist_verification(provider: str, key: str, success: bool) -> None:
+        setattr(settings.api_key_verified, provider, success)
+        saves.append((provider, key, success))
+
     app.controller = SimpleNamespace(
         verify_api_key=fake_verify,
+        persist_api_key_verification=persist_verification,
         settings=settings,
         config_path="settings.json",
     )
-
-    saves: list[tuple[object, object]] = []
-    app.controller._save_settings = lambda: saves.append(("controller", settings))
-    app.controller.persist_settings = lambda: saves.append(("controller", settings))
 
     deepgram_result = await app._on_verify_api_key("deepgram", "k")
     google_result = await app._on_verify_api_key("google", "k")
@@ -3646,15 +3649,15 @@ async def test_on_verify_api_key_skips_persistence_for_stale_field_value(
             google=False,
         )
     )
+    saves: list[tuple[str, str, bool]] = []
     app.controller = SimpleNamespace(
         verify_api_key=fake_verify,
+        persist_api_key_verification=lambda provider, key, success: saves.append(
+            (provider, key, success)
+        ),
         settings=settings,
         config_path="settings.json",
     )
-
-    saves: list[tuple[object, object]] = []
-    app.controller._save_settings = lambda: saves.append(("controller", settings))
-    app.controller.persist_settings = lambda: saves.append(("controller", settings))
 
     result = await app._on_verify_api_key("google", "old-key")
 

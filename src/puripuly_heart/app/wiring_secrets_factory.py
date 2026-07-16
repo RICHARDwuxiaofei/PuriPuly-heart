@@ -46,7 +46,7 @@ def create_secret_store(
     *,
     config_path: Path,
     passphrase: str | None = None,
-    keyring_service_name: str = VNEXT_KEYRING_SERVICE_NAME,
+    keyring_service_name: str = STABLE_KEYRING_SERVICE_NAME,
 ) -> SecretStore:
     passphrase = passphrase or os.getenv(SECRETS_PASSPHRASE_ENV)
 

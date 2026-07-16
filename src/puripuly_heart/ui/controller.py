@@ -26,6 +26,7 @@ import numpy as np
 from puripuly_heart.app.language_selection import LanguageSelectionChange
 from puripuly_heart.app.ports.canonical_settings_persistence import (
     CanonicalSettingsPersistencePort,
+    ProviderVerificationBinding,
 )
 from puripuly_heart.app.ports.runtime_apply import RuntimeApplyRequest
 from puripuly_heart.app.ports.secret_store import (
@@ -73,6 +74,7 @@ from puripuly_heart.app.services.provider_runtime_apply import (
 )
 from puripuly_heart.app.services.qq_managed_auth import QqManagedAuthRequest, QqManagedAuthService
 from puripuly_heart.app.services.secret_settings_transaction import (
+    SecretClearRequest,
     SecretSetRequest,
     SecretSettingsTransaction,
 )
@@ -178,6 +180,7 @@ from puripuly_heart.core.audio.source import (
 from puripuly_heart.core.clipboard.watcher import create_clipboard_watcher
 from puripuly_heart.core.clock import SystemClock
 from puripuly_heart.core.hardware_fingerprint import get_raw_hardware_fingerprint
+from puripuly_heart.core.lifecycle import LifecycleScope, start_lifecycle_task
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.local_stt_assets import (
     LocalQwenSherpaLoadError,
@@ -257,7 +260,11 @@ from puripuly_heart.core.runtime.peer_channel import (
 from puripuly_heart.core.runtime.provider_rebuild import ProviderRuntimeRebuildService
 from puripuly_heart.core.runtime.receiver import VrcMicReceiverRuntime
 from puripuly_heart.core.runtime.self_audio import SelfAudioRuntime
-from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
+from puripuly_heart.core.runtime_logging import (
+    RuntimeLoggingSinks,
+    SessionLoggingMode,
+    SessionRuntimeLoggingService,
+)
 from puripuly_heart.core.stt.controller import (
     FinalTranscriptSuppressedNotification,
     ManagedSTTProvider,
@@ -577,6 +584,7 @@ class _ControllerSettingsPatchRepository:
     committed_settings: AppSettings
     base_settings: AppSettings | None = None
     surface: str = "translation_provider"
+    provider_verification_binding: ProviderVerificationBinding | None = None
 
     async def load(self) -> SettingsSnapshot:
         settings = self.controller.settings or self.committed_settings
@@ -598,11 +606,13 @@ class _ControllerSettingsPatchRepository:
         else:
             next_settings = copy.deepcopy(self.committed_settings)
         self.controller._begin_canonical_mutation()
-        self.controller._update_canonical_settings_from_legacy_delta(
-            base_settings or next_settings,
-            next_settings,
-        )
         try:
+            self.controller._update_canonical_settings_from_legacy_delta(
+                base_settings or next_settings,
+                next_settings,
+            )
+            if self.provider_verification_binding is not None:
+                self.controller._bind_provider_verification(self.provider_verification_binding)
             await asyncio.to_thread(
                 self.controller._persist_settings_at_controller_boundary,
                 next_settings,
@@ -773,6 +783,26 @@ def _settings_mutation_committed(result: TransactionResult) -> bool:
     }
 
 
+def _provider_verification_fingerprint(value: str) -> str:
+    return f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+
+_PROVIDER_VERIFICATION_SECRET_KEY_BY_PROVIDER = {
+    "deepgram": "deepgram_api_key",
+    "soniox": "soniox_api_key",
+    "google": "google_api_key",
+    "openrouter": OPENROUTER_BYOK_API_KEY_SECRET,
+    "deepseek": "deepseek_api_key",
+    "cerebras": "cerebras_api_key",
+    "alibaba_beijing": "alibaba_api_key_beijing",
+    "alibaba_singapore": "alibaba_api_key_singapore",
+}
+_PROVIDER_BY_VERIFICATION_SECRET_KEY = {
+    secret_key: provider
+    for provider, secret_key in _PROVIDER_VERIFICATION_SECRET_KEY_BY_PROVIDER.items()
+}
+
+
 def _sensitive_optional_text_signature(value: str | None) -> tuple[int, str] | None:
     if value is None:
         return None
@@ -841,6 +871,7 @@ class GuiController:
     app: object
     config_path: Path
     allow_stable_settings_import: bool = False
+    runtime_logging_sinks: RuntimeLoggingSinks | None = field(default=None, repr=False)
     settings_mutation_service: SettingsMutationService | None = None
     provider_verifier: _ControllerProviderVerifier | None = None
     telemetry_client: TranslationSuccessTelemetryClientPort | None = None
@@ -870,6 +901,11 @@ class GuiController:
         repr=False,
     )
     _canonical_mutation_rollback_active_settings: AppSettings | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _provider_secret_change_lock: asyncio.Lock | None = field(
         init=False,
         default=None,
         repr=False,
@@ -7046,6 +7082,176 @@ class GuiController:
             next_settings=next_settings,
         )
 
+    def _provider_verification_binding(
+        self,
+        provider: str,
+        key: str,
+        *,
+        flow: str,
+        context_values: Mapping[str, object] | None = None,
+    ) -> ProviderVerificationBinding:
+        secret_key = _PROVIDER_VERIFICATION_SECRET_KEY_BY_PROVIDER.get(provider)
+        if secret_key is None:
+            raise ValueError(f"unsupported provider verification binding: {provider}")
+        context: dict[str, object] = {"flow": flow}
+        settings = self.settings
+        if settings is not None:
+            if provider == "google":
+                context["model"] = settings.gemini.llm_model.value
+            elif provider == "cerebras":
+                context["model"] = settings.cerebras.llm_model.value
+            elif provider in {"alibaba_beijing", "alibaba_singapore"}:
+                context["base_url"] = (
+                    "https://dashscope.aliyuncs.com/api/v1"
+                    if provider == "alibaba_beijing"
+                    else "https://dashscope-intl.aliyuncs.com/api/v1"
+                )
+                context["model"] = settings.qwen.llm_model.value
+                context["low_latency"] = settings.stt.low_latency_mode
+        if context_values is not None:
+            context.update(context_values)
+        return ProviderVerificationBinding(
+            provider=provider,
+            secret_key=secret_key,
+            secret_revision=None,
+            secret_fingerprint=_provider_verification_fingerprint(key),
+            verifier_context=context,
+            verifier_evidence={"source": "provider_verifier"},
+        )
+
+    def _bind_provider_verification(
+        self,
+        binding: ProviderVerificationBinding,
+    ) -> None:
+        canonical = self.vnext_settings
+        if canonical is None:
+            raise RuntimeError("canonical settings unavailable for provider verification")
+        self.vnext_settings = self.canonical_settings_persistence.bind_provider_verification(
+            canonical,
+            binding,
+        )
+
+    async def persist_provider_secret_change(
+        self,
+        secret_key: str,
+        value: str,
+    ) -> bool:
+        if self._provider_secret_change_lock is None:
+            self._provider_secret_change_lock = asyncio.Lock()
+        async with self._provider_secret_change_lock:
+            return await self._persist_provider_secret_change_serialized(secret_key, value)
+
+    async def _persist_provider_secret_change_serialized(
+        self,
+        secret_key: str,
+        value: str,
+    ) -> bool:
+        assert self.settings is not None
+        provider = _PROVIDER_BY_VERIFICATION_SECRET_KEY.get(secret_key)
+        if provider is None:
+            raise ValueError(f"unsupported provider secret key: {secret_key}")
+        updated = copy.deepcopy(self.settings)
+        setattr(updated.api_key_verified, provider, False)
+        secret_store = create_secret_store(
+            self.settings.secrets,
+            config_path=self.config_path,
+        )
+        repository = _ControllerSettingsPatchRepository(
+            controller=self,
+            base_settings=self.settings,
+            committed_settings=updated,
+            surface="provider_secret_change",
+        )
+        transaction = SecretSettingsTransaction(
+            secret_store=_ControllerSecretStorePortAdapter(secret_store),
+            settings_repository=repository,
+        )
+        settings_values = _settings_snapshot_values(updated)
+        scope = LifecycleScope(f"provider-secret-change:{provider}")
+        if value:
+            operation = start_lifecycle_task(
+                scope,
+                transaction.set_provider_secret(
+                    SecretSetRequest(
+                        secret_key=secret_key,
+                        secret_value=value,
+                        settings_values=settings_values,
+                        expected_settings_revision=None,
+                        reason="provider_secret_change",
+                        correlation_id=None,
+                    )
+                ),
+                name="transaction",
+            )
+        else:
+            operation = start_lifecycle_task(
+                scope,
+                transaction.clear_provider_secret(
+                    SecretClearRequest(
+                        secret_key=secret_key,
+                        settings_values=settings_values,
+                        expected_settings_revision=None,
+                        reason="provider_secret_change",
+                        correlation_id=None,
+                    )
+                ),
+                name="transaction",
+            )
+        cancelled = False
+        try:
+            result = await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            cancelled = True
+            result = await operation
+        finally:
+            await scope.close()
+        self.last_settings_mutation_result = result
+        succeeded = result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+        if succeeded:
+            self.settings = repository.committed_settings
+            self._remember_canonical_legacy_projection(self.settings)
+            self._complete_canonical_mutation()
+        if cancelled:
+            raise asyncio.CancelledError
+        return succeeded
+
+    def persist_api_key_verification(
+        self,
+        provider: str,
+        key: str,
+        success: bool,
+    ) -> None:
+        assert self.settings is not None
+        baseline = copy.deepcopy(self._canonical_legacy_projection_snapshot or self.settings)
+        self._begin_canonical_mutation(legacy_snapshot=baseline)
+        setattr(self.settings.api_key_verified, provider, success)
+        try:
+            self._update_canonical_settings_from_legacy_delta(
+                baseline,
+                self.settings,
+            )
+            if success:
+                binding = self._provider_verification_binding(
+                    provider,
+                    key,
+                    flow="settings_api_key_verification",
+                )
+                secret_store = create_secret_store(
+                    self.settings.secrets,
+                    config_path=self.config_path,
+                )
+                if secret_store.get(binding.secret_key) != key:
+                    raise RuntimeError(
+                        "verified credential does not match the active SecretStore value"
+                    )
+                self._bind_provider_verification(binding)
+            self._persist_settings_at_controller_boundary(self.settings)
+        except Exception:
+            self._rollback_canonical_mutation()
+            raise
+        self._remember_canonical_legacy_projection(self.settings)
+        self._complete_canonical_mutation()
+
     def _update_canonical_settings_from_compatibility_mutation(
         self,
         settings: AppSettings,
@@ -9111,6 +9317,12 @@ class GuiController:
             base_settings=self.settings,
             committed_settings=updated,
             surface="openrouter_pkce",
+            provider_verification_binding=self._provider_verification_binding(
+                "openrouter",
+                result.api_key,
+                flow="openrouter_pkce",
+                context_values={"launch_source": launch_source},
+            ),
         )
         transaction = SecretSettingsTransaction(
             secret_store=secret_store_port,
@@ -9254,7 +9466,8 @@ class GuiController:
         if self._runtime_logging is None:
             self._runtime_logging = RuntimeLoggingService(
                 session_factory=lambda: SessionRuntimeLoggingService(
-                    ui_handler_factory=FletLogHandler
+                    sinks=self.runtime_logging_sinks,
+                    ui_handler_factory=FletLogHandler,
                 ),
                 fallback_logger=logger,
             )

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import fields, is_dataclass
+from pathlib import Path
 
 import pytest
 
@@ -70,6 +72,24 @@ def test_v24_migration_classification_covers_current_serialized_settings_paths()
 
     assert missing_paths == []
     assert extra_paths == []
+
+
+def test_final_dev_v30_fixture_has_an_explicit_destination_for_every_persisted_path() -> None:
+    fixture_path = Path(__file__).parent / "fixtures" / "final_dev_v30_settings.json"
+    raw = json.loads(fixture_path.read_text(encoding="utf-8"))
+    final_dev_paths = set(serialized_field_paths(raw))
+    v30_destinations = {
+        "managed_identity.pending_delivery_ack_id": (
+            "state.managed_connection.pending_delivery_ack_delivery_id"
+        ),
+        "telemetry.identifier": "state.telemetry.anonymous_id",
+        "telemetry.sent_utc_dates": "state.telemetry.sent_translation_success_dates_utc",
+        "translation.fallback_selection_alias": "intent.translation.fallback.selection_alias",
+    }
+    classified_paths = set(V24_MIGRATION_CLASSIFICATION) | set(v30_destinations)
+
+    assert sorted(final_dev_paths - classified_paths) == []
+    assert raw["settings_version"] == 30
 
 
 def test_migration_classification_guard_reports_removed_entries() -> None:

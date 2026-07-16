@@ -58,10 +58,7 @@ def load_settings_with_result(
             settings=None,
             migrated=result.migrated,
             backup_path=result.backup_path,
-            error=vnext_compat.SettingsPersistenceError(
-                status,
-                f"{type(exc).__name__}: {exc}",
-            ),
+            error=vnext_compat.safe_persistence_error(status, exc),
         )
     return FacadeSettingsLoadResult(
         status=result.status,
@@ -73,26 +70,45 @@ def load_settings_with_result(
 
 
 def save_settings(path: Path, settings: AppSettings | AppSettingsVNext) -> None:
-    result = save_settings_with_result(path, settings)
-    if not result.ok:
-        status_value = getattr(result.status, "value", result.status)
-        raise RuntimeError(result.error.message if result.error is not None else status_value)
+    vnext_compat._save_vnext_settings_or_raise(
+        path,
+        _canonical_settings_for_save(path, settings),
+    )
 
 
 def save_settings_with_result(
     path: Path,
     settings: AppSettings | AppSettingsVNext,
 ) -> vnext_compat.VNextSettingsSaveResult:
-    if isinstance(settings, AppSettingsVNext):
-        vnext_settings = settings
-    else:
-        settings.validate()
-        vnext_settings = vnext_migration.from_legacy_app_settings(
-            settings,
-            preserve_provider_verification=True,
+    try:
+        vnext_settings = _canonical_settings_for_save(path, settings)
+    except Exception as exc:
+        status = vnext_compat.SettingsPersistenceStatus.SAVE_FAILED
+        return vnext_compat.VNextSettingsSaveResult(
+            status=status,
+            error=vnext_compat.safe_persistence_error(status, exc),
         )
-        vnext_settings = _preserve_existing_process_capture_target(path, settings, vnext_settings)
     return vnext_compat.save_vnext_settings(path, vnext_settings)
+
+
+def _canonical_settings_for_save(
+    path: Path,
+    settings: AppSettings | AppSettingsVNext,
+) -> AppSettingsVNext:
+    if isinstance(settings, AppSettingsVNext):
+        return settings
+    settings.validate()
+    existing = _load_existing_canonical_projection(path)
+    if existing is None:
+        vnext_settings = vnext_migration.from_legacy_app_settings(settings)
+    else:
+        canonical, baseline = existing
+        vnext_settings = vnext_migration.apply_legacy_app_settings_delta(
+            canonical,
+            baseline,
+            settings,
+        )
+    return _preserve_existing_process_capture_target(path, settings, vnext_settings)
 
 
 def load_vnext_settings(path: Path, **kwargs: Any) -> vnext_compat.VNextSettingsLoadResult:
@@ -110,6 +126,20 @@ def _legacy_settings_module() -> Any:
     from puripuly_heart.config import settings as legacy_settings
 
     return legacy_settings
+
+
+def _load_existing_canonical_projection(
+    path: Path,
+) -> tuple[AppSettingsVNext, AppSettings] | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, Mapping) or not vnext_migration.is_vnext_settings_dict(raw):
+        return None
+    canonical = vnext_migration.from_dict(raw)
+    legacy = _legacy_settings_module().from_dict(vnext_migration.to_legacy_dict(canonical))
+    return canonical, legacy
 
 
 def _preserve_existing_process_capture_target(

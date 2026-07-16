@@ -118,6 +118,7 @@ class TranslatorApp:
         config_path,
         debug_ui_preview: bool = False,
         allow_stable_settings_import: bool = False,
+        runtime_logging_sinks=None,
     ):
         self.page = page
         controller_kwargs = {
@@ -130,6 +131,10 @@ class TranslatorApp:
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         ):
             controller_kwargs["allow_stable_settings_import"] = allow_stable_settings_import
+        if "runtime_logging_sinks" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        ):
+            controller_kwargs["runtime_logging_sinks"] = runtime_logging_sinks
         self.controller = GuiController(**controller_kwargs)
         self.overlay_state = "off"
         self.overlay_failure_reason: str | None = None
@@ -172,6 +177,7 @@ class TranslatorApp:
         self.view_settings.on_providers_changed = self._on_providers_changed
         self.view_settings.on_request_openrouter_pkce = self._on_request_openrouter_pkce
         self.view_settings.on_verify_api_key = self._on_verify_api_key
+        self.view_settings.on_provider_secret_change = self._on_provider_secret_change
         self.view_settings.on_secret_cleared = self._on_secret_cleared
         self.view_settings.on_local_llm_secret_changed = self._on_local_llm_secret_changed
         self.view_settings.on_start_microphone_test = self._on_start_microphone_test
@@ -1649,9 +1655,7 @@ class TranslatorApp:
         if not self._api_key_verification_matches_current_field(provider, key):
             return success, msg
 
-        # Save verification result to settings
-        setattr(self.controller.settings.api_key_verified, provider, success)
-        self.controller.persist_settings()
+        self.controller.persist_api_key_verification(provider, key, success)
 
         # Sync verification result with dashboard needs_key flags (UI update on user click)
         if provider in ("deepgram", "soniox", "qwen_asr"):
@@ -1667,6 +1671,26 @@ class TranslatorApp:
             self.view_dashboard.set_translation_needs_key(not success, update_ui=False)
 
         return success, msg
+
+    async def _on_provider_secret_change(self, key: str, value: str) -> bool:
+        succeeded = await self.controller.persist_provider_secret_change(key, value)
+        if not succeeded:
+            return False
+        provider = {
+            "deepgram_api_key": "deepgram",
+            "soniox_api_key": "soniox",
+            "google_api_key": "google",
+            "openrouter_api_key": "openrouter",
+            "deepseek_api_key": "deepseek",
+            "cerebras_api_key": "cerebras",
+            "alibaba_api_key_beijing": "alibaba_beijing",
+            "alibaba_api_key_singapore": "alibaba_singapore",
+        }.get(key)
+        if provider in {"deepgram", "soniox"}:
+            self.view_dashboard.set_stt_needs_key(True, update_ui=False)
+        elif provider is not None:
+            self.view_dashboard.set_translation_needs_key(True, update_ui=False)
+        return True
 
     def _on_secret_cleared(self, key: str) -> None:
         """Reset verification status when API key is cleared."""
@@ -1763,6 +1787,7 @@ async def main_gui(
     config_path,
     debug_ui_preview: bool = False,
     allow_stable_settings_import: bool = False,
+    runtime_logging_sinks=None,
 ):
     app_kwargs = {
         "config_path": config_path,
@@ -1773,6 +1798,10 @@ async def main_gui(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     ):
         app_kwargs["allow_stable_settings_import"] = allow_stable_settings_import
+    if "runtime_logging_sinks" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    ):
+        app_kwargs["runtime_logging_sinks"] = runtime_logging_sinks
     app = TranslatorApp(page, **app_kwargs)
     await app.controller.start()
     show_telemetry_consent = getattr(app, "maybe_show_telemetry_consent_dialog", None)

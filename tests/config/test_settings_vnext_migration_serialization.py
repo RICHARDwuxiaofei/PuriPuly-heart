@@ -48,6 +48,16 @@ PROVIDER_VERIFICATION_FIELDS = (
     "alibaba_beijing",
     "alibaba_singapore",
 )
+PROVIDER_VERIFICATION_SECRET_KEYS = {
+    "deepgram": "deepgram_api_key",
+    "soniox": "soniox_api_key",
+    "google": "google_api_key",
+    "openrouter": "openrouter_api_key",
+    "deepseek": "deepseek_api_key",
+    "cerebras": "cerebras_api_key",
+    "alibaba_beijing": "alibaba_api_key_beijing",
+    "alibaba_singapore": "alibaba_api_key_singapore",
+}
 
 
 def _load_module(name: str) -> ModuleType:
@@ -92,6 +102,11 @@ def _write_json_bytes(path: Path, data: dict[str, Any]) -> bytes:
     return raw_bytes
 
 
+def _final_dev_v30_fixture() -> dict[str, Any]:
+    fixture_path = Path(__file__).parent / "fixtures" / "final_dev_v30_settings.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
 def test_v24_maximal_fixture_migrates_to_canonical_vnext_serialization() -> None:
     migration = _migration()
     serialization = _serialization()
@@ -120,7 +135,7 @@ def test_v24_maximal_fixture_migrates_to_canonical_vnext_serialization() -> None
     assert serialized["intent"]["integrated_context"]["enabled"] is False
     assert serialized["state"]["integrated_context"]["bootstrapped"] is True
     assert serialized["state"]["peer_translation"]["eula_accepted"] is True
-    assert serialized["state"]["provider_verification"]["deepgram"]["status"] == "unknown"
+    assert serialized["state"]["provider_verification"]["deepgram"]["status"] == "verified"
     assert "ui" not in serialized["state"]
     assert "provider" not in serialized
     assert "openrouter" not in serialized
@@ -161,7 +176,103 @@ def test_high_version_legacy_shape_migrates_by_shape_not_settings_version() -> N
     assert serialized["intent"]["translation"]["connection"] == "ollama"
 
 
-def test_v24_boolean_api_key_verification_migrates_every_provider_to_unknown() -> None:
+def test_final_dev_v30_fixture_migrates_with_semantic_and_verification_continuity(
+    tmp_path: Path,
+) -> None:
+    compat = _compat()
+    migration = _migration()
+    serialization = _serialization()
+    raw = _final_dev_v30_fixture()
+    path = tmp_path / "settings.json"
+    original_bytes = _write_json_bytes(path, raw)
+    fixed_now = datetime(2026, 7, 17, 1, 2, 3, tzinfo=timezone.utc)
+
+    first = compat.load_vnext_settings(path, now=fixed_now)
+
+    assert first.ok
+    assert first.migrated is True
+    assert first.backup_path == tmp_path / "settings.json.pre-v30.20260717T010203Z.bak"
+    assert first.backup_path.read_bytes() == original_bytes
+    assert first.settings is not None
+    canonical = serialization.to_dict(first.settings)
+    assert canonical["intent"]["translation"]["model"] == "local_llm"
+    assert canonical["intent"]["translation"]["connection"] == "ollama"
+    assert canonical["intent"]["translation"]["fallback"] == {
+        "enabled": True,
+        "model": "deepseek_v4_flash",
+        "connection": "openrouter",
+        "selection_alias": "openrouter_deepseek_v4_flash",
+    }
+    assert canonical["intent"]["translation"]["qwen"]["region"] == "singapore"
+    assert canonical["intent"]["translation"]["gemini"]["llm_model"] == (raw["gemini"]["llm_model"])
+    assert canonical["intent"]["translation"]["deepseek"]["llm_model"] == (
+        raw["deepseek"]["llm_model"]
+    )
+    assert canonical["intent"]["stt"]["custom_terms"] == raw["stt"]["custom_terms"]
+    assert (
+        canonical["intent"]["languages"]["recent_source_languages"]
+        == raw["languages"]["recent_source_languages"]
+    )
+    assert canonical["state"]["telemetry"] == {
+        "anonymous_id": "fixture-telemetry-anonymous-id",
+        "sent_translation_success_dates_utc": ("2026-07-01", "2026-07-02"),
+    }
+    assert canonical["state"]["managed_connection"]["pending_delivery_ack_delivery_id"] == (
+        "fixture-delivery-id"
+    )
+    assert all(
+        canonical["state"]["provider_verification"][provider]["status"] == "verified"
+        for provider in PROVIDER_VERIFICATION_FIELDS
+    )
+    projected = migration.to_legacy_dict(first.settings)
+    assert projected["api_key_verified"] == raw["api_key_verified"]
+    assert projected["gemini"] == raw["gemini"]
+    assert projected["deepseek"] == raw["deepseek"]
+    assert projected["telemetry_state"] == {
+        "anonymous_id": raw["telemetry"]["identifier"],
+        "sent_translation_success_dates_utc": raw["telemetry"]["sent_utc_dates"],
+    }
+    assert (
+        projected["managed_identity"]["pending_delivery_ack_delivery_id"]
+        == raw["managed_identity"]["pending_delivery_ack_id"]
+    )
+
+    canonical_bytes = path.read_bytes()
+    second = compat.load_vnext_settings(path, now=fixed_now)
+
+    assert second.ok
+    assert second.migrated is False
+    assert second.backup_path is None
+    assert path.read_bytes() == canonical_bytes
+    assert list(tmp_path.glob("*.bak")) == [first.backup_path]
+
+
+def test_final_dev_v30_ui_equivalent_save_preserves_migrated_and_changed_values(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "settings.json"
+    _write_json_bytes(path, _final_dev_v30_fixture())
+    loaded = load_settings(path)
+
+    loaded.ui.locale = "ko"
+    loaded.audio.ring_buffer_ms = 875
+    save_settings(path, loaded)
+    reloaded = load_settings(path)
+
+    assert reloaded.ui.locale == "ko"
+    assert reloaded.audio.ring_buffer_ms == 875
+    assert reloaded.translation.model.value == "local_llm"
+    assert reloaded.gemini.llm_model.value == "gemini-3-flash-preview"
+    assert reloaded.deepseek.llm_model.value == "deepseek-v4-pro"
+    assert reloaded.languages.recent_source_languages == ["fr", "de", "it", "ko", "en", "zh-CN"]
+    assert reloaded.managed_identity.pending_delivery_ack_delivery_id == "fixture-delivery-id"
+    assert all(
+        getattr(reloaded.api_key_verified, provider) is True
+        for provider in PROVIDER_VERIFICATION_FIELDS
+    )
+
+
+def test_v24_boolean_api_key_verification_migrates_every_provider_to_verified() -> None:
     migration = _migration()
     serialization = _serialization()
     raw = maximal_v24_settings_fixture()
@@ -175,19 +286,19 @@ def test_v24_boolean_api_key_verification_migrates_every_provider_to_unknown() -
 
     assert provider_entries == {
         provider: {
-            "status": "unknown",
-            "provider": None,
-            "secret_key": None,
-            "secret_revision": None,
+            "status": "verified",
+            "provider": provider,
+            "secret_key": PROVIDER_VERIFICATION_SECRET_KEYS[provider],
+            "secret_revision": "legacy-dev-settings",
             "secret_fingerprint": None,
-            "verifier_context": {},
-            "verifier_evidence": {},
+            "verifier_context": {"flow": "legacy_settings_migration"},
+            "verifier_evidence": {"source": "legacy_boolean"},
         }
         for provider in PROVIDER_VERIFICATION_FIELDS
     }
 
 
-def test_public_facade_save_treats_bare_api_key_verified_booleans_as_unknown(
+def test_public_facade_save_does_not_fabricate_legacy_verification_provenance(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "settings.json"
@@ -203,24 +314,50 @@ def test_public_facade_save_treats_bare_api_key_verified_booleans_as_unknown(
     assert {
         provider: raw["state"]["provider_verification"][provider]
         for provider in PROVIDER_VERIFICATION_FIELDS
-    } == {
-        provider: {
-            "status": "unknown",
-            "provider": None,
-            "secret_key": None,
-            "secret_revision": None,
-            "secret_fingerprint": None,
-            "verifier_context": {},
-            "verifier_evidence": {},
-        }
-        for provider in PROVIDER_VERIFICATION_FIELDS
-    }
+    } == {provider: {"status": "unknown"} for provider in PROVIDER_VERIFICATION_FIELDS}
 
     loaded = load_settings(path)
     assert all(
         getattr(loaded.api_key_verified, provider) is False
         for provider in PROVIDER_VERIFICATION_FIELDS
     )
+
+
+def test_public_facade_save_preserves_existing_credential_bound_verification(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "settings.json"
+    verified = ProviderVerificationEntry(
+        status="verified",
+        provider="openrouter",
+        secret_key="openrouter_api_key",
+        secret_revision=None,
+        secret_fingerprint="sha256:credential-bound",
+        verifier_context={"flow": "settings_api_key_verification"},
+        verifier_evidence={"source": "provider_verifier"},
+    )
+    canonical = AppSettingsVNext(
+        state=PersistedOperationalState(
+            provider_verification=ProviderVerificationState(openrouter=verified)
+        )
+    )
+    save_settings(path, canonical)
+    legacy = load_settings(path)
+    legacy.ui.locale = "ja"
+
+    save_settings(path, legacy)
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["intent"]["ui"]["locale"] == "ja"
+    assert raw["state"]["provider_verification"]["openrouter"] == {
+        "status": "verified",
+        "provider": "openrouter",
+        "secret_key": "openrouter_api_key",
+        "secret_revision": None,
+        "secret_fingerprint": "sha256:credential-bound",
+        "verifier_context": {"flow": "settings_api_key_verification"},
+        "verifier_evidence": {"source": "provider_verifier"},
+    }
 
 
 def test_evidence_bound_verified_entry_serializes_and_projects_legacy_true(
@@ -692,7 +829,7 @@ def test_pre_v27_canonical_vnext_output_device_migration_backs_up_before_rewrite
     fixed_now = datetime(2026, 7, 10, 1, 2, 3, tzinfo=timezone.utc)
     path = tmp_path / "settings.json"
     raw = serialization.to_dict(AppSettingsVNext())
-    raw["settings_version"] = VNEXT_SETTINGS_SCHEMA_VERSION - 1
+    raw["settings_version"] = 26
     raw["intent"]["desktop_audio"].pop("capture_target")
     raw["intent"]["desktop_audio"]["output_device"] = legacy_output_device
     original_bytes = _write_json_bytes(path, raw)
@@ -1299,6 +1436,93 @@ def test_save_failure_before_final_replace_leaves_original_and_backup_safe(
     assert backup_path.read_bytes() == original_bytes
 
 
+def test_post_replace_validation_failure_restores_original_bytes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    compat = _compat()
+    fixed_now = datetime(2026, 7, 17, 1, 2, 3, tzinfo=timezone.utc)
+    path = tmp_path / "settings.json"
+    original_bytes = _write_json_bytes(path, _final_dev_v30_fixture())
+
+    def fail_validation(_path: Path, _settings: AppSettingsVNext) -> None:
+        raise ValueError("injected validation failure")
+
+    monkeypatch.setattr(compat, "_validate_persisted_settings", fail_validation)
+
+    result = compat.load_vnext_settings(path, now=fixed_now)
+
+    assert result.status == compat.SettingsPersistenceStatus.SAVE_FAILED
+    assert result.settings is None
+    assert path.read_bytes() == original_bytes
+    assert result.backup_path is not None
+    assert result.backup_path.read_bytes() == original_bytes
+
+
+def test_post_replace_validation_and_restoration_failure_returns_safe_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    compat = _compat()
+    path = tmp_path / "settings.json"
+    original_bytes = _write_json_bytes(path, _final_dev_v30_fixture())
+    validation_sentinel = "private-validation-setting-sentinel"
+    restoration_sentinel = "private-restoration-setting-sentinel"
+
+    def fail_validation(_path: Path, _settings: AppSettingsVNext) -> None:
+        raise ValueError(validation_sentinel)
+
+    def fail_restoration(_path: Path, _content: bytes) -> None:
+        raise OSError(restoration_sentinel)
+
+    monkeypatch.setattr(compat, "_validate_persisted_settings", fail_validation)
+    monkeypatch.setattr(compat, "_atomic_write_bytes", fail_restoration)
+
+    result = compat.load_vnext_settings(path)
+
+    assert result.status == compat.SettingsPersistenceStatus.SAVE_FAILED
+    assert result.settings is None
+    assert result.error is not None
+    assert result.error.message == "save_failed:RuntimeError"
+    assert validation_sentinel not in result.error.message
+    assert restoration_sentinel not in result.error.message
+    assert result.backup_path is not None
+    assert result.backup_path.read_bytes() == original_bytes
+
+
+def test_migration_diagnostics_include_only_approved_metadata(caplog, tmp_path: Path) -> None:
+    compat = _compat()
+    raw = _final_dev_v30_fixture()
+    prohibited_values = (
+        raw["system_prompt"],
+        raw["osc"]["host"],
+        raw["managed_identity"]["installation_id"],
+        raw["telemetry"]["identifier"],
+    )
+    success_path = tmp_path / "success.json"
+    _write_json_bytes(success_path, raw)
+
+    with caplog.at_level("INFO", logger=compat.__name__):
+        success = compat.load_vnext_settings(success_path)
+
+    assert success.ok
+    assert "source_shape=legacy destination_shape=canonical status=success" in caplog.text
+    assert all(value not in caplog.text for value in prohibited_values)
+
+    caplog.clear()
+    failure_path = tmp_path / "failure.json"
+    failure_path.write_text("not-json-user-value", encoding="utf-8")
+    with caplog.at_level("WARNING", logger=compat.__name__):
+        failure = compat.load_vnext_settings(failure_path)
+
+    assert failure.status == compat.SettingsPersistenceStatus.PARSE_FAILED
+    assert failure.error is not None
+    assert failure.error.message == "parse_failed:JSONDecodeError"
+    assert "not-json-user-value" not in failure.error.message
+    assert "failure_category=parse_failed" in caplog.text
+    assert "not-json-user-value" not in caplog.text
+
+
 def test_parse_and_migration_failures_return_explicit_results_without_overwrite(
     tmp_path: Path,
 ) -> None:
@@ -1322,6 +1546,9 @@ def test_parse_and_migration_failures_return_explicit_results_without_overwrite(
 
     migration_result = compat.load_vnext_settings(migration_path)
     assert migration_result.status == compat.SettingsPersistenceStatus.MIGRATION_FAILED
+    assert migration_result.error is not None
+    assert migration_result.error.message == "migration_failed:ValueError"
+    assert "unsupported_anchor" not in migration_result.error.message
     assert migration_path.read_bytes() == migration_bytes
 
 
@@ -1399,9 +1626,12 @@ def test_facade_projection_failure_returns_explicit_result_without_overwrite(
     assert result.status == compat.SettingsPersistenceStatus.MIGRATION_FAILED
     assert result.settings is None
     assert result.error is not None
+    assert result.error.message == "migration_failed:ValueError"
+    assert "not-an-int" not in result.error.message
     assert path.read_bytes() == original_bytes
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="migration_failed:ValueError") as exc_info:
         load_settings(path)
+    assert "not-an-int" not in str(exc_info.value)
 
 
 def test_raw_provider_api_key_fields_are_absent_from_vnext_serialized_output() -> None:

@@ -1221,7 +1221,8 @@ def test_controller_consumes_only_canonical_settings_port_and_composition_entryp
     }
 
     assert imports["puripuly_heart.app.ports.canonical_settings_persistence"] == {
-        "CanonicalSettingsPersistencePort"
+        "CanonicalSettingsPersistencePort",
+        "ProviderVerificationBinding",
     }
     assert imports["puripuly_heart.app.services.canonical_settings_persistence"] == {
         "compose_canonical_settings_persistence"

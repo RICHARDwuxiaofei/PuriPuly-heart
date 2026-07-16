@@ -18,7 +18,7 @@ def test_create_secret_store_keyring_returns_keyring_store(tmp_path):
     )
 
     assert isinstance(store, KeyringSecretStore)
-    assert store.service_name == wiring_secrets_factory.VNEXT_KEYRING_SERVICE_NAME
+    assert store.service_name == wiring_secrets_factory.STABLE_KEYRING_SERVICE_NAME
 
 
 def test_create_secret_store_encrypted_file_resolves_relative_path(tmp_path):

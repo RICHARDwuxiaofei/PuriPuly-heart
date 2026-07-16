@@ -84,6 +84,7 @@ CURRENT_USER_INTENT_DESTINATIONS = {
     "audio.input_host_api": "intent.audio.input_host_api",
     "audio.ring_buffer_ms": "intent.audio.ring_buffer_ms",
     "cerebras.llm_model": "intent.translation.cerebras.llm_model",
+    "deepseek.llm_model": "intent.translation.deepseek.llm_model",
     "deepgram_stt.model": "intent.stt.deepgram.model",
     "desktop_audio.output_device": "intent.desktop_audio.output_device",
     "desktop_audio.vad_hangover_ms": "intent.desktop_audio.vad_hangover_ms",
@@ -98,6 +99,7 @@ CURRENT_USER_INTENT_DESTINATIONS = {
     "languages.source_language": "intent.languages.source_language",
     "languages.target_language": "intent.languages.target_language",
     "llm.concurrency_limit": "intent.translation.concurrency_limit",
+    "gemini.llm_model": "intent.translation.gemini.llm_model",
     "local_llm.base_url": "intent.local_llm.base_url",
     "local_llm.extra_body": "intent.local_llm.extra_body",
     "local_llm.model": "intent.local_llm.model",
@@ -162,8 +164,6 @@ CURRENT_USER_INTENT_DESTINATIONS = {
 }
 
 CURRENT_COMPATIBILITY_INPUT_DESTINATIONS = {
-    "deepseek.llm_model": "compatibility_input.deepseek.llm_model",
-    "gemini.llm_model": "compatibility_input.gemini.llm_model",
     "provider.llm": "compatibility_input.provider.llm",
     "qwen_asr_stt.endpoint": "compatibility_input.qwen_asr_stt.endpoint",
 }

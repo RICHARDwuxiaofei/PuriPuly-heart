@@ -154,3 +154,65 @@ def test_api_key_field_does_not_save_unchanged_loaded_value() -> None:
     field._handle_blur(None)
 
     assert saved == []
+
+
+@pytest.mark.asyncio
+async def test_api_key_field_does_not_verify_when_secret_save_fails() -> None:
+    verified: list[tuple[str, str]] = []
+
+    async def verify(provider: str, key: str) -> tuple[bool, str]:
+        verified.append((provider, key))
+        return True, "ok"
+
+    field = ApiKeyField(
+        "settings.api_keys.openrouter",
+        "openrouter_api_key",
+        "openrouter",
+        on_verify=verify,
+        on_save=lambda _key, _value: False,
+    )
+    field._text_field.value = "unsaved-secret"
+    field._handle_change(None)
+
+    field._handle_blur(None)
+    await field._run_verification()
+
+    assert verified == []
+    assert field._current_status == "error"
+    assert field._last_verified_hash == ""
+    assert not hasattr(field, "_pending_key")
+
+
+@pytest.mark.asyncio
+async def test_api_key_field_awaits_secret_transaction_before_verification() -> None:
+    events: list[str] = []
+    release_save = asyncio.Event()
+
+    async def save(_key: str, _value: str) -> bool:
+        events.append("save-start")
+        await release_save.wait()
+        events.append("save-complete")
+        return True
+
+    async def verify(_provider: str, _key: str) -> tuple[bool, str]:
+        events.append("verify")
+        return True, "ok"
+
+    field = ApiKeyField(
+        "settings.api_keys.openrouter",
+        "openrouter_api_key",
+        "openrouter",
+        on_verify=verify,
+        on_save=save,
+    )
+    field._text_field.value = "new-secret"
+    field._handle_change(None)
+    field._handle_blur(None)
+    task = asyncio.create_task(field._run_verification())
+    await asyncio.sleep(0)
+
+    assert events == ["save-start"]
+    release_save.set()
+    await task
+
+    assert events == ["save-start", "save-complete", "verify"]
