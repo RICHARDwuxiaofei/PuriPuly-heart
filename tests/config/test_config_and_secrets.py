@@ -1773,16 +1773,11 @@ def test_stt_custom_vocabulary_missing_keys_default():
 
     loaded = from_dict(data)
 
-    assert loaded.stt.custom_vocabulary_enabled is True
-    assert loaded.stt.custom_terms == {
-        "ko": ["아이리", "시나노"],
-        "en": ["airi", "shinano"],
-        "zh-CN": ["airi", "shinano"],
-        "ja": ["airi", "shinano"],
-    }
+    assert loaded.stt.custom_vocabulary_enabled is False
+    assert loaded.stt.custom_terms == {}
 
 
-def test_load_settings_backfills_seeded_custom_vocabulary_defaults(tmp_path):
+def test_load_settings_backfills_empty_custom_vocabulary_defaults(tmp_path):
     path = tmp_path / "settings.json"
     legacy = to_dict(AppSettings())
     legacy.setdefault("stt", {}).pop("custom_vocabulary_enabled", None)
@@ -1791,22 +1786,12 @@ def test_load_settings_backfills_seeded_custom_vocabulary_defaults(tmp_path):
 
     loaded = load_settings(path)
 
-    assert loaded.stt.custom_vocabulary_enabled is True
-    assert loaded.stt.custom_terms == {
-        "ko": ["아이리", "시나노"],
-        "en": ["airi", "shinano"],
-        "zh-CN": ["airi", "shinano"],
-        "ja": ["airi", "shinano"],
-    }
+    assert loaded.stt.custom_vocabulary_enabled is False
+    assert loaded.stt.custom_terms == {}
 
     persisted = legacy_projected_settings_file(path)
-    assert persisted["stt"]["custom_vocabulary_enabled"] is True
-    assert persisted["stt"]["custom_terms"] == {
-        "ko": ["아이리", "시나노"],
-        "en": ["airi", "shinano"],
-        "zh-CN": ["airi", "shinano"],
-        "ja": ["airi", "shinano"],
-    }
+    assert persisted["stt"]["custom_vocabulary_enabled"] is False
+    assert persisted["stt"]["custom_terms"] == {}
 
 
 @pytest.mark.parametrize(

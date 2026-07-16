@@ -1647,7 +1647,7 @@ def test_create_stt_backend_deepgram_uses_settings_and_secret() -> None:
     assert backend.model == "nova-3"
     assert backend.sample_rate_hz == 16000
     assert backend.language == get_deepgram_language(settings.languages.source_language)
-    assert list(backend.keyterms) == ["아이리", "시나노"]
+    assert list(backend.keyterms) == []
 
 
 def test_create_stt_backend_deepgram_passes_effective_custom_terms() -> None:
@@ -2176,7 +2176,7 @@ def test_create_stt_backend_soniox_uses_secret() -> None:
     backend = create_stt_backend(settings, secrets=secrets)
     assert isinstance(backend, SonioxRealtimeSTTBackend)
     assert backend.api_key == "k6"
-    assert list(backend.context_terms) == ["아이리", "시나노"]
+    assert list(backend.context_terms) == []
 
 
 def test_create_stt_backend_soniox_passes_effective_custom_terms() -> None:

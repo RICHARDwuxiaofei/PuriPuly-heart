@@ -15,12 +15,12 @@ def _vocab_config(settings: AppSettings) -> CustomVocabularyRuntimeConfig:
     )
 
 
-def test_get_effective_custom_terms_uses_seeded_defaults_for_fresh_settings() -> None:
+def test_get_effective_custom_terms_returns_empty_for_fresh_settings() -> None:
     settings = AppSettings()
 
-    assert get_effective_custom_terms(_vocab_config(settings), "ko") == ["아이리", "시나노"]
-    assert get_effective_custom_terms(_vocab_config(settings), "en") == ["airi", "shinano"]
-    assert get_effective_custom_terms(_vocab_config(settings), "zh-CN") == ["airi", "shinano"]
+    assert get_effective_custom_terms(_vocab_config(settings), "ko") == []
+    assert get_effective_custom_terms(_vocab_config(settings), "en") == []
+    assert get_effective_custom_terms(_vocab_config(settings), "zh-CN") == []
 
 
 def test_get_effective_custom_terms_reads_current_language_bucket_only() -> None:

@@ -15,12 +15,7 @@ from puripuly_heart.config.overlay_calibration import OverlayCalibration
 VNEXT_SETTINGS_SCHEMA_VERSION: Final = 28
 
 DEFAULT_OPENROUTER_BROKER_BASE_URL: Final = "https://puripuly-heart-broker.kapitalismho.workers.dev"
-DEFAULT_CUSTOM_VOCAB_TERMS: Final[Mapping[str, tuple[str, ...]]] = {
-    "ko": ("아이리", "시나노"),
-    "en": ("airi", "shinano"),
-    "zh-CN": ("airi", "shinano"),
-    "ja": ("airi", "shinano"),
-}
+DEFAULT_CUSTOM_VOCAB_TERMS: Final[Mapping[str, tuple[str, ...]]] = {}
 MANAGED_AUTH_CLAIM_SOURCE_DISCORD: Final = "discord"
 MANAGED_AUTH_CLAIM_SOURCE_QQ: Final = "qq"
 MANAGED_AUTH_CLAIM_SOURCES: Final = (

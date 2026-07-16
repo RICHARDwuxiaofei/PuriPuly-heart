@@ -83,12 +83,7 @@ DESKTOP_FLET_SIZE_PRESETS: dict[str, tuple[int, int]] = {
 }
 DESKTOP_FLET_DEFAULT_WIDTH = DESKTOP_FLET_SIZE_PRESETS[DESKTOP_FLET_DEFAULT_SIZE_PRESET][0]
 DESKTOP_FLET_DEFAULT_HEIGHT = DESKTOP_FLET_SIZE_PRESETS[DESKTOP_FLET_DEFAULT_SIZE_PRESET][1]
-DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
-    "ko": ("아이리", "시나노"),
-    "en": ("airi", "shinano"),
-    "zh-CN": ("airi", "shinano"),
-    "ja": ("airi", "shinano"),
-}
+DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {}
 LEGACY_QWEN_DEFAULT_PROMPT = (
     "VRChat social voice chat interpretation. Use spoken, conversational language and mirror "
     "the speaker's tone and formality. Fix voice recognition errors like missing punctuation "

@@ -3255,7 +3255,7 @@ def test_refresh_after_openrouter_pkce_success_preserves_unrelated_drafts(
     view.refresh_after_openrouter_pkce_success(updated, config_path=Path("settings.json"))
 
     assert view._custom_vocab_tag_editor._input_field.value == ""  # noqa: SLF001
-    assert _custom_vocab_chip_terms(view) == ["아이리", "시나노"]
+    assert _custom_vocab_chip_terms(view) == []
     assert view._google_key.value == "typed-google-draft"
     assert view._openrouter_key.value == "pkce-openrouter-key"
     assert view._openrouter_key._current_status == "success"
@@ -6820,18 +6820,12 @@ def test_custom_vocabulary_loads_current_source_language_bucket_as_tags(
 
 
 @pytest.mark.parametrize(
-    ("source_language", "expected_terms"),
-    [
-        ("ko", ["아이리", "시나노"]),
-        ("en", ["airi", "shinano"]),
-        ("zh-CN", ["airi", "shinano"]),
-        ("ja", ["airi", "shinano"]),
-    ],
+    "source_language",
+    ["ko", "en", "zh-CN", "ja"],
 )
-def test_custom_vocabulary_loads_seeded_settings_defaults_as_tags(
+def test_custom_vocabulary_loads_empty_tags_for_fresh_settings(
     monkeypatch: pytest.MonkeyPatch,
     source_language: str,
-    expected_terms: list[str],
 ) -> None:
     settings = AppSettings()
     settings.languages.source_language = source_language
@@ -6839,7 +6833,7 @@ def test_custom_vocabulary_loads_seeded_settings_defaults_as_tags(
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    assert _custom_vocab_chip_terms(view) == expected_terms
+    assert _custom_vocab_chip_terms(view) == []
     assert view._custom_vocab_tag_editor._empty_text.visible is False  # noqa: SLF001
 
 

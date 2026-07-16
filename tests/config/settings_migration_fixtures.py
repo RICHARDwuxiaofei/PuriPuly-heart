@@ -281,13 +281,8 @@ EXPLICIT_MISSING_FIELD_DEFAULT_EXPECTATIONS: dict[str, Any] = {
     "openrouter.broker_base_url": DEFAULT_OPENROUTER_BROKER_BASE_URL,
     # Current peer desktop-audio VAD default is intentionally lower than older schema defaults.
     "desktop_audio.vad_hangover_ms": DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS,
-    # Missing vocabulary restores the shipped multilingual terms and keeps vocabulary enabled.
-    "stt.custom_terms": {
-        "ko": ["아이리", "시나노"],
-        "en": ["airi", "shinano"],
-        "zh-CN": ["airi", "shinano"],
-        "ja": ["airi", "shinano"],
-    },
+    # Missing vocabulary restores empty terms and keeps vocabulary enabled.
+    "stt.custom_terms": {},
     # Integrated context remains enabled for missing legacy UI settings.
     "ui.integrated_context_enabled": True,
     # Clipboard watcher and GitHub prompt counters are opt-in/operational state defaults.
