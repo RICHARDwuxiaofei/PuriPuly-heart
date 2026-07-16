@@ -15,10 +15,12 @@ from puripuly_heart.config.settings_vnext.schema import (
     CerebrasTranslationIntent,
     ClipboardIntent,
     DeepgramSTTIntent,
+    DeepSeekTranslationIntent,
     DesktopAudioIntent,
     DesktopFletOverlayIntent,
     DesktopFletOverlayPositionIntent,
     DesktopFletOverlayVisualIntent,
+    GeminiTranslationIntent,
     GithubStarPromptState,
     IntegratedContextIntent,
     IntegratedContextState,
@@ -71,6 +73,18 @@ _PROVIDER_VERIFICATION_FIELDS = (
     "alibaba_beijing",
     "alibaba_singapore",
 )
+_PROVIDER_VERIFICATION_SECRET_KEYS = {
+    "deepgram": "deepgram_api_key",
+    "soniox": "soniox_api_key",
+    "google": "google_api_key",
+    "openrouter": "openrouter_api_key",
+    "deepseek": "deepseek_api_key",
+    "cerebras": "cerebras_api_key",
+    "alibaba_beijing": "alibaba_api_key_beijing",
+    "alibaba_singapore": "alibaba_api_key_singapore",
+}
+_LEGACY_VERIFICATION_REVISION = "legacy-dev-settings"
+_LEGACY_VERIFICATION_CONTEXT = {"flow": "legacy_settings_migration"}
 
 _TEMPORARY_GENERIC_FALLBACK_ALIASES: dict[str, TranslationFallbackIntent] = {
     "none": TranslationFallbackIntent(enabled=False),
@@ -279,6 +293,12 @@ def _telemetry_state_from_legacy_raw_dict(data: Mapping[str, Any]) -> TelemetryO
     telemetry_state = (
         data.get("telemetry_state") if isinstance(data.get("telemetry_state"), Mapping) else {}
     )
+    if not telemetry_state:
+        telemetry = data.get("telemetry") if isinstance(data.get("telemetry"), Mapping) else {}
+        telemetry_state = {
+            "anonymous_id": telemetry.get("identifier"),
+            "sent_translation_success_dates_utc": telemetry.get("sent_utc_dates", ()),
+        }
     return TelemetryOperationalState(
         anonymous_id=telemetry_state.get("anonymous_id"),
         sent_translation_success_dates_utc=telemetry_state.get(
@@ -303,10 +323,20 @@ def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
     fallback_intent = _fallback_intent_from_legacy_raw_dict(data)
     telemetry_consent = _telemetry_consent_from_legacy_raw_dict(data)
     telemetry_state = _telemetry_state_from_legacy_raw_dict(data)
-    migrated, _changed = legacy_settings._migrate_settings_dict(dict(copy.deepcopy(data)))
+    prepared_legacy = dict(copy.deepcopy(data))
+    managed_identity = prepared_legacy.get("managed_identity")
+    if isinstance(managed_identity, dict):
+        pending_delivery_ack_id = managed_identity.get("pending_delivery_ack_id")
+        if (
+            pending_delivery_ack_id is not None
+            and "pending_delivery_ack_delivery_id" not in managed_identity
+        ):
+            managed_identity["pending_delivery_ack_delivery_id"] = pending_delivery_ack_id
+    migrated, _changed = legacy_settings._migrate_settings_dict(prepared_legacy)
     settings = from_legacy_app_settings(
         legacy_settings.from_dict(migrated),
         fallback_intent=fallback_intent,
+        preserve_provider_verification=True,
     )
     settings = replace(settings, state=replace(settings.state, telemetry=telemetry_state))
     return with_telemetry_consent(settings, telemetry_consent)
@@ -343,6 +373,12 @@ def from_legacy_app_settings(
                 openrouter_selected_source=data["openrouter"]["selected_source"],
                 openrouter_selection_alias=data["openrouter"]["selection_alias"],
                 openrouter_provider_routing=data["openrouter"]["provider_routing"],
+                gemini=GeminiTranslationIntent(
+                    llm_model=data["gemini"]["llm_model"],
+                ),
+                deepseek=DeepSeekTranslationIntent(
+                    llm_model=data["deepseek"]["llm_model"],
+                ),
                 qwen=QwenTranslationIntent(
                     region=data["qwen"]["region"],
                     llm_model=data["qwen"]["llm_model"],
@@ -507,6 +543,54 @@ def from_legacy_app_settings(
     )
 
 
+def _apply_changed_mapping_values(
+    target: dict[str, Any],
+    baseline: Mapping[str, object],
+    next_values: Mapping[str, object],
+) -> None:
+    if "kind" in baseline and "kind" in next_values and baseline["kind"] != next_values["kind"]:
+        target.clear()
+        target.update(copy.deepcopy(dict(next_values)))
+        return
+    for key in baseline:
+        if key not in next_values:
+            target.pop(key, None)
+    for key, next_value in next_values.items():
+        previous_value = baseline.get(key)
+        if isinstance(previous_value, Mapping) and isinstance(next_value, Mapping):
+            target_value = target.get(key)
+            if not isinstance(target_value, dict):
+                target_value = {}
+                target[key] = target_value
+            _apply_changed_mapping_values(target_value, previous_value, next_value)
+        elif previous_value != next_value:
+            target[key] = copy.deepcopy(next_value)
+
+
+def apply_legacy_app_settings_delta(
+    canonical: AppSettingsVNext,
+    base_settings: object,
+    next_settings: object,
+) -> AppSettingsVNext:
+    converted_base = from_legacy_app_settings(base_settings)
+    converted_next = from_legacy_app_settings(next_settings)
+    canonical_data = serialization.to_dict(canonical)
+    _apply_changed_mapping_values(
+        canonical_data,
+        serialization.to_dict(converted_base),
+        serialization.to_dict(converted_next),
+    )
+    verification_entries = canonical_data["state"]["provider_verification"]
+    base_verification = getattr(base_settings, "api_key_verified", None)
+    next_verification = getattr(next_settings, "api_key_verified", None)
+    for provider in verification_entries:
+        was_verified = bool(getattr(base_verification, provider, False))
+        remains_verified = bool(getattr(next_verification, provider, False))
+        if was_verified and not remains_verified:
+            verification_entries[provider] = {"status": "unknown"}
+    return serialization.from_dict(canonical_data)
+
+
 def _validate_vnext_top_level_shape(data: Mapping[str, Any]) -> None:
     for section in ("intent", "state"):
         if section not in data:
@@ -520,10 +604,19 @@ def _provider_verification_state(
     *,
     preserve_provider_verification: bool,
 ) -> ProviderVerificationState:
-    _ = (raw_verification, preserve_provider_verification)
     entries: dict[str, ProviderVerificationEntry] = {}
     for provider in _PROVIDER_VERIFICATION_FIELDS:
-        entries[provider] = ProviderVerificationEntry(status="unknown")
+        if preserve_provider_verification and raw_verification.get(provider) is True:
+            entries[provider] = ProviderVerificationEntry(
+                status="verified",
+                provider=provider,
+                secret_key=_PROVIDER_VERIFICATION_SECRET_KEYS[provider],
+                secret_revision=_LEGACY_VERIFICATION_REVISION,
+                verifier_context=_LEGACY_VERIFICATION_CONTEXT,
+                verifier_evidence={"source": "legacy_boolean"},
+            )
+        else:
+            entries[provider] = ProviderVerificationEntry(status="unknown")
     return ProviderVerificationState(**entries)
 
 
@@ -624,6 +717,12 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
             "broker_base_url": intent.translation.openrouter_broker_base_url,
         }
     )
+    data["gemini"] = {
+        "llm_model": intent.translation.gemini.llm_model,
+    }
+    data["deepseek"] = {
+        "llm_model": intent.translation.deepseek.llm_model,
+    }
     data["qwen"] = {
         "region": intent.translation.qwen.region,
         "llm_model": intent.translation.qwen.llm_model,

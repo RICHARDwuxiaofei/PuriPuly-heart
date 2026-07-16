@@ -80,7 +80,26 @@ def to_dict(settings: AppSettingsVNext) -> dict[str, Any]:
 
 
 def to_json_text(settings: AppSettingsVNext) -> str:
-    return json.dumps(to_dict(settings), ensure_ascii=False, indent=2)
+    return json.dumps(to_persisted_dict(settings), ensure_ascii=False, indent=2)
+
+
+def to_persisted_dict(settings: AppSettingsVNext) -> dict[str, Any]:
+    return normalize_persisted_dict(to_dict(settings))
+
+
+def normalize_persisted_dict(data: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = copy.deepcopy(dict(data))
+    state = normalized.get("state")
+    if not isinstance(state, dict):
+        return normalized
+    entries = state.get("provider_verification")
+    if not isinstance(entries, dict):
+        return normalized
+    for provider in _PROVIDER_VERIFICATION_FIELDS:
+        entry = entries.get(provider)
+        if isinstance(entry, Mapping) and entry.get("status") == "unknown":
+            entries[provider] = {"status": "unknown"}
+    return normalized
 
 
 def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:

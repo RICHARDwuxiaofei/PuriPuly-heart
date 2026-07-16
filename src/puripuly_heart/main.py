@@ -7,12 +7,13 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
+    from puripuly_heart.core.runtime_logging import RuntimeLoggingSinks
 
 
-def configure_main_logging():
+def configure_main_logging(*, log_dir: Path | None = None):
     from puripuly_heart.core.runtime_logging import configure_main_logging as configure
 
-    return configure()
+    return configure(log_dir=log_dir)
 
 
 def default_settings_path() -> Path:
@@ -29,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=argparse.SUPPRESS,
-        help="Path to settings JSON (default: vNext user config dir)",
+        help="Path to settings JSON (default: user config dir)",
     )
     parser.add_argument(
         "--debug-ui-preview",
@@ -102,7 +103,7 @@ def _run_gui(
     config_path: Path,
     *,
     debug_ui_preview: bool,
-    allow_stable_settings_import: bool,
+    runtime_logging_sinks: RuntimeLoggingSinks,
 ) -> int:
     import flet as ft
 
@@ -110,16 +111,16 @@ def _run_gui(
     from puripuly_heart.ui.fonts import assets_dir
 
     async def _target(page: ft.Page):
-        kwargs = {
+        gui_kwargs = {
             "config_path": config_path,
             "debug_ui_preview": debug_ui_preview,
         }
         parameters = inspect.signature(main_gui).parameters
-        if "allow_stable_settings_import" in parameters or any(
+        if "runtime_logging_sinks" in parameters or any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         ):
-            kwargs["allow_stable_settings_import"] = allow_stable_settings_import
-        return await main_gui(page, **kwargs)
+            gui_kwargs["runtime_logging_sinks"] = runtime_logging_sinks
+        return await main_gui(page, **gui_kwargs)
 
     ft.app(target=_target, assets_dir=str(assets_dir()))
     return 0
@@ -151,12 +152,9 @@ def _verify_desktop_overlay_repro(*, output_dir: Path) -> int:
 
 def _load_settings_or_default(
     path: Path,
-    *,
-    allow_stable_settings_import: bool = False,
 ) -> AppSettingsVNext:
     from dataclasses import replace
 
-    from puripuly_heart.config.profile_bootstrap import import_stable_settings_if_missing
     from puripuly_heart.config.settings import detect_system_locale, resolve_first_run_ui_locale
     from puripuly_heart.config.settings_vnext.facade import load_vnext_settings
     from puripuly_heart.config.settings_vnext.schema import (
@@ -171,13 +169,6 @@ def _load_settings_or_default(
                 result.error.message if result.error is not None else str(result.status)
             )
         return result.settings
-
-    if allow_stable_settings_import:
-        import_result = import_stable_settings_if_missing(path)
-        _raise_stable_settings_import_error(import_result)
-        if import_result.imported and import_result.settings is not None:
-            _copy_stable_secrets_after_settings_import(import_result)
-            return import_result.settings
 
     settings = AppSettingsVNext()
     system_locale = detect_system_locale()
@@ -220,55 +211,10 @@ def _load_settings_or_default(
     return settings
 
 
-def _copy_stable_secrets_after_settings_import(import_result: object) -> None:
-    settings = getattr(import_result, "settings", None)
-    source_path = getattr(import_result, "source_path", None)
-    target_path = getattr(import_result, "target_path", None)
-    if settings is None or source_path is None or target_path is None:
-        return
-    try:
-        from puripuly_heart.app.wiring_secrets_factory import (
-            copy_stable_secrets_to_vnext_namespace,
-        )
-
-        copy_stable_secrets_to_vnext_namespace(
-            (getattr(import_result, "source_settings", None) or settings).intent.secrets,
-            stable_config_path=source_path,
-            vnext_config_path=target_path,
-            vnext_settings=settings.intent.secrets,
-        )
-    except Exception:
-        return
-
-
-def _raise_stable_settings_import_error(import_result: object) -> None:
-    error = getattr(import_result, "error", None)
-    if error is None:
-        return
-    message = getattr(error, "message", str(error))
-    raise RuntimeError(f"failed to import stable settings into vNext profile: {message}")
-
-
 def _settings_config_path(args: argparse.Namespace) -> tuple[Path, bool]:
     if hasattr(args, "config"):
         return args.config, True
     return default_settings_path(), False
-
-
-def _call_load_settings_or_default(
-    path: Path,
-    *,
-    allow_stable_settings_import: bool,
-) -> AppSettingsVNext:
-    parameters = inspect.signature(_load_settings_or_default).parameters
-    if "allow_stable_settings_import" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    ):
-        return _load_settings_or_default(
-            path,
-            allow_stable_settings_import=allow_stable_settings_import,
-        )
-    return _load_settings_or_default(path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -283,9 +229,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "verify-desktop-overlay-repro":
         return _verify_desktop_overlay_repro(output_dir=args.output_dir)
 
-    logging_sinks = configure_main_logging()
+    settings_config_path, explicit_settings_config = _settings_config_path(args)
+    logging_sinks = configure_main_logging(
+        log_dir=(
+            settings_config_path.parent
+            if explicit_settings_config and args.command in {None, "run-gui"}
+            else None
+        )
+    )
     try:
-        settings_config_path, explicit_settings_config = _settings_config_path(args)
         if args.command != "run-desktop-overlay":
             args.config = settings_config_path
 
@@ -305,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
             return _run_gui(
                 args.config,
                 debug_ui_preview=bool(getattr(args, "debug_ui_preview", False)),
-                allow_stable_settings_import=not explicit_settings_config,
+                runtime_logging_sinks=logging_sinks,
             )
 
         if args.command == "local-qwen-runtime-check":
@@ -319,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
             return _run_gui(
                 args.config,
                 debug_ui_preview=bool(getattr(args, "debug_ui_preview", False)),
-                allow_stable_settings_import=not explicit_settings_config,
+                runtime_logging_sinks=logging_sinks,
             )
 
         parser.print_help()

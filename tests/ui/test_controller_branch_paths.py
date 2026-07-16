@@ -11804,6 +11804,65 @@ def test_runtime_logging_writes_non_ascii_detailed_messages_to_utf8_file(tmp_pat
         stream_handler.close()
 
 
+def test_controller_runtime_logging_uses_injected_main_sinks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    log_file = tmp_path / "runtime.log"
+    sinks = RuntimeLoggingSinks(
+        stream_handler=logging.NullHandler(),
+        file_handler=logging.NullHandler(),
+        log_file=log_file,
+    )
+    session_log_file = log_file
+
+    class FakeSessionRuntimeLoggingService:
+        mode = SessionLoggingMode.BASIC
+        log_file = session_log_file
+
+        def set_mode(self, mode) -> None:
+            self.mode = SessionLoggingMode(mode)
+
+        def attach_realtime_sink(self, sink) -> None:
+            _ = sink
+
+        def detach_realtime_sink(self) -> None:
+            return None
+
+        def emit_basic(self, message, *, level=logging.INFO) -> None:
+            _ = message, level
+
+        def emit_detailed(self, message, *, level=logging.INFO) -> bool:
+            _ = message, level
+            return False
+
+        def emit_detailed_lazy(self, build_message, *, level=logging.INFO) -> bool:
+            _ = build_message, level
+            return False
+
+        def emit_persisted(self, message, *, level=logging.INFO) -> None:
+            _ = message, level
+
+        def close(self) -> None:
+            return None
+
+    def create_session(**kwargs):
+        captured.update(kwargs)
+        return FakeSessionRuntimeLoggingService()
+
+    monkeypatch.setattr(controller_module, "SessionRuntimeLoggingService", create_session)
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=tmp_path / "settings.json",
+        runtime_logging_sinks=sinks,
+    )
+
+    assert controller.runtime_logging.log_file == log_file
+    assert captured["sinks"] is sinks
+
+
 @pytest.mark.asyncio
 async def test_start_mic_loop_does_not_apply_wasapi_flags_to_name_fallback(
     monkeypatch: pytest.MonkeyPatch,
@@ -15534,6 +15593,19 @@ async def test_connect_openrouter_via_pkce_stores_key_sets_alias_and_marks_verif
     assert controller.settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
     assert controller.settings.openrouter.selected_source == OpenRouterCredentialSource.BYOK
     assert controller.settings.api_key_verified.openrouter is True
+    assert controller.vnext_settings is not None
+    verification = controller.vnext_settings.state.provider_verification.openrouter
+    assert verification.status == "verified"
+    assert verification.secret_key == "openrouter_api_key"
+    assert verification.secret_revision is None
+    assert verification.secret_fingerprint is not None
+    assert verification.secret_fingerprint.startswith("sha256:")
+    assert verification.secret_fingerprint != "sk-or-v1-user"
+    assert verification.verifier_context == {
+        "flow": "openrouter_pkce",
+        "launch_source": "settings",
+    }
+    assert verification.verifier_evidence == {"source": "provider_verifier"}
     assert len(applied_plans) == 1
 
 

@@ -21,7 +21,7 @@ def test_default_paths_use_user_config_dir(monkeypatch, tmp_path):
     assert paths.default_settings_path() == tmp_path / paths.APP_DIR_NAME / paths.SETTINGS_FILENAME
     assert (
         paths.default_settings_path()
-        == tmp_path / paths.VNEXT_APP_DIR_NAME / paths.SETTINGS_FILENAME
+        == tmp_path / paths.STABLE_APP_DIR_NAME / paths.SETTINGS_FILENAME
     )
     assert (
         paths.stable_settings_path()

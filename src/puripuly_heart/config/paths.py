@@ -6,7 +6,7 @@ from pathlib import Path
 
 STABLE_APP_DIR_NAME = "puripuly-heart"
 VNEXT_APP_DIR_NAME = "puripuly-heart-vnext"
-APP_DIR_NAME = VNEXT_APP_DIR_NAME
+APP_DIR_NAME = STABLE_APP_DIR_NAME
 SETTINGS_FILENAME = "settings.json"
 VAD_MODEL_FILENAME = "silero_vad.onnx"
 MODELS_DIRNAME = "models"

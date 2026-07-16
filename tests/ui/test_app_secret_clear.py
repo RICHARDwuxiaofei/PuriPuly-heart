@@ -104,3 +104,46 @@ def test_on_secret_cleared_resets_deepseek_for_new_secret_key() -> None:
     assert app.view_dashboard.translation_calls == [(True, False)]
     assert app.view_dashboard.stt_calls == []
     assert len(saves) == 1
+
+
+@pytest.mark.asyncio
+async def test_on_provider_secret_change_routes_atomic_invalidation_before_verification() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    calls: list[tuple[str, str]] = []
+
+    async def persist(key: str, value: str) -> bool:
+        calls.append((key, value))
+        return True
+
+    app.controller = SimpleNamespace(persist_provider_secret_change=persist)
+    app.view_dashboard = DummyDashboard()
+
+    result = await app._on_provider_secret_change(
+        "openrouter_api_key",
+        "new-secret",
+    )
+
+    assert result is True
+    assert calls == [("openrouter_api_key", "new-secret")]
+    assert app.view_dashboard.translation_calls == [(True, False)]
+    assert app.view_dashboard.stt_calls == []
+
+
+@pytest.mark.asyncio
+async def test_on_provider_secret_change_skips_dashboard_update_when_transaction_fails() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+
+    async def persist(_key: str, _value: str) -> bool:
+        return False
+
+    app.controller = SimpleNamespace(persist_provider_secret_change=persist)
+    app.view_dashboard = DummyDashboard()
+
+    result = await app._on_provider_secret_change(
+        "deepgram_api_key",
+        "new-secret",
+    )
+
+    assert result is False
+    assert app.view_dashboard.translation_calls == []
+    assert app.view_dashboard.stt_calls == []

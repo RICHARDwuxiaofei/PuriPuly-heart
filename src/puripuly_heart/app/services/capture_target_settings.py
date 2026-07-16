@@ -33,7 +33,7 @@ def persist_desktop_audio_capture_target(
     if original_bytes is None:
         try:
             settings.validate()
-            vnext = from_legacy_app_settings(settings, preserve_provider_verification=True)
+            vnext = from_legacy_app_settings(settings)
         except Exception:
             raise CaptureTargetSettingsError("migration_failed") from None
     else:

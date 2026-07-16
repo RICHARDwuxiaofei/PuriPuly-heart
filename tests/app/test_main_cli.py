@@ -93,6 +93,53 @@ def test_main_run_gui_invokes_flet_app(monkeypatch, tmp_path) -> None:
     assert calls["debug_ui_preview"] is False
 
 
+def test_run_gui_forwards_main_logging_sinks_when_supported(monkeypatch, tmp_path) -> None:
+    calls: dict[str, object] = {}
+    logging_sinks = object()
+    fake_flet = ModuleType("flet")
+
+    def fake_app(*, target, assets_dir):
+        _ = assets_dir
+        asyncio.run(target(object()))
+
+    fake_flet.app = fake_app
+    monkeypatch.setitem(sys.modules, "flet", fake_flet)
+
+    fake_ui_app = ModuleType("puripuly_heart.ui.app")
+
+    async def main_gui(
+        page,
+        *,
+        config_path,
+        debug_ui_preview=False,
+        runtime_logging_sinks=None,
+    ):
+        calls.update(
+            page=page,
+            config_path=config_path,
+            debug_ui_preview=debug_ui_preview,
+            runtime_logging_sinks=runtime_logging_sinks,
+        )
+
+    fake_ui_app.main_gui = main_gui
+    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.app", fake_ui_app)
+
+    fake_fonts = ModuleType("puripuly_heart.ui.fonts")
+    fake_fonts.assets_dir = lambda: tmp_path
+    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.fonts", fake_fonts)
+
+    config_path = tmp_path / "settings.json"
+    result = main_module._run_gui(
+        config_path,
+        debug_ui_preview=False,
+        runtime_logging_sinks=logging_sinks,
+    )
+
+    assert result == 0
+    assert calls["config_path"] == config_path
+    assert calls["runtime_logging_sinks"] is logging_sinks
+
+
 def test_main_default_invokes_gui(monkeypatch, tmp_path) -> None:
     calls: dict[str, object] = {}
 
@@ -178,7 +225,10 @@ def test_main_run_gui_force_closes_logging_when_gui_runtime_logging_leaks(
     monkeypatch.setattr(
         main_module,
         "configure_main_logging",
-        lambda: configure_main_logging(root_logger=root_logger),
+        lambda *, log_dir=None: configure_main_logging(
+            root_logger=root_logger,
+            log_dir=log_dir,
+        ),
     )
 
     fake_flet = ModuleType("flet")
@@ -696,6 +746,22 @@ def test_load_settings_or_default_loads_when_exists(monkeypatch, tmp_path) -> No
     assert main_module._load_settings_or_default(settings_path) is sentinel
 
 
+def test_load_settings_or_default_redacts_invalid_setting_value(tmp_path) -> None:
+    from puripuly_heart.config.settings_vnext import serialization
+    from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
+
+    settings_path = tmp_path / "settings.json"
+    sentinel = "private-overlay-anchor-sentinel"
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["intent"]["overlay"]["calibration"]["anchor"] = sentinel
+    settings_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="migration_failed:ValueError") as exc_info:
+        main_module._load_settings_or_default(settings_path)
+
+    assert sentinel not in str(exc_info.value)
+
+
 def test_settings_config_path_marks_default_as_implicit(monkeypatch, tmp_path) -> None:
     default_path = tmp_path / "vnext" / "settings.json"
     monkeypatch.setattr(main_module, "default_settings_path", lambda: default_path)
@@ -715,6 +781,28 @@ def test_settings_config_path_marks_custom_config_as_explicit(tmp_path) -> None:
 
     assert path == custom_path
     assert explicit is True
+
+
+def test_main_explicit_config_routes_logging_to_selected_file_parent(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    log_dirs: list[Path | None] = []
+
+    class FakeLoggingSinks:
+        def close(self, *, force: bool = False) -> None:
+            assert force is True
+
+    monkeypatch.setattr(
+        main_module,
+        "configure_main_logging",
+        lambda *, log_dir=None: log_dirs.append(log_dir) or FakeLoggingSinks(),
+    )
+    monkeypatch.setattr(main_module, "_run_gui", lambda *_args, **_kwargs: 0)
+    config_path = tmp_path / "selected" / "settings.json"
+
+    assert main_module.main(["--config", str(config_path)]) == 0
+    assert log_dirs == [config_path.parent]
 
 
 def test_production_cli_does_not_advertise_or_accept_process_capture_smoke(capsys) -> None:

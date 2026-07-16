@@ -293,6 +293,7 @@ class SettingsView(ft.Column):
         self.on_local_llm_secret_changed: Callable[[], None] | None = None
         self.on_request_openrouter_pkce: Callable[[AppSettings], None] | None = None
         self.on_verify_api_key: Callable[[str, str], object] | None = None
+        self.on_provider_secret_change: Callable[[str, str], object] | None = None
         self.on_secret_cleared: Callable[[str], None] | None = None  # key name
         self.on_overlay_calibration_begin: Callable[[], OverlayCalibration] | None = None
         self.on_overlay_calibration_change: Callable[[str, object], OverlayCalibration] | None = (
@@ -3723,17 +3724,20 @@ class SettingsView(ft.Column):
         if self.on_local_llm_secret_changed:
             self.on_local_llm_secret_changed()
 
-    def _on_secret_change(self, key: str, value: str) -> None:
+    def _on_secret_change(self, key: str, value: str) -> object:
         if not self._settings or not self._config_path:
-            return
+            return False
+        if self.on_provider_secret_change is not None:
+            return self.on_provider_secret_change(key, value)
 
         if not self._write_secret_value(key, value):
-            return
+            return False
         if not value and self.on_secret_cleared:
             with contextlib.suppress(Exception):
                 self.on_secret_cleared(key)
         if key == "openrouter_api_key":
             self._sync_openrouter_pkce_button_state()
+        return True
 
     def _on_audio_change(self) -> None:
         if not self._settings:

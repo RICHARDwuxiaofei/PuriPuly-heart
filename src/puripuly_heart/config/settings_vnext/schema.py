@@ -12,7 +12,7 @@ from typing import Final, Literal
 from puripuly_heart.config.audio_host_api import WINDOWS_WASAPI_COMPATIBILITY_HOST_API
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
 
-VNEXT_SETTINGS_SCHEMA_VERSION: Final = 27
+VNEXT_SETTINGS_SCHEMA_VERSION: Final = 28
 
 DEFAULT_OPENROUTER_BROKER_BASE_URL: Final = "https://puripuly-heart-broker.kapitalismho.workers.dev"
 DEFAULT_CUSTOM_VOCAB_TERMS: Final[Mapping[str, tuple[str, ...]]] = {
@@ -312,6 +312,16 @@ class QwenTranslationIntent:
 
 
 @dataclass(frozen=True, slots=True)
+class GeminiTranslationIntent:
+    llm_model: str = "gemini-3.1-flash-lite"
+
+
+@dataclass(frozen=True, slots=True)
+class DeepSeekTranslationIntent:
+    llm_model: str = "deepseek-v4-flash"
+
+
+@dataclass(frozen=True, slots=True)
 class CerebrasTranslationIntent:
     llm_model: str = "gemma-4-31b"
 
@@ -349,6 +359,8 @@ class TranslationIntent:
     openrouter_selected_source: str = "managed"
     openrouter_selection_alias: str | None = "gemma4_managed"
     openrouter_provider_routing: str = "default"
+    gemini: GeminiTranslationIntent = field(default_factory=GeminiTranslationIntent)
+    deepseek: DeepSeekTranslationIntent = field(default_factory=DeepSeekTranslationIntent)
     qwen: QwenTranslationIntent = field(default_factory=QwenTranslationIntent)
     cerebras: CerebrasTranslationIntent = field(default_factory=CerebrasTranslationIntent)
 
@@ -933,11 +945,13 @@ __all__ = [
     "ClipboardIntent",
     "CerebrasTranslationIntent",
     "DeepgramSTTIntent",
+    "DeepSeekTranslationIntent",
     "DesktopAudioIntent",
     "DesktopFletOverlayIntent",
     "DesktopFletOverlayPositionIntent",
     "DesktopFletOverlayVisualIntent",
     "GithubStarPromptState",
+    "GeminiTranslationIntent",
     "IntegratedContextIntent",
     "IntegratedContextState",
     "CANONICAL_TRANSLATION_FALLBACK_ALIASES",
