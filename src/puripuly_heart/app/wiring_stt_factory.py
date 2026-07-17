@@ -63,6 +63,7 @@ class ResolvedPeerSTTConfig:
     soniox_trailing_silence_ms: int | None = None
     soniox_enable_language_identification: bool = False
     soniox_language_hints: tuple[str, ...] | None = None
+    soniox_language_hints_strict: bool = False
 
     @property
     def model(self) -> str | None:
@@ -94,6 +95,7 @@ class ResolvedPeerSTTConfig:
                 "trailing_silence_ms": self.soniox_trailing_silence_ms,
                 "enable_language_identification": self.soniox_enable_language_identification,
                 "language_hints": self.soniox_language_hints,
+                "language_hints_strict": self.soniox_language_hints_strict,
             }
         return {}
 
@@ -136,9 +138,17 @@ def _effective_custom_terms_for_resolved_config(
 
 def _self_stt_runtime_intent_from_compatibility_settings(settings: AppSettings) -> STTRuntimeIntent:
     source_language = settings.languages.source_language
+    provider = _stt_provider_value_or_raise(settings.provider.stt, peer=False)
+    soniox_language_hints = None
+    soniox_language_hints_strict = False
+    if provider == STT_PROVIDER_SONIOX:
+        from puripuly_heart.core.language import get_soniox_language_hints
+
+        soniox_language_hints = tuple(get_soniox_language_hints(source_language))
+        soniox_language_hints_strict = True
     return STTRuntimeIntent(
         channel="self",
-        provider=_stt_provider_value_or_raise(settings.provider.stt, peer=False),
+        provider=provider,
         source_language=source_language,
         input_host_api=settings.audio.input_host_api,
         input_device=settings.audio.input_device,
@@ -162,51 +172,8 @@ def _self_stt_runtime_intent_from_compatibility_settings(settings: AppSettings) 
         soniox_endpoint=settings.soniox_stt.endpoint,
         soniox_keepalive_interval_s=settings.soniox_stt.keepalive_interval_s,
         soniox_trailing_silence_ms=settings.soniox_stt.trailing_silence_ms,
-    )
-
-
-def _effective_custom_terms_for_resolved_config(
-    settings: AppSettings,
-    source_language: str,
-) -> Mapping[str, tuple[str, ...]]:
-    terms = tuple(
-        get_effective_custom_terms(
-            build_custom_vocabulary_runtime_config(settings), source_language
-        )
-    )
-    if not terms:
-        return {}
-    return {source_language: terms}
-
-
-def _self_stt_runtime_intent_from_compatibility_settings(settings: AppSettings) -> STTRuntimeIntent:
-    source_language = settings.languages.source_language
-    return STTRuntimeIntent(
-        channel="self",
-        provider=_stt_provider_value_or_raise(settings.provider.stt, peer=False),
-        source_language=source_language,
-        input_host_api=settings.audio.input_host_api,
-        input_device=settings.audio.input_device,
-        output_device=None,
-        sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
-        channels=settings.audio.internal_channels,
-        ring_buffer_ms=settings.audio.ring_buffer_ms,
-        drain_timeout_s=settings.stt.drain_timeout_s,
-        vad_speech_threshold=settings.stt.vad_speech_threshold,
-        vad_hangover_ms=settings.stt.low_latency_vad_hangover_ms,
-        vad_pre_roll_ms=500,
-        low_latency_enabled=settings.stt.low_latency_mode,
-        low_latency_merge_gap_ms=settings.stt.low_latency_merge_gap_ms,
-        low_latency_spec_retry_max=settings.stt.low_latency_spec_retry_max,
-        custom_vocabulary_enabled=settings.stt.custom_vocabulary_enabled,
-        custom_terms=_effective_custom_terms_for_resolved_config(settings, source_language),
-        deepgram_model=settings.deepgram_stt.model,
-        qwen_asr_model=settings.qwen_asr_stt.model,
-        qwen_region=settings.qwen.region.value,
-        soniox_model=settings.soniox_stt.model,
-        soniox_endpoint=settings.soniox_stt.endpoint,
-        soniox_keepalive_interval_s=settings.soniox_stt.keepalive_interval_s,
-        soniox_trailing_silence_ms=settings.soniox_stt.trailing_silence_ms,
+        soniox_language_hints=soniox_language_hints,
+        soniox_language_hints_strict=soniox_language_hints_strict,
     )
 
 
@@ -223,21 +190,27 @@ def peer_stt_runtime_intent_from_vnext(settings: AppSettingsVNext) -> STTRuntime
     automatic_soniox = (
         provider == STT_PROVIDER_SONIOX and intent.languages.peer_source_mode == "soniox_auto"
     )
+    source_language = intent.languages.peer_source_language or intent.languages.source_language
     language_hints = None
-    if automatic_soniox:
+    language_hints_strict = False
+    if provider == STT_PROVIDER_SONIOX:
         from puripuly_heart.core.language import get_soniox_language_hints
 
-        language_hints = tuple(
-            dict.fromkeys(
-                hint
-                for language in intent.languages.peer_expected_languages
-                for hint in get_soniox_language_hints(language)
+        if automatic_soniox:
+            mapped_language_hints = tuple(
+                dict.fromkeys(
+                    hint
+                    for language in intent.languages.peer_expected_languages
+                    for hint in get_soniox_language_hints(language)
+                )
             )
-        )
+            language_hints = mapped_language_hints or None
+        else:
+            language_hints = tuple(get_soniox_language_hints(source_language))
     return STTRuntimeIntent(
         channel="peer",
         provider=provider,
-        source_language=intent.languages.peer_source_language or intent.languages.source_language,
+        source_language=source_language,
         input_host_api=None,
         input_device=None,
         output_device=intent.desktop_audio.output_device,
@@ -262,6 +235,7 @@ def peer_stt_runtime_intent_from_vnext(settings: AppSettingsVNext) -> STTRuntime
         soniox_trailing_silence_ms=intent.stt.soniox.trailing_silence_ms,
         soniox_enable_language_identification=automatic_soniox,
         soniox_language_hints=language_hints,
+        soniox_language_hints_strict=language_hints_strict,
     )
 
 
@@ -436,6 +410,11 @@ def create_stt_backend_from_resolved_config(
                 "enable_language_identification",
                 default=False,
             ),
+            language_hints_strict=_resolved_bool_option(
+                config.provider_options,
+                "language_hints_strict",
+                default=False,
+            ),
             context_terms=keyterms,
         )
 
@@ -468,17 +447,19 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
 
     if provider == STTProviderName.SONIOX:
         automatic_soniox = settings.languages.peer_source_mode == "soniox_auto"
-        language_hints = None
-        if automatic_soniox:
-            from puripuly_heart.core.language import get_soniox_language_hints
+        from puripuly_heart.core.language import get_soniox_language_hints
 
-            language_hints = tuple(
+        if automatic_soniox:
+            mapped_language_hints = tuple(
                 dict.fromkeys(
                     hint
                     for language in settings.languages.peer_expected_languages
                     for hint in get_soniox_language_hints(language)
                 )
             )
+            language_hints = mapped_language_hints or None
+        else:
+            language_hints = tuple(get_soniox_language_hints(peer_source_language))
         return ResolvedPeerSTTConfig(
             provider=provider,
             source_language=peer_source_language,
@@ -538,6 +519,7 @@ def build_peer_stt_provider_signature_from_vnext(settings: AppSettingsVNext) -> 
         resolved.provider_options.get("trailing_silence_ms"),
         resolved.provider_options.get("enable_language_identification", False),
         resolved.provider_options.get("language_hints"),
+        resolved.provider_options.get("language_hints_strict", False),
     )
 
 

@@ -601,6 +601,7 @@ class STTRuntimeIntent:
     soniox_trailing_silence_ms: int = SONIOX_STT_DEFAULT_TRAILING_SILENCE_MS
     soniox_enable_language_identification: bool = False
     soniox_language_hints: tuple[str, ...] | None = None
+    soniox_language_hints_strict: bool = False
 
     def __post_init__(self) -> None:
         channel = _normalize_allowed(
@@ -1081,6 +1082,11 @@ def resolve_stt_config(intent: STTRuntimeIntent) -> ResolvedSTTConfig:
             provider_options = {
                 **provider_options,
                 "language_hints": intent.soniox_language_hints,
+            }
+        if intent.soniox_language_hints_strict:
+            provider_options = {
+                **provider_options,
+                "language_hints_strict": True,
             }
 
     return ResolvedSTTConfig(
