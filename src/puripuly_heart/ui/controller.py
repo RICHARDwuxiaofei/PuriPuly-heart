@@ -123,6 +123,7 @@ from puripuly_heart.config.llm_profiles import (
     profile_for_alias,
 )
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
+from puripuly_heart.config.paths import user_config_dir
 from puripuly_heart.config.process_capture_resolution import (
     ProcessCaptureResolver,
     ProcessCaptureTargetUnavailableError,
@@ -4302,6 +4303,7 @@ class GuiController:
                 bridge_messages=bridge.messages,
                 session_token=bridge.session_token,
                 locale=self.settings.ui.locale,
+                log_dir=str(user_config_dir()),
                 startup_timeout_ms=OVERLAY_STARTUP_TIMEOUT_MS,
                 renderer_events=renderer_events,
                 overlay_instance_id=overlay_instance_id,

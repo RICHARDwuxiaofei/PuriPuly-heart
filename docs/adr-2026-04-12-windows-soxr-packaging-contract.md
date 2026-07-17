@@ -88,4 +88,3 @@ Rejected because the compliance bundle and release smoke guarantees are finalize
 ## References
 
 - `docs/superpowers/plans/2026-04-12-stt-soxr-release-hardening-implementation.md`
-- `agents/logs/2026-04-12-stt-soxr-release-hardening-verification.md`

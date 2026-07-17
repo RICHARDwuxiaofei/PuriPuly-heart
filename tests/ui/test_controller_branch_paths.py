@@ -5589,9 +5589,11 @@ async def test_create_peer_vad_from_runtime_config_uses_shared_peer_vad_policy_h
 @pytest.mark.asyncio
 async def test_overlay_toggle_starts_and_stops_overlay_runtime(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(controller_module, "user_config_dir", lambda: tmp_path)
 
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
@@ -5603,6 +5605,7 @@ async def test_overlay_toggle_starts_and_stops_overlay_runtime(
     manager = FakeOverlayProcessManager.instances[0]
     bridge = FakeOverlayBridge.instances[0]
 
+    assert manager.extra_kwargs["log_dir"] == str(tmp_path)
     assert controller.settings.ui.overlay_enabled is True
     assert controller.overlay_state == "starting"
     assert controller.hub.overlay_sink is _overlay_runtime(controller).presenter
