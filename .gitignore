@@ -239,7 +239,12 @@ refactoring/
 !/scripts/release/unattended-runtime-evidence.py
 .codex/
 .agent/
-.agents/
+.agents/*
+!.agents/specs/
+.agents/specs/*
+!.agents/specs/prd/
+.agents/specs/prd/*
+!.agents/specs/prd/*.md
 docs/plans/
 docs/superpowers
 !docs/superpowers/
