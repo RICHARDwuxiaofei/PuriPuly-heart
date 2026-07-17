@@ -12,7 +12,7 @@ from typing import Final, Literal
 from puripuly_heart.config.audio_host_api import WINDOWS_WASAPI_COMPATIBILITY_HOST_API
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
 
-VNEXT_SETTINGS_SCHEMA_VERSION: Final = 28
+VNEXT_SETTINGS_SCHEMA_VERSION: Final = 29
 
 DEFAULT_OPENROUTER_BROKER_BASE_URL: Final = "https://puripuly-heart-broker.kapitalismho.workers.dev"
 DEFAULT_CUSTOM_VOCAB_TERMS: Final[Mapping[str, tuple[str, ...]]] = {}
@@ -393,7 +393,7 @@ class SonioxSTTIntent:
 class STTIntent:
     provider: str = "local_qwen"
     drain_timeout_s: float = 2.0
-    vad_speech_threshold: float = 0.5
+    vad_speech_threshold: float = 0.35
     low_latency_mode: bool = True
     low_latency_vad_hangover_ms: int = 500
     low_latency_merge_gap_ms: int = 600
@@ -592,7 +592,7 @@ class CaptureTargetIntent:
 class DesktopAudioIntent:
     output_device: str = ""
     capture_target: CaptureTargetIntent = field(default_factory=CaptureTargetIntent)
-    vad_speech_threshold: float = 0.6
+    vad_speech_threshold: float = 0.5
     vad_hangover_ms: int = 500
     vad_pre_roll_ms: int = 500
 

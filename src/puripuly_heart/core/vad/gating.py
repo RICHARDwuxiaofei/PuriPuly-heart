@@ -85,7 +85,7 @@ class VadGating:
         *,
         sample_rate_hz: int,
         ring_buffer_ms: int = 500,
-        speech_threshold: float = 0.5,
+        speech_threshold: float = 0.35,
         hangover_ms: int = 1100,
         max_segment_ms: int | None = None,
         chunk_samples: int | None = None,
@@ -388,7 +388,7 @@ class VadGating:
         return False
 
 
-PEER_VAD_SPEECH_THRESHOLD = 0.60
+PEER_VAD_SPEECH_THRESHOLD = 0.5
 PEER_VAD_START_DEBOUNCE_CHUNKS = 3
 PEER_VAD_START_COMMIT_CHUNKS = 3
 PEER_MAX_SEGMENT_MS = 7000

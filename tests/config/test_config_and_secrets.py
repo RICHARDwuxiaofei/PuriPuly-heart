@@ -1335,14 +1335,14 @@ def test_load_settings_backfills_v4_peer_blocks_from_schema3_fixture(tmp_path) -
         },
         "desktop_audio": {
             "output_device": "",
-            "vad_speech_threshold": 0.6,
+            "vad_speech_threshold": 0.5,
             "vad_hangover_ms": 900,
             "vad_pre_roll_ms": 500,
         },
         "overlay_calibration": AppSettings().overlay_calibration.to_dict(),
         "stt": {
             "drain_timeout_s": 2.0,
-            "vad_speech_threshold": 0.5,
+            "vad_speech_threshold": 0.35,
             "low_latency_mode": True,
             "low_latency_vad_hangover_ms": 600,
             "low_latency_merge_gap_ms": 600,

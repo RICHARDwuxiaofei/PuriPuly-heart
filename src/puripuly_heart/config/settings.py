@@ -557,7 +557,7 @@ class AudioSettings:
 @dataclass(slots=True)
 class DesktopAudioSettings:
     output_device: str = ""
-    vad_speech_threshold: float = 0.6
+    vad_speech_threshold: float = 0.5
     vad_hangover_ms: int = DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS
     vad_pre_roll_ms: int = 500
     runtime_capture_target: object | None = field(default=None, repr=False, compare=False)
@@ -576,7 +576,7 @@ class DesktopAudioSettings:
 @dataclass(slots=True)
 class STTSettings:
     drain_timeout_s: float = 2.0
-    vad_speech_threshold: float = 0.5
+    vad_speech_threshold: float = 0.35
     low_latency_mode: bool = True
     low_latency_vad_hangover_ms: int = DEFAULT_LOW_LATENCY_VAD_HANGOVER_MS
     low_latency_merge_gap_ms: int = 600
@@ -3849,7 +3849,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 if desktop_audio_data.get("output_device") is not None
                 else ""
             ),
-            vad_speech_threshold=float(desktop_audio_data.get("vad_speech_threshold", 0.6)),
+            vad_speech_threshold=float(desktop_audio_data.get("vad_speech_threshold", 0.5)),
             vad_hangover_ms=int(
                 desktop_audio_data.get("vad_hangover_ms", DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS)
             ),
@@ -3907,7 +3907,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         ),
         stt=STTSettings(
             drain_timeout_s=float(stt_data.get("drain_timeout_s", 2.0)),
-            vad_speech_threshold=float(vad_threshold_raw) if vad_threshold_raw is not None else 0.5,
+            vad_speech_threshold=(
+                float(vad_threshold_raw) if vad_threshold_raw is not None else 0.35
+            ),
             low_latency_mode=bool(stt_data.get("low_latency_mode", False)),
             low_latency_vad_hangover_ms=int(
                 stt_data.get(

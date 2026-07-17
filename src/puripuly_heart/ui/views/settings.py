@@ -1337,8 +1337,8 @@ class SettingsView(ft.Column):
             min=0.0,
             max=1.0,
             divisions=20,
-            value=0.5,
-            label="0.50",
+            value=0.35,
+            label="0.35",
             active_color=COLOR_PRIMARY,
             on_change=self._handle_vad_visual_change,
             on_change_end=self._handle_vad_change,
@@ -1358,15 +1358,15 @@ class SettingsView(ft.Column):
             min=0.0,
             max=1.0,
             divisions=20,
-            value=0.6,
-            label="0.60",
+            value=0.5,
+            label="0.50",
             active_color=COLOR_PRIMARY,
             on_change=self._handle_peer_vad_visual_change,
             on_change_end=self._handle_peer_vad_change,
         )
         self._peer_vad_field = self._build_numeric_setting_field(
             label=t("settings.vad.peer"),
-            value="0.60",
+            value="0.50",
             on_change_end=self._on_peer_vad_threshold_change,
         )
         self._peer_hangover_field = self._build_numeric_setting_field(
