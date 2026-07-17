@@ -1,7 +1,6 @@
 ## Authority
 
 - Do not add code comments unless explicitly requested.
-- For implementation started with `$start-goal`, treat the pinned reviewed PRD as the only normative completion contract and validate `STATE.md`, Git pins, worktree identity, open findings, pending evidence, and the recorded next action before resuming.
 - Keep Goal completion separate from merge, push, deployment, and worktree cleanup approval.
 
 ## Product Invariants
