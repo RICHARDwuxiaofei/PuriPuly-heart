@@ -42,10 +42,9 @@ def _allowed_settings(identifier: str = "anon-id") -> AppSettings:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("consent", ["unknown", "decline"])
-async def test_unknown_and_declined_consent_skip_without_client_call(consent: str) -> None:
+async def test_declined_consent_skips_without_client_call() -> None:
     settings = AppSettings()
-    settings = with_telemetry_consent(settings, consent)
+    settings = with_telemetry_consent(settings, "decline")
     client = FakeTelemetryClient()
     persist = PersistRecorder()
     events: list[tuple[str, dict[str, object]]] = []
@@ -61,7 +60,23 @@ async def test_unknown_and_declined_consent_skip_without_client_call(consent: st
     assert result.attempted_send is False
     assert client.calls == []
     assert persist.calls == []
-    assert events == [("skipped_consent", {"reason": "consent_not_allow"})]
+    assert events == [("skipped_consent", {"reason": "consent_declined"})]
+
+
+@pytest.mark.asyncio
+async def test_unknown_consent_is_treated_as_allow_when_identifier_present() -> None:
+    settings = AppSettings()
+    settings.telemetry.consent = "unknown"
+    settings.telemetry_state.anonymous_id = "anon-unknown"
+    client = FakeTelemetryClient()
+    persist = PersistRecorder()
+    service = TranslationSuccessTelemetryService(client, utc_date_provider=_date_provider)
+
+    result = await service.record_translation_success_day(settings, persist_sent_date=persist)
+
+    assert result.status == "sent"
+    assert client.calls == [("anon-unknown", "2026-07-03")]
+    assert persist.calls
 
 
 @pytest.mark.asyncio

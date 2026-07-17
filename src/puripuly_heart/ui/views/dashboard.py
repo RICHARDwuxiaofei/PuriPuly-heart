@@ -51,6 +51,8 @@ class DashboardView(ft.Column):
         self._managed_auth_pending = False
         self._local_stt_notice_status: str | None = None
         self._local_stt_notice_percent: int | None = None
+        self._vrchat_osc_notice_active = False
+        self._overlay_session_fallback_notice_active = False
         self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
         self._process_capture_warning_active = False
         self._process_capture_warning_reason: str | None = None
@@ -625,6 +627,14 @@ class DashboardView(ft.Column):
 
         self._sync_notice()
 
+    def set_vrchat_osc_notice(self, active: bool) -> None:
+        self._vrchat_osc_notice_active = bool(active)
+        self._sync_notice()
+
+    def set_overlay_session_fallback_notice(self, active: bool) -> None:
+        self._overlay_session_fallback_notice_active = bool(active)
+        self._sync_notice()
+
     def _current_local_stt_notice(self) -> tuple[str | None, str | None]:
         status = self._local_stt_notice_status
         if status is None:
@@ -694,6 +704,15 @@ class DashboardView(ft.Column):
         notice_text, tone = self._current_local_stt_notice()
         if notice_text is not None:
             self.display_card.set_notice(notice_text, tone)
+            return
+        if self._overlay_session_fallback_notice_active:
+            self.display_card.set_notice(
+                t("dashboard.overlay_session_fallback_desktop"),
+                "info",
+            )
+            return
+        if self._vrchat_osc_notice_active:
+            self.display_card.set_notice(t("dashboard.vrchat_osc_disabled"), "warning")
             return
         notice_text, tone = self._current_overlay_failure_notice()
         self.display_card.set_notice(notice_text, tone)

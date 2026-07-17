@@ -6129,6 +6129,65 @@ async def test_overlay_target_routing_installs_steamvr_runner_by_default(
 
 
 @pytest.mark.asyncio
+async def test_overlay_session_fallback_to_desktop_when_steamvr_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    notices: list[bool] = []
+
+    class FakeSteamVrRunner:
+        pass
+
+    class FakeDesktopRunner:
+        pass
+
+    monkeypatch.setattr(
+        controller_module,
+        "DefaultOverlayProcessRunner",
+        FakeSteamVrRunner,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "DesktopFletOverlayRunner",
+        FakeDesktopRunner,
+        raising=False,
+    )
+
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=SimpleNamespace(
+                set_overlay_session_fallback_notice=lambda active: notices.append(bool(active))
+            )
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "steamvr"
+    controller.settings.ui.overlay_enabled = False
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    first = FakeOverlayProcessManager.instances[0]
+    assert isinstance(first.process_runner, FakeSteamVrRunner)
+    first.complete_startup(failure_reason="steamvr_not_running")
+
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 2)
+    second = FakeOverlayProcessManager.instances[1]
+    assert isinstance(second.process_runner, FakeDesktopRunner)
+    assert controller.settings.overlay.target == "steamvr"
+    assert controller._overlay_session_desktop_fallback_active is True
+    assert True in notices
+    second.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    assert controller._active_overlay_target == "desktop"
+
+    await controller.set_overlay_enabled(False)
+    assert controller._overlay_session_desktop_fallback_active is False
+    assert False in notices
+
+
+@pytest.mark.asyncio
 async def test_desktop_initial_control_manifest_always_launches_edit_even_with_legacy_locked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

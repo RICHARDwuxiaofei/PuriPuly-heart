@@ -16,6 +16,9 @@ REQUIRED_DISCORD_AUTH_KEYS = [
     "discord_auth.callback_received_body",
     "discord_auth.success",
     "discord_auth.referral_id.label",
+    "discord_auth.referral_id.expand",
+    "discord_auth.referral_id.collapse",
+    "discord_auth.referral_id.helper",
     "discord_auth.referral_reward_applied",
     "discord_auth.error.email_unverified",
     "discord_auth.error.account_too_new",
@@ -31,19 +34,19 @@ REQUIRED_DISCORD_AUTH_KEYS = [
 
 _EXPECTED_EXACT_STRINGS = {
     "en": {
-        "discord_auth.body": "PuriPuly gives new users a free usage allowance.\nYou can translate 700+ times.\nYou'll receive it right after Discord verification.\n\nWe don't keep personal information.\nWe only check the minimum information needed for verification.\n\nIf you received a Pass ID from a friend, enter it here.\nYou and your friend can each get 200 extra translations.",
+        "discord_auth.body": "PuriPuly gives new users a free usage allowance.\nYou can translate 700+ times.\nYou'll receive it right after Discord verification.\n\nWe don't keep personal information.\nWe only check the minimum information needed for verification.",
         "discord_auth.success": "Discord verification is complete.",
     },
     "ko": {
-        "discord_auth.body": "PuriPuly는 신규 사용자에게 무료 사용량을 제공해요.\n700회 이상 번역할 수 있어요.\nDiscord 인증 후 바로 발급돼요.\n\n개인 정보는 보관하지 않아요.\n인증에 필요한 최소 정보만 확인해요.\n\n친구에게 받은 Pass ID가 있으면 입력해 주세요.\n친구와 같이 200회 추가 사용량을 받을 수 있어요.",
+        "discord_auth.body": "PuriPuly는 신규 사용자에게 무료 사용량을 제공해요.\n700회 이상 번역할 수 있어요.\nDiscord 인증 후 바로 발급돼요.\n\n개인 정보는 보관하지 않아요.\n인증에 필요한 최소 정보만 확인해요.",
         "discord_auth.success": "Discord 인증이 완료되었어요.",
     },
     "ja": {
-        "discord_auth.body": "PuriPulyでは新規ユーザー向けに無料利用枠をご用意しています。\n700回以上翻訳できます。\nDiscord認証後、すぐに付与されます。\n\n個人情報は保存しません。\n認証に必要な最小限の情報だけを確認します。\n\n友だちから受け取った Pass ID があれば入力してください。\n友だちと一緒に追加で200回分の利用枠を受け取れます。",
+        "discord_auth.body": "PuriPulyでは新規ユーザー向けに無料利用枠をご用意しています。\n700回以上翻訳できます。\nDiscord認証後、すぐに付与されます。\n\n個人情報は保存しません。\n認証に必要な最小限の情報だけを確認します。",
         "discord_auth.success": "Discord認証が完了しました。",
     },
     "zh-CN": {
-        "discord_auth.body": "PuriPuly 会为新用户提供免费使用额度。\n可翻译 700 次以上。\n完成 Discord 认证后会立即发放。\n\n我们不会保存个人信息。\n只会确认认证所需的最低限度信息。\n\n如果你有朋友给你的 Pass ID，请在这里输入。\n你和朋友可以一起获得额外 200 次使用额度。",
+        "discord_auth.body": "PuriPuly 会为新用户提供免费使用额度。\n可翻译 700 次以上。\n完成 Discord 认证后会立即发放。\n\n我们不会保存个人信息。\n只会确认认证所需的最低限度信息。",
         "discord_auth.success": "Discord 认证已完成。",
     },
 }
@@ -113,6 +116,9 @@ def test_discord_auth_copy_uses_pass_terms_without_referral_or_currency(locale: 
         [
             bundle["discord_auth.body"],
             bundle["discord_auth.referral_id.label"],
+            bundle["discord_auth.referral_id.expand"],
+            bundle["discord_auth.referral_id.collapse"],
+            bundle["discord_auth.referral_id.helper"],
             bundle["discord_auth.referral_reward_applied"],
         ]
     )

@@ -235,6 +235,7 @@ from puripuly_heart.core.osc.receiver import (
     VrcOscReceiver,
 )
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
+from puripuly_heart.core.osc.vrchat_osc_presence import probe_vrchat_osc_presence
 from puripuly_heart.core.overlay.bridge import OverlayBridge
 from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
@@ -1042,6 +1043,14 @@ class GuiController:
     _overlay_runtime: OverlayRuntimeHandle | None = None
     _overlay_lock: asyncio.Lock | None = None
     _active_overlay_target: str | None = field(init=False, default=None)
+    _overlay_session_desktop_fallback_active: bool = field(init=False, default=False)
+    _vrchat_osc_notice_active: bool = field(init=False, default=False)
+    _vrchat_osc_probe_task: asyncio.Task[None] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _vrchat_osc_probe_generation: int = field(init=False, default=0)
     _desktop_bounds_persist_task: asyncio.Task[None] | None = field(
         init=False,
         default=None,
@@ -1309,6 +1318,7 @@ class GuiController:
         self._start_ui_event_bridge_task(bridge)
         await self._sync_clipboard_watcher()
         self._schedule_process_discovery_idle_preparation()
+        self._schedule_vrchat_osc_presence_probe(force=True)
 
     def _schedule_process_discovery_idle_preparation(self) -> None:
         if self._process_idle_preparation_scheduled:
@@ -3039,6 +3049,33 @@ class GuiController:
             return OVERLAY_TARGET_STEAMVR
         return self._normalized_overlay_target(resolved_settings.overlay.target)
 
+    def _effective_overlay_target_for_start(self) -> str:
+        if self._overlay_session_desktop_fallback_active:
+            return OVERLAY_TARGET_DESKTOP
+        return self._overlay_target_for_settings(self.settings)
+
+    def _clear_overlay_session_desktop_fallback(self) -> None:
+        self._overlay_session_desktop_fallback_active = False
+        self._set_overlay_session_fallback_notice_active(False)
+
+    def _set_overlay_session_fallback_notice_active(self, active: bool) -> None:
+        dash = getattr(self.app, "view_dashboard", None)
+        set_notice = getattr(dash, "set_overlay_session_fallback_notice", None)
+        if callable(set_notice):
+            with contextlib.suppress(Exception):
+                set_notice(bool(active))
+
+    def _should_session_fallback_overlay_to_desktop(self, reason: str) -> bool:
+        if reason not in {"steamvr_not_running", "steamvr_not_installed"}:
+            return False
+        if self._overlay_session_desktop_fallback_active:
+            return False
+        if self._active_overlay_target == OVERLAY_TARGET_DESKTOP:
+            return False
+        if self.settings is None or not self.settings.ui.overlay_enabled:
+            return False
+        return self._overlay_target_for_settings(self.settings) == OVERLAY_TARGET_STEAMVR
+
     def _new_overlay_runtime_handle(self) -> OverlayRuntimeHandle:
         runtime = OverlayRuntimeHandle(shutdown_grace_s=OVERLAY_SHUTDOWN_GRACE_S)
         self._overlay_runtime = runtime
@@ -3987,8 +4024,10 @@ class GuiController:
             await self.set_stt_enabled(False)
         except Exception as exc:
             cleanup_failures.append(exc)
+        await self._cancel_vrchat_osc_presence_probe()
         await self._close_vrc_mic_receiver_runtime_for_release(cleanup_failures)
         await self._shutdown_overlay_runtime(preserve_failure_reason=True)
+        self._clear_overlay_session_desktop_fallback()
         await self._close_peer_runtime_for_release(cleanup_failures)
 
         await self._stop_hub_for_release(cleanup_failures)
@@ -4031,6 +4070,7 @@ class GuiController:
             self.settings.ui.peer_translation_enabled = False
             self._last_peer_translation_enabled = False
             self._last_peer_translation_activation_requested = False
+            self._clear_overlay_session_desktop_fallback()
         self._refresh_overlay_peer_consumers()
 
         if enabled:
@@ -4158,7 +4198,7 @@ class GuiController:
             runtime = self._new_overlay_runtime_handle()
             if preserved_presenter is not None:
                 runtime.adopt_presenter(preserved_presenter)
-            self._active_overlay_target = self._overlay_target_for_settings(self.settings)
+            self._active_overlay_target = self._effective_overlay_target_for_start()
             previous_state = self.overlay_state
             self.overlay_state = "starting"
             self.auto_restart_scheduled = False
@@ -4406,9 +4446,56 @@ class GuiController:
             raise
 
     async def _handle_overlay_start_failure(self, failure_reason: str | None) -> None:
+        reason = self._normalize_overlay_failure_reason(failure_reason)
+        if self._should_session_fallback_overlay_to_desktop(reason):
+            self.log_basic(f"[Overlay] Session fallback to desktop: reason={reason}")
+            self._overlay_session_desktop_fallback_active = True
+            await self._teardown_overlay_runtime(preserve_presenter_state=True)
+            previous_state = self.overlay_state
+            self.overlay_state = "off"
+            self.failure_reason = None
+            self._log_overlay_state_transition(previous_state, self.overlay_state)
+            self._sync_effective_hub_flags()
+            await self._refresh_overlay_runtime_dependencies()
+            self._notify_overlay_state()
+            self._set_overlay_session_fallback_notice_active(True)
+            # Restart outside this start task so runtime close/reopen is not re-entrant.
+            self._schedule_overlay_session_desktop_fallback_start()
+            return
         self.on_overlay_start_failed(failure_reason)
         await self._teardown_overlay_runtime(preserve_presenter_state=True)
         await self._refresh_overlay_runtime_dependencies()
+
+    def _schedule_overlay_session_desktop_fallback_start(self) -> None:
+        async def _task() -> None:
+            await asyncio.sleep(0)
+            if self.settings is None or not self.settings.ui.overlay_enabled:
+                return
+            if not self._overlay_session_desktop_fallback_active:
+                return
+            if self.overlay_state in {"starting", "connected"}:
+                return
+            await self._begin_overlay_start()
+
+        run_task = getattr(self.page, "run_task", None)
+        if callable(run_task):
+            try:
+                run_task(_task)
+                return
+            except Exception as exc:
+                self.log_detailed(
+                    "[Overlay] Failed to schedule session desktop fallback via page.run_task",
+                    level=logging.WARNING,
+                    exception=exc,
+                )
+        try:
+            asyncio.get_running_loop().create_task(_task())
+        except RuntimeError as exc:
+            self.log_detailed(
+                "[Overlay] Failed to schedule session desktop fallback",
+                level=logging.WARNING,
+                exception=exc,
+            )
 
     async def _shutdown_overlay_runtime(self, *, preserve_failure_reason: bool) -> None:
         if self._overlay_lock is None:
@@ -4778,6 +4865,89 @@ class GuiController:
 
     def _show_short_stt_message(self, message_key: str) -> None:
         self._show_short_message(message_key)
+
+    def _vrchat_osc_probe_port(self) -> int:
+        if self.settings is None:
+            return 9000
+        port = getattr(self.settings.osc, "port", 9000)
+        return port if isinstance(port, int) and 0 < port <= 65535 else 9000
+
+    def _set_vrchat_osc_notice_active(self, active: bool) -> None:
+        active = bool(active)
+        if self._vrchat_osc_notice_active == active:
+            return
+        self._vrchat_osc_notice_active = active
+        dash = getattr(self.app, "view_dashboard", None)
+        set_notice = getattr(dash, "set_vrchat_osc_notice", None)
+        if callable(set_notice):
+            with contextlib.suppress(Exception):
+                set_notice(active)
+
+    def _schedule_vrchat_osc_presence_probe(self, *, force: bool = False) -> None:
+        _ = force
+        self._vrchat_osc_probe_generation += 1
+        generation = self._vrchat_osc_probe_generation
+        existing = self._vrchat_osc_probe_task
+        if existing is not None and not existing.done():
+            existing.cancel()
+
+        async def _task() -> None:
+            await self._run_vrchat_osc_presence_probe_loop(generation)
+
+        run_task = getattr(self.page, "run_task", None)
+        if callable(run_task):
+            try:
+                self._vrchat_osc_probe_task = run_task(_task)
+                return
+            except Exception as exc:
+                self.log_detailed(
+                    "[OSC] Failed to schedule VRChat OSC presence probe via page.run_task",
+                    level=logging.WARNING,
+                    exception=exc,
+                )
+        try:
+            self._vrchat_osc_probe_task = asyncio.get_running_loop().create_task(_task())
+        except RuntimeError:
+            self._vrchat_osc_probe_task = None
+
+    async def _run_vrchat_osc_presence_probe_loop(self, generation: int) -> None:
+        while generation == self._vrchat_osc_probe_generation:
+            try:
+                presence = await asyncio.to_thread(
+                    probe_vrchat_osc_presence,
+                    port=self._vrchat_osc_probe_port(),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.log_detailed(
+                    "[OSC] VRChat OSC presence probe failed",
+                    level=logging.WARNING,
+                    exception=exc,
+                )
+                presence = None
+            if generation != self._vrchat_osc_probe_generation:
+                return
+            if presence is None:
+                self._set_vrchat_osc_notice_active(False)
+            else:
+                self._set_vrchat_osc_notice_active(presence.should_prompt_enable_osc)
+            try:
+                await asyncio.sleep(30.0)
+            except asyncio.CancelledError:
+                raise
+
+    async def _cancel_vrchat_osc_presence_probe(self) -> None:
+        self._vrchat_osc_probe_generation += 1
+        task = self._vrchat_osc_probe_task
+        self._vrchat_osc_probe_task = None
+        if task is None:
+            self._set_vrchat_osc_notice_active(False)
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+        self._set_vrchat_osc_notice_active(False)
 
     def _show_short_message(self, message_key: str, **message_kwargs: object) -> None:
         message = t(message_key, **message_kwargs)
@@ -5736,8 +5906,16 @@ class GuiController:
         previous_settings_for_desktop = (
             copy.deepcopy(self.settings) if self.settings is not None else None
         )
-        prev_overlay_target = self._previous_overlay_target_for_apply()
+        prev_settings_overlay_target = self._overlay_target_for_settings(self.settings)
         next_overlay_target = self._overlay_target_for_settings(settings)
+        if self._overlay_session_desktop_fallback_active:
+            # Session fallback keeps settings on SteamVR while runtime is desktop.
+            # Compare settings targets so unrelated applies do not look like a switch.
+            prev_overlay_target = prev_settings_overlay_target
+        else:
+            prev_overlay_target = self._previous_overlay_target_for_apply()
+        if next_overlay_target == OVERLAY_TARGET_DESKTOP:
+            self._clear_overlay_session_desktop_fallback()
         if (
             prev_overlay_target != next_overlay_target
             and prev_overlay_enabled
@@ -5749,6 +5927,7 @@ class GuiController:
             )
             settings = copy.deepcopy(settings)
             settings.ui.overlay_enabled = False
+            self._clear_overlay_session_desktop_fallback()
         desktop_runtime_controls = self._prepare_desktop_runtime_settings_update(
             previous_settings_for_desktop,
             settings,

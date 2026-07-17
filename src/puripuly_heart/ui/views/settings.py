@@ -2267,7 +2267,9 @@ class SettingsView(ft.Column):
     def _telemetry_consent_display_label(self, settings: AppSettings | None) -> str:
         consent = getattr(getattr(settings, "telemetry", None), "consent", "unknown")
         return t(
-            "settings.telemetry.state.on" if consent == "allow" else "settings.telemetry.state.off"
+            "settings.telemetry.state.on"
+            if consent != "decline"
+            else "settings.telemetry.state.off"
         )
 
     def _sync_telemetry_consent_card(self, settings: AppSettings | None = None) -> None:
@@ -4787,7 +4789,7 @@ class SettingsView(ft.Column):
             OptionItem(
                 "decline",
                 t("settings.telemetry.option.decline"),
-                t("settings.telemetry.option.decline.description"),
+                "",
             ),
         ]
         modal = SettingsModal(
@@ -4797,7 +4799,7 @@ class SettingsView(ft.Column):
             _select,
             show_description=True,
         )
-        modal.open("allow" if self._settings.telemetry.consent == "allow" else "decline")
+        modal.open("decline" if self._settings.telemetry.consent == "decline" else "allow")
 
     def _on_low_latency_click(self, e) -> None:
         """Open low latency mode selection modal."""

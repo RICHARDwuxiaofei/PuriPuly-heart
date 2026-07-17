@@ -339,7 +339,9 @@ def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
         preserve_provider_verification=True,
     )
     settings = replace(settings, state=replace(settings.state, telemetry=telemetry_state))
-    return with_telemetry_consent(settings, telemetry_consent)
+    from puripuly_heart.config.settings_vnext.schema import ensure_telemetry_default_allow
+
+    return ensure_telemetry_default_allow(with_telemetry_consent(settings, telemetry_consent))
 
 
 def from_legacy_app_settings(

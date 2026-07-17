@@ -602,7 +602,7 @@ def test_maximal_v24_fixture_preserves_telemetry_consent_and_identifier() -> Non
     }
 
 
-def test_existing_settings_default_to_unknown_telemetry_without_identifier() -> None:
+def test_existing_settings_upgrade_unknown_telemetry_to_allow_with_identifier() -> None:
     migration = _migration()
     serialization = _serialization()
 
@@ -612,11 +612,9 @@ def test_existing_settings_default_to_unknown_telemetry_without_identifier() -> 
 
     serialized = serialization.to_dict(migration.from_dict(existing))
 
-    assert serialized["intent"]["telemetry"] == {"consent": "unknown"}
-    assert serialized["state"]["telemetry"] == {
-        "anonymous_id": None,
-        "sent_translation_success_dates_utc": (),
-    }
+    assert serialized["intent"]["telemetry"] == {"consent": "allow"}
+    assert serialized["state"]["telemetry"]["anonymous_id"]
+    assert serialized["state"]["telemetry"]["sent_translation_success_dates_utc"] == ()
 
 
 def test_telemetry_consent_transitions_manage_operational_state() -> None:

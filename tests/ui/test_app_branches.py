@@ -53,6 +53,11 @@ class DummyPage:
             min_width=0,
             min_height=0,
             icon="",
+            center_calls=0,
+            center=lambda: None,
+        )
+        self.window.center = lambda: setattr(
+            self.window, "center_calls", self.window.center_calls + 1
         )
         self.dialog = None
 
@@ -155,21 +160,18 @@ def _dialog_containers(dialog) -> list[ft.Container]:
     return [node for node in _iter_control_tree(dialog) if isinstance(node, ft.Container)]
 
 
-def test_telemetry_consent_dialog_shown_only_for_unknown_and_localized() -> None:
+def test_telemetry_consent_dialog_is_not_shown_on_launch() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
     app.controller = TelemetryController(AppSettings())
     app._mark_launch_high_priority_feedback_shown = lambda *_args, **_kwargs: None
 
-    assert app.maybe_show_telemetry_consent_dialog() is True
-    assert len(app.page.opened) == 1
-    texts = _dialog_text_values(app.page.opened[0])
-    assert app_module.t("telemetry.consent.title") in texts
-    assert any(app_module.t("telemetry.consent.body") in text for text in texts)
-    assert any(app_module.t("telemetry.consent.excludes") in text for text in texts)
-
-    app.controller.settings.telemetry.consent = "decline"
     assert app.maybe_show_telemetry_consent_dialog() is False
+    assert app.page.opened == []
+
+    app.controller.settings.telemetry.consent = "unknown"
+    assert app.maybe_show_telemetry_consent_dialog() is False
+    assert app.page.opened == []
 
 
 def test_telemetry_consent_choice_persists_and_syncs_settings_view() -> None:
@@ -373,6 +375,7 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert page.window.min_height == app_module.MIN_WINDOW_HEIGHT
     assert page.window.width >= page.window.min_width
     assert page.window.height >= page.window.min_height
+    assert page.window.center_calls == 1
     assert page.added
     assert app.view_dashboard.on_send_message == app._on_manual_submit
     assert app.view_dashboard.on_message_input_activity == app._on_message_input_activity

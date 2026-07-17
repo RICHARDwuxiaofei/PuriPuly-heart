@@ -9,6 +9,7 @@ from typing import Any, Final
 from puripuly_heart.config.settings_vnext.schema import (
     VNEXT_SETTINGS_SCHEMA_VERSION,
     AppSettingsVNext,
+    ensure_telemetry_default_allow,
     with_telemetry_consent,
 )
 
@@ -118,7 +119,7 @@ def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
         merged,
         merged.intent.telemetry.consent,
     )
-    return merged
+    return ensure_telemetry_default_allow(merged)
 
 
 def _with_current_settings_version(data: Mapping[str, Any]) -> Mapping[str, Any]:

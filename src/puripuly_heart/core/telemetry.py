@@ -63,7 +63,13 @@ class TranslationSuccessTelemetryService:
         identifier = settings.telemetry_state.anonymous_id
         sent_dates = set(settings.telemetry_state.sent_translation_success_dates_utc)
 
-        if consent != "allow":
+        if consent == "decline":
+            return self._result(
+                "skipped_consent",
+                active_date_utc=active_date_utc,
+                reason="consent_declined",
+            )
+        if consent not in {"allow", "unknown"}:
             return self._result(
                 "skipped_consent",
                 active_date_utc=active_date_utc,

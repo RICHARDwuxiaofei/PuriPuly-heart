@@ -933,6 +933,19 @@ def with_telemetry_consent(
     )
 
 
+def ensure_telemetry_default_allow(
+    settings: AppSettingsVNext,
+    *,
+    identifier_factory: object = new_anonymous_telemetry_identifier,
+) -> AppSettingsVNext:
+    consent = TelemetryConsentIntent(settings.intent.telemetry.consent).consent
+    if consent == "decline":
+        return settings
+    if consent == "allow" and settings.state.telemetry.anonymous_id:
+        return settings
+    return with_telemetry_consent(settings, "allow", identifier_factory=identifier_factory)
+
+
 __all__ = [
     "AppSettingsVNext",
     "AudioIntent",
@@ -983,4 +996,5 @@ __all__ = [
     "VNEXT_SETTINGS_SCHEMA_VERSION",
     "with_capture_target",
     "with_telemetry_consent",
+    "ensure_telemetry_default_allow",
 ]

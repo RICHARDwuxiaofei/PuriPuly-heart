@@ -6,12 +6,14 @@ import flet as ft
 
 from puripuly_heart.ui.components.glow import create_glow_stack
 from puripuly_heart.ui.components.warm_document_dialog import (
+    BODY_TEXT_SIZE,
     WarmDocumentDialogAction,
     WarmDocumentDialogResult,
     join_body_paragraphs,
     open_warm_document_dialog,
     split_body_paragraphs,
 )
+from puripuly_heart.ui.fonts import default_font_family
 from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.theme import COLOR_DIVIDER, COLOR_ON_BACKGROUND, COLOR_PRIMARY
 
@@ -45,6 +47,7 @@ class DiscordManagedAuthDialog:
         self._dialog: ft.AlertDialog | None = None
         self._is_open = False
         self._is_waiting = False
+        self._referral_expanded = False
 
         self._dialog_result: WarmDocumentDialogResult | None = None
         self._body_text: ft.Text | None = None
@@ -54,7 +57,10 @@ class DiscordManagedAuthDialog:
         self._close_button: ft.TextButton | None = None
         self._reopen_browser_button: ft.TextButton | None = None
         self._cancel_button: ft.TextButton | None = None
+        self._referral_toggle: ft.TextButton | None = None
+        self._referral_toggle_label: ft.Text | None = None
         self._referral_id_field: ft.TextField | None = None
+        self._referral_section: ft.Column | None = None
 
     @property
     def is_open(self) -> bool:
@@ -76,11 +82,18 @@ class DiscordManagedAuthDialog:
             return
 
         self._is_waiting = False
+        self._referral_expanded = False
         self._referral_id_field = self._build_referral_id_field()
+        self._referral_toggle = self._build_referral_toggle()
+        self._referral_section = ft.Column(
+            controls=[self._referral_toggle, self._referral_id_field],
+            spacing=12,
+            tight=True,
+        )
         self._dialog_result = open_warm_document_dialog(
             self._page,
             body_paragraphs=split_body_paragraphs(t("discord_auth.body")),
-            extra_body_controls=[self._referral_id_field],
+            extra_body_controls=[self._referral_section],
             body_spacing=44,
             action_top_margin=24,
             actions=[
@@ -113,7 +126,7 @@ class DiscordManagedAuthDialog:
         return ft.TextField(
             label=t("discord_auth.referral_id.label"),
             value="",
-            helper_text="",
+            helper_text=t("discord_auth.referral_id.helper"),
             dense=False,
             border_radius=14,
             border_color=COLOR_DIVIDER,
@@ -121,19 +134,60 @@ class DiscordManagedAuthDialog:
             content_padding=ft.padding.symmetric(horizontal=16, vertical=20),
             text_size=22,
             color=COLOR_ON_BACKGROUND,
+            visible=False,
             on_submit=lambda _: self._on_continue(),
         )
+
+    def _build_referral_toggle(self) -> ft.TextButton:
+        label = ft.Text(
+            t("discord_auth.referral_id.expand"),
+            size=BODY_TEXT_SIZE,
+            color=COLOR_ON_BACKGROUND,
+            font_family=default_font_family(),
+            weight=ft.FontWeight.W_400,
+        )
+        self._referral_toggle_label = label
+        return ft.TextButton(
+            content=label,
+            style=ft.ButtonStyle(
+                color={
+                    ft.ControlState.DEFAULT: COLOR_ON_BACKGROUND,
+                    ft.ControlState.HOVERED: COLOR_PRIMARY,
+                },
+                bgcolor=ft.Colors.TRANSPARENT,
+                padding=ft.padding.symmetric(horizontal=0, vertical=4),
+                overlay_color=ft.Colors.TRANSPARENT,
+                animation_duration=0,
+            ),
+            on_click=lambda _: self._toggle_referral_section(),
+        )
+
+    def _toggle_referral_section(self) -> None:
+        if self._referral_id_field is None or self._referral_toggle_label is None:
+            return
+        self._referral_expanded = not self._referral_expanded
+        self._referral_id_field.visible = self._referral_expanded
+        self._referral_toggle_label.value = t(
+            "discord_auth.referral_id.collapse"
+            if self._referral_expanded
+            else "discord_auth.referral_id.expand"
+        )
+        self._update_page_if_possible()
 
     def set_waiting(self) -> None:
         self._is_waiting = True
         if self._dialog_result is None or self._body_text is None:
             return
 
-        if self._referral_id_field is not None:
-            referral_id_field = self._referral_id_field
-            if referral_id_field in self._dialog_result.body_column.controls:
-                self._dialog_result.body_column.controls.remove(referral_id_field)
-            self._referral_id_field = None
+        if self._referral_section is not None:
+            referral_section = self._referral_section
+            if referral_section in self._dialog_result.body_column.controls:
+                self._dialog_result.body_column.controls.remove(referral_section)
+            self._referral_section = None
+        self._referral_id_field = None
+        self._referral_toggle = None
+        self._referral_toggle_label = None
+        self._referral_expanded = False
 
         self._body_text.value = join_body_paragraphs(
             split_body_paragraphs(t("discord_auth.waiting_body"))

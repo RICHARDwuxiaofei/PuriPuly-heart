@@ -250,6 +250,7 @@ class TranslatorApp:
         self.page.window.min_width = MIN_WINDOW_WIDTH
         self.page.window.min_height = MIN_WINDOW_HEIGHT
         self.page.window.icon = "icons/icon.ico"
+        self.page.window.center()
         self.page.on_keyboard_event = self._on_keyboard_event
 
     def _build_layout(self):
@@ -637,18 +638,7 @@ class TranslatorApp:
         dialog.open()
 
     def maybe_show_telemetry_consent_dialog(self) -> bool:
-        settings = getattr(self.controller, "settings", None)
-        if settings is None or settings.telemetry.consent != "unknown":
-            return False
-        dialog = TelemetryConsentDialog(
-            self.page,
-            on_allow=lambda: self._on_telemetry_consent_change("allow"),
-            on_decline=lambda: self._on_telemetry_consent_change("decline"),
-        )
-        self._telemetry_consent_dialog = dialog
-        dialog.open()
-        self._mark_launch_high_priority_feedback_shown("telemetry_consent")
-        return True
+        return False
 
     def _on_telemetry_consent_change(self, consent: str) -> None:
         if consent not in {"allow", "decline"}:
@@ -1804,9 +1794,6 @@ async def main_gui(
         app_kwargs["runtime_logging_sinks"] = runtime_logging_sinks
     app = TranslatorApp(page, **app_kwargs)
     await app.controller.start()
-    show_telemetry_consent = getattr(app, "maybe_show_telemetry_consent_dialog", None)
-    if callable(show_telemetry_consent):
-        show_telemetry_consent()
 
     # Check for updates in background
     update_kwargs = {"log_detailed": app._log_detailed}

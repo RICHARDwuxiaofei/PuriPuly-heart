@@ -1723,6 +1723,22 @@ def with_telemetry_consent(
     return updated
 
 
+def ensure_telemetry_default_allow(
+    settings: AppSettings,
+    *,
+    identifier_factory: object = new_anonymous_telemetry_identifier,
+) -> AppSettings:
+    """Map unknown consent to allow and mint an anonymous id when needed."""
+    consent = _parse_telemetry_consent(settings.telemetry.consent)
+    if consent == "decline":
+        return settings
+    if consent == "allow" and _normalize_telemetry_identifier(
+        settings.telemetry_state.anonymous_id
+    ):
+        return settings
+    return with_telemetry_consent(settings, "allow", identifier_factory=identifier_factory)
+
+
 def _parse_stt_provider(value: str) -> STTProviderName:
     """Parse STT provider, mapping legacy values to supported providers."""
     if value == "alibaba":
@@ -2699,6 +2715,7 @@ def new_settings_for_first_run(system_locale: str | None = None) -> AppSettings:
             connection=TranslationConnection.OPENROUTER,
         )
     ensure_prompt_defaults(settings)
+    settings = with_telemetry_consent(settings, "allow")
     settings.validate()
     return settings
 
@@ -4107,6 +4124,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     materialize_translation_settings(settings)
 
     ensure_prompt_defaults(settings)
+    settings = ensure_telemetry_default_allow(settings)
     settings.validate()
     return settings
 

@@ -188,13 +188,45 @@ def test_discord_managed_auth_dialog_renders_optional_referral_id_field() -> Non
     dialog.open()
 
     field = dialog._referral_id_field
+    toggle = dialog._referral_toggle
+    label = dialog._referral_toggle_label
     assert field is not None
+    assert toggle is not None
+    assert label is not None
     assert field.label == t("discord_auth.referral_id.label")
-    assert getattr(field, "helper_text", None) in (None, "")
+    assert field.helper_text == t("discord_auth.referral_id.helper")
     assert getattr(field, "hint_text", None) in (None, "")
     assert field.value == ""
+    assert field.visible is False
+    assert label.value == t("discord_auth.referral_id.expand")
+    assert label.size == 24
     assert dialog._continue_button is not None
     assert not getattr(dialog._continue_button, "disabled", False)
+
+
+def test_discord_managed_auth_dialog_expands_referral_id_field_on_demand() -> None:
+    set_locale("en")
+    page = DummyPage()
+    dialog = _dialog(page)
+    dialog.open()
+
+    assert dialog._referral_id_field is not None
+    assert dialog._referral_toggle is not None
+    assert dialog._referral_toggle_label is not None
+    assert dialog._referral_id_field.visible is False
+
+    dialog._referral_toggle.on_click(None)
+
+    assert dialog._referral_id_field.visible is True
+    assert dialog._referral_toggle_label.value == t("discord_auth.referral_id.collapse")
+    dialog._referral_id_field.value = "7KQ9M2"
+    assert dialog.referral_id == "7KQ9M2"
+
+    dialog._referral_toggle.on_click(None)
+
+    assert dialog._referral_id_field.visible is False
+    assert dialog._referral_toggle_label.value == t("discord_auth.referral_id.expand")
+    assert dialog.referral_id == "7KQ9M2"
 
 
 def test_discord_managed_auth_dialog_scales_referral_id_field_content() -> None:
@@ -241,7 +273,7 @@ def test_discord_managed_auth_dialog_referral_field_is_present_before_page_open(
 
     dialog.open()
 
-    assert page.body_control_classes_at_open == ["Text", "TextField"]
+    assert page.body_control_classes_at_open == ["Text", "Column"]
 
 
 def test_discord_managed_auth_dialog_invalid_looking_referral_id_does_not_block_continue() -> None:
@@ -291,14 +323,15 @@ def test_discord_managed_auth_dialog_removes_referral_field_when_waiting() -> No
     dialog.open()
     assert dialog._dialog_result is not None
     body_column = dialog._dialog_result.body_column
-    field = dialog._referral_id_field
-    assert field is not None
-    assert field in body_column.controls
+    section = dialog._referral_section
+    assert section is not None
+    assert section in body_column.controls
 
     dialog.set_waiting()
 
-    assert field not in body_column.controls
+    assert section not in body_column.controls
     assert dialog._referral_id_field is None
+    assert dialog._referral_section is None
     assert body_column.controls == [dialog._body_text]
 
 
