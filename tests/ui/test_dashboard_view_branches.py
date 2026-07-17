@@ -234,20 +234,32 @@ def test_dashboard_stt_toggle_warning_and_enable_flow(monkeypatch: pytest.Monkey
     seen: list[bool] = []
     view.on_toggle_stt = lambda enabled: seen.append(enabled)
     view.stt_needs_key = True
+    warn_stt = dashboard_module.t("dashboard.warn_stt_key")
 
     view._toggle_stt()
+    assert view._current_display_text == warn_stt
+    assert view._stt_showing_warning is True
+
     view._toggle_stt()
+    assert view._current_display_text is None
+    assert view._stt_showing_warning is False
+    assert view.display_card.statuses[-1][0] == "disconnected"
+
+    # Blank leftover must still restore the idle status face.
+    view.set_display_text("")
+    view._stt_showing_warning = True
+    view._toggle_stt()
+    assert view._current_display_text is None
+    assert view.display_card.statuses[-1][0] == "disconnected"
+
     view.stt_needs_key = False
     view._toggle_stt()
     view._toggle_stt()
 
-    assert seen == [False, False, True, False]
+    assert seen == [False, False, False, True, False]
     assert view.is_stt_on is False
     assert view._stt_showing_warning is False
-    assert any(
-        call[0] == dashboard_module.t("dashboard.warn_stt_key")
-        for call in view.display_card.display_calls
-    )
+    assert any(call[0] == warn_stt for call in view.display_card.display_calls)
 
 
 def test_dashboard_translation_toggle_controls_power_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,19 +267,30 @@ def test_dashboard_translation_toggle_controls_power_state(monkeypatch: pytest.M
     seen: list[bool] = []
     view.on_toggle_translation = lambda enabled: seen.append(enabled)
     view.translation_needs_key = True
+    warn_llm = dashboard_module.t("dashboard.warn_llm_key")
 
     view._toggle_translation()
+    assert view._current_display_text == warn_llm
+    assert view._translation_showing_warning is True
+
     view._toggle_translation()
+    assert view._current_display_text is None
+    assert view._translation_showing_warning is False
+    assert view.display_card.statuses[-1][0] == "disconnected"
+
+    view.set_display_text("")
+    view._translation_showing_warning = True
+    view._toggle_translation()
+    assert view._current_display_text is None
+    assert view.display_card.statuses[-1][0] == "disconnected"
+
     view.translation_needs_key = False
     view._toggle_translation()
     view._toggle_translation()
 
-    assert seen == [False, False, True, False]
+    assert seen == [False, False, False, True, False]
     assert view.is_power_on is False
-    assert any(
-        call[0] == dashboard_module.t("dashboard.warn_llm_key")
-        for call in view.display_card.display_calls
-    )
+    assert any(call[0] == warn_llm for call in view.display_card.display_calls)
 
 
 def test_dashboard_translation_visual_commit_forwards_metadata_and_runtime_log(

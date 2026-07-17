@@ -116,7 +116,7 @@
   "settings.fallback.deepseek_v4_flash_official": "DeepSeek V4 Flash (공식 API)",
   "settings.fallback.openrouter_deepseek_v4_flash": "DeepSeek V4 Flash (OpenRouter)",
   "settings.fallback.cerebras_gemma4_31b": "Gemma 4 31B (Cerebras)",
-  "settings.fallback.cerebras_gemma4_31b.description": "폴백 모델로 사용하기 좋아요. 무료 API 티어를 활용하세요",
+  "settings.fallback.cerebras_gemma4_31b.description": "",
   "settings.fallback.openrouter_gemma4_26b_a4b": "Gemma 4 26B A4B (OpenRouter)",
   "settings.managed_trial_usage.remaining_placeholder": "확인 중",
   "settings.managed_trial_usage.remaining": "{percent}% 남음",

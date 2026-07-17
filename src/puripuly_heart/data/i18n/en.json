@@ -116,7 +116,7 @@
   "settings.fallback.deepseek_v4_flash_official": "DeepSeek V4 Flash (Official API)",
   "settings.fallback.openrouter_deepseek_v4_flash": "DeepSeek V4 Flash (OpenRouter)",
   "settings.fallback.cerebras_gemma4_31b": "Gemma 4 31B (Cerebras)",
-  "settings.fallback.cerebras_gemma4_31b.description": "Great as a fallback model. Make use of the free API tier.",
+  "settings.fallback.cerebras_gemma4_31b.description": "",
   "settings.fallback.openrouter_gemma4_26b_a4b": "Gemma 4 26B A4B (OpenRouter)",
   "settings.managed_trial_usage.remaining_placeholder": "Checking",
   "settings.managed_trial_usage.remaining": "{percent}% remaining",

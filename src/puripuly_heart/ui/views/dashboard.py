@@ -37,6 +37,7 @@ class DashboardView(ft.Column):
 
         # State
         self.is_connected = False
+        self._connection_status = "disconnected"
         self.is_power_on = False
         self.is_translation_on = False
         self.is_stt_on = False
@@ -251,12 +252,29 @@ class DashboardView(ft.Column):
         )
         self._sync_notice()
 
+    def _restore_status_display(self) -> None:
+        status = self._connection_status or "disconnected"
+        self.set_status(status)
+
+    def _dismiss_api_key_warning_display(self) -> None:
+        if self._stt_showing_warning:
+            self.set_display_text(t("dashboard.warn_stt_key"))
+            return
+        if self._translation_showing_warning:
+            self.set_display_text(t("dashboard.warn_llm_key"))
+            return
+        if self._process_capture_warning_active and self._process_capture_warning_text:
+            self.set_display_text(self._process_capture_warning_text)
+            return
+        self._restore_status_display()
+
     def _toggle_stt(self):
         if self.is_stt_on:
             self.is_stt_on = False
             self._stt_showing_warning = False
         elif self._stt_showing_warning:
             self._stt_showing_warning = False
+            self._dismiss_api_key_warning_display()
         elif self.stt_needs_key:
             self._stt_showing_warning = True
             self.set_display_text(t("dashboard.warn_stt_key"))
@@ -275,6 +293,7 @@ class DashboardView(ft.Column):
             self._translation_showing_warning = False
         elif self._translation_showing_warning:
             self._translation_showing_warning = False
+            self._dismiss_api_key_warning_display()
         elif self.translation_needs_key:
             self._translation_showing_warning = True
             self.set_display_text(t("dashboard.warn_llm_key"))
@@ -464,6 +483,7 @@ class DashboardView(ft.Column):
         )
 
     def set_status(self, status: str) -> None:
+        self._connection_status = status
         self.is_connected = status == "connected"
         self._primary_display_revision += 1
         self._current_display_text = None
@@ -537,7 +557,7 @@ class DashboardView(ft.Column):
                 self._current_display_text == warning_text
                 and self._primary_display_revision == warning_display_revision
             ):
-                self.set_display_text("")
+                self._restore_status_display()
 
     def set_translation_needs_key(self, needs_key: bool, *, update_ui: bool = True) -> None:
         self.translation_needs_key = bool(needs_key)
