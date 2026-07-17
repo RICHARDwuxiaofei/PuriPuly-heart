@@ -181,6 +181,8 @@ def test_stt_runtime_resolution_produces_channel_specific_resolved_dto() -> None
             soniox_endpoint="wss://peer-soniox.example/realtime",
             soniox_keepalive_interval_s=12.5,
             soniox_trailing_silence_ms=700,
+            soniox_language_hints=("zh",),
+            soniox_language_hints_strict=True,
         )
     )
 
@@ -203,6 +205,8 @@ def test_stt_runtime_resolution_produces_channel_specific_resolved_dto() -> None
     assert config.provider_options == {
         "keepalive_interval_s": 12.5,
         "trailing_silence_ms": 700,
+        "language_hints": ("zh",),
+        "language_hints_strict": True,
     }
 
 

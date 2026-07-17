@@ -1953,7 +1953,7 @@ def test_build_peer_stt_provider_signature_includes_backend_affecting_values() -
     assert 350 in signature
 
 
-def test_peer_soniox_auto_detection_resolves_identification_and_optional_hints_only() -> None:
+def test_peer_soniox_auto_detection_keeps_self_language_restriction_separate() -> None:
     settings = AppSettings()
     settings.provider.stt = STTProviderName.SONIOX
     settings.provider.peer_stt = STTProviderName.SONIOX
@@ -1966,7 +1966,9 @@ def test_peer_soniox_auto_detection_resolves_identification_and_optional_hints_o
     assert peer.provider_options["enable_language_identification"] is True
     assert peer.provider_options["language_hints"] == ("ja", "zh")
     assert "enable_language_identification" not in self_config.provider_options
-    assert "language_hints" not in self_config.provider_options
+    assert self_config.provider_options["language_hints"] == ("ko",)
+    assert self_config.provider_options["language_hints_strict"] is True
+    assert "language_hints_strict" not in peer.provider_options
 
 
 def test_peer_auto_detection_falls_back_to_manual_configuration_for_other_providers() -> None:
@@ -2012,7 +2014,31 @@ def test_vnext_peer_runtime_resolution_and_signature_use_canonical_auto_intent()
     assert automatic.provider_options["language_hints"] == ("ja", "zh")
     assert automatic_signature != build_peer_stt_provider_signature_from_vnext(manual_settings)
     assert "enable_language_identification" not in manual.provider_options
-    assert "language_hints" not in manual.provider_options
+    assert manual.provider_options["language_hints"] == ("en",)
+    assert "language_hints_strict" not in manual.provider_options
+    assert "language_hints_strict" not in automatic.provider_options
+
+
+def test_vnext_peer_soniox_auto_without_expected_languages_omits_hints() -> None:
+    settings = AppSettingsVNext()
+    settings = replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            peer_stt=replace(settings.intent.peer_stt, provider="soniox"),
+            languages=replace(
+                settings.intent.languages,
+                peer_source_mode="soniox_auto",
+                peer_expected_languages=[],
+            ),
+        ),
+    )
+
+    automatic = resolve_peer_stt_runtime_config_from_vnext(settings)
+
+    assert automatic.provider_options["enable_language_identification"] is True
+    assert "language_hints" not in automatic.provider_options
+    assert "language_hints_strict" not in automatic.provider_options
 
 
 def test_vnext_peer_runtime_keeps_self_and_non_soniox_paths_manual() -> None:
@@ -2041,7 +2067,7 @@ def test_vnext_peer_runtime_keeps_self_and_non_soniox_paths_manual() -> None:
     assert self_config.provider_options.get("enable_language_identification") is None
 
 
-def test_manual_peer_and_self_soniox_backends_receive_no_language_hints() -> None:
+def test_self_soniox_is_strict_while_manual_peer_uses_a_soft_hint() -> None:
     settings = AppSettings()
     settings.provider.stt = STTProviderName.SONIOX
     settings.provider.peer_stt = STTProviderName.SONIOX
@@ -2053,8 +2079,10 @@ def test_manual_peer_and_self_soniox_backends_receive_no_language_hints() -> Non
 
     assert isinstance(self_backend, SonioxRealtimeSTTBackend)
     assert isinstance(peer_backend, SonioxRealtimeSTTBackend)
-    assert self_backend.language_hints == []
-    assert peer_backend.language_hints == []
+    assert self_backend.language_hints == ["ko"]
+    assert self_backend.language_hints_strict is True
+    assert peer_backend.language_hints == ["en"]
+    assert peer_backend.language_hints_strict is False
 
 
 def test_build_peer_stt_provider_signature_uses_fixed_16khz_runtime_contract() -> None:

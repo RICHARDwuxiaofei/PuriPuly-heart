@@ -12,8 +12,8 @@ Let a user hear a mixed-language peer conversation, have Soniox detect each spok
 
 This is a vNext-native feature, not a direct port of a legacy settings or Hub implementation.
 
-- **Persisted user intent:** peer source mode (`manual` or `soniox_auto`) and optional expected participant languages belong to the canonical vNext language intent. They are not generic Soniox provider settings and do not affect self STT.
-- **Resolved runtime config:** the peer STT resolver derives Soniox `enable_language_identification` and non-strict `language_hints` only when the resolved peer provider is Soniox and the peer source mode is automatic. Switching to another provider resolves to a configured manual peer source language.
+- **Persisted user intent:** peer source mode (`manual` or `soniox_auto`) and optional expected participant languages belong to the canonical vNext language intent. They are not generic Soniox provider settings and do not replace the independently selected self source language.
+- **Resolved runtime config:** self Soniox sessions derive a strict single-language restriction from the explicitly selected source language. Manual peer Soniox sessions derive a non-strict hint from the selected peer source language. The peer STT resolver derives Soniox `enable_language_identification` and non-strict `language_hints` from expected participant languages only when the resolved peer provider is Soniox and the peer source mode is automatic. Switching to another provider resolves to a configured manual peer source language.
 - **Runtime-only data:** final token language, timestamps, language runs, parent/child identities, queue state, cancellation state, and latency bookkeeping are never persisted as user settings.
 - **Provider boundary:** Soniox may enrich final STT results with provider-neutral final language-run data. Other STT providers retain their current text-only final-result behavior.
 - **Lifecycle owner:** introduce a dedicated vNext **Peer Final-Runs Lifecycle Owner** in the orchestration boundary. A finalized peer Utterance Segment is its parent work item. The owner creates ordered child runs, serializes their LLM work, and closes the parent only after every child is terminal. `ClientHub` composes the owner and drives its startup/shutdown, but does not directly own the parent/child queue or child work. No unmanaged background task may own this work.
@@ -39,7 +39,7 @@ If vNext retains a legacy settings compatibility adapter, it must accept old set
 ### Expected participant languages
 
 - When peer STT is Soniox, show a **Peer automatic-detection languages** card in the Soniox/API Settings area.
-- This is peer-only data. It never changes self microphone STT.
+- This is peer-only data. It never changes the strict language restriction derived from the self microphone source language.
 - The list is optional. A non-empty selection becomes non-strict Soniox `language_hints`; an empty selection permits Soniox automatic detection without hints.
 - When peer STT changes away from Soniox, the active peer path returns to a configured manual source language.
 
@@ -47,6 +47,8 @@ If vNext retains a legacy settings compatibility adapter, it must accept old set
 
 - Soniox is used only for STT and language identification. Existing LLM translation remains the translation path.
 - Automatic peer sessions set `enable_language_identification: true`.
+- Self sessions set one `language_hints` entry from the selected source language and set `language_hints_strict: true`.
+- Manual peer sessions use the selected source language as a non-strict hint. Automatic peer sessions also keep expected-language hints non-strict and omit strict restriction.
 - After local VAD ends speech, retain Soniox final tokens until `<fin>`, then group only adjacent final tokens sharing the same language in original time order.
 - One finalized peer VAD utterance becomes a parent final-runs event. The Peer Final-Runs Lifecycle Owner gives its children unique identities and a serial translation/output lifecycle; a parent closes only after every child reaches translated, existing source-only fallback, or cancellation.
 - Soniox `zh` is normalized to generic **Chinese** for LLM prompt/context/request construction. It is not converted to a persisted `zh-CN` or `zh-TW` preference and must never fall back to English. Unmapped languages use the existing safe source-only/failure path.

@@ -50,6 +50,7 @@ class SonioxRealtimeSTTBackend(STTBackend):
     keepalive_interval_s: float = 10.0
     trailing_silence_ms: int = 100
     enable_language_identification: bool = False
+    language_hints_strict: bool = False
     connect_timeout_s: float = 5.0
 
     async def open_session(self) -> STTBackendSession:
@@ -65,6 +66,8 @@ class SonioxRealtimeSTTBackend(STTBackend):
             raise ValueError("trailing_silence_ms must be >= 0")
         if self.connect_timeout_s <= 0:
             raise ValueError("connect_timeout_s must be > 0")
+        if self.language_hints_strict and not self.language_hints:
+            raise ValueError("language_hints_strict requires language_hints")
 
         session = _SonioxSession(
             api_key=self.api_key,
@@ -76,6 +79,7 @@ class SonioxRealtimeSTTBackend(STTBackend):
             keepalive_interval_s=self.keepalive_interval_s,
             trailing_silence_ms=self.trailing_silence_ms,
             enable_language_identification=self.enable_language_identification,
+            language_hints_strict=self.language_hints_strict,
             connect_timeout_s=self.connect_timeout_s,
         )
         await session.start()
@@ -132,6 +136,7 @@ class _SonioxSession(STTBackendSession):
     trailing_silence_ms: int
     connect_timeout_s: float
     enable_language_identification: bool = False
+    language_hints_strict: bool = False
 
     _events: asyncio.Queue[STTBackendTranscriptEvent | BaseException | None] = field(
         init=False, repr=False
@@ -166,6 +171,8 @@ class _SonioxSession(STTBackendSession):
         }
         if self.language_hints:
             config["language_hints"] = self.language_hints
+            if self.language_hints_strict:
+                config["language_hints_strict"] = True
         if self.context_terms:
             config["context"] = {"terms": self.context_terms}
 

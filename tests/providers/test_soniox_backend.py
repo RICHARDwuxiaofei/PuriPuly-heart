@@ -53,6 +53,14 @@ async def test_soniox_backend_validates_params() -> None:
     with pytest.raises(ValueError, match="keepalive_interval_s"):
         await backend.open_session()
 
+    backend = SonioxRealtimeSTTBackend(
+        api_key="k",
+        language_hints=[],
+        language_hints_strict=True,
+    )
+    with pytest.raises(ValueError, match="language_hints_strict"):
+        await backend.open_session()
+
 
 def test_soniox_backend_defaults_to_realtime_v5_model() -> None:
     backend = SonioxRealtimeSTTBackend(api_key="k", language_hints=["en"])
@@ -609,6 +617,7 @@ async def test_soniox_session_start_send_recv_and_close(monkeypatch) -> None:
         keepalive_interval_s=0.01,
         trailing_silence_ms=50,
         connect_timeout_s=5.0,
+        language_hints_strict=True,
     )
 
     await session.start()
@@ -631,6 +640,8 @@ async def test_soniox_session_start_send_recv_and_close(monkeypatch) -> None:
 
     config = json.loads(ws.sent[0])
     assert config["context"]["terms"] == ["Puripuly", "VRChat"]
+    assert config["language_hints"] == ["en"]
+    assert config["language_hints_strict"] is True
 
     payloads = [
         payload
@@ -676,3 +687,4 @@ async def test_soniox_session_start_omits_context_when_no_terms(monkeypatch) -> 
 
     config = json.loads(ws.sent[0])
     assert "context" not in config
+    assert "language_hints_strict" not in config
