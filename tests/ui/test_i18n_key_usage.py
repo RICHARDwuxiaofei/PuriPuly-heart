@@ -397,10 +397,10 @@ def test_local_llm_keys_are_localized() -> None:
         "zh-CN": "可以使用 OpenAI 兼容 API",
     }
     expected_deepseek_v4_pro_descriptions = {
-        "en": "Translation speed may be unstable",
-        "ko": "번역 속도가 불안정할 수 있어요",
-        "ja": "翻訳速度が不安定になることがあります",
-        "zh-CN": "翻译速度可能不稳定",
+        "en": "Translation speed is slow",
+        "ko": "번역 속도가 느려요",
+        "ja": "翻訳速度が遅いです",
+        "zh-CN": "翻译速度较慢",
     }
     for locale, expected in expected_local_llm_descriptions.items():
         assert bundles[locale]["settings.translation_model.local_llm.description"] == expected
@@ -457,11 +457,11 @@ def test_deepseek_v4_pro_keys_are_localized_with_blank_provider_description() ->
         "provider.deepseek_v4_pro_openrouter.description",
     }
     expected_model_descriptions = {
-        "en": "Translation speed may be unstable",
-        "ko": "번역 속도가 불안정할 수 있어요",
-        "ja": "翻訳速度が不安定になることがあります",
-        "zh-CN": "翻译速度可能不稳定",
-        "ru": "Скорость перевода может быть нестабильной",
+        "en": "Translation speed is slow",
+        "ko": "번역 속도가 느려요",
+        "ja": "翻訳速度が遅いです",
+        "zh-CN": "翻译速度较慢",
+        "ru": "Скорость перевода низкая",
     }
 
     for locale, bundle in bundles.items():

@@ -317,9 +317,19 @@ def test_settings_view_llm_modal_lists_logical_translation_models_once(monkeypat
     captured: dict[str, object] = {}
 
     class DummyModal:
-        def __init__(self, _page, _title, options, _on_select, *, show_description=False):
+        def __init__(
+            self,
+            _page,
+            _title,
+            options,
+            _on_select,
+            *,
+            show_description=False,
+            two_column=False,
+        ):
             captured["options"] = options
             captured["show_description"] = show_description
+            captured["two_column"] = two_column
 
         def open(self, current: str) -> None:
             captured["current"] = current

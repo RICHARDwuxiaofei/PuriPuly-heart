@@ -14,6 +14,7 @@ from typing import Callable
 
 import flet as ft
 
+from puripuly_heart.app.services.local_asr_selection import resolve_local_asr_selection
 from puripuly_heart.app.wiring import create_secret_store
 from puripuly_heart.config.llm_profiles import (
     profile_for_alias,
@@ -100,6 +101,52 @@ _OVERLAY_TEXT_SCALE_PRESETS = (
 )
 _DESKTOP_OVERLAY_REOPEN_FAILURE_REASONS = frozenset({"window_configuration_failed"})
 _CUSTOM_VOCAB_DELIMITER_RE = re.compile(r"\s+")
+_STT_UI_PROVIDERS = (
+    STTProviderName.LOCAL_CPU_AUTO,
+    STTProviderName.LOCAL_PARAKEET_V3,
+    STTProviderName.LOCAL_PARAKEET_JAPANESE,
+    STTProviderName.LOCAL_QWEN,
+    STTProviderName.LOCAL_QWEN_GPU,
+    STTProviderName.DEEPGRAM,
+    STTProviderName.QWEN_ASR,
+    STTProviderName.SONIOX,
+)
+_STT_SECTION_ORDER = (
+    "settings.stt.section.recommended",
+    "settings.stt.section.cloud",
+    "settings.stt.section.gpu_inference",
+    "settings.stt.section.cpu_inference",
+)
+_STT_SECTION_BY_PROVIDER: dict[STTProviderName, str] = {
+    STTProviderName.LOCAL_CPU_AUTO: "settings.stt.section.recommended",
+    STTProviderName.DEEPGRAM: "settings.stt.section.recommended",
+    STTProviderName.SONIOX: "settings.stt.section.recommended",
+    STTProviderName.QWEN_ASR: "settings.stt.section.cloud",
+    STTProviderName.LOCAL_QWEN_GPU: "settings.stt.section.gpu_inference",
+    STTProviderName.LOCAL_PARAKEET_V3: "settings.stt.section.cpu_inference",
+    STTProviderName.LOCAL_PARAKEET_JAPANESE: "settings.stt.section.cpu_inference",
+    STTProviderName.LOCAL_QWEN: "settings.stt.section.cpu_inference",
+}
+_GPU_STATE_LABEL_KEYS = {
+    "discovering": "settings.gpu_state.discovering",
+    "discovery_pending": "settings.gpu_state.discovery_pending",
+    "discovery_failed": "settings.gpu_state.discovery_failed",
+    "not_installed": "settings.gpu_state.not_installed",
+    "invalid": "settings.gpu_state.invalid",
+    "installing": "settings.gpu_state.installing",
+    "install_failed": "settings.gpu_state.install_failed",
+    "installed": "settings.gpu_state.installed",
+    "unsupported": "settings.gpu_state.unsupported",
+    "validating": "settings.gpu_state.validating",
+    "loading": "settings.gpu_state.loading",
+    "warming": "settings.gpu_state.warming",
+    "ready": "settings.gpu_state.ready",
+    "activation_failed": "settings.gpu_state.activation_failed",
+}
+_GPU_ACTION_LABEL_KEYS = {
+    "install": "settings.gpu_action.install",
+    "retry": "settings.gpu_action.retry",
+}
 _TRANSLATION_MODEL_LABEL_KEYS = {
     TranslationModel.GEMMA4: "provider.gemma4_26b_a4b_it",
     TranslationModel.DEEPSEEK_V4_FLASH: "provider.deepseek_v4_flash",
@@ -307,6 +354,8 @@ class SettingsView(ft.Column):
         self.on_desktop_overlay_position_reset: Callable[[], None] | None = None
         self.on_view_logs: Callable[[], None] | None = None
         self.on_start_microphone_test: Callable[[], None] | None = None
+        self.on_gpu_install_requested: Callable[[], object] | None = None
+        self.on_gpu_retry_requested: Callable[[], object] | None = None
         self.on_telemetry_consent_change: Callable[[str], None] | None = None
         self.on_list_loopback_capture_options: Callable[[], object] | None = None
         self.on_list_loopback_process_options: Callable[[], object] | None = None
@@ -340,9 +389,16 @@ class SettingsView(ft.Column):
         self._managed_key_referral_id: str | None = None
         self._managed_key_pass_status: TalkTogetherPassStatus | None = None
         self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
+        self._gpu_runtime_state = "discovering"
+        self._gpu_progress_percent: int | None = None
+        self._gpu_devices: tuple[tuple[str, str], ...] = ()
+        self._local_cpu_auto_available = False
 
         # Build UI components
         self._build_ui()
+
+    def set_local_cpu_auto_available(self, available: bool) -> None:
+        self._local_cpu_auto_available = bool(available)
 
     # --- Card Wrapper (About page pattern) ---
     def _wrap_card(
@@ -854,7 +910,7 @@ class SettingsView(ft.Column):
         """Build the settings UI with Bento grid layout."""
         # === API provider surfaces: Self STT + Peer STT + Shared Translation ===
         self._stt_text = self._build_clickable_text(
-            provider_label(STTProviderName.LOCAL_QWEN.value),
+            provider_label(STTProviderName.LOCAL_CPU_AUTO.value),
             self._on_stt_click,
         )
         self._stt_title = ft.Text(
@@ -1337,8 +1393,8 @@ class SettingsView(ft.Column):
             min=0.0,
             max=1.0,
             divisions=20,
-            value=0.5,
-            label="0.50",
+            value=0.35,
+            label="0.35",
             active_color=COLOR_PRIMARY,
             on_change=self._handle_vad_visual_change,
             on_change_end=self._handle_vad_change,
@@ -1358,15 +1414,15 @@ class SettingsView(ft.Column):
             min=0.0,
             max=1.0,
             divisions=20,
-            value=0.6,
-            label="0.60",
+            value=0.5,
+            label="0.50",
             active_color=COLOR_PRIMARY,
             on_change=self._handle_peer_vad_visual_change,
             on_change_end=self._handle_peer_vad_change,
         )
         self._peer_vad_field = self._build_numeric_setting_field(
             label=t("settings.vad.peer"),
-            value="0.60",
+            value="0.50",
             on_change_end=self._on_peer_vad_threshold_change,
         )
         self._peer_hangover_field = self._build_numeric_setting_field(
@@ -1419,7 +1475,7 @@ class SettingsView(ft.Column):
             color=COLOR_NEUTRAL,
         )
         self._peer_stt_text = self._build_clickable_text(
-            provider_label(STTProviderName.LOCAL_QWEN.value),
+            provider_label(STTProviderName.LOCAL_CPU_AUTO.value),
             self._on_peer_stt_click,
         )
         self._peer_stt_label = ft.Text(
@@ -1433,6 +1489,41 @@ class SettingsView(ft.Column):
         )
         row1 = ft.Container(
             content=ft.Row([stt_card, peer_stt_card, trans_card], spacing=16, expand=True),
+        )
+
+        self._gpu_device_title = ft.Text(
+            t("settings.gpu_device.title"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._gpu_device_status = ft.Text(
+            t("settings.gpu_state.discovering"),
+            size=14,
+            color=COLOR_NEUTRAL,
+        )
+        self._gpu_device_dropdown = ft.Dropdown(
+            value="auto",
+            options=[ft.dropdown.Option(key="auto", text=t("settings.gpu_device.auto"))],
+            text_size=14,
+            border_radius=10,
+            border_color=COLOR_DIVIDER,
+            focused_border_color=COLOR_PRIMARY,
+            on_change=self._on_gpu_device_change,
+        )
+        self._gpu_action_button = _make_text_button(
+            t("settings.gpu_action.install"),
+            on_click=self._on_gpu_action_click,
+        )
+        self._gpu_device_card = self._wrap_unit_card(
+            title=self._gpu_device_title,
+            value=self._gpu_device_dropdown,
+            extra_controls=(self._gpu_device_status, self._gpu_action_button),
+            height=None,
+        )
+        self._gpu_device_card.visible = False
+        self._gpu_device_row = ft.Container(
+            content=ft.Row([self._gpu_device_card], spacing=16, expand=True),
         )
 
         self._overlay_translation_title = ft.Text(
@@ -2094,6 +2185,7 @@ class SettingsView(ft.Column):
             {
                 "api": [
                     row1,
+                    self._gpu_device_row,
                     self._translation_connection_row,
                     self._local_llm_connection_card,
                     self._managed_key_card,
@@ -2118,6 +2210,94 @@ class SettingsView(ft.Column):
             }
         )
         self.controls = [self._settings_subtab_shell]
+
+    def _gpu_selected(self, settings: AppSettings | None = None) -> bool:
+        current = settings or self._build_settings_with_provider_draft()
+        return bool(
+            current is not None
+            and (
+                current.provider.stt == STTProviderName.LOCAL_QWEN_GPU
+                or current.provider.peer_stt == STTProviderName.LOCAL_QWEN_GPU
+            )
+        )
+
+    def _sync_gpu_device_card(self) -> None:
+        if not hasattr(self, "_gpu_device_dropdown"):
+            return
+        settings = self._build_settings_with_provider_draft()
+        selected = settings.stt.gpu_device_id if settings is not None else "auto"
+        options = [ft.dropdown.Option(key="auto", text=t("settings.gpu_device.auto"))]
+        devices = getattr(self, "_gpu_devices", ())
+        known_ids = {device_id for device_id, _label in devices}
+        options.extend(
+            ft.dropdown.Option(key=device_id, text=label) for device_id, label in devices
+        )
+        if selected != "auto" and selected not in known_ids:
+            options.append(
+                ft.dropdown.Option(
+                    key=selected,
+                    text=t("settings.gpu_device.unavailable", device=selected),
+                )
+            )
+        self._gpu_device_dropdown.options = options
+        self._gpu_device_dropdown.value = selected
+        self._gpu_device_card.visible = self._gpu_selected(settings)
+        if self._gpu_runtime_state == "installing" and self._gpu_progress_percent is not None:
+            self._gpu_device_status.value = t(
+                "settings.gpu_state.installing_progress",
+                percent=self._gpu_progress_percent,
+            )
+        else:
+            state = getattr(self, "_gpu_runtime_state", "discovering")
+            self._gpu_device_status.value = t(
+                _GPU_STATE_LABEL_KEYS.get(state, _GPU_STATE_LABEL_KEYS["activation_failed"])
+            )
+        action = (
+            "install"
+            if self._gpu_runtime_state in {"not_installed", "invalid", "install_failed"}
+            else "retry"
+        )
+        _set_text_button_label(self._gpu_action_button, t(_GPU_ACTION_LABEL_KEYS[action]))
+        self._gpu_action_button.visible = self._gpu_runtime_state in {
+            "not_installed",
+            "invalid",
+            "install_failed",
+            "unsupported",
+            "discovery_failed",
+            "activation_failed",
+        }
+
+    def set_gpu_runtime_state(
+        self,
+        state: str,
+        *,
+        devices: tuple[tuple[str, str], ...] | None = None,
+        progress_percent: int | None = None,
+    ) -> None:
+        self._gpu_runtime_state = state
+        self._gpu_progress_percent = progress_percent
+        if devices is not None:
+            self._gpu_devices = devices
+        self._sync_gpu_device_card()
+        _update_control_if_mounted(self._gpu_device_row)
+
+    def _on_gpu_device_change(self, event) -> None:
+        if self._settings is None:
+            return
+        value = str(getattr(getattr(event, "control", None), "value", "auto") or "auto")
+        draft = self._ensure_provider_settings_draft()
+        draft.stt.gpu_device_id = value
+        self.has_provider_changes = True
+        self._sync_gpu_device_card()
+
+    def _on_gpu_action_click(self, _event) -> None:
+        callback = (
+            self.on_gpu_install_requested
+            if self._gpu_runtime_state in {"not_installed", "invalid", "install_failed"}
+            else self.on_gpu_retry_requested
+        )
+        if callback is not None:
+            callback()
 
     def _populate_host_apis(self) -> None:
         """Legacy hook for tests; host APIs are handled by AudioSettings."""
@@ -2644,14 +2824,49 @@ class SettingsView(ft.Column):
 
     def _effective_peer_stt_provider(self, settings: AppSettings | None) -> STTProviderName:
         if settings is None:
-            return STTProviderName.LOCAL_QWEN
+            return STTProviderName.LOCAL_CPU_AUTO
         return self._normalized_peer_stt_provider(settings.provider.peer_stt)
 
     def _peer_stt_option_item(self, provider: STTProviderName) -> OptionItem:
+        return self._stt_option_item(provider)
+
+    def _classified_peer_stt_option_item(self, provider: STTProviderName) -> OptionItem:
+        item = self._peer_stt_option_item(provider)
+        section_key = _STT_SECTION_BY_PROVIDER.get(provider, "")
+        section = t(section_key) if section_key else ""
+        return OptionItem(
+            value=item.value,
+            label=item.label,
+            description=item.description,
+            disabled=item.disabled,
+            section=section,
+        )
+
+    def _stt_option_item(self, provider: STTProviderName) -> OptionItem:
+        auto_unavailable = (
+            provider == STTProviderName.LOCAL_CPU_AUTO and not self._local_cpu_auto_available
+        )
         return OptionItem(
             value=provider.value,
             label=provider_label(provider.value),
-            description=t(f"provider.{provider.value}.description", default=""),
+            description=(
+                t("provider.local_cpu_auto.unavailable")
+                if auto_unavailable
+                else t(f"provider.{provider.value}.description", default="")
+            ),
+            disabled=auto_unavailable,
+        )
+
+    def _classified_stt_option_item(self, provider: STTProviderName) -> OptionItem:
+        item = self._stt_option_item(provider)
+        section_key = _STT_SECTION_BY_PROVIDER.get(provider, "")
+        section = t(section_key) if section_key else ""
+        return OptionItem(
+            value=item.value,
+            label=item.label,
+            description=item.description,
+            disabled=item.disabled,
+            section=section,
         )
 
     def _local_llm_extra_body_error_message(
@@ -2915,6 +3130,7 @@ class SettingsView(ft.Column):
             provider_label(self._effective_peer_stt_provider(settings).value),
         )
         self._update_api_visibility()
+        self._sync_gpu_device_card()
 
         # LLM Provider
         self._set_unit_card_value_text(
@@ -3231,19 +3447,18 @@ class SettingsView(ft.Column):
         """Open STT provider selection modal."""
         if not self.page:
             return
-        options = [
-            OptionItem(
-                value=p.value,
-                label=provider_label(p.value),
-                description=t(f"provider.{p.value}.description", default=""),
-            )
-            for p in STTProviderName
+        ordered_providers = [
+            provider
+            for section_key in _STT_SECTION_ORDER
+            for provider in _STT_UI_PROVIDERS
+            if _STT_SECTION_BY_PROVIDER.get(provider) == section_key
         ]
+        options = [self._classified_stt_option_item(provider) for provider in ordered_providers]
         display_settings = self._build_settings_with_provider_draft()
         current = (
             display_settings.provider.stt.value
             if display_settings is not None
-            else STTProviderName.LOCAL_QWEN.value
+            else STTProviderName.LOCAL_CPU_AUTO.value
         )
         modal = SettingsModal(
             self.page,
@@ -3251,6 +3466,7 @@ class SettingsView(ft.Column):
             options,
             self._on_stt_selected,
             show_description=True,
+            two_column=True,
         )
         modal.open(current)
 
@@ -3261,6 +3477,8 @@ class SettingsView(ft.Column):
         current_settings = self._build_settings_with_provider_draft()
         assert current_settings is not None
         provider = STTProviderName(value)
+        if provider == STTProviderName.LOCAL_CPU_AUTO and not self._local_cpu_auto_available:
+            return
         old_provider = current_settings.provider.stt.value
         if old_provider == provider.value:
             return
@@ -3270,32 +3488,26 @@ class SettingsView(ft.Column):
         draft = self._ensure_provider_settings_draft()
         draft.provider.stt = provider
         self._update_api_visibility()
+        self._sync_gpu_device_card()
         self.has_provider_changes = True
 
         # Update text
         self._set_unit_card_value_text(self._stt_text, provider_label(provider.value))
 
-        # Check compatibility warning
         source_lang = self._settings.languages.source_language
-        warning = get_stt_compatibility_warning(source_lang, provider.value)
+        selection = resolve_local_asr_selection(provider.value, source_lang)
+        if selection.fallback_applied:
+            self._show_stt_selection_notice(t("local_stt.language_fallback_qwen"))
+        elif not selection.supported:
+            self._show_stt_selection_notice(t("local_stt.language_unsupported"))
+        warning = (
+            None
+            if selection.fallback_applied or not selection.supported
+            else get_stt_compatibility_warning(source_lang, provider.value)
+        )
         if warning:
             message = t(warning.key, language=language_name(warning.language_code))
-            if self.show_snackbar:
-                self.show_snackbar(message, ft.Colors.ORANGE_700)
-            elif self.page:
-                self.page.open(
-                    ft.SnackBar(
-                        ft.Text(
-                            message,
-                            color=ft.Colors.WHITE,
-                        ),
-                        bgcolor=ft.Colors.ORANGE_700,
-                        duration=4000,
-                        behavior=ft.SnackBarBehavior.FLOATING,
-                        margin=ft.margin.only(bottom=90),
-                        padding=20,
-                    )
-                )
+            self._show_stt_selection_notice(message)
 
         if self.page:
             self._qwen_region_btn.update()
@@ -3305,20 +3517,29 @@ class SettingsView(ft.Column):
     def _on_peer_stt_click(self, e) -> None:
         if not self.page:
             return
-        options = [self._peer_stt_option_item(provider) for provider in STTProviderName]
+        ordered_providers = [
+            provider
+            for section_key in _STT_SECTION_ORDER
+            for provider in _STT_UI_PROVIDERS
+            if _STT_SECTION_BY_PROVIDER.get(provider) == section_key
+        ]
+        options = [
+            self._classified_peer_stt_option_item(provider) for provider in ordered_providers
+        ]
         display_settings = self._build_settings_with_provider_draft()
         current_provider = (
             display_settings.provider.peer_stt
             if display_settings is not None
-            else STTProviderName.LOCAL_QWEN
+            else STTProviderName.LOCAL_CPU_AUTO
         )
         current = self._normalized_peer_stt_provider(current_provider).value
         SettingsModal(
             self.page,
-            t("settings.peer_stt_provider"),
+            t("settings.section.peer_stt"),
             options,
             self._on_peer_stt_selected,
             show_description=True,
+            two_column=True,
         ).open(current)
 
     def _on_peer_stt_selected(self, value: str) -> None:
@@ -3327,17 +3548,43 @@ class SettingsView(ft.Column):
         current_settings = self._build_settings_with_provider_draft()
         assert current_settings is not None
         provider = STTProviderName(value)
+        if provider == STTProviderName.LOCAL_CPU_AUTO and not self._local_cpu_auto_available:
+            return
         if current_settings.provider.peer_stt == provider:
             return
         draft = self._ensure_provider_settings_draft()
         draft.provider.peer_stt = provider
+        selection = resolve_local_asr_selection(
+            provider.value,
+            current_settings.languages.effective_peer_source,
+        )
+        if selection.fallback_applied:
+            self._show_stt_selection_notice(t("local_stt.language_fallback_qwen"))
+        elif not selection.supported:
+            self._show_stt_selection_notice(t("local_stt.language_unsupported"))
         self._set_unit_card_value_text(self._peer_stt_text, provider_label(value))
         self._update_api_visibility()
+        self._sync_gpu_device_card()
         if self.page:
             self._peer_stt_text.update()
             self._qwen_region_btn.update()
             self._api_keys_column.update()
         self.has_provider_changes = True
+
+    def _show_stt_selection_notice(self, message: str) -> None:
+        if self.show_snackbar:
+            self.show_snackbar(message, ft.Colors.ORANGE_700)
+        elif self.page:
+            self.page.open(
+                ft.SnackBar(
+                    ft.Text(message, color=ft.Colors.WHITE),
+                    bgcolor=ft.Colors.ORANGE_700,
+                    duration=4000,
+                    behavior=ft.SnackBarBehavior.FLOATING,
+                    margin=ft.margin.only(bottom=90),
+                    padding=20,
+                )
+            )
 
     def _on_llm_click(self, e) -> None:
         """Open LLM provider selection modal."""
@@ -3368,6 +3615,7 @@ class SettingsView(ft.Column):
             options,
             self._on_llm_selected,
             show_description=True,
+            two_column=True,
         )
         modal.open(current)
 
@@ -5046,6 +5294,7 @@ class SettingsView(ft.Column):
         self._peer_provider_title.value = t("settings.section.peer_stt")
         self._dashboard_language_redirect_text.value = t("settings.dashboard_language_redirect")
         self._peer_stt_label.value = t("settings.peer_stt_provider")
+        self._gpu_device_title.value = t("settings.gpu_device.title")
         self._overlay_target_title.value = t("settings.overlay.caption_location")
         self._overlay_translation_title.value = t("settings.overlay.show_translation")
         self._overlay_peer_original_title.value = t("settings.overlay.show_peer_original")
@@ -5169,6 +5418,7 @@ class SettingsView(ft.Column):
         self._alibaba_key_singapore.apply_locale()
         self._audio_settings.apply_locale()
         self._prompt_editor.apply_locale()
+        self._sync_gpu_device_card()
 
         if self.page:
             self.update()

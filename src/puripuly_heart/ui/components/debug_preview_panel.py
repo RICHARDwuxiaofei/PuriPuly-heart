@@ -60,6 +60,7 @@ class DebugPreviewPanel(ft.Container):
         on_capture_fault_cycle: Callable[[], None],
         on_stt_fault_cycle: Callable[[], None],
         on_audio_fault_clear: Callable[[], None],
+        on_gpu_state_cycle: Callable[[], None],
         on_github_star_snackbar: Callable[[], None],
         on_telemetry_consent: Callable[[], None],
     ) -> None:
@@ -124,6 +125,11 @@ class DebugPreviewPanel(ft.Container):
                 "audio_fault_clear",
                 "debug_preview.audio_fault_clear",
                 on_audio_fault_clear,
+            ),
+            _PreviewAction(
+                "gpu_state_cycle",
+                "debug_preview.gpu_state_cycle",
+                on_gpu_state_cycle,
             ),
         )
         self._toggle_button = _make_text_button(

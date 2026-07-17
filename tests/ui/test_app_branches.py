@@ -549,6 +549,7 @@ def test_translator_app_mounts_debug_preview_when_enabled(
         "on_capture_fault_cycle",
         "on_stt_fault_cycle",
         "on_audio_fault_clear",
+        "on_gpu_state_cycle",
     }
     discord_callback = seen["callbacks"]["on_discord_auth"]
     assert getattr(discord_callback, "__self__", None) is app
@@ -1177,6 +1178,37 @@ async def test_main_gui_forwards_debug_ui_preview_flag(
     assert seen["started"] is True
     assert seen["init"] == (page, Path("settings.json"), True)
     assert seen["check"][0] is page
+
+
+def test_debug_preview_gpu_states_cycle_in_memory() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.debug_ui_preview = True
+    app.page = DummyPage()
+    app.view_settings = SimpleNamespace(
+        states=[],
+        set_gpu_runtime_state=lambda state, **kwargs: app.view_settings.states.append(
+            (state, kwargs)
+        ),
+    )
+    for _ in range(14):
+        app._cycle_debug_preview_gpu_state()
+
+    assert [state for state, _kwargs in app.view_settings.states] == [
+        "discovering",
+        "discovery_pending",
+        "discovery_failed",
+        "not_installed",
+        "invalid",
+        "installing",
+        "install_failed",
+        "installed",
+        "unsupported",
+        "validating",
+        "loading",
+        "warming",
+        "ready",
+        "activation_failed",
+    ]
 
 
 class PreviewDashboard:
@@ -3314,8 +3346,11 @@ def test_on_overlay_state_changed_updates_settings_view_runtime_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -> None:
+async def test_debug_preview_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -> (
+    None
+):
     app = TranslatorApp.__new__(TranslatorApp)
+    app.debug_ui_preview = True
     app.page = DummyPage()
     seen: list[tuple[str, object]] = []
 

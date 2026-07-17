@@ -87,7 +87,10 @@ def test_settings_roundtrip(tmp_path):
     shared_prompt = load_prompt_for_provider("gemini")
     expected.system_prompt = shared_prompt
     expected.system_prompts = {}
+    expected.telemetry.consent = "allow"
+    expected.telemetry_state.anonymous_id = loaded.telemetry_state.anonymous_id
 
+    assert loaded.telemetry_state.anonymous_id
     assert loaded == expected
 
 
@@ -124,7 +127,7 @@ def test_schema21_migration_forces_existing_peer_vad_hangover_to_500_ms(
     assert persisted["desktop_audio"]["vad_hangover_ms"] == 500
 
 
-def test_new_user_defaults_peer_voice_to_english_to_korean_local_qwen() -> None:
+def test_new_user_defaults_peer_voice_to_english_to_korean_cpu_auto() -> None:
     settings = AppSettings()
 
     assert settings.languages.source_language == "ko"
@@ -133,7 +136,7 @@ def test_new_user_defaults_peer_voice_to_english_to_korean_local_qwen() -> None:
     assert settings.languages.peer_target_language == "ko"
     assert settings.languages.effective_peer_source == "en"
     assert settings.languages.effective_peer_target == "ko"
-    assert settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
+    assert settings.provider.peer_stt == STTProviderName.LOCAL_CPU_AUTO
     assert settings.ui.integrated_context_enabled is True
     assert settings.osc.chatbox_include_source is False
 
@@ -408,11 +411,11 @@ def test_settings_validation_rejects_invalid_osc():
         settings.validate()
 
 
-def test_default_stt_provider_is_local_qwen() -> None:
+def test_default_stt_provider_is_local_cpu_auto() -> None:
     settings = AppSettings()
 
-    assert settings.provider.stt == STTProviderName.LOCAL_QWEN
-    assert to_dict(settings)["provider"]["stt"] == STTProviderName.LOCAL_QWEN.value
+    assert settings.provider.stt == STTProviderName.LOCAL_CPU_AUTO
+    assert to_dict(settings)["provider"]["stt"] == STTProviderName.LOCAL_CPU_AUTO.value
 
 
 def test_self_vad_and_soniox_defaults_match_current_compatibility_defaults() -> None:
@@ -1162,13 +1165,13 @@ def test_load_settings_infers_missing_qwen_region_from_legacy_asr_endpoint(tmp_p
     assert persisted["qwen_asr_stt"]["endpoint"] == loaded.qwen.get_asr_endpoint()
 
 
-def test_from_dict_defaults_missing_stt_provider_to_local_qwen() -> None:
+def test_from_dict_defaults_missing_stt_provider_to_local_cpu_auto() -> None:
     data = to_dict(AppSettings())
     data["provider"].pop("stt", None)
 
     loaded = from_dict(data)
 
-    assert loaded.provider.stt == STTProviderName.LOCAL_QWEN
+    assert loaded.provider.stt == STTProviderName.LOCAL_CPU_AUTO
 
 
 def test_from_dict_maps_legacy_alibaba_provider_to_qwen_asr() -> None:
@@ -1279,7 +1282,7 @@ def test_load_settings_backfills_peer_provider_defaults_without_copying_self_val
     assert "peer_deepgram_stt" not in persisted
 
 
-def test_load_settings_preserves_peer_local_qwen(tmp_path) -> None:
+def test_load_settings_migrates_peer_local_qwen_to_cpu_auto(tmp_path) -> None:
     path = tmp_path / "settings.json"
     legacy = to_dict(AppSettings())
     legacy["provider"]["peer_stt"] = STTProviderName.LOCAL_QWEN.value
@@ -1288,8 +1291,8 @@ def test_load_settings_preserves_peer_local_qwen(tmp_path) -> None:
     loaded = load_settings(path)
     persisted = legacy_projected_settings_file(path)
 
-    assert loaded.provider.peer_stt == STTProviderName.LOCAL_QWEN
-    assert persisted["provider"]["peer_stt"] == STTProviderName.LOCAL_QWEN.value
+    assert loaded.provider.peer_stt == STTProviderName.LOCAL_CPU_AUTO
+    assert persisted["provider"]["peer_stt"] == STTProviderName.LOCAL_CPU_AUTO.value
 
 
 def test_from_dict_recovers_malformed_peer_soniox_override_values() -> None:
@@ -1335,14 +1338,14 @@ def test_load_settings_backfills_v4_peer_blocks_from_schema3_fixture(tmp_path) -
         },
         "desktop_audio": {
             "output_device": "",
-            "vad_speech_threshold": 0.6,
+            "vad_speech_threshold": 0.5,
             "vad_hangover_ms": 900,
             "vad_pre_roll_ms": 500,
         },
         "overlay_calibration": AppSettings().overlay_calibration.to_dict(),
         "stt": {
             "drain_timeout_s": 2.0,
-            "vad_speech_threshold": 0.5,
+            "vad_speech_threshold": 0.35,
             "low_latency_mode": True,
             "low_latency_vad_hangover_ms": 600,
             "low_latency_merge_gap_ms": 600,

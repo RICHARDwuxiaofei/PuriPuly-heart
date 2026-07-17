@@ -119,6 +119,7 @@ class TranslatorApp:
         debug_ui_preview: bool = False,
         allow_stable_settings_import: bool = False,
         runtime_logging_sinks=None,
+        vrchat_osc_presence=None,
     ):
         self.page = page
         controller_kwargs = {
@@ -135,6 +136,10 @@ class TranslatorApp:
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         ):
             controller_kwargs["runtime_logging_sinks"] = runtime_logging_sinks
+        if "vrchat_osc_presence" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        ):
+            controller_kwargs["vrchat_osc_presence"] = vrchat_osc_presence
         self.controller = GuiController(**controller_kwargs)
         self.overlay_state = "off"
         self.overlay_failure_reason: str | None = None
@@ -181,6 +186,8 @@ class TranslatorApp:
         self.view_settings.on_secret_cleared = self._on_secret_cleared
         self.view_settings.on_local_llm_secret_changed = self._on_local_llm_secret_changed
         self.view_settings.on_start_microphone_test = self._on_start_microphone_test
+        self.view_settings.on_gpu_install_requested = self._on_gpu_install_requested
+        self.view_settings.on_gpu_retry_requested = self._on_gpu_retry_requested
         self.view_settings.on_telemetry_consent_change = self._on_telemetry_consent_change
         self.view_settings.on_list_loopback_capture_options = (
             lambda: self.controller.list_loopback_capture_options()
@@ -320,6 +327,7 @@ class TranslatorApp:
             on_capture_fault_cycle=self._preview_capture_fault_cycle,
             on_stt_fault_cycle=self._preview_stt_fault_cycle,
             on_audio_fault_clear=self._preview_audio_fault_clear,
+            on_gpu_state_cycle=self._cycle_debug_preview_gpu_state,
             on_github_star_snackbar=self._preview_github_star_snackbar,
             on_telemetry_consent=self._preview_telemetry_consent,
         )
@@ -810,6 +818,36 @@ class TranslatorApp:
             apply_debug_locale()
         self.page.update()
 
+    def _cycle_debug_preview_gpu_state(self) -> None:
+        states = (
+            "discovering",
+            "discovery_pending",
+            "discovery_failed",
+            "not_installed",
+            "invalid",
+            "installing",
+            "install_failed",
+            "installed",
+            "unsupported",
+            "validating",
+            "loading",
+            "warming",
+            "ready",
+            "activation_failed",
+        )
+        index = int(getattr(self, "_debug_preview_gpu_state_index", -1)) + 1
+        index %= len(states)
+        self._debug_preview_gpu_state_index = index
+        devices = (
+            ("vulkan-index-0", "Debug Vulkan Device 0"),
+            ("vulkan-index-1", "Debug Vulkan Device 1"),
+        )
+        self.view_settings.set_gpu_runtime_state(
+            states[index],
+            devices=devices,
+            progress_percent=42 if states[index] == "installing" else None,
+        )
+
     def refresh_overlay_peer_contract(self) -> None:
         controller = getattr(self, "controller", None)
         build_contract = getattr(controller, "build_overlay_peer_consumer_contract", None)
@@ -1031,7 +1069,6 @@ class TranslatorApp:
             f"overlay_state={getattr(self, 'overlay_state', 'unknown')} "
             f"failure_reason={getattr(self, 'overlay_failure_reason', None)}"
         )
-
         controller = getattr(self, "controller", None)
         settings = getattr(controller, "settings", None)
         ui_settings = getattr(settings, "ui", None)
@@ -1061,6 +1098,12 @@ class TranslatorApp:
             await self.controller.apply_loopback_capture_option(value)
 
         self._queue_settings_mutation_task(_task)
+
+    def _on_gpu_install_requested(self) -> None:
+        self.page.run_task(self.controller.install_or_repair_gpu_model)
+
+    def _on_gpu_retry_requested(self) -> None:
+        self.page.run_task(self.controller.retry_gpu_activation)
 
     def _on_language_change(
         self,
@@ -1778,6 +1821,7 @@ async def main_gui(
     debug_ui_preview: bool = False,
     allow_stable_settings_import: bool = False,
     runtime_logging_sinks=None,
+    vrchat_osc_presence=None,
 ):
     app_kwargs = {
         "config_path": config_path,
@@ -1792,6 +1836,10 @@ async def main_gui(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     ):
         app_kwargs["runtime_logging_sinks"] = runtime_logging_sinks
+    if "vrchat_osc_presence" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    ):
+        app_kwargs["vrchat_osc_presence"] = vrchat_osc_presence
     app = TranslatorApp(page, **app_kwargs)
     await app.controller.start()
 

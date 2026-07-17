@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import http.server
 import json
@@ -69,14 +70,15 @@ def _build_manifest(
     modelscope_url: str,
     model_bytes: bytes,
     token_bytes: bytes,
+    model_id: str = "qwen3-asr-0.6b-int8-sherpa",
 ) -> LocalSTTAssetManifest:
     return LocalSTTAssetManifest(
         manifest_version=1,
         installed_manifest_version=1,
-        model_id="qwen3-asr-0.6b-int8-sherpa",
+        model_id=model_id,
         engine="sherpa-onnx",
         upstream_repo="example/repo",
-        install_dirname="qwen3-asr-0.6b-int8-sherpa",
+        install_dirname=model_id,
         sources={
             "huggingface": LocalSTTAssetSource(
                 name="huggingface",
@@ -415,3 +417,87 @@ async def test_ensure_local_stt_installed_recovers_invalid_existing_install(
     assert installed.selected_source == "huggingface"
     assert (install_dir / "model.int8.onnx").read_bytes() == model_bytes
     assert (install_dir / "tokenizer" / "tokens.txt").read_bytes() == token_bytes
+
+
+@pytest.mark.asyncio
+async def test_independent_cpu_model_installs_survive_one_model_download_failure(
+    temp_dir: Path,
+    file_server,
+) -> None:
+    source_dir, base_url = file_server
+    model_ids = ("parakeet-v3", "parakeet-ja", "qwen")
+    manifests: list[LocalSTTAssetManifest] = []
+    for model_id in model_ids:
+        model_bytes = f"{model_id}-model".encode()
+        token_bytes = f"{model_id}-tokens".encode()
+        model_source = source_dir / model_id
+        if model_id != "parakeet-ja":
+            model_source.mkdir()
+            (model_source / "model.int8.onnx").write_bytes(model_bytes)
+            (model_source / "tokenizer").mkdir()
+            (model_source / "tokenizer" / "tokens.txt").write_bytes(token_bytes)
+        manifests.append(
+            _build_manifest(
+                huggingface_url=f"{base_url}/{model_id}",
+                modelscope_url=f"{base_url}/{model_id}",
+                model_bytes=model_bytes,
+                token_bytes=token_bytes,
+                model_id=model_id,
+            )
+        )
+    model_root = temp_dir / "appdata" / "models"
+
+    results = await asyncio.gather(
+        *(
+            ensure_local_stt_installed(
+                model_id=manifest.model_id,
+                preferred_source="huggingface",
+                model_root=model_root,
+                manifest=manifest,
+            )
+            for manifest in manifests
+        ),
+        return_exceptions=True,
+    )
+
+    assert isinstance(results[0], InstalledLocalSTTManifest)
+    assert isinstance(results[1], LocalSTTRuntimeInstallError)
+    assert isinstance(results[2], InstalledLocalSTTManifest)
+    assert (
+        inspect_local_stt_install_state(
+            model_root / manifests[0].install_dirname,
+            manifest=manifests[0],
+            verify_checksums=True,
+        ).status
+        == "ready"
+    )
+    assert (
+        inspect_local_stt_install_state(
+            model_root / manifests[1].install_dirname,
+            manifest=manifests[1],
+            verify_checksums=True,
+        ).status
+        == "missing"
+    )
+    assert (
+        inspect_local_stt_install_state(
+            model_root / manifests[2].install_dirname,
+            manifest=manifests[2],
+            verify_checksums=True,
+        ).status
+        == "ready"
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_install_rejects_cross_model_manifest_target() -> None:
+    manifest = _build_manifest(
+        huggingface_url="https://example.invalid",
+        modelscope_url="https://example.invalid",
+        model_bytes=b"model",
+        token_bytes=b"tokens",
+        model_id="model-a",
+    )
+
+    with pytest.raises(LocalSTTRuntimeInstallError, match="does not match"):
+        await ensure_local_stt_installed(model_id="model-b", manifest=manifest)

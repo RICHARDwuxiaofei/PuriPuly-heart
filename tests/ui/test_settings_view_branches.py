@@ -79,6 +79,22 @@ def _make_settings_view(monkeypatch: pytest.MonkeyPatch, store: DummySecretStore
     return settings_view.SettingsView(), store
 
 
+def test_cpu_auto_option_is_disabled_until_all_models_are_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _store = _make_settings_view(monkeypatch)
+
+    unavailable = view._stt_option_item(STTProviderName.LOCAL_CPU_AUTO)
+    assert unavailable.disabled is True
+    assert unavailable.description == t("provider.local_cpu_auto.unavailable")
+
+    view.set_local_cpu_auto_available(True)
+    available = view._stt_option_item(STTProviderName.LOCAL_CPU_AUTO)
+    assert available.disabled is False
+    assert available.description == t("provider.local_cpu_auto.description")
+    assert view._peer_stt_option_item(STTProviderName.LOCAL_CPU_AUTO).disabled is False
+
+
 def test_telemetry_card_loads_state_and_modal_allow_decline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -103,9 +119,9 @@ def test_telemetry_card_loads_state_and_modal_allow_decline(
     view.on_telemetry_consent_change = calls.append
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    assert view._telemetry_consent_text.content.value == t("settings.telemetry.state.off")
+    assert view._telemetry_consent_text.content.value == t("settings.telemetry.state.on")
     view._on_telemetry_consent_click(None)
-    assert opened[0][0] == "decline"
+    assert opened[0][0] == "allow"
     assert getattr(view, "_telemetry_consent_card") is not None
 
     captured_select = []
@@ -1571,6 +1587,8 @@ async def test_order22_live_settings_view_audio_change_emits_copied_draft_and_ro
         config_path=Path("settings.json"),
     )
     controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.DEEPGRAM
+    controller.settings.provider.peer_stt = STTProviderName.DEEPGRAM
     controller.settings.audio.input_device = "Built-in Mic"
     controller._sync_ui_from_settings()
 
@@ -1616,6 +1634,8 @@ async def test_order22_live_settings_view_audio_change_save_failure_restores_con
         ui_handler_factory=controller_module.FletLogHandler
     )
     controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.DEEPGRAM
+    controller.settings.provider.peer_stt = STTProviderName.DEEPGRAM
     controller.settings.audio.input_device = "Built-in Mic"
     controller._sync_ui_from_settings()
     emitted: list[AppSettings] = []
@@ -2110,7 +2130,7 @@ def test_on_stt_selected_updates_provider_and_pipeline_flags(
 
     pending = view.build_provider_apply_settings()
 
-    assert settings.provider.stt == STTProviderName.LOCAL_QWEN
+    assert settings.provider.stt == STTProviderName.LOCAL_CPU_AUTO
     assert pending is not None
     assert pending.provider.stt == STTProviderName.SONIOX
     assert view.has_provider_changes is True
@@ -2163,7 +2183,7 @@ def test_on_peer_stt_selected_updates_provider_and_pipeline_flags(
 
     pending = view.build_provider_apply_settings()
 
-    assert settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
+    assert settings.provider.peer_stt == STTProviderName.LOCAL_CPU_AUTO
     assert pending is not None
     assert pending.provider.peer_stt == STTProviderName.SONIOX
     assert view.has_provider_changes is True
@@ -2181,10 +2201,20 @@ def test_peer_stt_local_qwen_option_is_selectable_with_provider_description(
     captured: dict[str, object] = {}
 
     class DummyModal:
-        def __init__(self, _page, title, options, _on_select, *, show_description=False):
+        def __init__(
+            self,
+            _page,
+            title,
+            options,
+            _on_select,
+            *,
+            show_description=False,
+            two_column=False,
+        ):
             captured["title"] = title
             captured["options"] = options
             captured["show_description"] = show_description
+            captured["two_column"] = two_column
 
         def open(self, current: str) -> None:
             captured["current"] = current
@@ -2198,12 +2228,27 @@ def test_peer_stt_local_qwen_option_is_selectable_with_provider_description(
         option for option in options if option.value == STTProviderName.LOCAL_QWEN.value
     )
 
-    assert captured["title"] == t("settings.peer_stt_provider")
+    assert captured["title"] == t("settings.section.peer_stt")
     assert captured["show_description"] is True
-    assert local_qwen_option.label == "Qwen ASR 0.6B (Local)"
+    assert captured["two_column"] is True
+    assert local_qwen_option.label == "Qwen ASR 0.6B"
     assert local_qwen_option.disabled is False
     assert local_qwen_option.description == t("provider.local_qwen.description")
-    assert all(not option.disabled for option in options)
+    assert all(
+        option.disabled == (option.value == STTProviderName.LOCAL_CPU_AUTO.value)
+        for option in options
+    )
+    assert {option.value for option in options} == {
+        STTProviderName.LOCAL_CPU_AUTO.value,
+        STTProviderName.LOCAL_PARAKEET_V3.value,
+        STTProviderName.LOCAL_PARAKEET_JAPANESE.value,
+        STTProviderName.LOCAL_QWEN.value,
+        STTProviderName.LOCAL_QWEN_GPU.value,
+        STTProviderName.DEEPGRAM.value,
+        STTProviderName.QWEN_ASR.value,
+        STTProviderName.SONIOX.value,
+    }
+    assert STTProviderName.LOCAL_QWEN_GPU.value in {option.value for option in options}
 
 
 def test_peer_stt_local_qwen_choice_can_be_persisted(
@@ -2230,6 +2275,70 @@ def test_peer_stt_local_qwen_choice_can_be_persisted(
 
     assert normalized_pending is not None
     assert normalized_pending.provider.peer_stt == STTProviderName.LOCAL_QWEN
+
+
+def test_gpu_selection_shows_one_shared_device_card_and_retains_unavailable_saved_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.LOCAL_QWEN_GPU
+    settings.stt.gpu_device_id = "vk:saved"
+    view, _ = _make_settings_view(monkeypatch)
+
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.set_gpu_runtime_state(
+        "ready",
+        devices=(("vk:0", "GPU 0"),),
+    )
+
+    assert view._gpu_device_card.visible is True
+    assert view._gpu_device_dropdown.value == "vk:saved"
+    assert [option.key for option in view._gpu_device_dropdown.options] == [
+        "auto",
+        "vk:0",
+        "vk:saved",
+    ]
+    assert view._gpu_device_status.value == t("settings.gpu_state.ready")
+
+
+@pytest.mark.parametrize("locale", ("en", "ko", "zh-CN", "ja", "ru"))
+def test_gpu_card_renders_every_runtime_state_in_each_supported_locale(
+    monkeypatch: pytest.MonkeyPatch,
+    locale: str,
+) -> None:
+    previous_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale(locale)
+        settings = AppSettings()
+        settings.provider.stt = STTProviderName.LOCAL_QWEN_GPU
+        settings.stt.gpu_device_id = "vk:saved"
+        view, _ = _make_settings_view(monkeypatch)
+        view.load_from_settings(settings, config_path=Path("settings.json"))
+
+        for state, key in settings_view._GPU_STATE_LABEL_KEYS.items():
+            progress = 37 if state == "installing" else None
+            expected = (
+                t("settings.gpu_state.installing_progress", percent=37)
+                if progress is not None
+                else t(key)
+            )
+            view.set_gpu_runtime_state(
+                state,
+                devices=(("vk:0", "GPU 0"),),
+                progress_percent=progress,
+            )
+
+            assert view._gpu_device_card.visible is True
+            assert view._gpu_device_status.value == expected
+            assert expected.strip()
+            assert expected not in {key, "settings.gpu_state.installing_progress"}
+            assert view._gpu_device_dropdown.options[0].text == t("settings.gpu_device.auto")
+            assert view._gpu_device_dropdown.options[-1].text == t(
+                "settings.gpu_device.unavailable",
+                device="vk:saved",
+            )
+    finally:
+        i18n_module.set_locale(previous_locale)
 
 
 def test_settings_view_omits_legacy_overlay_peer_toggle_api(
@@ -3331,10 +3440,20 @@ def test_llm_modal_lists_logical_translation_models_once(
     captured: dict[str, object] = {}
 
     class DummyModal:
-        def __init__(self, _page, title, options, _on_select, *, show_description=False):
+        def __init__(
+            self,
+            _page,
+            title,
+            options,
+            _on_select,
+            *,
+            show_description=False,
+            two_column=False,
+        ):
             captured["title"] = title
             captured["options"] = options
             captured["show_description"] = show_description
+            captured["two_column"] = two_column
 
         def open(self, current: str) -> None:
             captured["current"] = current
@@ -3353,6 +3472,7 @@ def test_llm_modal_lists_logical_translation_models_once(
 
     assert captured["title"] == t("settings.section.translation")
     assert captured["show_description"] is True
+    assert captured["two_column"] is True
     assert [option.value for option in options] == [
         TranslationModel.GEMMA4.value,
         TranslationModel.DEEPSEEK_V4_FLASH.value,
@@ -3672,7 +3792,7 @@ def test_provider_draft_does_not_leak_into_immediate_settings_apply(
 
     assert len(changed) == 1
     assert changed[0].ui.locale == "ko"
-    assert changed[0].provider.stt == STTProviderName.LOCAL_QWEN
+    assert changed[0].provider.stt == STTProviderName.LOCAL_CPU_AUTO
     assert pending is not None
     assert pending.provider.stt == STTProviderName.SONIOX
 
@@ -3686,8 +3806,8 @@ def test_provider_selection_equality_guards_skip_noop_draft_changes(
     view.load_from_settings(settings, config_path=Path("settings.json"))
     view.on_settings_changed = lambda incoming: changed.append(incoming)
 
-    view._on_stt_selected(STTProviderName.LOCAL_QWEN.value)
-    view._on_peer_stt_selected(STTProviderName.LOCAL_QWEN.value)
+    view._on_stt_selected(STTProviderName.LOCAL_CPU_AUTO.value)
+    view._on_peer_stt_selected(STTProviderName.LOCAL_CPU_AUTO.value)
     view._on_translation_connection_selected(TranslationConnection.MANAGED.value)
     view._on_qwen_region_selected(QwenRegion.BEIJING.value)
 
@@ -4251,25 +4371,25 @@ def test_translation_connection_and_model_copy_is_backed_by_i18n(locale: str) ->
 
     expected_model_descriptions = {
         "en": {
-            "settings.translation_model.gemma4.description": "Good for most situations We recommend using this model",
-            "settings.translation_model.deepseek_v4_flash.description": "An option for people using PuriPuly in mainland China",
-            "settings.translation_model.gemini3_flash.description": "Translation speed may be unstable",
+            "settings.translation_model.gemma4.description": "Good for most situations",
+            "settings.translation_model.deepseek_v4_flash.description": "Try this if Gemma 4's speed is unstable",
+            "settings.translation_model.gemini3_flash.description": "Translation speed is slow",
             "settings.translation_model.gemini31_flash_lite.description": "",
             "settings.translation_model.qwen35_plus.description": "A strong alternative to DeepSeek",
             "settings.translation_model.local_llm.description": "You can use an OpenAI-compatible API",
         },
         "ko": {
-            "settings.translation_model.gemma4.description": "대부분의 상황에서 좋아요 이 모델을 사용하는 걸 권장해요",
-            "settings.translation_model.deepseek_v4_flash.description": "중국 대륙에서 사용하고 있는 사람들을 위한 선택이에요",
-            "settings.translation_model.gemini3_flash.description": "번역 속도가 불안정할 수 있어요",
+            "settings.translation_model.gemma4.description": "대부분의 상황에서 좋아요",
+            "settings.translation_model.deepseek_v4_flash.description": "Gemma 4의 속도가 불안정할 경우 사용해보세요",
+            "settings.translation_model.gemini3_flash.description": "번역 속도가 느려요",
             "settings.translation_model.gemini31_flash_lite.description": "",
             "settings.translation_model.qwen35_plus.description": "딥시크의 좋은 대안이에요",
             "settings.translation_model.local_llm.description": "OpenAI 호환 API를 사용할 수 있어요",
         },
         "zh-CN": {
-            "settings.translation_model.gemma4.description": "适合大多数情况 建议使用此模型",
-            "settings.translation_model.deepseek_v4_flash.description": "适合在中国大陆使用 PuriPuly 的用户",
-            "settings.translation_model.gemini3_flash.description": "翻译速度可能不稳定",
+            "settings.translation_model.gemma4.description": "适合大多数情况",
+            "settings.translation_model.deepseek_v4_flash.description": "当 Gemma 4 速度不稳定时可以试试",
+            "settings.translation_model.gemini3_flash.description": "翻译速度较慢",
             "settings.translation_model.gemini31_flash_lite.description": "",
             "settings.translation_model.qwen35_plus.description": "DeepSeek 的不错替代选择",
             "settings.translation_model.local_llm.description": "可以使用 OpenAI 兼容 API",
@@ -4295,10 +4415,20 @@ def test_peer_stt_local_qwen_explanatory_copy_renders_from_i18n(
         captured: dict[str, object] = {}
 
         class DummyModal:
-            def __init__(self, _page, title, options, _on_select, *, show_description=False):
+            def __init__(
+                self,
+                _page,
+                title,
+                options,
+                _on_select,
+                *,
+                show_description=False,
+                two_column=False,
+            ):
                 captured["title"] = title
                 captured["options"] = options
                 captured["show_description"] = show_description
+                captured["two_column"] = two_column
 
             def open(self, current: str) -> None:
                 captured["current"] = current
@@ -4314,7 +4444,8 @@ def test_peer_stt_local_qwen_explanatory_copy_renders_from_i18n(
             option for option in options if option.value == STTProviderName.LOCAL_QWEN.value
         )
 
-        assert captured["title"] == t("settings.peer_stt_provider")
+        assert captured["title"] == t("settings.section.peer_stt")
+        assert captured["two_column"] is True
         assert local_qwen_option.description == t("provider.local_qwen.description")
     finally:
         i18n_module.set_locale(old_locale)
@@ -4340,10 +4471,20 @@ def test_peer_local_qwen_load_preserves_display_and_modal_current(
     captured: dict[str, object] = {}
 
     class DummyModal:
-        def __init__(self, _page, title, options, _on_select, *, show_description=False):
+        def __init__(
+            self,
+            _page,
+            title,
+            options,
+            _on_select,
+            *,
+            show_description=False,
+            two_column=False,
+        ):
             captured["title"] = title
             captured["options"] = options
             captured["show_description"] = show_description
+            captured["two_column"] = two_column
 
         def open(self, current: str) -> None:
             captured["current"] = current
@@ -4352,7 +4493,8 @@ def test_peer_local_qwen_load_preserves_display_and_modal_current(
 
     view._on_peer_stt_click(None)
 
-    assert captured["title"] == t("settings.peer_stt_provider")
+    assert captured["title"] == t("settings.section.peer_stt")
+    assert captured["two_column"] is True
     assert captured["current"] == STTProviderName.LOCAL_QWEN.value
 
 
@@ -5404,24 +5546,26 @@ def test_api_tab_places_independent_managed_key_card_above_api_keys(
     view, _ = _make_settings_view(monkeypatch)
     api_controls = _subtab_controls(view, "api")
 
-    assert len(api_controls) == 6
+    assert len(api_controls) == 7
     assert _row_card_titles(api_controls[0]) == [
         t("settings.section.stt"),
         t("settings.section.peer_stt"),
         t("settings.section.translation"),
     ]
-    assert _row_card_titles(api_controls[1]) == [
+    assert _row_card_titles(api_controls[1]) == [t("settings.gpu_device.title")]
+    assert view._gpu_device_card.visible is False
+    assert _row_card_titles(api_controls[2]) == [
         t("settings.low_latency_mode"),
         t("settings.translation_connection"),
         t("settings.fallback"),
     ]
-    assert _row_card_titles(api_controls[2]) == [t("settings.local_llm.connection")]
-    assert api_controls[2] is view._local_llm_connection_card
-    assert api_controls[3] is view._managed_key_card
-    assert _row_card_titles(api_controls[3]) == [t("settings.managed_key.title")]
-    assert api_controls[4] is view._peer_auto_languages_card
-    assert api_controls[5] is not view._api_keys_column
-    assert _row_card_titles(api_controls[5]) == [t("settings.section.api_keys")]
+    assert _row_card_titles(api_controls[3]) == [t("settings.local_llm.connection")]
+    assert api_controls[3] is view._local_llm_connection_card
+    assert api_controls[4] is view._managed_key_card
+    assert _row_card_titles(api_controls[4]) == [t("settings.managed_key.title")]
+    assert api_controls[5] is view._peer_auto_languages_card
+    assert api_controls[6] is not view._api_keys_column
+    assert _row_card_titles(api_controls[6]) == [t("settings.section.api_keys")]
 
 
 def test_api_tab_primary_value_typography_is_consistent_across_rows(

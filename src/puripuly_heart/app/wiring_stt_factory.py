@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from puripuly_heart.app.wiring_llm_factory import _qwen_api_key_for_resolved_credential
 from puripuly_heart.app.wiring_secrets_factory import require_secret
@@ -14,7 +15,11 @@ from puripuly_heart.config.runtime_resolution import (
     SONIOX_STT_DEFAULT_TRAILING_SILENCE_MS,
     SONIOX_STT_MODEL_RT_V5,
     STT_PROVIDER_DEEPGRAM,
+    STT_PROVIDER_LOCAL_CPU_AUTO,
+    STT_PROVIDER_LOCAL_PARAKEET_JAPANESE,
+    STT_PROVIDER_LOCAL_PARAKEET_V3,
     STT_PROVIDER_LOCAL_QWEN,
+    STT_PROVIDER_LOCAL_QWEN_GPU,
     STT_PROVIDER_QWEN_ASR,
     STT_PROVIDER_SONIOX,
     STTRuntimeIntent,
@@ -29,6 +34,13 @@ from puripuly_heart.config.settings import (
     STTProviderName,
 )
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
+from puripuly_heart.core.local_stt_assets import (
+    LOCAL_QWEN_GPU_MODEL_ID,
+    LOCAL_STT_MODEL_ID,
+    PARAKEET_JAPANESE_MODEL_ID,
+    PARAKEET_V3_MODEL_ID,
+)
+from puripuly_heart.core.runtime.gpu_asr import SharedGpuASRRuntime
 from puripuly_heart.core.storage.secrets import SecretStore
 from puripuly_heart.core.stt.backend import STTBackend
 from puripuly_heart.core.stt.custom_vocab import (
@@ -270,6 +282,8 @@ def create_stt_backend(
     *,
     secrets: SecretStore,
     diagnostics_enabled: Callable[[], bool] | None = None,
+    gpu_runtime: SharedGpuASRRuntime | None = None,
+    gpu_model_path: Path | None = None,
 ) -> STTBackend:
     resolved = resolve_stt_runtime_config(
         _self_stt_runtime_intent_from_compatibility_settings(settings)
@@ -278,6 +292,9 @@ def create_stt_backend(
         resolved,
         secrets=secrets,
         diagnostics_enabled=diagnostics_enabled,
+        gpu_runtime=gpu_runtime,
+        gpu_model_path=gpu_model_path,
+        gpu_device_id=settings.stt.gpu_device_id,
     )
 
 
@@ -367,21 +384,54 @@ def create_stt_backend_from_resolved_config(
     *,
     secrets: SecretStore,
     diagnostics_enabled: Callable[[], bool] | None = None,
+    gpu_runtime: SharedGpuASRRuntime | None = None,
+    gpu_model_path: Path | None = None,
+    gpu_device_id: str = "auto",
 ) -> STTBackend:
     stream_label = config.channel
     keyterms = _resolved_stt_keyterms(config)
 
-    if config.provider == STT_PROVIDER_LOCAL_QWEN:
-        from puripuly_heart.core.language import get_local_qwen_language_hint
-        from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
-        from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaSTTBackend
+    local_cpu_model_by_provider = {
+        STT_PROVIDER_LOCAL_PARAKEET_V3: PARAKEET_V3_MODEL_ID,
+        STT_PROVIDER_LOCAL_PARAKEET_JAPANESE: PARAKEET_JAPANESE_MODEL_ID,
+        STT_PROVIDER_LOCAL_QWEN: LOCAL_STT_MODEL_ID,
+    }
+    if config.provider == STT_PROVIDER_LOCAL_CPU_AUTO:
+        from puripuly_heart.providers.stt.local_cpu import LocalCPUAutoSTTBackend
 
-        return LocalQwenSherpaSTTBackend(
-            model_dir=default_local_stt_model_dir(),
+        return LocalCPUAutoSTTBackend(
+            source_language=config.source_language,
             sample_rate_hz=config.sample_rate_hz,
             stream_label=stream_label,
-            language_hint=get_local_qwen_language_hint(config.source_language),
+            hotwords=keyterms,
             diagnostics_enabled=diagnostics_enabled,
+        )
+    if config.provider in local_cpu_model_by_provider:
+        from puripuly_heart.providers.stt.local_cpu import create_local_cpu_backend
+
+        return create_local_cpu_backend(
+            local_cpu_model_by_provider[config.provider],
+            source_language=config.source_language,
+            sample_rate_hz=config.sample_rate_hz,
+            stream_label=stream_label,
+            hotwords=() if config.provider == STT_PROVIDER_LOCAL_QWEN else keyterms,
+            diagnostics_enabled=diagnostics_enabled,
+        )
+    if config.provider == STT_PROVIDER_LOCAL_QWEN_GPU:
+        if gpu_runtime is None:
+            raise RuntimeError("Local Vulkan ASR worker is not available")
+        if config.channel not in {"self", "peer"}:
+            raise ValueError(f"Unsupported GPU ASR channel: {config.channel}")
+        from puripuly_heart.core.local_gpu_assets import local_gpu_model_path
+        from puripuly_heart.providers.stt.local_gpu import LocalGpuSTTBackend
+
+        return LocalGpuSTTBackend(
+            runtime=gpu_runtime,
+            channel=config.channel,
+            model_path=gpu_model_path or local_gpu_model_path(),
+            model_id=LOCAL_QWEN_GPU_MODEL_ID,
+            device_id=gpu_device_id,
+            sample_rate_hz=config.sample_rate_hz,
         )
 
     if config.provider == STT_PROVIDER_DEEPGRAM:
@@ -492,7 +542,13 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
             soniox_language_hints=language_hints,
         )
 
-    if provider == STTProviderName.LOCAL_QWEN:
+    if provider in {
+        STTProviderName.LOCAL_CPU_AUTO,
+        STTProviderName.LOCAL_PARAKEET_V3,
+        STTProviderName.LOCAL_PARAKEET_JAPANESE,
+        STTProviderName.LOCAL_QWEN,
+        STTProviderName.LOCAL_QWEN_GPU,
+    }:
         return ResolvedPeerSTTConfig(
             provider=provider,
             source_language=peer_source_language,
@@ -538,6 +594,11 @@ def build_peer_stt_provider_signature_from_vnext(settings: AppSettingsVNext) -> 
         resolved.provider_options.get("trailing_silence_ms"),
         resolved.provider_options.get("enable_language_identification", False),
         resolved.provider_options.get("language_hints"),
+        (
+            settings.intent.stt.gpu_device_id
+            if resolved.provider == STT_PROVIDER_LOCAL_QWEN_GPU
+            else None
+        ),
     )
 
 
@@ -546,12 +607,17 @@ def create_peer_stt_backend(
     *,
     secrets: SecretStore,
     diagnostics_enabled: Callable[[], bool] | None = None,
+    gpu_runtime: SharedGpuASRRuntime | None = None,
+    gpu_model_path: Path | None = None,
 ) -> STTBackend:
     resolved = resolve_peer_stt_runtime_config(settings)
     return create_peer_stt_backend_from_resolved_config(
         resolved,
         secrets=secrets,
         diagnostics_enabled=diagnostics_enabled,
+        gpu_runtime=gpu_runtime,
+        gpu_model_path=gpu_model_path,
+        gpu_device_id=settings.stt.gpu_device_id,
     )
 
 
@@ -560,9 +626,15 @@ def create_peer_stt_backend_from_resolved_config(
     *,
     secrets: SecretStore,
     diagnostics_enabled: Callable[[], bool] | None = None,
+    gpu_runtime: SharedGpuASRRuntime | None = None,
+    gpu_model_path: Path | None = None,
+    gpu_device_id: str = "auto",
 ) -> STTBackend:
     return create_stt_backend_from_resolved_config(
         config,
         secrets=secrets,
         diagnostics_enabled=diagnostics_enabled,
+        gpu_runtime=gpu_runtime,
+        gpu_model_path=gpu_model_path,
+        gpu_device_id=gpu_device_id,
     )

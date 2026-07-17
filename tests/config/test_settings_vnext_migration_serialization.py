@@ -754,7 +754,11 @@ def test_current_vnext_dict_reads_and_serializes_idempotently() -> None:
     migration = _migration()
     serialization = _serialization()
 
-    original = AppSettingsVNext()
+    original = with_telemetry_consent(
+        AppSettingsVNext(),
+        "allow",
+        identifier_factory=lambda: "current-settings-test-id",
+    )
     raw = serialization.to_dict(original)
 
     loaded = migration.from_dict(raw)
@@ -864,16 +868,20 @@ def test_process_capture_target_round_trips_with_discord_update_resistant_identi
     migration = _migration()
     from puripuly_heart.config.capture_target_resolution import resolve_desktop_audio_capture_target
 
-    settings = AppSettingsVNext(
-        intent=replace(
-            AppSettingsVNext().intent,
-            desktop_audio=replace(
-                AppSettingsVNext().intent.desktop_audio,
-                capture_target=CaptureTargetIntent.process_target(
-                    ProcessCaptureTargetIntent.discord(input_channel)
+    settings = with_telemetry_consent(
+        AppSettingsVNext(
+            intent=replace(
+                AppSettingsVNext().intent,
+                desktop_audio=replace(
+                    AppSettingsVNext().intent.desktop_audio,
+                    capture_target=CaptureTargetIntent.process_target(
+                        ProcessCaptureTargetIntent.discord(input_channel)
+                    ),
                 ),
             ),
-        )
+        ),
+        "allow",
+        identifier_factory=lambda: "capture-target-test-id",
     )
 
     serialized = serialization.to_dict(settings)
@@ -1592,7 +1600,12 @@ def test_vnext_settings_version_only_difference_does_not_backup_or_overwrite(
     serialization = _serialization()
     fixed_now = datetime(2026, 6, 9, 1, 2, 3, tzinfo=timezone.utc)
     path = tmp_path / "settings.json"
-    raw = serialization.to_dict(AppSettingsVNext())
+    settings = with_telemetry_consent(
+        AppSettingsVNext(),
+        "allow",
+        identifier_factory=lambda: "version-only-test-id",
+    )
+    raw = serialization.to_dict(settings)
     raw["settings_version"] = VNEXT_SETTINGS_SCHEMA_VERSION - 1
     raw["intent"]["ui"]["locale"] = "ja"
     original_bytes = _write_json_bytes(path, raw)
@@ -1615,7 +1628,12 @@ def test_facade_projection_failure_returns_explicit_result_without_overwrite(
     compat = _compat()
     serialization = _serialization()
     path = tmp_path / "settings.json"
-    raw = serialization.to_dict(AppSettingsVNext())
+    settings = with_telemetry_consent(
+        AppSettingsVNext(),
+        "allow",
+        identifier_factory=lambda: "projection-failure-test-id",
+    )
+    raw = serialization.to_dict(settings)
     raw["intent"]["osc"]["port"] = "not-an-int"
     original_bytes = _write_json_bytes(path, raw)
 

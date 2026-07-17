@@ -144,7 +144,11 @@ def normalize_managed_claim_sources(value: object) -> tuple[str, ...]:
 
 
 class STTProviderName(str, Enum):
+    LOCAL_CPU_AUTO = "local_cpu_auto"
+    LOCAL_PARAKEET_V3 = "local_parakeet_v3"
+    LOCAL_PARAKEET_JAPANESE = "local_parakeet_ja"
     LOCAL_QWEN = "local_qwen"
+    LOCAL_QWEN_GPU = "local_qwen_gpu"
     DEEPGRAM = "deepgram"
     QWEN_ASR = "qwen_asr"
     SONIOX = "soniox"
@@ -557,7 +561,7 @@ class AudioSettings:
 @dataclass(slots=True)
 class DesktopAudioSettings:
     output_device: str = ""
-    vad_speech_threshold: float = 0.6
+    vad_speech_threshold: float = 0.5
     vad_hangover_ms: int = DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS
     vad_pre_roll_ms: int = 500
     runtime_capture_target: object | None = field(default=None, repr=False, compare=False)
@@ -576,13 +580,14 @@ class DesktopAudioSettings:
 @dataclass(slots=True)
 class STTSettings:
     drain_timeout_s: float = 2.0
-    vad_speech_threshold: float = 0.5
+    vad_speech_threshold: float = 0.35
     low_latency_mode: bool = True
     low_latency_vad_hangover_ms: int = DEFAULT_LOW_LATENCY_VAD_HANGOVER_MS
     low_latency_merge_gap_ms: int = 600
     low_latency_spec_retry_max: int = 10
     custom_vocabulary_enabled: bool = True
     custom_terms: dict[str, list[str]] = field(default_factory=_default_custom_terms)
+    gpu_device_id: str = "auto"
 
     def validate(self) -> None:
         if self.drain_timeout_s <= 0:
@@ -599,6 +604,8 @@ class STTSettings:
             raise ValueError("custom_vocabulary_enabled must be a bool")
         if not isinstance(self.custom_terms, dict):
             raise ValueError("custom_terms must be a dict[str, list[str]]")
+        if not isinstance(self.gpu_device_id, str) or not self.gpu_device_id.strip():
+            raise ValueError("gpu_device_id must be a non-empty string")
         for language, terms in self.custom_terms.items():
             if not isinstance(language, str):
                 raise ValueError("custom_terms keys must be strings")
@@ -711,8 +718,8 @@ class OSCSettings:
 
 @dataclass(slots=True)
 class ProviderSettings:
-    stt: STTProviderName = STTProviderName.LOCAL_QWEN
-    peer_stt: STTProviderName = STTProviderName.LOCAL_QWEN
+    stt: STTProviderName = STTProviderName.LOCAL_CPU_AUTO
+    peer_stt: STTProviderName = STTProviderName.LOCAL_CPU_AUTO
     llm: LLMProviderName = LLMProviderName.OPENROUTER
 
     def validate(self) -> None:
@@ -1562,6 +1569,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "low_latency_spec_retry_max": settings.stt.low_latency_spec_retry_max,
             "custom_vocabulary_enabled": settings.stt.custom_vocabulary_enabled,
             "custom_terms": _parse_custom_terms(settings.stt.custom_terms),
+            "gpu_device_id": settings.stt.gpu_device_id.strip(),
         },
         "deepgram_stt": {
             "model": settings.deepgram_stt.model,
@@ -3745,9 +3753,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     raw_provider_data = data.get("provider")
     provider_data = raw_provider_data if isinstance(raw_provider_data, dict) else {}
     if raw_provider_data is None:
-        stt_provider_value = STTProviderName.LOCAL_QWEN.value
+        stt_provider_value = STTProviderName.LOCAL_CPU_AUTO.value
     elif isinstance(raw_provider_data, dict):
-        stt_provider_value = provider_data.get("stt", STTProviderName.LOCAL_QWEN.value)
+        stt_provider_value = provider_data.get("stt", STTProviderName.LOCAL_CPU_AUTO.value)
     else:
         stt_provider_value = STTProviderName.DEEPGRAM.value
     raw_peer_provider = (
@@ -3849,7 +3857,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 if desktop_audio_data.get("output_device") is not None
                 else ""
             ),
-            vad_speech_threshold=float(desktop_audio_data.get("vad_speech_threshold", 0.6)),
+            vad_speech_threshold=float(desktop_audio_data.get("vad_speech_threshold", 0.5)),
             vad_hangover_ms=int(
                 desktop_audio_data.get("vad_hangover_ms", DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS)
             ),
@@ -3907,7 +3915,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         ),
         stt=STTSettings(
             drain_timeout_s=float(stt_data.get("drain_timeout_s", 2.0)),
-            vad_speech_threshold=float(vad_threshold_raw) if vad_threshold_raw is not None else 0.5,
+            vad_speech_threshold=(
+                float(vad_threshold_raw) if vad_threshold_raw is not None else 0.35
+            ),
             low_latency_mode=bool(stt_data.get("low_latency_mode", False)),
             low_latency_vad_hangover_ms=int(
                 stt_data.get(
@@ -3919,6 +3929,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             low_latency_spec_retry_max=int(stt_data.get("low_latency_spec_retry_max", 10)),
             custom_vocabulary_enabled=custom_vocabulary_enabled,
             custom_terms=parsed_custom_terms,
+            gpu_device_id=str(stt_data.get("gpu_device_id", "auto")).strip() or "auto",
         ),
         deepgram_stt=DeepgramSTTSettings(
             model=str(data.get("deepgram_stt", {}).get("model", "nova-3")),

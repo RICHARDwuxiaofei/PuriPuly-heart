@@ -46,6 +46,15 @@ if not overlay_staged_path.exists():
         f"{overlay_staged_path}. Build and stage the Rust overlay before PyInstaller packaging."
     )
 
+gpu_worker_staged_path = (
+    Path("build").resolve() / "gpu_worker" / "PuriPulyHeartGpuWorker.exe"
+)
+if not gpu_worker_staged_path.exists():
+    raise SystemExit(
+        "Staged GPU worker executable not found at "
+        f"{gpu_worker_staged_path}. Build and stage the Rust GPU worker before PyInstaller packaging."
+    )
+
 from puripuly_heart.core.local_qwen_runtime import LOCAL_QWEN_PACKAGED_RUNTIME_RELATIVE_DIR
 from puripuly_heart.core.overlay.openvr_vendor import collect_vendored_openvr_runtime_binaries
 
@@ -143,6 +152,7 @@ proctap_runtime_binaries += collect_dynamic_libs("proctap", destdir="proctap")
 runtime_binaries += proctap_runtime_binaries
 runtime_binaries += collect_staged_soxr_runtime_binaries()
 runtime_binaries += collect_vendored_openvr_runtime_binaries()
+runtime_binaries += [(str(gpu_worker_staged_path), ".")]
 
 # Hidden imports for dynamic imports
 hiddenimports = [

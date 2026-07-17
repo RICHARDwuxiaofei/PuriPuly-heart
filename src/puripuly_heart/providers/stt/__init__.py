@@ -1,1 +1,6 @@
-__all__ = ["deepgram", "local_qwen_sherpa", "qwen_asr", "soniox"]
+__all__ = [
+    "deepgram",
+    "local_qwen_sherpa",
+    "qwen_asr",
+    "soniox",
+]

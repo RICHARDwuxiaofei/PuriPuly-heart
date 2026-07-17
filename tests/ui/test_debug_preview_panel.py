@@ -36,6 +36,7 @@ DEBUG_PREVIEW_I18N_KEYS = {
     "debug_preview.capture_fault_cycle",
     "debug_preview.stt_fault_cycle",
     "debug_preview.audio_fault_clear",
+    "debug_preview.gpu_state_cycle",
     "debug_preview.capture_fault_snackbar",
     "debug_preview.stt_fault_snackbar",
     "peer_translation_eula.body",
@@ -62,6 +63,7 @@ ACTION_KEYS = [
     "capture_fault_cycle",
     "stt_fault_cycle",
     "audio_fault_clear",
+    "gpu_state_cycle",
 ]
 
 
@@ -86,6 +88,7 @@ def _callbacks(seen: list[str]):
         "on_capture_fault_cycle": lambda: seen.append("capture_fault_cycle"),
         "on_stt_fault_cycle": lambda: seen.append("stt_fault_cycle"),
         "on_audio_fault_clear": lambda: seen.append("audio_fault_clear"),
+        "on_gpu_state_cycle": lambda: seen.append("gpu_state_cycle"),
     }
 
 
@@ -225,6 +228,7 @@ def test_debug_preview_panel_uses_text_button_label_api_when_available(
         "Cycle capture fault",
         "Cycle STT fault",
         "Clear audio faults",
+        "Cycle GPU state",
     ]
 
     monkeypatch.setattr(panel_module, "t", lambda key: f"label:{key}")
@@ -264,7 +268,7 @@ def test_debug_preview_i18n_keys_exist_in_all_locale_bundles() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     i18n_dir = repo_root / "src" / "puripuly_heart" / "data" / "i18n"
 
-    for locale in ("en.json", "ko.json", "zh-CN.json", "ja.json"):
+    for locale in ("en.json", "ko.json", "zh-CN.json", "ja.json", "ru.json"):
         bundle = json.loads((i18n_dir / locale).read_text(encoding="utf-8"))
         missing = DEBUG_PREVIEW_I18N_KEYS - set(bundle)
         assert not missing, f"{locale} missing {sorted(missing)}"

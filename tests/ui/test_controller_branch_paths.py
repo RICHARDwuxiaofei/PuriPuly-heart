@@ -112,6 +112,14 @@ from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 PEER_DISCLOSURE_KEY = "peer_translation.disclosure"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_relative_settings_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+
 class DummySecrets:
     def __init__(self, values: dict[str, str]):
         self._values = dict(values)
@@ -1143,7 +1151,9 @@ def _patch_init_pipeline_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[s
     monkeypatch.setattr(controller_module, "create_llm_provider", lambda *_a, **_k: "llm")
     monkeypatch.setattr(controller_module, "create_stt_backend", lambda *_a, **_k: "backend")
     monkeypatch.setattr(
-        controller_module, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend"
+        controller_module,
+        "create_peer_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "peer-backend",
     )
     monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "stt")
 
@@ -1264,7 +1274,11 @@ def test_create_peer_stt_provider_wires_fault_provider_with_debug_gate(
     controller._debug_stt_fault_profile = "stt_input_low_snr_vad_pass"
     config = controller._build_peer_runtime_config(controller.settings)
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
-    monkeypatch.setattr(controller_module, "create_peer_stt_backend", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        controller_module,
+        "create_peer_stt_backend_from_resolved_config",
+        lambda *_a, **_k: object(),
+    )
     monkeypatch.setattr(controller_module, "ManagedSTTProvider", fake_stt_provider)
 
     controller._create_peer_stt_provider_from_runtime_config(config, lambda _exc: None)
@@ -5226,8 +5240,21 @@ async def test_peer_local_qwen_download_completion_resumes_peer_runtime_after_re
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
     monkeypatch.setattr(
         controller_module,
-        "create_peer_stt_backend",
+        "create_peer_stt_backend_from_resolved_config",
         lambda *_a, **_k: SuccessfulPeerBackend(),
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_cpu_model_installs",
+        lambda model_ids, *_a, **_k: controller_module.LocalCPUInstallSnapshot(
+            models=tuple(
+                controller_module.LocalCPUModelInstall(
+                    model_id=model_id,
+                    state=controller_module.LocalSTTInstallState(status="ready"),
+                )
+                for model_id in model_ids
+            )
+        ),
     )
 
     await controller._run_local_stt_download(origin="manual")
@@ -5261,8 +5288,21 @@ async def test_refresh_peer_stt_runtime_does_not_create_disposable_local_qwen_pr
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
     monkeypatch.setattr(
         controller_module,
-        "create_peer_stt_backend",
+        "create_peer_stt_backend_from_resolved_config",
         lambda *_a, **_k: pytest.fail("disposable Peer backend probe created"),
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_cpu_model_installs",
+        lambda model_ids, *_a, **_k: controller_module.LocalCPUInstallSnapshot(
+            models=tuple(
+                controller_module.LocalCPUModelInstall(
+                    model_id=model_id,
+                    state=controller_module.LocalSTTInstallState(status="ready"),
+                )
+                for model_id in model_ids
+            )
+        ),
     )
     monkeypatch.setattr(
         GuiController,
@@ -8996,8 +9036,6 @@ async def test_overlay_start_failure_keeps_saved_preferences_but_effective_state
         "vendored_openvr_dll_missing",
         "packaged_openvr_dll_missing",
         "openvr_dll_hash_mismatch",
-        "steamvr_not_installed",
-        "steamvr_not_running",
         "hmd_not_found",
     ],
 )
@@ -9033,7 +9071,11 @@ async def test_overlay_runtime_disconnect_keeps_saved_preferences_without_auto_r
         GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
     )
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
-    monkeypatch.setattr(controller_module, "create_peer_stt_backend", lambda *_a, **_k: "peer")
+    monkeypatch.setattr(
+        controller_module,
+        "create_peer_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "peer",
+    )
     monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "peer-stt")
 
     controller = _make_controller(app=SimpleNamespace())
@@ -9070,7 +9112,11 @@ async def test_overlay_runtime_crash_keeps_saved_preferences_without_auto_restar
         GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
     )
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
-    monkeypatch.setattr(controller_module, "create_peer_stt_backend", lambda *_a, **_k: "peer")
+    monkeypatch.setattr(
+        controller_module,
+        "create_peer_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "peer",
+    )
     monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "peer-stt")
 
     controller = _make_controller(app=SimpleNamespace())

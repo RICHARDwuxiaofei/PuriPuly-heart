@@ -87,6 +87,11 @@ from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
+from puripuly_heart.providers.stt.local_cpu import LocalCPUAutoSTTBackend
+from puripuly_heart.providers.stt.local_parakeet_sherpa import (
+    LocalParakeetJapaneseSherpaSTTBackend,
+    LocalParakeetV3SherpaSTTBackend,
+)
 from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaSTTBackend
 from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
 from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
@@ -1572,6 +1577,67 @@ def test_create_stt_backend_from_resolved_local_qwen_uses_channel_language_and_n
     assert backend.sample_rate_hz == 16000
     assert backend.stream_label == "self"
     assert backend.language_hint == "Chinese"
+
+
+@pytest.mark.parametrize(
+    ("provider", "backend_type"),
+    [
+        ("local_parakeet_v3", LocalParakeetV3SherpaSTTBackend),
+        ("local_parakeet_ja", LocalParakeetJapaneseSherpaSTTBackend),
+    ],
+)
+def test_create_stt_backend_from_resolved_direct_parakeet_provider(
+    provider: str,
+    backend_type: type,
+) -> None:
+    resolved = _resolved_stt_config(
+        provider=provider,
+        source_language="ja",
+        model=None,
+        credential_reference=None,
+    )
+
+    backend = wiring_module.create_stt_backend_from_resolved_config(
+        resolved,
+        secrets=InMemorySecretStore(),
+    )
+
+    assert isinstance(backend, backend_type)
+    assert backend.sample_rate_hz == 16000
+    assert backend.stream_label == "self"
+
+
+def test_create_stt_backend_from_resolved_cpu_auto_provider() -> None:
+    resolved = _resolved_stt_config(
+        provider="local_cpu_auto",
+        source_language="ja",
+        model=None,
+        credential_reference=None,
+    )
+
+    backend = wiring_module.create_stt_backend_from_resolved_config(
+        resolved,
+        secrets=InMemorySecretStore(),
+    )
+
+    assert isinstance(backend, LocalCPUAutoSTTBackend)
+    assert backend.source_language == "ja"
+    assert backend.stream_label == "self"
+
+
+def test_create_stt_backend_from_resolved_gpu_provider_fails_without_cpu_fallback() -> None:
+    resolved = _resolved_stt_config(
+        provider="local_qwen_gpu",
+        source_language="ja",
+        model=None,
+        credential_reference=None,
+    )
+
+    with pytest.raises(RuntimeError, match="Vulkan ASR worker is not available"):
+        wiring_module.create_stt_backend_from_resolved_config(
+            resolved,
+            secrets=InMemorySecretStore(),
+        )
 
 
 def test_create_peer_stt_backend_from_resolved_uses_peer_dto_without_raw_self_settings() -> None:

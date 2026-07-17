@@ -181,12 +181,20 @@ CREDENTIAL_REF_QWEN_SINGAPORE: Final = "qwen:singapore"
 CREDENTIAL_REF_DEEPGRAM_STT: Final = "deepgram:stt"
 CREDENTIAL_REF_SONIOX_STT: Final = "soniox:stt"
 
+STT_PROVIDER_LOCAL_CPU_AUTO: Final = "local_cpu_auto"
+STT_PROVIDER_LOCAL_PARAKEET_V3: Final = "local_parakeet_v3"
+STT_PROVIDER_LOCAL_PARAKEET_JAPANESE: Final = "local_parakeet_ja"
 STT_PROVIDER_LOCAL_QWEN: Final = "local_qwen"
+STT_PROVIDER_LOCAL_QWEN_GPU: Final = "local_qwen_gpu"
 STT_PROVIDER_DEEPGRAM: Final = "deepgram"
 STT_PROVIDER_QWEN_ASR: Final = "qwen_asr"
 STT_PROVIDER_SONIOX: Final = "soniox"
 STT_PROVIDERS: Final[tuple[str, ...]] = (
+    STT_PROVIDER_LOCAL_CPU_AUTO,
+    STT_PROVIDER_LOCAL_PARAKEET_V3,
+    STT_PROVIDER_LOCAL_PARAKEET_JAPANESE,
     STT_PROVIDER_LOCAL_QWEN,
+    STT_PROVIDER_LOCAL_QWEN_GPU,
     STT_PROVIDER_DEEPGRAM,
     STT_PROVIDER_QWEN_ASR,
     STT_PROVIDER_SONIOX,
@@ -197,10 +205,10 @@ STT_DEFAULT_SAMPLE_RATE_HZ: Final = 16000
 STT_DEFAULT_CHANNELS: Final = 1
 STT_DEFAULT_RING_BUFFER_MS: Final = 500
 STT_DEFAULT_DRAIN_TIMEOUT_S: Final = 2.0
-STT_DEFAULT_VAD_SPEECH_THRESHOLD: Final = 0.5
+STT_DEFAULT_VAD_SPEECH_THRESHOLD: Final = 0.35
 STT_DEFAULT_VAD_HANGOVER_MS: Final = 500
 STT_DEFAULT_VAD_PRE_ROLL_MS: Final = 500
-PEER_STT_DEFAULT_VAD_SPEECH_THRESHOLD: Final = 0.6
+PEER_STT_DEFAULT_VAD_SPEECH_THRESHOLD: Final = 0.5
 PEER_STT_DEFAULT_VAD_HANGOVER_MS: Final = 500
 PEER_STT_DEFAULT_VAD_PRE_ROLL_MS: Final = 500
 STT_DEFAULT_LOW_LATENCY_ENABLED: Final = True
@@ -575,7 +583,7 @@ class DirectProviderRuntimeIntent:
 @dataclass(frozen=True, slots=True)
 class STTRuntimeIntent:
     channel: str = RUNTIME_CHANNEL_SELF
-    provider: str = STT_PROVIDER_LOCAL_QWEN
+    provider: str = STT_PROVIDER_LOCAL_CPU_AUTO
     source_language: str = STT_DEFAULT_SOURCE_LANGUAGE
     input_host_api: str | None = None
     input_device: str | None = None
@@ -611,7 +619,7 @@ class STTRuntimeIntent:
         provider = _normalize_allowed(
             self.provider,
             allowed=STT_PROVIDERS,
-            default=STT_PROVIDER_LOCAL_QWEN,
+            default=STT_PROVIDER_LOCAL_CPU_AUTO,
         )
         source_language = _normalize_string(
             self.source_language,
@@ -1372,7 +1380,11 @@ __all__ = [
     "STT_DEFAULT_VAD_PRE_ROLL_MS",
     "STT_DEFAULT_VAD_SPEECH_THRESHOLD",
     "STT_PROVIDER_DEEPGRAM",
+    "STT_PROVIDER_LOCAL_CPU_AUTO",
+    "STT_PROVIDER_LOCAL_PARAKEET_JAPANESE",
+    "STT_PROVIDER_LOCAL_PARAKEET_V3",
     "STT_PROVIDER_LOCAL_QWEN",
+    "STT_PROVIDER_LOCAL_QWEN_GPU",
     "STT_PROVIDER_QWEN_ASR",
     "STT_PROVIDER_SONIOX",
     "STT_PROVIDERS",

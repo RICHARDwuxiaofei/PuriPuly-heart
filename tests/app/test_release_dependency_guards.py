@@ -1056,6 +1056,14 @@ def test_shared_setup_action_installs_pinned_uv_and_uses_frozen_sync() -> None:
     assert "uv sync ${{ inputs.sync-args }} --frozen" in action
 
 
+def test_windows_gpu_worker_native_sources_compile_as_utf8() -> None:
+    cargo_config = (ROOT / ".cargo" / "config.toml").read_text(encoding="utf-8")
+
+    assert "CXXFLAGS_x86_64_pc_windows_msvc" in cargo_config
+    assert 'value = "/utf-8"' in cargo_config
+    assert "force = true" in cargo_config
+
+
 def test_installer_script_guards_against_repo_checkout_installs() -> None:
     script = (ROOT / "installer.iss").read_text(encoding="utf-8")
 
@@ -1084,7 +1092,11 @@ def test_installer_script_copies_full_packaged_app_tree_without_legacy_internal_
         'Source: "{#MyPackagedAppDir}\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs'
         in script
     )
-    assert 'Excludes: "{#MyAppExeName},{#MyOverlayExeName}"' in script
+    assert 'Excludes: "{#MyAppExeName},{#MyOverlayExeName},{#MyGpuWorkerExeName}"' in script
+    assert (
+        'Source: "{#MyPackagedAppDir}\\{#MyGpuWorkerExeName}"; DestDir: "{app}"; Flags: ignoreversion'
+        in script
+    )
     assert 'Source: "{#MyPackagedAppDir}\\_internal\\*"' not in script
 
 
@@ -1098,6 +1110,14 @@ def test_installer_script_uses_root_level_local_stt_manifest_path_for_packaged_l
     assert (
         '#define LocalSttManifestRelativePath "_internal\\puripuly_heart\\data\\models\\qwen3-asr-0.6b-int8-sherpa.manifest.json"'
         not in script
+    )
+    assert (
+        '#define ParakeetV3ManifestRelativePath "puripuly_heart\\data\\models\\parakeet-tdt-0.6b-v3-int8-sherpa.manifest.json"'
+        in script
+    )
+    assert (
+        '#define ParakeetJapaneseManifestRelativePath "puripuly_heart\\data\\models\\parakeet-tdt-ctc-0.6b-ja-int8-sherpa.manifest.json"'
+        in script
     )
 
 
@@ -1125,19 +1145,22 @@ def test_installer_script_uses_inno_managed_local_stt_download() -> None:
     script = (ROOT / "installer.iss").read_text(encoding="utf-8")
 
     assert "LocalSttSourcePage" in script
-    assert "LocalSttReinstallCheckBox" in script
+    assert "LocalSttReinstallCheckBox" not in script
+    assert "LocalSttReinstall=" not in script
     assert "CreateDownloadPage" in script
     assert "ASR model" in script
     assert "Local Speech Model" not in script
     assert "local speech model" not in script
-    assert "DownloadPage.Add" in script
-    assert "DownloadPage.Download" in script
+    assert "DownloadTemporaryFile" in script
+    assert "DownloadPage.Add" not in script
+    assert "DownloadPage.Download" not in script
     assert "GetSHA256OfFile" in script
     assert "FileSize64" in script
+    assert "GetSpaceOnDisk64" in script
     assert "ValidateLocalSttInstalledManifest" in script
     assert "selected_revision" in script
-    assert "DownloadLocalSttSource('huggingface'" in script
-    assert "DownloadLocalSttSource('modelscope'" in script
+    assert "DownloadAndInstallLocalSttSource('huggingface'" in script
+    assert "DownloadAndInstallLocalSttSource('modelscope'" in script
     assert "function RunLocalSttModelInstall(): Boolean;" in script
     assert "if not RunLocalSttModelInstall() then begin" in script
     assert "continuing app install without bundled ASR model" in script
@@ -1153,44 +1176,98 @@ def test_installer_script_uses_concise_local_stt_user_copy_across_locales() -> N
     script = (ROOT / "installer.iss").read_text(encoding="utf-8")
 
     expected_messages = {
-        "english.LocalSttPageDescription": "Download the built-in ASR model.",
-        "english.LocalSttReinstall": "Redownload ASR model",
+        "english.LocalSttChecking": "Checking installed ASR models...",
+        "english.LocalSttDownloadSize": "ASR models will be downloaded.%nInstallation requires %1 of disk space.",
+        "english.LocalSttNoDownload": "All ASR models are installed.",
         "english.LocalSttDownloadDescription": "",
-        "korean.LocalSttPageDescription": "내장 ASR 모델을 다운로드 합니다.",
-        "korean.LocalSttReinstall": "ASR 모델 재다운로드",
+        "korean.LocalSttChecking": "설치된 ASR 모델을 확인하는 중...",
+        "korean.LocalSttDownloadSize": "ASR 모델을 다운로드합니다.%n설치에 필요한 용량은 %1입니다.",
+        "korean.LocalSttNoDownload": "ASR 모델이 모두 설치되어있습니다.",
         "korean.LocalSttDownloadDescription": "",
-        "japanese.LocalSttPageDescription": "内蔵ASRモデルをダウンロードします。",
-        "japanese.LocalSttReinstall": "ASRモデルを再ダウンロード",
+        "japanese.LocalSttChecking": "インストール済みのASRモデルを確認しています...",
+        "japanese.LocalSttDownloadSize": "ASRモデルをダウンロードします。%nインストールには%1の空き容量が必要です。",
+        "japanese.LocalSttNoDownload": "ASRモデルはすべてインストール済みです。",
         "japanese.LocalSttDownloadDescription": "",
-        "chinesesimplified.LocalSttPageDescription": "下载内置 ASR 模型。",
-        "chinesesimplified.LocalSttReinstall": "重新下载 ASR 模型",
+        "chinesesimplified.LocalSttChecking": "正在检查已安装的 ASR 模型...",
+        "chinesesimplified.LocalSttDownloadSize": "将下载 ASR 模型。%n安装需要 %1 的空间。",
+        "chinesesimplified.LocalSttNoDownload": "ASR 模型均已安装。",
         "chinesesimplified.LocalSttDownloadDescription": "",
-        "chinesetraditional.LocalSttPageDescription": "下載內建 ASR 模型。",
-        "chinesetraditional.LocalSttReinstall": "重新下載 ASR 模型",
+        "chinesetraditional.LocalSttChecking": "正在檢查已安裝的 ASR 模型...",
+        "chinesetraditional.LocalSttDownloadSize": "將下載 ASR 模型。%n安裝需要 %1 的空間。",
+        "chinesetraditional.LocalSttNoDownload": "ASR 模型均已安裝。",
         "chinesetraditional.LocalSttDownloadDescription": "",
     }
 
     for key, value in expected_messages.items():
         assert f"{key}={value}\n" in script
 
+    assert "LocalSttPageDescription" not in script
     assert "Hugging Face is tried first; ModelScope is used automatically if needed." not in script
     assert "먼저 Hugging Face를 시도하고, 필요하면 ModelScope로 자동 전환합니다." not in script
 
 
+def test_installer_reports_required_model_bytes_and_keeps_one_continuous_progress_page() -> None:
+    script = (ROOT / "installer.iss").read_text(encoding="utf-8")
+
+    assert "QwenDownloadSize = 987664355;" in script
+    assert "ParakeetV3DownloadSize = 670478772;" in script
+    assert "ParakeetJapaneseDownloadSize = 655571161;" in script
+    assert "LocalSttRequiredDownloadBytes" in script
+    assert "procedure CompleteLocalSttDownloadSegment" in script
+    assert script.count("DownloadPage.Show;") == 1
+    assert script.count("DownloadPage.Hide;") == 1
+    assert "DownloadPage.SetProgress" in script
+    assert "LocalSttDisplayedDownloadBytes" in script
+
+
+def test_installer_skips_only_strongly_valid_models_and_checks_both_storage_locations() -> None:
+    script = (ROOT / "installer.iss").read_text(encoding="utf-8")
+
+    assert "QwenNeedsDownload := not EnsureExistingLocalSttInstall" in script
+    assert "ParakeetV3NeedsDownload := not EnsureExistingParakeetV3Install" in script
+    assert "ParakeetJapaneseNeedsDownload := not EnsureExistingParakeetJapaneseInstall" in script
+    assert "GetSHA256OfFile" in script
+    assert "FileSize64" in script
+    assert "ValidateLocalSttInstalledManifest" in script
+    assert "Repaired local STT installed manifest without redownloading model assets" in script
+    assert "GetSpaceOnDisk64(TempPath" in script
+    assert "GetSpaceOnDisk64(ModelPath" in script
+    assert "LocalSttRequiredDownloadBytes * 2" in script
+
+
 def test_installer_script_embeds_local_stt_manifest_assets_for_inno_download() -> None:
     script = (ROOT / "installer.iss").read_text(encoding="utf-8")
-    manifest = json.loads(
-        (
-            ROOT / "src/puripuly_heart/data/models/qwen3-asr-0.6b-int8-sherpa.manifest.json"
-        ).read_text(encoding="utf-8")
-    )
 
     assert "HuggingFaceLocalSttUrl" in script
     assert "ModelScopeLocalSttUrl" in script
-    for asset in manifest["files"]:
-        assert asset["relative_path"] in script
-        assert asset["sha256"] in script
-        assert str(asset["size_bytes"]) in script
+    for manifest_path in sorted((ROOT / "src/puripuly_heart/data/models").glob("*.manifest.json")):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest["engine"] == "transcribe.cpp-vulkan":
+            assert manifest["model_id"] not in script
+            continue
+        assert manifest["model_id"] in script
+        assert manifest["install_dirname"] in script
+        for source in manifest["sources"].values():
+            assert source["revision"] in script
+        for asset in manifest["files"]:
+            assert asset["relative_path"] in script
+            assert asset["sha256"] in script
+            assert str(asset["size_bytes"]) in script
+
+
+def test_installer_attempts_all_required_cpu_models_and_continues_on_partial_failure() -> None:
+    script = (ROOT / "installer.iss").read_text(encoding="utf-8")
+
+    assert "function RunRequiredCpuLocalSttModelInstalls(): Boolean;" in script
+    parakeet_v3_call = "ParakeetV3Installed := RunParakeetV3LocalSttModelInstall();"
+    parakeet_ja_call = "ParakeetJapaneseInstalled := RunParakeetJapaneseLocalSttModelInstall();"
+    qwen_call = "if not RunLocalSttModelInstall() then begin"
+    assert script.index(parakeet_v3_call) < script.index(parakeet_ja_call) < script.index(qwen_call)
+    assert (
+        "Result := ParakeetV3Installed and ParakeetJapaneseInstalled and QwenInstalled;" in script
+    )
+    assert "if not RunRequiredCpuLocalSttModelInstalls() then begin" in script
+    assert "continuing app install without bundled ASR model" in script
 
 
 def test_installer_script_supports_local_stt_appdata_override_for_smoke_runs() -> None:

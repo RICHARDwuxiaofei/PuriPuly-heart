@@ -116,7 +116,7 @@ def test_desktop_audio_settings_round_trip_with_defaults() -> None:
     settings = from_dict({})
 
     assert settings.desktop_audio.output_device == ""
-    assert settings.desktop_audio.vad_speech_threshold == 0.6
+    assert settings.desktop_audio.vad_speech_threshold == 0.5
     assert settings.desktop_audio.vad_hangover_ms == 500
     assert settings.desktop_audio.vad_pre_roll_ms == 500
 

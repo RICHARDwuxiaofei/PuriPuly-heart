@@ -12,6 +12,7 @@ import flet as ft
 
 from puripuly_heart.config.settings import (
     AppSettings,
+    STTProviderName,
     TranslationConnection,
     TranslationModel,
     materialize_translation_settings,
@@ -75,6 +76,8 @@ class Flet028SnackBarPage(DummyPage):
 
 def _settings_for_connection(connection: TranslationConnection) -> AppSettings:
     settings = AppSettings()
+    settings.provider.stt = STTProviderName.DEEPGRAM
+    settings.provider.peer_stt = STTProviderName.DEEPGRAM
     settings.translation.connection = connection
     if connection == TranslationConnection.MANAGED_CHINA:
         settings.translation.model = TranslationModel.DEEPSEEK_V4_FLASH
@@ -870,6 +873,7 @@ def test_debug_preview_panel_includes_github_star_snackbar_action() -> None:
         on_capture_fault_cycle=noop,
         on_stt_fault_cycle=noop,
         on_audio_fault_clear=noop,
+        on_gpu_state_cycle=noop,
         on_github_star_snackbar=lambda: invoked.append("github-star"),
         on_telemetry_consent=noop,
     )

@@ -76,6 +76,13 @@ def build_parser() -> argparse.ArgumentParser:
         "soxr-runtime-check",
         help="Verify the packaged soxr runtime contract and smoke resample",
     )
+    local_cpu_real_model_check = sub.add_parser(
+        "local-cpu-real-model-check",
+        help="Run strict real-model checks for all direct local CPU ASR backends",
+    )
+    local_cpu_real_model_check.add_argument("--model-root", type=Path, required=True)
+    local_cpu_real_model_check.add_argument("--audio-root", type=Path, required=True)
+    local_cpu_real_model_check.add_argument("--report", type=Path, required=True)
     run_gui = sub.add_parser("run-gui", help="Run the Graphical User Interface (Flet)")
     run_gui.add_argument(
         "--debug-ui-preview",
@@ -99,6 +106,26 @@ def run_soxr_runtime_check() -> int:
     return run()
 
 
+def run_local_cpu_real_model_check(
+    *,
+    model_root: Path,
+    audio_root: Path,
+    report_path: Path,
+) -> int:
+    from puripuly_heart.release_evidence.local_cpu_real_decode import main as run
+
+    return run(
+        [
+            "--model-root",
+            str(model_root),
+            "--audio-root",
+            str(audio_root),
+            "--report",
+            str(report_path),
+        ]
+    )
+
+
 def _run_gui(
     config_path: Path,
     *,
@@ -107,8 +134,11 @@ def _run_gui(
 ) -> int:
     import flet as ft
 
+    from puripuly_heart.app.adapters.vrchat_osc_presence import PsutilVrchatOscPresenceAdapter
     from puripuly_heart.ui.app import main_gui
     from puripuly_heart.ui.fonts import assets_dir
+
+    vrchat_osc_presence = PsutilVrchatOscPresenceAdapter()
 
     async def _target(page: ft.Page):
         gui_kwargs = {
@@ -120,6 +150,10 @@ def _run_gui(
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         ):
             gui_kwargs["runtime_logging_sinks"] = runtime_logging_sinks
+        if "vrchat_osc_presence" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        ):
+            gui_kwargs["vrchat_osc_presence"] = vrchat_osc_presence
         return await main_gui(page, **gui_kwargs)
 
     ft.app(target=_target, assets_dir=str(assets_dir()))
@@ -232,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         return _verify_desktop_overlay_repro(output_dir=args.output_dir)
 
     settings_config_path, explicit_settings_config = _settings_config_path(args)
+    debug_ui_preview = bool(getattr(args, "debug_ui_preview", False))
     logging_sinks = configure_main_logging(
         log_dir=(
             settings_config_path.parent
@@ -258,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run-gui":
             return _run_gui(
                 args.config,
-                debug_ui_preview=bool(getattr(args, "debug_ui_preview", False)),
+                debug_ui_preview=debug_ui_preview,
                 runtime_logging_sinks=logging_sinks,
             )
 
@@ -268,11 +303,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "soxr-runtime-check":
             return run_soxr_runtime_check()
 
+        if args.command == "local-cpu-real-model-check":
+            return run_local_cpu_real_model_check(
+                model_root=args.model_root,
+                audio_root=args.audio_root,
+                report_path=args.report,
+            )
+
         # Default: run GUI when no command specified (e.g., double-clicking EXE)
         if args.command is None:
             return _run_gui(
                 args.config,
-                debug_ui_preview=bool(getattr(args, "debug_ui_preview", False)),
+                debug_ui_preview=debug_ui_preview,
                 runtime_logging_sinks=logging_sinks,
             )
 

@@ -25,6 +25,17 @@ DASHBOARD_POWER_BUTTON_ICON_SIZE = 80
 DASHBOARD_POWER_BUTTON_LABEL_SIZE = 32
 OVERLAY_FAILURE_REASON_ONLY_NOTICE_REASONS = {"steamvr_not_running"}
 PEER_SOURCE_MODE_SONIOX_AUTO = "soniox_auto"
+_LOCAL_STT_MODEL_LABEL_KEYS = {
+    "parakeet-tdt-0.6b-v3-int8-sherpa": "local_stt.model.parakeet-tdt-0.6b-v3-int8-sherpa",
+    "parakeet-tdt-ctc-0.6b-ja-int8-sherpa": "local_stt.model.parakeet-tdt-ctc-0.6b-ja-int8-sherpa",
+    "qwen3-asr-0.6b-int8-sherpa": "local_stt.model.qwen3-asr-0.6b-int8-sherpa",
+}
+_LOCAL_STT_TARGETED_NOTICE_KEYS = {
+    "missing": "dashboard.local_stt_notice_missing_model",
+    "invalid": "dashboard.local_stt_notice_invalid_model",
+    "downloading": "dashboard.local_stt_notice_downloading_model",
+    "download_failed": "dashboard.local_stt_notice_download_failed_model",
+}
 
 
 class DashboardView(ft.Column):
@@ -52,6 +63,7 @@ class DashboardView(ft.Column):
         self._managed_auth_pending = False
         self._local_stt_notice_status: str | None = None
         self._local_stt_notice_percent: int | None = None
+        self._local_stt_notice_model_id: str | None = None
         self._vrchat_osc_notice_active = False
         self._overlay_session_fallback_notice_active = False
         self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
@@ -253,7 +265,12 @@ class DashboardView(ft.Column):
         self._sync_notice()
 
     def _restore_status_display(self) -> None:
-        status = self._connection_status or "disconnected"
+        status = getattr(self, "_connection_status", "disconnected") or "disconnected"
+        if not hasattr(self, "display_card"):
+            self._connection_status = status
+            self.is_connected = status == "connected"
+            self.set_display_text("")
+            return
         self.set_status(status)
 
     def _dismiss_api_key_warning_display(self) -> None:
@@ -647,6 +664,10 @@ class DashboardView(ft.Column):
 
         self._sync_notice()
 
+    def set_local_stt_notice_model(self, model_id: str | None) -> None:
+        self._local_stt_notice_model_id = model_id
+        self._sync_notice()
+
     def set_vrchat_osc_notice(self, active: bool) -> None:
         self._vrchat_osc_notice_active = bool(active)
         self._sync_notice()
@@ -679,14 +700,33 @@ class DashboardView(ft.Column):
         notice_key = notice_key_by_status.get(status)
         if notice_key is None:
             return None, None
-        notice_text = (
-            t(
-                "dashboard.local_stt_notice_downloading_progress",
-                percent=self._local_stt_notice_percent,
+        model_id = self._local_stt_notice_model_id
+        if model_id is not None and status in {
+            "missing",
+            "invalid",
+            "downloading",
+            "download_failed",
+        }:
+            model = t(_LOCAL_STT_MODEL_LABEL_KEYS.get(model_id, ""), default=model_id)
+            targeted_key = _LOCAL_STT_TARGETED_NOTICE_KEYS[status]
+            notice_text = (
+                t(
+                    "dashboard.local_stt_notice_downloading_progress_model",
+                    model=model,
+                    percent=self._local_stt_notice_percent,
+                )
+                if status == "downloading" and self._local_stt_notice_percent is not None
+                else t(targeted_key, model=model)
             )
-            if status == "downloading" and self._local_stt_notice_percent is not None
-            else t(notice_key)
-        )
+        else:
+            notice_text = (
+                t(
+                    "dashboard.local_stt_notice_downloading_progress",
+                    percent=self._local_stt_notice_percent,
+                )
+                if status == "downloading" and self._local_stt_notice_percent is not None
+                else t(notice_key)
+            )
         return notice_text, tone_by_status.get(status)
 
     def _current_overlay_failure_notice(self) -> tuple[str | None, str | None]:

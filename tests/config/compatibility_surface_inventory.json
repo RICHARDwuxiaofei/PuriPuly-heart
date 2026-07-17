@@ -941,7 +941,8 @@
       "surface": "puripuly_heart.app.adapters provider verifier adapter",
       "classification": "internal_adapter_implementation_contract",
       "modules": [
-        "puripuly_heart.app.adapters.provider_verifier"
+        "puripuly_heart.app.adapters.provider_verifier",
+        "puripuly_heart.app.adapters.gpu_worker_process"
       ],
       "rationale": "ProviderVerifierAdapter is an app adapter implementation of the provider-verifier port; the adapter class is importable for wiring/tests but is not an external public compatibility facade."
     },
@@ -1006,7 +1007,8 @@
       "surface": "provider STT local decode coordinator",
       "classification": "internal_provider_implementation_modules",
       "modules": [
-        "puripuly_heart.providers.stt.local_decode"
+        "puripuly_heart.providers.stt.local_decode",
+        "puripuly_heart.providers.stt.local_gpu"
       ],
       "rationale": "The local decode coordinator owns provider-internal FIFO inference scheduling and lifecycle behavior. It is shared implementation infrastructure for local STT adapters, not an external public compatibility facade."
     },

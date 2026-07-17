@@ -150,6 +150,7 @@ CURRENT_USER_INTENT_DESTINATIONS = {
     "stt.custom_terms": "intent.stt.custom_terms",
     "stt.custom_vocabulary_enabled": "intent.stt.custom_vocabulary_enabled",
     "stt.drain_timeout_s": "intent.stt.drain_timeout_s",
+    "stt.gpu_device_id": "intent.stt.gpu_device_id",
     "stt.low_latency_merge_gap_ms": "intent.stt.low_latency_merge_gap_ms",
     "stt.low_latency_mode": "intent.stt.low_latency_mode",
     "stt.low_latency_spec_retry_max": "intent.stt.low_latency_spec_retry_max",
@@ -365,6 +366,7 @@ def maximal_v24_settings_fixture() -> dict[str, Any]:
     settings.stt.low_latency_spec_retry_max = 5
     settings.stt.custom_vocabulary_enabled = False
     settings.stt.custom_terms = {"en": ["fixture-term"], "ja": ["フィクスチャ"]}
+    settings.stt.gpu_device_id = "vulkan-device-fixture"
     settings.deepgram_stt.model = "nova-2"
     settings.qwen_asr_stt.model = "qwen-asr-fixture"
     settings.soniox_stt.model = "stt-rt-fixture"

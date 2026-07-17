@@ -32,12 +32,12 @@ LEGACY_TASK_CREATION_ALLOWLIST = Counter(
         ("src/puripuly_heart/core/overlay/presenter.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/overlay/process.py", ASYNCIO_CREATE_TASK): 2,
         ("src/puripuly_heart/providers/stt/soniox.py", ASYNCIO_CREATE_TASK): 3,
-        ("src/puripuly_heart/ui/app.py", RUN_TASK): 15,
+        ("src/puripuly_heart/ui/app.py", RUN_TASK): 17,
         ("src/puripuly_heart/ui/components/settings/api_key_field.py", RUN_TASK): 1,
         ("src/puripuly_heart/ui/views/settings.py", RUN_TASK): 1,
-        ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 3,
+        ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 4,
         ("src/puripuly_heart/ui/controller.py", LOOP_CREATE_TASK): 5,
-        ("src/puripuly_heart/ui/controller.py", BARE_RUN_TASK): 5,
+        ("src/puripuly_heart/ui/controller.py", BARE_RUN_TASK): 6,
         ("src/puripuly_heart/ui/desktop_overlay.py", ASYNCIO_CREATE_TASK): 11,
         ("src/puripuly_heart/ui/desktop_overlay.py", BARE_RUN_TASK): 1,
         ("src/puripuly_heart/core/osc/receiver.py", LOOP_CREATE_TASK): 1,
@@ -60,6 +60,8 @@ NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST = Counter(
         ("src/puripuly_heart/core/runtime/local_stt_download.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/core/runtime/mic_test.py", ASYNCIO_CREATE_TASK): 2,
         ("src/puripuly_heart/core/runtime/receiver.py", ASYNCIO_CREATE_TASK): 1,
+        ("src/puripuly_heart/core/runtime/gpu_asr.py", ASYNCIO_CREATE_TASK): 3,
+        ("src/puripuly_heart/providers/stt/local_gpu.py", ASYNCIO_CREATE_TASK): 1,
         ("src/puripuly_heart/ui/desktop_overlay_repro.py", ASYNCIO_CREATE_TASK): 3,
     }
 )
@@ -100,7 +102,7 @@ TASK_CREATION_ALLOWLIST_RATIONALES = {
     (
         "src/puripuly_heart/ui/app.py",
         RUN_TASK,
-    ): "Flet UI callbacks, including peer-auto activation, must use page.run_task for async controller/service calls; each call remains UI-bound, not a background owner bypass",
+    ): "Flet UI callbacks, including peer-auto and GPU install/retry activation, must use page.run_task for async controller/service calls; each call remains UI-bound, not a background owner bypass",
     (
         "src/puripuly_heart/ui/components/settings/api_key_field.py",
         RUN_TASK,
@@ -112,7 +114,7 @@ TASK_CREATION_ALLOWLIST_RATIONALES = {
     (
         "src/puripuly_heart/ui/controller.py",
         ASYNCIO_CREATE_TASK,
-    ): "controller has exactly three bounded UI task handles for status refresh, desktop-bounds persistence, and STT switching",
+    ): "controller has exactly four bounded UI task handles for status refresh, desktop-bounds persistence, STT switching, and awaited GPU discovery",
     (
         "src/puripuly_heart/ui/controller.py",
         LOOP_CREATE_TASK,
@@ -120,7 +122,7 @@ TASK_CREATION_ALLOWLIST_RATIONALES = {
     (
         "src/puripuly_heart/ui/controller.py",
         BARE_RUN_TASK,
-    ): "controller has exactly five injected UI task-runner call sites for overlay/calibration/runtime callback scheduling",
+    ): "controller has exactly six injected UI task-runner call sites for overlay, calibration, GPU discovery, and runtime callback scheduling",
     (
         "src/puripuly_heart/ui/desktop_overlay.py",
         ASYNCIO_CREATE_TASK,
@@ -177,6 +179,14 @@ TASK_CREATION_ALLOWLIST_RATIONALES = {
         "src/puripuly_heart/core/runtime/receiver.py",
         ASYNCIO_CREATE_TASK,
     ): "VrcMicReceiverRuntime is the named lifecycle owner for receiver tasks",
+    (
+        "src/puripuly_heart/core/runtime/gpu_asr.py",
+        ASYNCIO_CREATE_TASK,
+    ): "SharedGpuASRRuntime owns bounded cancellation and close wait tasks and always cancels or gathers them before returning",
+    (
+        "src/puripuly_heart/providers/stt/local_gpu.py",
+        ASYNCIO_CREATE_TASK,
+    ): "Local GPU STT sessions own transcription tasks in an explicit set and cancel or gather every task during stop and close",
     (
         "src/puripuly_heart/ui/desktop_overlay_repro.py",
         ASYNCIO_CREATE_TASK,

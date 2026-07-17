@@ -39,6 +39,7 @@ class _ProviderRuntimeApplyPlan:
     should_rebuild_llm: bool
     should_refresh_peer: bool
     should_refresh_self_stt: bool
+    coordinated_gpu_restart: bool = False
 
 
 class ControllerRuntimeApplyBoundary(Protocol):

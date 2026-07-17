@@ -368,7 +368,7 @@ def test_vad_gating_emits_diagnostic_event_summaries() -> None:
         gating.process_chunk(chunk_samples(float(i + 1), n=gating.chunk_samples))
 
     assert any("[AudioDiag][VAD][self] event=SpeechStart" in line for line in lines)
-    assert any("prob=0.900" in line and "threshold=0.5" in line for line in lines)
+    assert any("prob=0.900" in line and "threshold=0.35" in line for line in lines)
     assert any("[AudioDiag][VAD][self] event=SpeechEnd" in line for line in lines)
 
 

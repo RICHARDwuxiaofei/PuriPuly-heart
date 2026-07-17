@@ -685,7 +685,7 @@ async def test_local_qwen_backend_runtime_validator_runs_only_until_recognizer_i
 
 
 @pytest.mark.asyncio
-async def test_local_qwen_backend_revalidates_runtime_assets_after_close(
+async def test_local_qwen_backend_close_is_terminal_and_replacement_revalidates_assets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[Path] = []
@@ -701,7 +701,14 @@ async def test_local_qwen_backend_revalidates_runtime_assets_after_close(
 
     await backend.open_session()
     await backend.close()
-    await backend.open_session()
+    with pytest.raises(RuntimeError, match="closed"):
+        await backend.open_session()
+
+    replacement = LocalQwenSherpaSTTBackend(
+        model_dir=Path("/models/qwen"),
+        sample_rate_hz=16000,
+    )
+    await replacement.open_session()
 
     assert calls == [Path("/models/qwen"), Path("/models/qwen")]
 
@@ -1364,6 +1371,87 @@ async def test_local_qwen_close_cancels_and_awaits_decode_worker(
     events = session.events()
     with pytest.raises(StopAsyncIteration):
         await events.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_session_close_waits_for_blocking_native_decode_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_started = threading.Event()
+    native_release = threading.Event()
+    native_finished = threading.Event()
+
+    def blocking_decode(
+        self: LocalQwenSherpaSTTBackend,
+        recognizer: object,
+        samples_f32: np.ndarray,
+    ) -> str:
+        _ = self, recognizer, samples_f32
+        native_started.set()
+        native_release.wait(timeout=2.0)
+        native_finished.set()
+        return "late native result"
+
+    backend = LocalQwenSherpaSTTBackend(model_dir=Path("/models/qwen"))
+    backend._recognizer = object()
+    monkeypatch.setattr(LocalQwenSherpaSTTBackend, "_decode_f32_sync", blocking_decode)
+    session = await backend.open_session()
+    await session.send_audio_f32(np.ones(160, dtype=np.float32))
+    await session.on_speech_end()
+    assert await asyncio.to_thread(native_started.wait, 1.0)
+
+    close_task = asyncio.create_task(session.close())
+    await asyncio.sleep(0.02)
+
+    assert close_task.done() is False
+    assert native_finished.is_set() is False
+    native_release.set()
+    await asyncio.wait_for(close_task, timeout=1.0)
+
+    assert native_finished.is_set() is True
+    events = session.events()
+    with pytest.raises(StopAsyncIteration):
+        await events.__anext__()
+    await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_provider_close_waits_for_direct_blocking_native_decode_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_started = threading.Event()
+    native_release = threading.Event()
+    native_finished = threading.Event()
+
+    def blocking_decode(
+        self: LocalQwenSherpaSTTBackend,
+        recognizer: object,
+        samples_f32: np.ndarray,
+    ) -> str:
+        _ = self, recognizer, samples_f32
+        native_started.set()
+        native_release.wait(timeout=2.0)
+        native_finished.set()
+        return "native result"
+
+    backend = LocalQwenSherpaSTTBackend(model_dir=Path("/models/qwen"))
+    backend._recognizer = object()
+    monkeypatch.setattr(LocalQwenSherpaSTTBackend, "_decode_f32_sync", blocking_decode)
+    decode_task = asyncio.create_task(backend.decode_f32(np.ones(160, dtype=np.float32)))
+    assert await asyncio.to_thread(native_started.wait, 1.0)
+
+    close_task = asyncio.create_task(backend.close())
+    await asyncio.sleep(0.02)
+
+    assert close_task.done() is False
+    assert native_finished.is_set() is False
+    native_release.set()
+    assert await asyncio.wait_for(decode_task, timeout=1.0) == "native result"
+    await asyncio.wait_for(close_task, timeout=1.0)
+
+    assert native_finished.is_set() is True
+    with pytest.raises(RuntimeError, match="closed"):
+        await backend.decode_f32(np.ones(160, dtype=np.float32))
 
 
 @pytest.mark.asyncio

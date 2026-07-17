@@ -1,7 +1,7 @@
 ---
 id: PRD-ISSUE-20-LOCAL-ASR-BACKENDS-001
 status: reviewed
-source: .agents/specs/prd/drafts/issue-20-local-asr-backends.source.r1.md
+source: .agents/specs/prd/drafts/issue-20-local-asr-backends.source.r2.md
 baseline_ref: vnext@2a2a35af442c2b6414e0d7ff22b42c9a4b57c427
 integration_target: vnext
 document_review_verdict: ready
@@ -43,7 +43,7 @@ On supported Windows x64 systems, PuriPuly provides a complete required set of i
 ## Platform and environment
 
 - Production support is Windows 10 and Windows 11 on x64 hardware.
-- Production GPU evidence requires a physical Vulkan-capable device and the packaged Windows composition; low-memory coexistence evidence includes a representative VRChat session.
+- Production GPU evidence requires a physical Vulkan-capable device and the packaged Windows composition; retained representative VRChat evidence verifies physical coexistence, while automated low-reported-VRAM controls verify advisory low-memory behavior.
 - Automated Python evidence uses repository `.venv` on Windows.
 - Native worker and overlay evidence uses the Windows Rust build environment.
 - Linux/WSL with `.venv-wsl` may provide development and non-production helper evidence but cannot replace required Windows evidence.
@@ -260,6 +260,7 @@ Provider replacement, channel disablement, and application shutdown await provid
 - Shared GPU inference uses non-preemptive global `speech_end` FIFO without self or peer priority.
 - Existing VAD duration behavior is preserved without a GPU-specific utterance cap.
 - CPU and Vulkan attempts expose backend identity, resolved model, and decode-only RTF diagnostics.
+- AC-009 does not require a new low-available-VRAM VRChat session; retained physical coexistence evidence plus automated low-reported-VRAM controls and deterministic OOM injection verify the unchanged advisory-VRAM and failure behavior.
 
 # Open Product Decisions
 
@@ -277,7 +278,7 @@ None.
 | AC-006 | REQ-008, REQ-016 | automated + temporal + manual UI | Packaged Windows application with fast, delayed-beyond-two-seconds, failed device-discovery, absent-model, unsupported-capability, and activation-failure controls | The first frame remains interactive, delayed discovery shows pending rather than failure, no model loads during discovery, and activation presents observably distinct missing-installation, unsupported-capability, validation, load, warmup, ready, and actionable activation-failure states. |
 | AC-007 | REQ-009, REQ-011, INV-P-003, INV-A-002, INV-A-003, INV-A-005, INV-A-007 | automated + production-composition + fault-injection | Packaged Windows application, physical Vulkan device, Windows worker build, and injected load, warmup, OOM, device-loss, backend, and worker-crash failures | GPU discovery and `transcribe.cpp` strict-Vulkan model operations occur only in `PuriPulyHeartGpuWorker.exe`; authenticated local supervision reports lifecycle outcomes; every injected failure stops only GPU channels, retains GPU selection and the installed model, exposes manual retry, releases failed worker resources, and performs no CPU fallback or automatic retry while the application, CPU ASR, and overlay remain usable and diagnostics contain no prohibited content. |
 | AC-008 | REQ-010, INV-P-005, INV-A-003, INV-A-004 | automated + temporal + process/memory observation | Packaged Windows application with saved-but-inactive, self-only, peer-only, both-channel, and shutdown scenarios on a physical Vulkan device | A saved inactive GPU selection starts no worker and loads no model; one worker and one model are resident while any GPU channel is active; disabling one of two consumers retains them; disabling the last rejects and discards new or pending work and cancels active work; bounded cancellation escalates to process termination; VRAM is released; and later activation performs a fresh load and warmup. |
-| AC-009 | REQ-011, INV-P-003, INV-P-004 | production-composition + manual + fault-injection | Supported Windows x64 system with physical Vulkan device, representative VRChat session creating low available VRAM, plus deterministic OOM injection | Low reported VRAM only warns and real load/warmup is attempted without proactive eviction; actual failure retains GPU selection and asset, exposes manual retry, performs no CPU fallback or automatic retry, and leaves unaffected application features usable. |
+| AC-009 | REQ-011, INV-P-003, INV-P-004 | automated + production-composition + fault-injection | Windows `.venv` low-reported-VRAM controls; retained supported Windows x64 physical-Vulkan and representative VRChat coexistence evidence; deterministic OOM injection | Injected low reported VRAM only warns and real load/warmup is attempted without proactive eviction; physical Vulkan composition confirms coexistence without proactive rejection; actual injected failure retains GPU selection and asset, exposes manual retry, performs no CPU fallback or automatic retry, and leaves unaffected application features usable. |
 | AC-010 | REQ-012, REQ-013, REQ-014, INV-A-004 | automated + temporal + concurrency | Windows `.venv` with a controllable clock and decode worker; packaged physical-device confirmation for shared GPU serialization | Self and peer pending CPU/GPU jobs expire exactly from `speech_end` at 12 seconds only before start; expired work emits no transcript or translation and records channel, intended model or provider, expiry reason, and queue wait; active jobs survive TTL; no count cap drops work; cloud behavior is unchanged; retained shared-GPU jobs run one at a time in global `speech_end` order; and existing peer/self VAD duration behavior is unchanged. |
 | AC-011 | REQ-015, INV-A-007 | automated + diagnostics inspection + comparative | Windows `.venv` CPU backends and packaged physical Vulkan backend with success, decode failure, and pre-start expiry cases | Every started attempt reports channel, resolved model, `CPU` or `Vulkan`, audio seconds, decode seconds, mathematically correct decode-only RTF, and result; queue/load time is separate; CPU Auto shows its resolved model; expired work reports channel, intended model or provider, expiry reason, and queue wait with no RTF and produces no downstream transcript or translation; no prohibited content appears. |
 | AC-012 | REQ-016, INV-P-001, INV-P-002, INV-A-005, INV-A-008 | automated regression + manual UI | Windows `.venv` routing, provider-alias, prompt-fallback, and localization guards; packaged application in every supported locale; existing overlay production composition | Locale bundles remain in parity and every new state is localized; peer results never reach the VRChat chatbox; self, peer, and system remain separate; established provider aliases and prompt fallback produce their compatible behavior; and the existing overlay starts, authenticates, presents, and shuts down unchanged with GPU available, unavailable, and failed. |
