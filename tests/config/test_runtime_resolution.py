@@ -262,7 +262,7 @@ def test_default_self_stt_runtime_intent_uses_low_latency_vad_defaults() -> None
     config = runtime_resolution.resolve_stt_config(runtime_resolution.STTRuntimeIntent())
 
     assert config.channel == resolved.RUNTIME_CHANNEL_SELF
-    assert config.vad_speech_threshold == 0.35
+    assert config.vad_speech_threshold == 0.4
     assert config.vad_hangover_ms == 500
     assert config.vad_pre_roll_ms == 500
 

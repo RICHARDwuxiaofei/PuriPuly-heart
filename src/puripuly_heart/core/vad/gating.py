@@ -85,7 +85,7 @@ class VadGating:
         *,
         sample_rate_hz: int,
         ring_buffer_ms: int = 500,
-        speech_threshold: float = 0.35,
+        speech_threshold: float = 0.4,
         hangover_ms: int = 1100,
         max_segment_ms: int | None = None,
         chunk_samples: int | None = None,

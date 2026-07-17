@@ -576,7 +576,7 @@ class DesktopAudioSettings:
 @dataclass(slots=True)
 class STTSettings:
     drain_timeout_s: float = 2.0
-    vad_speech_threshold: float = 0.35
+    vad_speech_threshold: float = 0.4
     low_latency_mode: bool = True
     low_latency_vad_hangover_ms: int = DEFAULT_LOW_LATENCY_VAD_HANGOVER_MS
     low_latency_merge_gap_ms: int = 600
@@ -3908,7 +3908,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         stt=STTSettings(
             drain_timeout_s=float(stt_data.get("drain_timeout_s", 2.0)),
             vad_speech_threshold=(
-                float(vad_threshold_raw) if vad_threshold_raw is not None else 0.35
+                float(vad_threshold_raw) if vad_threshold_raw is not None else 0.4
             ),
             low_latency_mode=bool(stt_data.get("low_latency_mode", False)),
             low_latency_vad_hangover_ms=int(

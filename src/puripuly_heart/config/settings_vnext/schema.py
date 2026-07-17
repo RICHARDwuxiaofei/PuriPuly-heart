@@ -393,7 +393,7 @@ class SonioxSTTIntent:
 class STTIntent:
     provider: str = "local_qwen"
     drain_timeout_s: float = 2.0
-    vad_speech_threshold: float = 0.35
+    vad_speech_threshold: float = 0.4
     low_latency_mode: bool = True
     low_latency_vad_hangover_ms: int = 500
     low_latency_merge_gap_ms: int = 600
