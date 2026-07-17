@@ -218,7 +218,10 @@ LAYER_RULES = (
     ),
     LayerRule(
         layer=APP_COMPOSITION,
-        prefixes=("puripuly_heart.app.services.canonical_settings_persistence",),
+        prefixes=(
+            "puripuly_heart.app.services.canonical_settings_persistence",
+            "puripuly_heart.app.services.capture_target_settings",
+        ),
         forbidden_layers=frozenset(
             {
                 UI_ADAPTERS_RENDERERS,
@@ -523,6 +526,7 @@ SETTINGS_PUBLIC_COMPATIBILITY_FACADE_PATHS = frozenset(
 SETTINGS_PERSISTENCE_COMPOSITION_PATHS = frozenset(
     {
         "src/puripuly_heart/app/services/canonical_settings_persistence.py",
+        "src/puripuly_heart/app/services/capture_target_settings.py",
     }
 )
 

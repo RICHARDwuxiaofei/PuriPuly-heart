@@ -34,6 +34,7 @@ LEGACY_TASK_CREATION_ALLOWLIST = Counter(
         ("src/puripuly_heart/providers/stt/soniox.py", ASYNCIO_CREATE_TASK): 3,
         ("src/puripuly_heart/ui/app.py", RUN_TASK): 15,
         ("src/puripuly_heart/ui/components/settings/api_key_field.py", RUN_TASK): 1,
+        ("src/puripuly_heart/ui/views/settings.py", RUN_TASK): 1,
         ("src/puripuly_heart/ui/controller.py", ASYNCIO_CREATE_TASK): 3,
         ("src/puripuly_heart/ui/controller.py", LOOP_CREATE_TASK): 5,
         ("src/puripuly_heart/ui/controller.py", BARE_RUN_TASK): 5,
@@ -104,6 +105,10 @@ TASK_CREATION_ALLOWLIST_RATIONALES = {
         "src/puripuly_heart/ui/components/settings/api_key_field.py",
         RUN_TASK,
     ): "Flet API-key field callback uses page.run_task at the UI boundary for async verification",
+    (
+        "src/puripuly_heart/ui/views/settings.py",
+        RUN_TASK,
+    ): "SettingsView uses page.run_task at the UI boundary to load loopback process capture options asynchronously while keeping the modal responsive",
     (
         "src/puripuly_heart/ui/controller.py",
         ASYNCIO_CREATE_TASK,
