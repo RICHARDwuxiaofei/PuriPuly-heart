@@ -1243,6 +1243,9 @@ class GuiController:
     _runtime_logging: RuntimeLoggingService | None = field(init=False, default=None)
     _local_qwen_hallucination_detection_count: int = field(init=False, default=0)
     _local_qwen_hallucination_modal_shown: bool = field(init=False, default=False)
+    _stop_lock: asyncio.Lock | None = field(init=False, default=None, repr=False)
+    _stop_complete: bool = field(init=False, default=False, repr=False)
+    _stop_exception: BaseException | None = field(init=False, default=None, repr=False)
 
     overlay_state: str = "off"
     failure_reason: str | None = None
@@ -1347,16 +1350,34 @@ class GuiController:
             with contextlib.suppress(Exception):
                 refresh_contract()
 
-    async def _drain_self_stt_for_toggle_off(self, *, force_immediate: bool = False) -> None:
+    async def _drain_self_stt_for_toggle_off(
+        self,
+        *,
+        force_immediate: bool = False,
+        explicit_toggle_off: bool = False,
+    ) -> None:
         if self.hub is None:
             return
-        if (
+        gpu_provider = bool(
             self.settings is not None
             and self.settings.provider.stt == STTProviderName.LOCAL_QWEN_GPU
-        ):
+        )
+        local_cpu_provider = bool(
+            self.settings is not None and self.settings.provider.stt.value in LOCAL_CPU_PROVIDERS
+        )
+        if gpu_provider:
+            abort = getattr(self.hub, "abort_self_stt_for_toggle_off", None)
+            if callable(abort):
+                await abort()
+                return
             replace_provider = getattr(self.hub, "replace_stt_provider", None)
             if callable(replace_provider):
                 await replace_provider(None)
+                return
+        if explicit_toggle_off and local_cpu_provider:
+            abort = getattr(self.hub, "abort_self_stt_for_toggle_off", None)
+            if callable(abort):
+                await abort()
                 return
         if not force_immediate:
             drain = getattr(self.hub, "drain_self_stt_for_toggle_off", None)
@@ -1378,19 +1399,19 @@ class GuiController:
                 result = close()
                 if inspect.isawaitable(result):
                     await result
-            if (
-                self.settings is not None
-                and self.settings.provider.stt.value in LOCAL_CPU_PROVIDERS
-            ):
-                schedule_release = getattr(self.hub, "schedule_self_stt_idle_release", None)
-                if callable(schedule_release):
-                    await schedule_release(release_backend_after=LOCAL_QWEN_IDLE_RELEASE_SECONDS)
 
-    async def _refresh_overlay_runtime_dependencies(self) -> None:
+    async def _refresh_overlay_runtime_dependencies(
+        self,
+        *,
+        peer_stop_mode: str = "retain",
+    ) -> None:
         if self.settings is None or self.hub is None:
             return
 
-        await self._refresh_peer_stt_runtime()
+        if peer_stop_mode == "retain":
+            await self._refresh_peer_stt_runtime()
+        else:
+            await self._refresh_peer_stt_runtime(stop_mode="release")
         self._sync_effective_hub_flags(self.settings)
         self._refresh_overlay_peer_consumers()
 
@@ -4859,6 +4880,26 @@ class GuiController:
         self.receiver = None
 
     async def stop(self) -> None:
+        if self._stop_complete:
+            if self._stop_exception is not None:
+                raise self._stop_exception
+            return
+        if self._stop_lock is None:
+            self._stop_lock = asyncio.Lock()
+        async with self._stop_lock:
+            if self._stop_complete:
+                if self._stop_exception is not None:
+                    raise self._stop_exception
+                return
+            try:
+                await self._stop_impl()
+            except BaseException as exc:
+                self._stop_exception = exc
+                raise
+            finally:
+                self._stop_complete = True
+
+    async def _stop_impl(self) -> None:
         cleanup_failures: list[Exception] = []
         for coordinator in (
             self._self_local_asr_transition,
@@ -5011,7 +5052,14 @@ class GuiController:
         if enabled and self.overlay_state not in {"starting", "connected"}:
             await self._begin_overlay_start()
         else:
-            await self._refresh_overlay_runtime_dependencies()
+            refresh_dependencies = self._refresh_overlay_runtime_dependencies
+            if not enabled and _callable_accepts_keyword(
+                refresh_dependencies,
+                "peer_stop_mode",
+            ):
+                await refresh_dependencies(peer_stop_mode="release")
+            else:
+                await refresh_dependencies()
         if activation_generation != self._peer_activation_generation:
             return
         self._sync_effective_hub_flags(self.settings)
@@ -7041,7 +7089,10 @@ class GuiController:
                 if not desired:
                     await self._stop_mic_loop()
                     if self.hub is not None:
-                        await self._drain_self_stt_for_toggle_off(force_immediate=force_immediate)
+                        await self._drain_self_stt_for_toggle_off(
+                            force_immediate=force_immediate,
+                            explicit_toggle_off=True,
+                        )
                 else:
                     if self.hub is None:
                         self.log_detailed(
@@ -10161,7 +10212,7 @@ class GuiController:
             log_detailed=lambda message: self.log_detailed(message),
         )
 
-    async def _refresh_peer_stt_runtime(self) -> None:
+    async def _refresh_peer_stt_runtime(self, *, stop_mode: str = "retain") -> None:
         if self.settings is None or self.hub is None or self._peer_runtime is None:
             return
 
@@ -10197,6 +10248,7 @@ class GuiController:
                 peer_runtime=self._peer_runtime,
                 config=config,
                 desired_active=desired_active,
+                stop_mode="release" if stop_mode == "release" else "retain",
             )
             transition_status = getattr(
                 self._peer_runtime,

@@ -69,6 +69,53 @@ async def test_local_decode_coordinator_preserves_fifo_and_empty_boundaries() ->
 
 
 @pytest.mark.asyncio
+async def test_pending_ttl_reaper_expires_queued_work_while_decode_is_active() -> None:
+    now = [0.0]
+    started = asyncio.Event()
+    release = asyncio.Event()
+    expired: list[LocalDecodeExpired] = []
+
+    async def decode(_samples_f32: np.ndarray) -> str:
+        started.set()
+        await release.wait()
+        return "done"
+
+    async def on_completion(_completion: LocalDecodeCompletion) -> None:
+        return None
+
+    async def on_failure(failure: LocalDecodeFailure) -> None:
+        raise AssertionError("unexpected failure") from failure.error
+
+    async def on_expired(item: LocalDecodeExpired) -> None:
+        expired.append(item)
+
+    coordinator = LocalDecodeCoordinator(
+        owner_name="test-local-decode-reaper",
+        sample_rate_hz=16000,
+        decode=decode,
+        on_completion=on_completion,
+        on_failure=on_failure,
+        on_expired=on_expired,
+        pending_ttl_s=0.02,
+        queue_clock=lambda: now[0],
+    )
+    coordinator.enqueue(np.ones(160, dtype=np.float32), speech_end_at=0.0)
+    await asyncio.wait_for(started.wait(), timeout=0.1)
+    coordinator.enqueue(np.ones(320, dtype=np.float32), speech_end_at=0.0)
+
+    now[0] = 1.0
+    await asyncio.sleep(0.04)
+
+    assert len(expired) == 1
+    assert coordinator.pending_jobs == 1
+    assert coordinator.buffered_audio_ms == pytest.approx(10.0)
+
+    release.set()
+    await coordinator.stop()
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
 async def test_local_decode_coordinator_warns_once_per_backlog_excursion() -> None:
     release = asyncio.Event()
     started = asyncio.Event()

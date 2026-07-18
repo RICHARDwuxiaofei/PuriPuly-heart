@@ -141,6 +141,10 @@ class _LocalGpuSTTSession(STTBackendSession):
             await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
         await self.close()
 
+    async def abort_for_toggle_off(self) -> None:
+        self._stopping = True
+        await self.close()
+
     async def close(self) -> None:
         if self._closed:
             return

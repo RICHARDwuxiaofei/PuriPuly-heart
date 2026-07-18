@@ -475,6 +475,11 @@ class _LocalQwenSherpaSession(STTBackendSession):
         self._log_summary_once()
         await self.close()
 
+    async def abort_for_toggle_off(self) -> None:
+        self._stopping = True
+        self._buffer_f32.clear()
+        await self.close()
+
     async def close(self) -> None:
         if self._closed:
             await asyncio.shield(self._close_complete.wait())

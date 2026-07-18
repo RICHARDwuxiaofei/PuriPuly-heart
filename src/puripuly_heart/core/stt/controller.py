@@ -103,6 +103,7 @@ class ManagedSTTProvider:
         default=None,
         repr=False,
     )
+    _publication_generation: int = field(init=False, default=0, repr=False)
 
     def __post_init__(self) -> None:
         if self.channel not in ("self", "peer"):
@@ -220,6 +221,68 @@ class ManagedSTTProvider:
                 await self._close_session_for_cleanup(self._active_session)
         finally:
             await self._complete_close_cleanup()
+
+    async def abort_for_toggle_off(self) -> None:
+        self._closing = True
+        self._publication_generation += 1
+        discarded_audio_samples = (
+            int(self._audio_ring.get_last_samples(self._audio_ring.capacity_samples).size)
+            if self._audio_ring is not None
+            else 0
+        )
+        active_decode = self._active_session is not None
+        self._emit_detailed(
+            "[STT][Abort] channel=%s provider=%s discarded_audio_samples=%s "
+            "pending_finals=%s active_decode=%s",
+            self.channel,
+            self._provider_label(),
+            discarded_audio_samples,
+            len(self._pending_final_utterance_ids),
+            active_decode,
+            fallback_level=logging.INFO,
+        )
+        reset_timer = self._reset_timer
+        self._reset_timer = None
+        if reset_timer is not None:
+            reset_timer.cancel()
+            await asyncio.gather(reset_timer, return_exceptions=True)
+
+        session = self._active_session
+        consumer_task = self._consumer_task
+        self._active_session = None
+        self._consumer_task = None
+        self._session_started_at = None
+        self._active_utterance_id = None
+        self._pending_final_utterance_ids.clear()
+        self._pending_final_utterance_times.clear()
+        self._last_speech_end_time = None
+        if self._audio_ring is not None:
+            self._audio_ring.clear()
+
+        if consumer_task is not None and not consumer_task.done():
+            consumer_task.cancel()
+        if session is not None:
+            abort = getattr(session, "abort_for_toggle_off", None)
+            if callable(abort):
+                result = abort()
+                if inspect.isawaitable(result):
+                    await result
+            else:
+                await self._close_session_for_cleanup(session)
+        if consumer_task is not None:
+            await asyncio.gather(consumer_task, return_exceptions=True)
+
+        draining = tuple(self._draining)
+        for task in draining:
+            if not task.done():
+                task.cancel()
+        if draining:
+            await asyncio.gather(*draining, return_exceptions=True)
+            self._draining.difference_update(draining)
+        await self.discard_pending_events()
+        await self._set_state(STTSessionState.DISCONNECTED)
+        await self.discard_pending_events()
+        self._closing = False
 
     async def _complete_close_cleanup(self) -> None:
         current_task = asyncio.current_task()
@@ -583,7 +646,10 @@ class ManagedSTTProvider:
                         self._active_session = session
                         self._session_started_at = self.clock.now()
                         self._consumer_task = asyncio.create_task(
-                            self._consume_session_events(session)
+                            self._consume_session_events(
+                                session,
+                                publication_generation=self._publication_generation,
+                            )
                         )
                         self._schedule_reset_timer()
                         await self._set_state(STTSessionState.STREAMING)
@@ -642,6 +708,7 @@ class ManagedSTTProvider:
         self._consumer_task = asyncio.create_task(
             self._consume_session_events(
                 new_session,
+                publication_generation=self._publication_generation,
             )
         )
         self._schedule_reset_timer()
@@ -656,7 +723,7 @@ class ManagedSTTProvider:
                 "[STT] Draining replaced session in background",
                 fallback_level=logging.INFO,
             )
-            self._draining.add(
+            self._track_draining_task(
                 asyncio.create_task(
                     self._drain_and_close(old_session, old_consumer, allow_finalize=False)
                 )
@@ -705,6 +772,7 @@ class ManagedSTTProvider:
         self._consumer_task = asyncio.create_task(
             self._consume_session_events(
                 new_session,
+                publication_generation=self._publication_generation,
             )
         )
         self._schedule_reset_timer()
@@ -713,11 +781,22 @@ class ManagedSTTProvider:
         self._emit_basic("[STT] Session reconnected after recent speech")
 
         # Drain old session with finalize (unlike bridging)
-        self._draining.add(
+        self._track_draining_task(
             asyncio.create_task(
                 self._drain_and_close(old_session, old_consumer, allow_finalize=True)
             )
         )
+
+    def _track_draining_task(self, task: asyncio.Task[None]) -> None:
+        self._draining.add(task)
+        task.add_done_callback(self._on_draining_task_done)
+
+    def _on_draining_task_done(self, task: asyncio.Task[None]) -> None:
+        self._draining.discard(task)
+        if task.cancelled():
+            return
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.exception()
 
     async def _reset_on_silence(self) -> None:
         if self._active_session is None or self._consumer_task is None:
@@ -942,9 +1021,15 @@ class ManagedSTTProvider:
     async def _consume_session_events(
         self,
         session: STTBackendSession,
+        *,
+        publication_generation: int | None = None,
     ) -> None:
+        if publication_generation is None:
+            publication_generation = self._publication_generation
         try:
             async for ev in session.events():
+                if publication_generation != self._publication_generation:
+                    continue
                 if ev.is_final:
                     self._drop_stale_pending_final_utterance_ids()
                     utterance_id = (

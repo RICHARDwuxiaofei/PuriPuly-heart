@@ -3,14 +3,20 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 ProviderFactory = Callable[[], object | Awaitable[object | None] | None]
 ProviderReplacer = Callable[[object | None], Awaitable[object | None] | Awaitable[None]]
 
 
 class PeerRuntimePolicyPort(Protocol):
-    async def apply_policy(self, *, config: object, desired_active: bool) -> None: ...
+    async def apply_policy(
+        self,
+        *,
+        config: object,
+        desired_active: bool,
+        stop_mode: Literal["retain", "release"] = "retain",
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,8 +54,16 @@ class ProviderRuntimeRebuildService:
         peer_runtime: PeerRuntimePolicyPort,
         config: object,
         desired_active: bool,
+        stop_mode: Literal["retain", "release"] = "retain",
     ) -> None:
-        await peer_runtime.apply_policy(config=config, desired_active=desired_active)
+        if stop_mode == "retain":
+            await peer_runtime.apply_policy(config=config, desired_active=desired_active)
+            return
+        await peer_runtime.apply_policy(
+            config=config,
+            desired_active=desired_active,
+            stop_mode=stop_mode,
+        )
 
     async def _create_provider(self, create_provider: ProviderFactory) -> ProviderRebuildOutcome:
         try:

@@ -120,6 +120,8 @@ class SharedGpuASRRuntime:
         discovery_pending_seconds: float = GPU_DISCOVERY_PENDING_SECONDS,
         channel_cancel_seconds: float = GPU_CHANNEL_CANCEL_SECONDS,
         force_close_seconds: float = GPU_FORCE_CLOSE_SECONDS,
+        pending_reaper_interval_seconds: float | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._process_factory = process_factory
         self._clock = clock or SystemClock()
@@ -128,6 +130,14 @@ class SharedGpuASRRuntime:
         self._discovery_pending_seconds = discovery_pending_seconds
         self._channel_cancel_seconds = channel_cancel_seconds
         self._force_close_seconds = force_close_seconds
+        self._pending_reaper_interval_seconds = (
+            min(0.25, max(0.01, pending_ttl_seconds / 2.0))
+            if pending_reaper_interval_seconds is None
+            else pending_reaper_interval_seconds
+        )
+        if self._pending_reaper_interval_seconds <= 0:
+            raise ValueError("pending_reaper_interval_seconds must be > 0")
+        self._sleep = sleep
         self._scope = LifecycleScope("shared-gpu-asr-runtime")
         self._lock = asyncio.Lock()
         self._discovery_lock = asyncio.Lock()
@@ -142,6 +152,7 @@ class SharedGpuASRRuntime:
         self._generation = 0
         self._dispatcher_task: asyncio.Task[None] | None = None
         self._event_task: asyncio.Task[None] | None = None
+        self._reaper_task: asyncio.Task[None] | None = None
         self._activation_task: asyncio.Task[_ActivationOutcome] | None = None
         self._temporary_directory: tempfile.TemporaryDirectory[str] | None = None
         self._state = GpuASRRuntimeState.STOPPED
@@ -390,6 +401,7 @@ class SharedGpuASRRuntime:
         config: _ActivationConfig,
     ) -> _ActivationOutcome:
         client: GpuWorkerClientPort | None = None
+        ownership_transferred = False
         event_task: asyncio.Task[None] | None = None
         temporary_directory = tempfile.TemporaryDirectory(prefix="puripuly-gpu-asr-audio-")
         try:
@@ -398,6 +410,7 @@ class SharedGpuASRRuntime:
                 if generation != self._generation or self._state != GpuASRRuntimeState.STARTING:
                     raise GpuASRRuntimeError("GPU activation was superseded")
                 self._client = client
+                ownership_transferred = True
                 event_task = start_lifecycle_task(
                     self._scope,
                     self._consume_events(generation, client),
@@ -411,8 +424,11 @@ class SharedGpuASRRuntime:
         except BaseException as exc:
             if event_task is not None:
                 event_task.cancel()
-            if client is not None and not client.is_closed and generation == self._generation:
-                await client.close()
+            if client is not None and not client.is_closed:
+                if not ownership_transferred:
+                    await self._close_unowned_client(client)
+                elif self._client is client and generation == self._generation:
+                    await self._close_unowned_client(client)
             if event_task is not None:
                 await asyncio.gather(event_task, return_exceptions=True)
             await run_owned_thread_call(temporary_directory.cleanup)
@@ -455,11 +471,16 @@ class SharedGpuASRRuntime:
                     self._dispatch(generation, client),
                     name=f"dispatcher-{generation}",
                 )
+                self._reaper_task = start_lifecycle_task(
+                    self._scope,
+                    self._reap_pending_work(generation, client),
+                    name=f"pending-ttl-reaper-{generation}",
+                )
         if stale:
             if event_task is not None:
                 event_task.cancel()
             if not client.is_closed:
-                await client.close()
+                await self._close_unowned_client(client)
             if event_task is not None:
                 await asyncio.gather(event_task, return_exceptions=True)
             await run_owned_thread_call(temporary_directory.cleanup)
@@ -475,6 +496,47 @@ class SharedGpuASRRuntime:
             },
         )
         return _ActivationOutcome(activation=activation)
+
+    async def _close_unowned_client(self, client: GpuWorkerClientPort) -> None:
+        try:
+            await asyncio.wait_for(client.close(), timeout=self._force_close_seconds)
+        except BaseException:
+            if not client.is_closed:
+                await asyncio.wait_for(client.force_close(), timeout=self._force_close_seconds)
+
+    async def _reap_pending_work(
+        self,
+        generation: int,
+        client: GpuWorkerClientPort,
+    ) -> None:
+        while True:
+            await self._sleep(self._pending_reaper_interval_seconds)
+            expired: list[tuple[_PendingWork, float, str]] = []
+            async with self._lock:
+                if not self._is_current_ready(generation, client):
+                    return
+                now = self._clock.now()
+                model_id = self._config.model_id if self._config is not None else "gpu"
+                retained: list[_PendingWork] = []
+                while self._queue:
+                    work = heapq.heappop(self._queue)
+                    queue_wait = max(0.0, now - work.speech_end_at)
+                    if queue_wait >= self._pending_ttl_seconds:
+                        work.discard_reason = "speech_end_ttl"
+                        if not work.future.done():
+                            work.future.set_exception(GpuASRWorkExpired("speech_end_ttl"))
+                        work.settled.set()
+                        expired.append((work, queue_wait, model_id))
+                    else:
+                        retained.append(work)
+                self._queue = retained
+                heapq.heapify(self._queue)
+            for work, queue_wait, model_id in expired:
+                await self._emit_work_expired(
+                    work,
+                    model_id=model_id,
+                    queue_wait=queue_wait,
+                )
 
     async def _stop_locked(
         self,
@@ -495,6 +557,7 @@ class SharedGpuASRRuntime:
                 self._activation_task,
                 self._dispatcher_task,
                 self._event_task,
+                self._reaper_task,
             )
             if task is not None and task is not asyncio.current_task()
         )
@@ -529,6 +592,7 @@ class SharedGpuASRRuntime:
         self._dispatcher_task = None
         self._event_task = None
         self._activation_task = None
+        self._reaper_task = None
         self._queue_event.set()
         self._state = final_state
         await self._emit("worker_stopped", {"outcome": reason, "forced": forced})
@@ -903,7 +967,12 @@ class SharedGpuASRRuntime:
                 active.future.set_exception(GpuASRWorkDiscarded("channel_cancel_timeout"))
             tasks = tuple(
                 task
-                for task in (self._activation_task, self._dispatcher_task, self._event_task)
+                for task in (
+                    self._activation_task,
+                    self._dispatcher_task,
+                    self._event_task,
+                    self._reaper_task,
+                )
                 if task is not None and task is not asyncio.current_task()
             )
             for task in tasks:
@@ -915,6 +984,7 @@ class SharedGpuASRRuntime:
             self._dispatcher_task = None
             self._event_task = None
             self._activation_task = None
+            self._reaper_task = None
             self._temporary_directory = None
             self._queue_event.set()
         close_task = start_lifecycle_task(
@@ -962,8 +1032,10 @@ class SharedGpuASRRuntime:
     def _discard_pending_locked(self, reason: str) -> None:
         while self._queue:
             work = heapq.heappop(self._queue)
+            work.discard_reason = reason
             if not work.future.done():
                 work.future.set_exception(GpuASRWorkDiscarded(reason))
+            work.settled.set()
 
     def _discard_channel_pending_locked(
         self,

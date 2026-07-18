@@ -77,6 +77,20 @@ class DormantBackendProvider:
             raise RuntimeError("backend close failed")
 
 
+class AbortableBackendProvider(QueueEventsProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.abort_calls = 0
+        self.close_backend_calls = 0
+
+    async def abort_for_toggle_off(self) -> None:
+        self.abort_calls += 1
+        await self.queue.put(None)
+
+    async def close_backend(self) -> None:
+        self.close_backend_calls += 1
+
+
 async def wait_until(predicate: Callable[[], bool], *, timeout_s: float = 1.0) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_s
@@ -84,6 +98,32 @@ async def wait_until(predicate: Callable[[], bool], *, timeout_s: float = 1.0) -
         if loop.time() >= deadline:
             raise AssertionError("timed out waiting for condition")
         await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_abort_and_release_stops_ingress_and_releases_backend() -> None:
+    provider = AbortableBackendProvider()
+    events: list[object] = []
+
+    async def handle_event(event: object) -> None:
+        events.append(event)
+
+    handle = ProviderRuntimeHandle(
+        name="self_stt",
+        provider=provider,
+        event_handler=handle_event,
+    )
+    await handle.start()
+
+    await handle.abort_and_release()
+    await provider.emit("late")
+    await asyncio.sleep(0)
+
+    assert provider.abort_calls == 1
+    assert provider.close_backend_calls == 1
+    assert handle.provider is None
+    assert handle.event_task is None
+    assert events == []
 
 
 @pytest.mark.asyncio

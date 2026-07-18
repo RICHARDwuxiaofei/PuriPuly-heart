@@ -80,6 +80,7 @@ class LocalDecodeCoordinator:
     _queue: deque[LocalDecodeJob] = field(init=False, repr=False)
     _scope: LifecycleScope = field(init=False, repr=False)
     _worker_task: asyncio.Task[None] | None = field(init=False, default=None, repr=False)
+    _reaper_task: asyncio.Task[None] | None = field(init=False, default=None, repr=False)
     _active_job: LocalDecodeJob | None = field(init=False, default=None, repr=False)
     _next_sequence: int = field(init=False, default=1, repr=False)
     _worker_generation: int = field(init=False, default=0, repr=False)
@@ -135,6 +136,7 @@ class LocalDecodeCoordinator:
         self._queued_audio_ms += audio_ms
         self._update_backlog_warning()
         self._ensure_worker()
+        self._ensure_reaper()
         return True
 
     async def stop(self) -> None:
@@ -182,6 +184,39 @@ class LocalDecodeCoordinator:
             self._run_worker(),
             name=f"decode-worker-{self._worker_generation}",
         )
+
+    def _ensure_reaper(self) -> None:
+        if self.pending_ttl_s is None:
+            return
+        if self._reaper_task is not None and not self._reaper_task.done():
+            return
+        self._reaper_task = start_lifecycle_task(
+            self._scope,
+            self._run_reaper(),
+            name="pending-ttl-reaper",
+        )
+
+    async def _run_reaper(self) -> None:
+        assert self.pending_ttl_s is not None
+        interval_s = min(0.25, max(0.01, self.pending_ttl_s / 2.0))
+        while not self._closed:
+            await asyncio.sleep(interval_s)
+            now = self.queue_clock()
+            expired: list[LocalDecodeExpired] = []
+            retained: deque[LocalDecodeJob] = deque()
+            while self._queue:
+                job = self._queue.popleft()
+                queue_wait_ms = max(0.0, (now - job.speech_end_at) * 1000.0)
+                if queue_wait_ms >= self.pending_ttl_s * 1000.0:
+                    self._queued_audio_ms = max(0.0, self._queued_audio_ms - job.audio_ms)
+                    expired.append(LocalDecodeExpired(job=job, queue_wait_ms=queue_wait_ms))
+                else:
+                    retained.append(job)
+            self._queue = retained
+            self._update_backlog_warning()
+            if self.on_expired is not None:
+                for item in expired:
+                    await self.on_expired(item)
 
     async def _run_worker(self) -> None:
         try:

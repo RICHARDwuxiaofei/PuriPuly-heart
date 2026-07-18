@@ -5,7 +5,7 @@ import inspect
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable, Protocol
+from typing import TYPE_CHECKING, Awaitable, Callable, Literal, Protocol
 
 from puripuly_heart.config.process_capture_resolution import ProcessCaptureTargetUnavailableError
 from puripuly_heart.config.resolved import ResolvedDesktopAudioCaptureTarget, ResolvedSTTConfig
@@ -88,7 +88,13 @@ class SpeechChannelRuntime(Protocol):
     @property
     def current_signature(self) -> object | None: ...
 
-    async def apply_policy(self, *, config: PeerRuntimeConfig, desired_active: bool) -> None: ...
+    async def apply_policy(
+        self,
+        *,
+        config: PeerRuntimeConfig,
+        desired_active: bool,
+        stop_mode: Literal["retain", "release"] = "retain",
+    ) -> None: ...
     async def warmup(self) -> None: ...
     async def close(self) -> None: ...
 
@@ -213,7 +219,15 @@ class PeerChannelRuntime:
             "local_asr_transition": self._transition_coordinator.lifecycle_snapshot(),
         }
 
-    async def apply_policy(self, *, config: PeerRuntimeConfig, desired_active: bool) -> None:
+    async def apply_policy(
+        self,
+        *,
+        config: PeerRuntimeConfig,
+        desired_active: bool,
+        stop_mode: Literal["retain", "release"] = "retain",
+    ) -> None:
+        if stop_mode not in {"retain", "release"}:
+            raise ValueError("stop_mode must be 'retain' or 'release'")
         async with self._lock:
             if (
                 not desired_active
@@ -301,10 +315,12 @@ class PeerChannelRuntime:
             async with self._lock:
                 if self._generation != generation or self._desired_active:
                     return
-            if await self._stop_for_dormant_reuse(generation, config):
+            if stop_mode == "retain" and await self._stop_for_dormant_reuse(generation, config):
                 return
             await self._teardown_resources(
-                target_state=PeerChannelRuntimeState.STOPPED, generation=generation
+                target_state=PeerChannelRuntimeState.STOPPED,
+                generation=generation,
+                abort_for_toggle_off=stop_mode == "release",
             )
             return
 
@@ -911,6 +927,7 @@ class PeerChannelRuntime:
         target_state: PeerChannelRuntimeState,
         generation: int,
         retry_retired: bool = True,
+        abort_for_toggle_off: bool = False,
     ) -> None:
         async with self._lock:
             loop_task = self._loop_task
@@ -931,11 +948,32 @@ class PeerChannelRuntime:
             nonlocal detached_peer_provider
             detached_peer_provider = await self._detach_current_peer_provider()
 
-        await self._attempt_cleanup(
-            cleanup_failures,
-            detach_current_peer_provider,
-            retain_on_failure=lambda: self._retain_retired_peer_provider(stt),
-        )
+        abort_peer = getattr(self.hub, "abort_peer_stt_for_toggle_off", None)
+        if (
+            abort_for_toggle_off
+            and stt is not None
+            and getattr(self.hub, "peer_stt", None) is stt
+            and callable(abort_peer)
+        ):
+
+            async def abort_current_peer_provider() -> None:
+                nonlocal detached_peer_provider
+                result = abort_peer(stt)
+                if inspect.isawaitable(result):
+                    await result
+                detached_peer_provider = stt
+
+            await self._attempt_cleanup(
+                cleanup_failures,
+                abort_current_peer_provider,
+                retain_on_failure=lambda: self._retain_retired_peer_provider(stt),
+            )
+        else:
+            await self._attempt_cleanup(
+                cleanup_failures,
+                detach_current_peer_provider,
+                retain_on_failure=lambda: self._retain_retired_peer_provider(stt),
+            )
         if stt is not None and detached_peer_provider is None:
             await self._attempt_cleanup(
                 cleanup_failures,

@@ -3901,3 +3901,36 @@ async def test_check_and_notify_update_swallows_exceptions(monkeypatch: pytest.M
     assert page.opened == []
     assert app.controller.basic_messages == []
     assert app.controller.detailed_messages == ["[Update] Check notification failed: network down"]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_is_idempotent_and_cancels_tracked_page_tasks() -> None:
+    stop_calls = 0
+    background_cancelled = asyncio.Event()
+
+    class Controller:
+        async def stop(self) -> None:
+            nonlocal stop_calls
+            stop_calls += 1
+            await asyncio.sleep(0)
+
+    async def background() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            background_cancelled.set()
+
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.controller = Controller()
+    app._tracked_page_tasks = {asyncio.create_task(background())}
+    app._shutdown_lock = None
+    app._shutdown_complete = False
+    app._shutting_down = False
+    app._settings_mutation_queue = [object()]
+
+    await asyncio.gather(app.shutdown(), app.shutdown())
+
+    assert stop_calls == 1
+    assert background_cancelled.is_set()
+    assert app._tracked_page_tasks == set()
+    assert app._settings_mutation_queue == []

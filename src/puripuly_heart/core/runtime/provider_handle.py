@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 ProviderEventHandler = Callable[[object], Awaitable[None]]
 ProviderExceptionHandler = Callable[[Exception], Awaitable[None] | None]
 ProviderStateChanged = Callable[["ProviderRuntimeHandle"], None]
+logger = logging.getLogger(__name__)
 
 
 class ProviderRuntimeHandle:
@@ -250,6 +252,55 @@ class ProviderRuntimeHandle:
             self._running = False
             self._generation += 1
             await self._cancel_event_task()
+
+    async def abort_and_release(self) -> None:
+        async with self._lock:
+            self._running = False
+            self._generation += 1
+            await self._cancel_idle_release_task()
+            await self._cancel_event_task()
+            failures: list[Exception] = []
+            pending = self._pending_handoff
+            self._pending_handoff = None
+            if pending is not None:
+                pending_provider, _pending_start, pending_future = pending
+                if not pending_future.done():
+                    pending_future.set_result(None)
+                try:
+                    await self._close_provider_for_shutdown(pending_provider)
+                except Exception as exc:
+                    failures.append(exc)
+                    self._retain_retired_provider(pending_provider)
+
+            provider = self._provider
+            if provider is not None:
+                provider_failed = False
+                abort = getattr(provider, "abort_for_toggle_off", None)
+                if callable(abort):
+                    try:
+                        result = abort()
+                        if inspect.isawaitable(result):
+                            await result
+                    except Exception as exc:
+                        failures.append(exc)
+                        provider_failed = True
+                try:
+                    await self._close_provider_for_shutdown(provider)
+                except Exception as exc:
+                    failures.append(exc)
+                    provider_failed = True
+                self._provider = None
+                if provider_failed:
+                    self._retain_retired_provider(provider)
+                self._notify_state_changed()
+                logger.info(
+                    "%s toggle-off release provider=%s backend_released=%s failures=%s",
+                    self.owner_name,
+                    type(provider).__name__,
+                    not provider_failed,
+                    len(failures),
+                )
+            _raise_close_failures(failures, f"{self.owner_name} toggle-off release failed")
 
     async def close(self) -> None:
         async with self._lock:

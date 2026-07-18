@@ -1054,6 +1054,16 @@ class ClientHub:
         await self._peer_stt_provider_runtime.retire_for_dormant_reuse(stt)
         self._sync_provider_runtime_aliases()
 
+    async def abort_peer_stt_for_toggle_off(self, stt: STTProvider | None = None) -> None:
+        if stt is not None and self.peer_stt is not stt:
+            return
+        await self.peer_final_runs.cancel_pending()
+        await self.peer_runtime.reset_runtime_state()
+        self._clear_peer_logical_turn_state()
+        self._clear_latency_state(channel="peer")
+        await self._peer_stt_provider_runtime.abort_and_release()
+        self._sync_provider_runtime_aliases()
+
     async def replace_llm_provider(self, llm: LLMProvider | None) -> None:
         await self._llm_provider_runtime.replace_provider(llm, start=False)
         self._sync_provider_runtime_aliases()
@@ -1066,6 +1076,14 @@ class ClientHub:
         await self._self_stt_provider_runtime.drain_for_toggle_off(
             release_backend_after=release_backend_after
         )
+        self._sync_provider_runtime_aliases()
+
+    async def abort_self_stt_for_toggle_off(self) -> None:
+        await self.reset_overlay_preview()
+        await self.self_runtime.reset_runtime_state()
+        self._clear_latency_state(channel="self")
+        self._sync_self_runtime_aliases()
+        await self._self_stt_provider_runtime.abort_and_release()
         self._sync_provider_runtime_aliases()
 
     async def schedule_self_stt_idle_release(self, *, release_backend_after: float) -> None:

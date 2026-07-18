@@ -143,6 +143,10 @@ class TranslatorApp:
         ):
             controller_kwargs["vrchat_osc_presence"] = vrchat_osc_presence
         self.controller = GuiController(**controller_kwargs)
+        self._tracked_page_tasks: set[object] = set()
+        self._shutdown_lock: asyncio.Lock | None = None
+        self._shutdown_complete = False
+        self._shutting_down = False
         self.overlay_state = "off"
         self.overlay_failure_reason: str | None = None
         self.overlay_peer_contract = None
@@ -247,6 +251,50 @@ class TranslatorApp:
         overlay_calibration = getattr(self.controller, "overlay_calibration", None)
         if callable(set_overlay_calibration) and overlay_calibration is not None:
             set_overlay_calibration(overlay_calibration)
+
+    def _run_page_task(self, coroutine, *args):
+        if getattr(self, "_shutting_down", False):
+            return None
+        task = self.page.run_task(coroutine, *args)
+        tracked = getattr(self, "_tracked_page_tasks", None)
+        if tracked is None:
+            tracked = set()
+            self._tracked_page_tasks = tracked
+        tracked.add(task)
+        add_done_callback = getattr(task, "add_done_callback", None)
+        if callable(add_done_callback):
+            add_done_callback(tracked.discard)
+        return task
+
+    async def shutdown(self) -> None:
+        if self._shutdown_complete:
+            return
+        if self._shutdown_lock is None:
+            self._shutdown_lock = asyncio.Lock()
+        async with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            self._shutting_down = True
+            current_task = asyncio.current_task()
+            tasks = tuple(
+                task
+                for task in self._tracked_page_tasks
+                if task is not current_task and not getattr(task, "done", lambda: True)()
+            )
+            for task in tasks:
+                cancel = getattr(task, "cancel", None)
+                if callable(cancel):
+                    cancel()
+            awaitables = tuple(task for task in tasks if inspect.isawaitable(task))
+            if awaitables:
+                await asyncio.gather(*awaitables, return_exceptions=True)
+            self._tracked_page_tasks.difference_update(tasks)
+            self._settings_mutation_queue = []
+            await self.controller.stop()
+            self._shutdown_complete = True
+
+    def _on_page_lifecycle_end(self, _event=None) -> None:
+        self._run_page_task(self.shutdown)
 
     def _setup_page(self):
         self.page.title = t("app.title")
@@ -446,7 +494,7 @@ class TranslatorApp:
         handle = getattr(self, "_after_launch_task_handle", None)
         if handle is not None and not handle.done():
             return
-        self._after_launch_task_handle = self.page.run_task(self._run_after_launch_tasks)
+        self._after_launch_task_handle = self._run_page_task(self._run_after_launch_tasks)
 
     async def _run_after_launch_tasks(self) -> None:
         await asyncio.gather(
@@ -776,7 +824,7 @@ class TranslatorApp:
             if callable(sync_telemetry) and self.controller.settings is not None:
                 sync_telemetry(self.controller.settings)
 
-        self.page.run_task(_task)
+        self._run_page_task(_task)
 
     def show_local_qwen_hallucination_dialog(self) -> None:
         dialog = LocalQwenHallucinationDialog(
@@ -799,7 +847,7 @@ class TranslatorApp:
                 await apply_settings(updated)
             await self.controller.set_peer_translation_enabled(True)
 
-        self.page.run_task(_task)
+        self._run_page_task(_task)
 
     def _close_open_dialog_for_navigation(self) -> None:
         microphone_test_dialog = getattr(self, "_microphone_test_dialog", None)
@@ -841,7 +889,7 @@ class TranslatorApp:
             finally:
                 self._settings_mutation_worker_active = False
 
-        self.page.run_task(_worker)
+        self._run_page_task(_worker)
 
     def _content_padding_for_index(self, index: int) -> int:
         return 0 if index == 1 else APP_CONTENT_PADDING
@@ -899,7 +947,7 @@ class TranslatorApp:
                 await asyncio.sleep(0.05)
                 await self.view_logs.scroll_to_bottom()
 
-            self.page.run_task(_scroll)
+            self._run_page_task(_scroll)
 
     def _open_logs_tab(self) -> None:
         self._on_nav_change(2)
@@ -1031,14 +1079,14 @@ class TranslatorApp:
             await self.controller.set_desktop_overlay_captions_locked(bool(locked))
             self._refresh_settings_desktop_overlay_state()
 
-        self.page.run_task(_task)
+        self._run_page_task(_task)
 
     def _on_desktop_overlay_size_change(self, size_preset: str) -> None:
         async def _task():
             await self.controller.set_desktop_overlay_size_preset(size_preset)
             self._refresh_settings_desktop_overlay_state()
 
-        self.page.run_task(_task)
+        self._run_page_task(_task)
 
     def _on_desktop_overlay_recovery_action(self, action: str) -> None:
         if action not in {"retry", "reopen"}:
@@ -1047,14 +1095,14 @@ class TranslatorApp:
         async def _task():
             await self.controller.set_overlay_enabled(True)
 
-        self.page.run_task(_task)
+        self._run_page_task(_task)
 
     def _on_desktop_overlay_position_reset(self) -> None:
         async def _task():
             await self.controller.reset_desktop_overlay_position()
             self._refresh_settings_desktop_overlay_state()
 
-        self.page.run_task(_task)
+        self._run_page_task(_task)
 
     def _refresh_settings_desktop_overlay_state(self) -> None:
         controller = getattr(self, "controller", None)
@@ -1078,13 +1126,13 @@ class TranslatorApp:
         async def _task():
             await self.controller.submit_text(text)
 
-        self.page.run_task(_task)
+        self._run_page_task(_task)
 
     def _on_message_input_activity(self, has_text: bool) -> None:
         async def _task():
             self.controller.set_manual_input_activity(has_text)
 
-        self.page.run_task(_task)
+        self._run_page_task(_task)
 
     def _on_keyboard_event(self, event) -> None:
         if getattr(event, "key", None) != "Tab":
@@ -1173,7 +1221,7 @@ class TranslatorApp:
         async def _task():
             await self.controller.set_translation_enabled(enabled)
 
-        self.page.run_task(_task)
+        self._run_page_task(_task)
         return True
 
     def _on_stt_toggle(self, enabled: bool) -> None:
@@ -1187,7 +1235,7 @@ class TranslatorApp:
         async def _task():
             await self.controller.set_stt_enabled(enabled)
 
-        self.page.run_task(_task)
+        self._run_page_task(_task)
 
     def _on_overlay_toggle(self, enabled: bool) -> None:
         self._log_basic(f"[Dashboard] Overlay toggle requested: enabled={enabled}")
@@ -1200,7 +1248,7 @@ class TranslatorApp:
         async def _task():
             await self.controller.set_overlay_enabled(enabled)
 
-        self.page.run_task(_task)
+        self._run_page_task(_task)
 
     def _on_peer_translation_toggle(self, enabled: bool) -> None:
         self._log_basic(f"[Dashboard] Peer toggle requested: enabled={enabled}")
@@ -1223,7 +1271,7 @@ class TranslatorApp:
         async def _task():
             await self.controller.set_peer_translation_enabled(enabled)
 
-        self.page.run_task(_task)
+        self._run_page_task(_task)
 
     def _on_retry_peer_process_capture(self) -> None:
         self._log_basic("[Dashboard] Peer process capture retry requested")
@@ -1240,7 +1288,7 @@ class TranslatorApp:
         self._queue_settings_mutation_task(_task)
 
     def _on_gpu_discovery_requested(self) -> None:
-        self.page.run_task(self.controller.ensure_gpu_device_discovery)
+        self._run_page_task(self.controller.ensure_gpu_device_discovery)
 
     def _on_language_change(
         self,
@@ -1592,7 +1640,7 @@ class TranslatorApp:
                 )
 
         self._qq_managed_auth_task_handle = self._get_oauth_runtime().start_external_task(
-            task_runner=self.page.run_task,
+            task_runner=self._run_page_task,
             task_factory=_task,
             task_name="qq-managed-auth-dialog",
             generation=generation,
@@ -1625,7 +1673,7 @@ class TranslatorApp:
             async def _task() -> None:
                 await result
 
-            self.page.run_task(_task)
+            self._run_page_task(_task)
 
     def _supports_discord_managed_auth_reopen(self) -> bool:
         controller = getattr(self, "controller", None)
@@ -1714,7 +1762,7 @@ class TranslatorApp:
                 )
 
         self._discord_managed_auth_task_handle = self._get_oauth_runtime().start_external_task(
-            task_runner=self.page.run_task,
+            task_runner=self._run_page_task,
             task_factory=_task,
             task_name="discord-managed-auth-dialog",
             generation=generation,
@@ -1993,7 +2041,23 @@ async def main_gui(
     ):
         app_kwargs["vrchat_osc_presence"] = vrchat_osc_presence
     app = TranslatorApp(page, **app_kwargs)
-    await app.controller.start()
+    lifecycle_handler = getattr(app, "_on_page_lifecycle_end", None)
+    if callable(lifecycle_handler):
+        page.on_disconnect = lifecycle_handler
+        page.on_close = lifecycle_handler
+    try:
+        await app.controller.start()
+    except BaseException:
+        shutdown = getattr(app, "shutdown", None)
+        if callable(shutdown):
+            with contextlib.suppress(BaseException):
+                await shutdown()
+        else:
+            stop = getattr(app.controller, "stop", None)
+            if callable(stop):
+                with contextlib.suppress(BaseException):
+                    await stop()
+        raise
     schedule_after_launch = getattr(app, "schedule_after_launch_tasks", None)
     if callable(schedule_after_launch):
         schedule_after_launch()
