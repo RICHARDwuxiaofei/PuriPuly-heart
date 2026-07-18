@@ -561,6 +561,32 @@ def test_build_spec_numpy_runtime_guard_narrow() -> None:
     assert 'collect_submodules("numpy")' not in spec
 
 
+def test_huggingface_xet_dependencies_and_windows_packaging_are_pinned_and_guarded() -> None:
+    project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    spec = (ROOT / "build.spec").read_text(encoding="utf-8")
+    main = (ROOT / "src" / "puripuly_heart" / "main.py").read_text(encoding="utf-8")
+
+    assert '"huggingface-hub==1.23.0"' in project
+    assert '"hf-xet==1.5.2"' in project
+    assert 'collect_data_files("huggingface_hub")' in spec
+    assert 'collect_submodules("huggingface_hub")' in spec
+    assert 'get_module_file_attribute("hf_xet.hf_xet")' in spec
+    assert 'runtime_binaries += [(str(hf_xet_native_extension), "hf_xet")]' in spec
+    assert '"hf_xet.hf_xet"' in spec
+    assert "required_huggingface_hiddenimports" in spec
+    assert '"hf-xet-runtime-check"' in main
+
+
+def test_huggingface_xet_apache_notices_cover_pinned_runtime_packages() -> None:
+    notices = (ROOT / "src" / "puripuly_heart" / "data" / "THIRD_PARTY_NOTICES.txt").read_text(
+        encoding="utf-8"
+    )
+
+    assert "huggingface-hub 1.23.0: Apache-2.0" in notices
+    assert "hf-xet 1.5.2 and its Windows native extension: Apache-2.0" in notices
+    assert "HF_XET_HIGH_PERFORMANCE by default" in notices
+
+
 def test_prepare_soxr_release_inputs_script_builds_system_linked_runtime_and_source_bundle() -> (
     None
 ):

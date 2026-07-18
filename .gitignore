@@ -237,6 +237,7 @@ refactoring/
 !/scripts/release/
 /scripts/release/*
 !/scripts/release/unattended-runtime-evidence.py
+!/scripts/release/huggingface-xet-frozen-smoke.py
 .codex/
 .agent/
 .agents/*

@@ -139,7 +139,7 @@ datas = [
     (str(NOTO_CJK_PROVENANCE_DIR / "OFL.txt"), NOTO_CJK_PACKAGED_PROVENANCE_RELATIVE_DIR.as_posix()),
     (str(NOTO_CJK_PROVENANCE_DIR / "README.md"), NOTO_CJK_PACKAGED_PROVENANCE_RELATIVE_DIR.as_posix()),
     (str(NOTO_CJK_PROVENANCE_DIR / "SHA256SUMS.txt"), NOTO_CJK_PACKAGED_PROVENANCE_RELATIVE_DIR.as_posix()),
-] + collect_data_files("flet_desktop")
+] + collect_data_files("flet_desktop") + collect_data_files("huggingface_hub")
 
 runtime_binaries = collect_dynamic_libs(
     "onnxruntime", destdir=LOCAL_QWEN_PACKAGED_RUNTIME_RELATIVE_DIR.as_posix()
@@ -153,6 +153,10 @@ runtime_binaries += proctap_runtime_binaries
 runtime_binaries += collect_staged_soxr_runtime_binaries()
 runtime_binaries += collect_vendored_openvr_runtime_binaries()
 runtime_binaries += [(str(gpu_worker_staged_path), ".")]
+hf_xet_native_extension = Path(get_module_file_attribute("hf_xet.hf_xet")).resolve()
+if not hf_xet_native_extension.is_file() or hf_xet_native_extension.name.lower() != "hf_xet.pyd":
+    raise SystemExit("Pinned hf_xet package did not provide the Windows hf_xet.pyd extension")
+runtime_binaries += [(str(hf_xet_native_extension), "hf_xet")]
 
 # Hidden imports for dynamic imports
 hiddenimports = [
@@ -169,6 +173,8 @@ hiddenimports = [
     "flet",
     "flet_desktop",
     "httpx",
+    "hf_xet",
+    "hf_xet.hf_xet",
     "keyring.backends.Windows",
     "onnxruntime",
     # NumPy's C-extension is required before the packaged CLI can even boot.
@@ -177,11 +183,15 @@ hiddenimports = [
     "sounddevice",
     "puripuly_heart.config.process_capture_platform",
     "puripuly_heart.core.audio.process_source",
-] + collect_submodules("proctap")
+] + collect_submodules("proctap") + collect_submodules("huggingface_hub")
 
 required_proctap_hiddenimports = {"proctap", "proctap._native", "proctap.backends.windows"}
 if not required_proctap_hiddenimports.issubset(set(hiddenimports)):
     raise SystemExit("Required ProcTap hidden imports were not collected")
+
+required_huggingface_hiddenimports = {"huggingface_hub", "hf_xet", "hf_xet.hf_xet"}
+if not required_huggingface_hiddenimports.issubset(set(hiddenimports)):
+    raise SystemExit("Required Hugging Face/Xet hidden imports were not collected")
 
 a = Analysis(
     [str(entry_script)],
