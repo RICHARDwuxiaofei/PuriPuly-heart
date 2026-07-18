@@ -76,6 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
         "soxr-runtime-check",
         help="Verify the packaged soxr runtime contract and smoke resample",
     )
+    sub.add_parser(
+        "hf-xet-runtime-check",
+        help="Verify the packaged Hugging Face/Xet runtime",
+    )
     local_cpu_real_model_check = sub.add_parser(
         "local-cpu-real-model-check",
         help="Run strict real-model checks for all direct local CPU ASR backends",
@@ -83,6 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
     local_cpu_real_model_check.add_argument("--model-root", type=Path, required=True)
     local_cpu_real_model_check.add_argument("--audio-root", type=Path, required=True)
     local_cpu_real_model_check.add_argument("--report", type=Path, required=True)
+    hf_xet_worker = sub.add_parser("hf-xet-download-worker", help=argparse.SUPPRESS)
+    hf_xet_worker.add_argument("--request-file", type=Path, required=True)
+    hf_xet_worker.add_argument("--event-file", type=Path, required=True)
     run_gui = sub.add_parser("run-gui", help="Run the Graphical User Interface (Flet)")
     run_gui.add_argument(
         "--debug-ui-preview",
@@ -104,6 +111,17 @@ def run_soxr_runtime_check() -> int:
     from puripuly_heart.app.soxr_runtime_check import run_soxr_runtime_check as run
 
     return run()
+
+
+def run_hf_xet_runtime_check() -> int:
+    import hf_xet
+    import huggingface_hub
+
+    if huggingface_hub.__version__ != "1.23.0":
+        raise RuntimeError("unexpected packaged huggingface_hub version")
+    if not Path(hf_xet.__file__).with_name("hf_xet.pyd").is_file():
+        raise RuntimeError("packaged hf_xet native extension is missing")
+    return 0
 
 
 def run_local_cpu_real_model_check(
@@ -256,6 +274,15 @@ def _settings_config_path(args: argparse.Namespace) -> tuple[Path, bool]:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "hf-xet-download-worker":
+        from puripuly_heart.core.local_stt_huggingface_xet_adapter import (
+            run_huggingface_xet_worker,
+        )
+
+        return run_huggingface_xet_worker(
+            request_path=args.request_file,
+            event_path=args.event_file,
+        )
     if args.command == "run-desktop-overlay-repro":
         return _run_desktop_overlay_repro(
             cycles=args.cycles,
@@ -302,6 +329,9 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "soxr-runtime-check":
             return run_soxr_runtime_check()
+
+        if args.command == "hf-xet-runtime-check":
+            return run_hf_xet_runtime_check()
 
         if args.command == "local-cpu-real-model-check":
             return run_local_cpu_real_model_check(

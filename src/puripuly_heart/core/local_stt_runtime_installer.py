@@ -14,6 +14,7 @@ from uuid import uuid4
 import httpx
 
 from puripuly_heart.core.local_stt_assets import (
+    LOCAL_QWEN_GPU_MODEL_ID,
     LOCAL_STT_MODEL_ID,
     InstalledLocalSTTManifest,
     LocalSTTAssetError,
@@ -23,6 +24,11 @@ from puripuly_heart.core.local_stt_assets import (
     inspect_local_stt_install_state,
     load_local_stt_asset_manifest,
     validate_local_stt_install,
+)
+from puripuly_heart.core.local_stt_download_port import (
+    HuggingFaceDownloadPort,
+    HuggingFaceDownloadRequest,
+    LocalSTTDownloadPortCancelled,
 )
 
 RuntimeLocalSTTStatus = Literal["downloading", "ready", "download_failed"]
@@ -69,6 +75,10 @@ class _DownloadProgress:
             return
         with self._lock:
             self._downloaded_bytes += size_bytes
+
+    def set_downloaded(self, size_bytes: int) -> None:
+        with self._lock:
+            self._downloaded_bytes = max(self._downloaded_bytes, size_bytes)
 
     def percent(self) -> int:
         if self._total_bytes <= 0:
@@ -160,6 +170,140 @@ def _download_source_into_staging(
         raise
 
 
+def _uses_huggingface_xet(
+    *,
+    source_name: str,
+    manifest: LocalSTTAssetManifest,
+) -> bool:
+    source = manifest.sources[source_name]
+    return (
+        manifest.model_id == LOCAL_QWEN_GPU_MODEL_ID
+        and source_name == "huggingface"
+        and bool(source.repo_id)
+    )
+
+
+def _validate_downloaded_asset(
+    *,
+    asset_path: Path,
+    relative_path: str,
+    expected_sha256: str,
+    expected_size_bytes: int | None,
+) -> None:
+    digest = hashlib.sha256()
+    size_bytes = 0
+    with asset_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+            size_bytes += len(chunk)
+    if digest.hexdigest() != expected_sha256:
+        raise LocalSTTRuntimeInstallError(
+            f"checksum mismatch for required model file: {relative_path}"
+        )
+    if expected_size_bytes is not None and size_bytes != expected_size_bytes:
+        raise LocalSTTRuntimeInstallError(f"size mismatch for required model file: {relative_path}")
+
+
+async def _download_huggingface_xet_source_into_staging(
+    *,
+    source_name: str,
+    staging_dir: Path,
+    manifest: LocalSTTAssetManifest,
+    downloader: HuggingFaceDownloadPort,
+    cancel_event: threading.Event | None,
+    progress: _DownloadProgress | None,
+) -> InstalledLocalSTTManifest:
+    source = manifest.sources[source_name]
+    completed_bytes = 0
+    try:
+        for asset in manifest.files:
+            _raise_if_cancelled(cancel_event)
+            remote_path = asset.remote_path_for_source(source_name)
+
+            def on_progress(update, *, offset: int = completed_bytes) -> None:
+                if progress is not None:
+                    progress.set_downloaded(offset + update.downloaded_bytes)
+
+            downloaded_path = await downloader.download(
+                HuggingFaceDownloadRequest(
+                    repo_id=source.repo_id,
+                    revision=source.revision,
+                    remote_path=remote_path,
+                    local_dir=staging_dir,
+                    expected_size_bytes=asset.size_bytes,
+                ),
+                cancel_event=cancel_event,
+                on_progress=on_progress,
+            )
+            asset_path = staging_dir / asset.relative_path
+            if downloaded_path.resolve() != asset_path.resolve():
+                asset_path.parent.mkdir(parents=True, exist_ok=True)
+                downloaded_path.replace(asset_path)
+            await asyncio.to_thread(
+                _validate_downloaded_asset,
+                asset_path=asset_path,
+                relative_path=asset.relative_path,
+                expected_sha256=asset.sha256,
+                expected_size_bytes=asset.size_bytes,
+            )
+            completed_bytes += asset.size_bytes or asset_path.stat().st_size
+            if progress is not None:
+                progress.set_downloaded(completed_bytes)
+
+        shutil.rmtree(staging_dir / ".cache", ignore_errors=True)
+        installed = InstalledLocalSTTManifest(
+            manifest_version=manifest.installed_manifest_version,
+            model_id=manifest.model_id,
+            engine=manifest.engine,
+            install_dirname=manifest.install_dirname,
+            selected_source=source_name,
+            selected_revision=source.revision,
+        )
+        (staging_dir / manifest.installed_manifest_filename).write_text(
+            json.dumps(installed.to_dict(), indent=2),
+            encoding="utf-8",
+        )
+        await asyncio.to_thread(validate_local_stt_install, staging_dir, manifest=manifest)
+        return installed
+    except LocalSTTDownloadPortCancelled as exc:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise LocalSTTRuntimeInstallCancelled("runtime local STT install cancelled") from exc
+
+
+async def _download_source_into_staging_async(
+    *,
+    source_name: str,
+    staging_dir: Path,
+    manifest: LocalSTTAssetManifest,
+    cancel_event: threading.Event | None,
+    progress: _DownloadProgress | None,
+    huggingface_downloader: HuggingFaceDownloadPort | None,
+) -> InstalledLocalSTTManifest:
+    if _uses_huggingface_xet(source_name=source_name, manifest=manifest):
+        if huggingface_downloader is None:
+            from puripuly_heart.core.local_stt_huggingface_xet_adapter import (
+                HuggingFaceXetDownloadAdapter,
+            )
+
+            huggingface_downloader = HuggingFaceXetDownloadAdapter()
+        return await _download_huggingface_xet_source_into_staging(
+            source_name=source_name,
+            staging_dir=staging_dir,
+            manifest=manifest,
+            downloader=huggingface_downloader,
+            cancel_event=cancel_event,
+            progress=progress,
+        )
+    return await asyncio.to_thread(
+        _download_source_into_staging,
+        source_name=source_name,
+        staging_dir=staging_dir,
+        manifest=manifest,
+        cancel_event=cancel_event,
+        progress=progress,
+    )
+
+
 def _promote_staging_install(
     *,
     staging_dir: Path,
@@ -197,6 +341,7 @@ async def ensure_local_stt_installed(
     manifest: LocalSTTAssetManifest | None = None,
     on_status: StatusCallback | None = None,
     cancel_event: threading.Event | None = None,
+    huggingface_downloader: HuggingFaceDownloadPort | None = None,
 ) -> InstalledLocalSTTManifest:
     if manifest is not None and model_id is not None and manifest.model_id != model_id:
         raise LocalSTTRuntimeInstallError(
@@ -234,6 +379,7 @@ async def ensure_local_stt_installed(
         staging_dir = resolved_root / f"{resolved_manifest.install_dirname}.staging-{uuid4().hex}"
         shutil.rmtree(staging_dir, ignore_errors=True)
         progress = _DownloadProgress(total_bytes)
+        download_task: asyncio.Task[InstalledLocalSTTManifest] | None = None
         try:
             current_percent = 0 if last_progress_percent is None else last_progress_percent
             if current_percent != last_progress_percent:
@@ -241,13 +387,13 @@ async def ensure_local_stt_installed(
                 await _emit_status(on_status, "downloading", percent=current_percent)
 
             download_task = asyncio.create_task(
-                asyncio.to_thread(
-                    _download_source_into_staging,
+                _download_source_into_staging_async(
                     source_name=source_name,
                     staging_dir=staging_dir,
                     manifest=resolved_manifest,
                     cancel_event=cancel_event,
                     progress=progress,
+                    huggingface_downloader=huggingface_downloader,
                 )
             )
             while not download_task.done():
@@ -271,7 +417,15 @@ async def ensure_local_stt_installed(
             )
             await _emit_status(on_status, "ready", percent=None)
             return installed
+        except asyncio.CancelledError:
+            if download_task is not None and not download_task.done():
+                download_task.cancel()
+                await asyncio.gather(download_task, return_exceptions=True)
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
         except LocalSTTRuntimeInstallCancelled:
+            if download_task is not None and not download_task.done():
+                await asyncio.gather(download_task, return_exceptions=True)
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise
         except Exception as exc:
