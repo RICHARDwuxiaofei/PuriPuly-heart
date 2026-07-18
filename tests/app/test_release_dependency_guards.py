@@ -785,6 +785,9 @@ def test_release_workflow_prepares_soxr_release_inputs_before_build_and_publishe
     assert "native/gpu_worker/Cargo.toml" in job_block
     assert "PuriPulyHeartGpuWorker.exe" in job_block
     assert job_block.index("native/gpu_worker/Cargo.toml") < job_block.index("PyInstaller")
+    assert "VULKAN_SDK_SHA256" in workflow
+    assert "copy_only=1" in job_block
+    assert "SPIRV-HeadersConfig.cmake" in job_block
     assert SOXR_SOURCE_BUNDLE_NAME in workflow
     assert (
         "release-artifacts/installer_output/"

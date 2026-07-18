@@ -16,7 +16,8 @@ env:
   PYTHON_VERSION: "3.12.10"
   UV_VERSION: "0.9.17"
   INNOSETUP_VERSION: "6.6.1"
-  VULKAN_SDK_VERSION: "1.4.328.1"
+  VULKAN_SDK_VERSION: "1.4.350.0"
+  VULKAN_SDK_SHA256: "855b27ba05d2d8119c5114c5d4ff870ca38f2c632b11e1bb9923b9b7e6ecfe7b"
 
 jobs:
   verify-version:
@@ -130,10 +131,43 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Vulkan SDK
-        uses: humbletim/install-vulkan-sdk@v1.2
-        with:
-          version: ${{ env.VULKAN_SDK_VERSION }}
-          cache: true
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "vulkan-sdk.exe"
+          $sdkRoot = Join-Path $env:RUNNER_TEMP "VulkanSDK-$env:VULKAN_SDK_VERSION"
+          Invoke-WebRequest `
+            -Uri "https://sdk.lunarg.com/sdk/download/$env:VULKAN_SDK_VERSION/windows/vulkan_sdk.exe?Human=true" `
+            -OutFile $installer
+          $actualSha256 = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $env:VULKAN_SDK_SHA256) {
+            throw "Vulkan SDK checksum mismatch: expected $env:VULKAN_SDK_SHA256, found $actualSha256"
+          }
+          $install = Start-Process `
+            -FilePath $installer `
+            -ArgumentList @(
+              "--root", $sdkRoot,
+              "--accept-licenses",
+              "--default-answer",
+              "--confirm-command", "install",
+              "copy_only=1"
+            ) `
+            -Wait `
+            -PassThru
+          if ($install.ExitCode -ne 0) {
+            throw "Vulkan SDK installer failed with exit code $($install.ExitCode)"
+          }
+          foreach ($requiredPath in @(
+            "$sdkRoot\Include\vulkan\vulkan.h",
+            "$sdkRoot\Lib\vulkan-1.lib",
+            "$sdkRoot\Bin\glslc.exe",
+            "$sdkRoot\Lib\cmake\SPIRV-Headers\SPIRV-HeadersConfig.cmake"
+          )) {
+            if (-not (Test-Path $requiredPath)) {
+              throw "Vulkan SDK file not found: $requiredPath"
+            }
+          }
+          "VULKAN_SDK=$sdkRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$sdkRoot\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build Rust overlay
         shell: pwsh
