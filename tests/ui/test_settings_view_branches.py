@@ -2286,10 +2286,7 @@ def test_gpu_selection_shows_one_shared_device_card_and_retains_unavailable_save
     view, _ = _make_settings_view(monkeypatch)
 
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.set_gpu_runtime_state(
-        "ready",
-        devices=(("vk:0", "GPU 0"),),
-    )
+    view.set_gpu_devices(devices=(("vk:0", "GPU 0"),))
 
     assert view._gpu_device_card.visible is True
     assert view._gpu_device_dropdown.value == "vk:saved"
@@ -2298,7 +2295,23 @@ def test_gpu_selection_shows_one_shared_device_card_and_retains_unavailable_save
         "vk:0",
         "vk:saved",
     ]
-    assert view._gpu_device_status.value == t("settings.gpu_state.ready")
+
+
+def test_gpu_card_is_standard_one_by_one_and_contains_only_device_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN_GPU
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    column = _wrapped_card_column(view._gpu_device_card)
+
+    assert view._gpu_device_card.height == 228
+    assert len(column.controls) == 2
+    assert column.controls[0] is view._gpu_device_title
+    assert column.controls[1].content is view._gpu_device_dropdown
+    assert len(view._gpu_device_row.content.controls) == 3
 
 
 def test_selecting_gpu_for_self_or_peer_requests_discovery_once_per_new_selection(
@@ -2321,7 +2334,7 @@ def test_selecting_gpu_for_self_or_peer_requests_discovery_once_per_new_selectio
 
 
 @pytest.mark.parametrize("locale", ("en", "ko", "zh-CN", "ja", "ru"))
-def test_gpu_card_renders_every_runtime_state_in_each_supported_locale(
+def test_gpu_card_localizes_device_options_in_each_supported_locale(
     monkeypatch: pytest.MonkeyPatch,
     locale: str,
 ) -> None:
@@ -2334,28 +2347,14 @@ def test_gpu_card_renders_every_runtime_state_in_each_supported_locale(
         view, _ = _make_settings_view(monkeypatch)
         view.load_from_settings(settings, config_path=Path("settings.json"))
 
-        for state, key in settings_view._GPU_STATE_LABEL_KEYS.items():
-            progress = 37 if state == "installing" else None
-            expected = (
-                t("settings.gpu_state.installing_progress", percent=37)
-                if progress is not None
-                else t(key)
-            )
-            view.set_gpu_runtime_state(
-                state,
-                devices=(("vk:0", "GPU 0"),),
-                progress_percent=progress,
-            )
+        view.set_gpu_devices(devices=(("vk:0", "GPU 0"),))
 
-            assert view._gpu_device_card.visible is True
-            assert view._gpu_device_status.value == expected
-            assert expected.strip()
-            assert expected not in {key, "settings.gpu_state.installing_progress"}
-            assert view._gpu_device_dropdown.options[0].text == t("settings.gpu_device.auto")
-            assert view._gpu_device_dropdown.options[-1].text == t(
-                "settings.gpu_device.unavailable",
-                device="vk:saved",
-            )
+        assert view._gpu_device_card.visible is True
+        assert view._gpu_device_dropdown.options[0].text == t("settings.gpu_device.auto")
+        assert view._gpu_device_dropdown.options[-1].text == t(
+            "settings.gpu_device.unavailable",
+            device="vk:saved",
+        )
     finally:
         i18n_module.set_locale(previous_locale)
 

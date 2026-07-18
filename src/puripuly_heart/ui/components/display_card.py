@@ -74,6 +74,7 @@ class DisplayCard(ft.Container):
         self._debug_prefix: str | None = None
         self._notice_value: str | None = None
         self._notice_tone: str | None = None
+        self._notice_action: Callable[[], None] | None = None
         self.input_is_focused = False
 
         self._display_primary = ft.Text(
@@ -112,6 +113,12 @@ class DisplayCard(ft.Container):
             border_radius=999,
             padding=ft.padding.symmetric(horizontal=10, vertical=6),
         )
+        self._notice_action_button = ft.TextButton(
+            text="",
+            visible=False,
+            height=36,
+            on_click=lambda _event: self._run_notice_action(),
+        )
 
         self._input_field = ft.TextField(
             hint_text=t("display.input_hint"),
@@ -140,7 +147,7 @@ class DisplayCard(ft.Container):
                         ),
                         expand=True,
                     ),
-                    self._notice_chip,
+                    self._notice_action_button,
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.START,
@@ -318,12 +325,29 @@ class DisplayCard(ft.Container):
         self._debug_prefix = None
         self._sync_display()
 
-    def set_notice(self, text: str | None, tone: str | None = None) -> None:
+    def set_notice(
+        self,
+        text: str | None,
+        tone: str | None = None,
+        *,
+        action_label: str | None = None,
+        on_action: Callable[[], None] | None = None,
+    ) -> None:
         self._notice_value = text or None
         self._notice_tone = tone if self._notice_value else None
+        self._notice_action = on_action if self._notice_value and action_label else None
+        self._notice_action_button.text = action_label or ""
+        self._notice_action_button.visible = self._notice_action is not None
         self._notice_text.value = ""
         self._notice_chip.visible = False
         self._sync_display()
+        if self._notice_action_button.page is not None:
+            self._notice_action_button.update()
+
+    def _run_notice_action(self) -> None:
+        action = self._notice_action
+        if action is not None:
+            action()
 
     def clear_input(self):
         """Clear the input field."""

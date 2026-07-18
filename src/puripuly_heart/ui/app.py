@@ -37,6 +37,7 @@ from puripuly_heart.ui.components.telemetry_consent_dialog import TelemetryConse
 from puripuly_heart.ui.components.title_bar import TitleBar
 from puripuly_heart.ui.controller import GuiController
 from puripuly_heart.ui.fonts import font_for_language, register_fonts
+from puripuly_heart.ui.gpu_notice import GpuDashboardNotice
 from puripuly_heart.ui.i18n import (
     get_locale,
     language_name,
@@ -177,6 +178,9 @@ class TranslatorApp:
         self.view_dashboard.on_toggle_peer_translation = self._on_peer_translation_toggle
         self.view_dashboard.on_retry_peer_process_capture = self._on_retry_peer_process_capture
         self.view_dashboard.on_language_change = self._on_language_change
+        self.view_dashboard.on_gpu_notice_action = getattr(
+            self.controller, "handle_gpu_notice_action", None
+        )
 
         self.view_settings.on_settings_changed = self._on_settings_changed
         self.view_settings.on_prompt_apply_settings = self._on_prompt_apply_settings
@@ -187,8 +191,6 @@ class TranslatorApp:
         self.view_settings.on_secret_cleared = self._on_secret_cleared
         self.view_settings.on_local_llm_secret_changed = self._on_local_llm_secret_changed
         self.view_settings.on_start_microphone_test = self._on_start_microphone_test
-        self.view_settings.on_gpu_install_requested = self._on_gpu_install_requested
-        self.view_settings.on_gpu_retry_requested = self._on_gpu_retry_requested
         self.view_settings.on_gpu_discovery_requested = self._on_gpu_discovery_requested
         self.view_settings.on_telemetry_consent_change = self._on_telemetry_consent_change
         self.view_settings.on_list_loopback_capture_options = (
@@ -930,19 +932,13 @@ class TranslatorApp:
 
     def _cycle_debug_preview_gpu_state(self) -> None:
         states = (
-            "discovering",
-            "discovery_pending",
             "discovery_failed",
             "not_installed",
             "invalid",
             "installing",
             "install_failed",
-            "installed",
             "unsupported",
-            "validating",
-            "loading",
-            "warming",
-            "ready",
+            "unavailable_device",
             "activation_failed",
         )
         index = int(getattr(self, "_debug_preview_gpu_state_index", -1)) + 1
@@ -952,11 +948,32 @@ class TranslatorApp:
             ("vulkan-index-0", "Debug Vulkan Device 0"),
             ("vulkan-index-1", "Debug Vulkan Device 1"),
         )
-        self.view_settings.set_gpu_runtime_state(
-            states[index],
-            devices=devices,
+        set_devices = getattr(self.view_settings, "set_gpu_devices", None)
+        if callable(set_devices):
+            set_devices(devices=devices)
+        action_by_state = {
+            "discovery_failed": "rediscover",
+            "not_installed": "install",
+            "invalid": "repair",
+            "install_failed": "reinstall",
+            "activation_failed": "restart",
+        }
+        notice = GpuDashboardNotice(
+            status=states[index],
             progress_percent=42 if states[index] == "installing" else None,
+            action=action_by_state.get(states[index]),
         )
+        set_notice = getattr(getattr(self, "view_dashboard", None), "set_gpu_notice", None)
+        if callable(set_notice):
+            set_notice(notice)
+        else:
+            legacy_setter = getattr(self.view_settings, "set_gpu_runtime_state", None)
+            if callable(legacy_setter):
+                legacy_setter(
+                    states[index],
+                    devices=devices,
+                    progress_percent=notice.progress_percent,
+                )
 
     def refresh_overlay_peer_contract(self) -> None:
         controller = getattr(self, "controller", None)
@@ -1208,12 +1225,6 @@ class TranslatorApp:
             await self.controller.apply_loopback_capture_option(value)
 
         self._queue_settings_mutation_task(_task)
-
-    def _on_gpu_install_requested(self) -> None:
-        self.page.run_task(self.controller.install_or_repair_gpu_model)
-
-    def _on_gpu_retry_requested(self) -> None:
-        self.page.run_task(self.controller.retry_gpu_activation)
 
     def _on_gpu_discovery_requested(self) -> None:
         self.page.run_task(self.controller.ensure_gpu_device_discovery)

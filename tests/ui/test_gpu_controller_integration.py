@@ -120,6 +120,38 @@ def _controller() -> tuple[GuiController, CapturingGpuSettingsView]:
     return controller, view
 
 
+@pytest.mark.parametrize(
+    "state",
+    (
+        "discovering",
+        "discovery_pending",
+        "installed",
+        "validating",
+        "loading",
+        "warming",
+        "ready",
+    ),
+)
+async def test_internal_gpu_states_are_logged_without_dashboard_notice(
+    state: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, view = _controller()
+    messages: list[str] = []
+
+    def log(_self: GuiController, message: str, **_kwargs) -> bool:
+        messages.append(message)
+        return True
+
+    monkeypatch.setattr(GuiController, "log_detailed", log)
+
+    controller._set_gpu_ui_state(state, origin="startup")
+
+    assert controller._gpu_ui_state == state
+    assert view.states == []
+    assert messages[-1] == f"[GPU ASR] state={state} origin=startup"
+
+
 async def test_self_gpu_toggle_off_releases_worker_and_toggle_on_rebuilds_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -256,7 +288,7 @@ async def test_unavailable_saved_gpu_device_retains_gpu_without_runtime_start() 
     assert controller.settings.provider.stt == STTProviderName.LOCAL_QWEN_GPU
     assert controller.settings.stt.gpu_device_id == "vk:missing"
     assert controller._gpu_asr_runtime is None
-    assert view.states[-1][0] == "unsupported"
+    assert view.states[-1][0] == "unavailable_device"
 
 
 async def test_gpu_activation_uses_low_cost_manifest_validation(
@@ -286,7 +318,36 @@ async def test_gpu_activation_uses_low_cost_manifest_validation(
 
     assert await controller._validate_gpu_activation() is True
     assert verification_modes == [False]
-    assert view.states[-1][0] == "loading"
+    assert controller._gpu_ui_state == "loading"
+    assert view.states == []
+
+
+async def test_missing_gpu_model_is_exposed_only_when_activation_is_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, view = _controller()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN_GPU
+    controller._gpu_devices = (
+        GpuWorkerDevice(
+            device_id="vk:0",
+            registry_index=0,
+            name="GPU",
+            description="GPU",
+            device_type="discrete",
+            memory_total_bytes=1,
+            memory_free_bytes=1,
+        ),
+    )
+    controller._gpu_discovery_attempted = True
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_gpu_install",
+        lambda **_kwargs: SimpleNamespace(status="missing", activation_allowed=False),
+    )
+
+    assert await controller._validate_gpu_activation() is False
+
+    assert view.states[-1][0] == "not_installed"
 
 
 async def test_explicit_gpu_install_uses_only_gpu_manifest(
@@ -311,10 +372,157 @@ async def test_explicit_gpu_install_uses_only_gpu_manifest(
     assert calls[0]["model_id"] == "gpu-model"
     assert calls[0]["manifest"] is manifest
     assert view.states[0] == ("installing", (), 0)
-    assert view.states[-1][0] == "installed"
+    assert controller._gpu_ui_state == "installed"
+    assert [state for state, _devices, _progress in view.states] == ["installing"]
 
 
-async def test_gpu_discovery_exposes_pending_before_devices(
+async def test_missing_gpu_model_preserves_self_enable_intent_without_downloading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _view = _controller()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN_GPU
+    dashboard_enabled: list[bool] = []
+    controller.app.view_dashboard = SimpleNamespace(
+        set_stt_enabled=dashboard_enabled.append,
+        set_local_stt_notice=lambda *_args, **_kwargs: None,
+        set_local_stt_notice_model=lambda *_args, **_kwargs: None,
+        set_gpu_notice=lambda _notice: None,
+    )
+    install = AsyncMock()
+
+    async def unavailable(_self: GuiController) -> bool:
+        _self._set_gpu_ui_state("not_installed")
+        return False
+
+    monkeypatch.setattr(GuiController, "_validate_gpu_activation", unavailable)
+    monkeypatch.setattr(GuiController, "install_or_repair_gpu_model", install)
+
+    await controller.set_stt_enabled(True)
+
+    assert controller._stt_desired is True
+    assert controller._gpu_pending_enable_channels == frozenset({"self"})
+    assert dashboard_enabled == []
+    install.assert_not_awaited()
+
+
+async def test_gpu_download_continues_after_pending_channel_is_turned_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _view = _controller()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN_GPU
+    controller._gpu_pending_enable_channels = frozenset({"self"})
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def fake_install(**_kwargs):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return object()
+
+    monkeypatch.setattr(
+        controller_module,
+        "load_local_gpu_asset_manifest",
+        lambda: SimpleNamespace(model_id="gpu-model"),
+    )
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_gpu_install",
+        lambda **_kwargs: SimpleNamespace(status="ready", activation_allowed=True),
+    )
+    monkeypatch.setattr(GuiController, "_ensure_stt_switch", AsyncMock())
+    retry = AsyncMock()
+
+    async def retry_call(_self: GuiController) -> None:
+        await retry()
+
+    monkeypatch.setattr(GuiController, "retry_gpu_activation", retry_call)
+
+    download = asyncio.create_task(controller.install_or_repair_gpu_model())
+    await started.wait()
+    await controller.set_stt_enabled(False)
+
+    assert not download.done()
+    assert controller._gpu_pending_enable_channels == frozenset()
+    release.set()
+    await download
+
+    assert calls == 1
+    retry.assert_not_awaited()
+
+
+async def test_concurrent_gpu_install_requests_share_one_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _view = _controller()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def fake_install(**_kwargs):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return object()
+
+    monkeypatch.setattr(
+        controller_module,
+        "load_local_gpu_asset_manifest",
+        lambda: SimpleNamespace(model_id="gpu-model"),
+    )
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_gpu_install",
+        lambda **_kwargs: SimpleNamespace(status="ready", activation_allowed=True),
+    )
+
+    first = asyncio.create_task(controller.install_or_repair_gpu_model())
+    await started.wait()
+    await controller.install_or_repair_gpu_model()
+    release.set()
+    await first
+
+    assert calls == 1
+
+
+async def test_gpu_install_auto_activation_uses_only_channels_still_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _view = _controller()
+    controller._gpu_pending_enable_channels = frozenset({"peer"})
+    monkeypatch.setattr(
+        controller_module,
+        "load_local_gpu_asset_manifest",
+        lambda: SimpleNamespace(model_id="gpu-model"),
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "ensure_local_stt_installed",
+        AsyncMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_gpu_install",
+        lambda **_kwargs: SimpleNamespace(status="ready", activation_allowed=True),
+    )
+    captured: list[frozenset[str]] = []
+
+    async def retry(_self: GuiController) -> None:
+        captured.append(_self._gpu_pending_enable_channels)
+
+    monkeypatch.setattr(GuiController, "retry_gpu_activation", retry)
+
+    await controller.install_or_repair_gpu_model()
+
+    assert captured == [frozenset({"peer"})]
+
+
+async def test_gpu_discovery_keeps_startup_progress_off_dashboard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller, view = _controller()
@@ -337,19 +545,30 @@ async def test_gpu_discovery_exposes_pending_before_devices(
     monkeypatch.setattr(GuiController, "_get_gpu_asr_runtime", lambda _self: Runtime())
     monkeypatch.setattr(GuiController, "_gpu_idle_ui_state", lambda _self: "not_installed")
 
-    task = asyncio.create_task(controller.ensure_gpu_device_discovery())
+    task = asyncio.create_task(controller.ensure_gpu_device_discovery(origin="startup"))
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     await controller._on_gpu_asr_diagnostic(SimpleNamespace(kind="discovery_pending", fields={}))
-    assert [state for state, _devices, _progress in view.states[:2]] == [
-        "discovering",
-        "discovery_pending",
-    ]
+    assert controller._gpu_ui_state == "discovery_pending"
+    assert view.states == []
 
     gate.set()
     await task
-    assert view.states[-1][0] == "not_installed"
-    assert view.states[-1][1] == (("vk:0", "GPU (discrete)"),)
+    assert controller._gpu_ui_state == "not_installed"
+    assert view.states == []
+
+
+async def test_gpu_worker_failure_preserves_channels_for_restart_action() -> None:
+    controller, view = _controller()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN_GPU
+    controller._stt_desired = True
+
+    await controller._on_gpu_asr_diagnostic(
+        SimpleNamespace(kind="worker_failed", fields={"code": "out_of_memory"})
+    )
+
+    assert controller._gpu_manual_retry_channels == frozenset({"self"})
+    assert view.states[-1][0] == "activation_failed"
 
 
 async def test_gpu_discovery_success_and_empty_results_are_cached(
@@ -392,9 +611,9 @@ async def test_saved_gpu_preload_skips_non_gpu_and_runs_once_for_gpu(
     controller, _view = _controller()
     calls: list[str] = []
 
-    async def discover(_self, *, force: bool = False):
+    async def discover(_self, *, force: bool = False, origin: str = "settings"):
         _ = force
-        calls.append("discover")
+        calls.append(origin)
         return ()
 
     monkeypatch.setattr(GuiController, "ensure_gpu_device_discovery", discover)
@@ -404,7 +623,7 @@ async def test_saved_gpu_preload_skips_non_gpu_and_runs_once_for_gpu(
 
     controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN_GPU
     assert await controller.preload_saved_gpu_device_discovery() == ()
-    assert calls == ["discover"]
+    assert calls == ["startup"]
 
 
 async def test_gpu_discovery_concurrent_requests_and_activation_share_one_task(
@@ -472,11 +691,13 @@ async def test_gpu_discovery_failure_is_cached_until_forced_retry(
     assert await controller.ensure_gpu_device_discovery() == ()
     assert await controller.ensure_gpu_device_discovery() == ()
     assert calls == 1
-    assert view.states[-1][0] == "discovery_failed"
+    assert controller._gpu_ui_state == "discovery_failed"
+    assert view.states == []
 
     assert await controller.ensure_gpu_device_discovery(force=True) == ()
     assert calls == 2
-    assert view.states[-1][0] == "unsupported"
+    assert controller._gpu_ui_state == "unsupported"
+    assert view.states == []
 
 
 def _gpu_restart_plan() -> _ProviderRuntimeApplyPlan:

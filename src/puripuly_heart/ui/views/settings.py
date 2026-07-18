@@ -127,26 +127,6 @@ _STT_SECTION_BY_PROVIDER: dict[STTProviderName, str] = {
     STTProviderName.LOCAL_PARAKEET_JAPANESE: "settings.stt.section.cpu_inference",
     STTProviderName.LOCAL_QWEN: "settings.stt.section.cpu_inference",
 }
-_GPU_STATE_LABEL_KEYS = {
-    "discovering": "settings.gpu_state.discovering",
-    "discovery_pending": "settings.gpu_state.discovery_pending",
-    "discovery_failed": "settings.gpu_state.discovery_failed",
-    "not_installed": "settings.gpu_state.not_installed",
-    "invalid": "settings.gpu_state.invalid",
-    "installing": "settings.gpu_state.installing",
-    "install_failed": "settings.gpu_state.install_failed",
-    "installed": "settings.gpu_state.installed",
-    "unsupported": "settings.gpu_state.unsupported",
-    "validating": "settings.gpu_state.validating",
-    "loading": "settings.gpu_state.loading",
-    "warming": "settings.gpu_state.warming",
-    "ready": "settings.gpu_state.ready",
-    "activation_failed": "settings.gpu_state.activation_failed",
-}
-_GPU_ACTION_LABEL_KEYS = {
-    "install": "settings.gpu_action.install",
-    "retry": "settings.gpu_action.retry",
-}
 _TRANSLATION_MODEL_LABEL_KEYS = {
     TranslationModel.GEMMA4: "provider.gemma4_26b_a4b_it",
     TranslationModel.DEEPSEEK_V4_FLASH: "provider.deepseek_v4_flash",
@@ -354,8 +334,6 @@ class SettingsView(ft.Column):
         self.on_desktop_overlay_position_reset: Callable[[], None] | None = None
         self.on_view_logs: Callable[[], None] | None = None
         self.on_start_microphone_test: Callable[[], None] | None = None
-        self.on_gpu_install_requested: Callable[[], object] | None = None
-        self.on_gpu_retry_requested: Callable[[], object] | None = None
         self.on_gpu_discovery_requested: Callable[[], object] | None = None
         self.on_telemetry_consent_change: Callable[[str], None] | None = None
         self.on_list_loopback_capture_options: Callable[[], object] | None = None
@@ -390,8 +368,6 @@ class SettingsView(ft.Column):
         self._managed_key_referral_id: str | None = None
         self._managed_key_pass_status: TalkTogetherPassStatus | None = None
         self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
-        self._gpu_runtime_state = "discovering"
-        self._gpu_progress_percent: int | None = None
         self._gpu_devices: tuple[tuple[str, str], ...] = ()
         self._local_cpu_auto_available = False
 
@@ -1498,11 +1474,6 @@ class SettingsView(ft.Column):
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
         )
-        self._gpu_device_status = ft.Text(
-            t("settings.gpu_state.discovering"),
-            size=14,
-            color=COLOR_NEUTRAL,
-        )
         self._gpu_device_dropdown = ft.Dropdown(
             value="auto",
             options=[ft.dropdown.Option(key="auto", text=t("settings.gpu_device.auto"))],
@@ -1512,19 +1483,25 @@ class SettingsView(ft.Column):
             focused_border_color=COLOR_PRIMARY,
             on_change=self._on_gpu_device_change,
         )
-        self._gpu_action_button = _make_text_button(
-            t("settings.gpu_action.install"),
-            on_click=self._on_gpu_action_click,
-        )
         self._gpu_device_card = self._wrap_unit_card(
             title=self._gpu_device_title,
             value=self._gpu_device_dropdown,
-            extra_controls=(self._gpu_device_status, self._gpu_action_button),
-            height=None,
         )
         self._gpu_device_card.visible = False
+        gpu_placeholder_1 = self._wrap_empty_unit_card()
+        gpu_placeholder_1.opacity = 0
+        gpu_placeholder_2 = self._wrap_empty_unit_card()
+        gpu_placeholder_2.opacity = 0
         self._gpu_device_row = ft.Container(
-            content=ft.Row([self._gpu_device_card], spacing=16, expand=True),
+            content=ft.Row(
+                [
+                    self._gpu_device_card,
+                    gpu_placeholder_1,
+                    gpu_placeholder_2,
+                ],
+                spacing=16,
+                expand=True,
+            ),
         )
 
         self._overlay_translation_title = ft.Text(
@@ -2243,42 +2220,13 @@ class SettingsView(ft.Column):
         self._gpu_device_dropdown.options = options
         self._gpu_device_dropdown.value = selected
         self._gpu_device_card.visible = self._gpu_selected(settings)
-        if self._gpu_runtime_state == "installing" and self._gpu_progress_percent is not None:
-            self._gpu_device_status.value = t(
-                "settings.gpu_state.installing_progress",
-                percent=self._gpu_progress_percent,
-            )
-        else:
-            state = getattr(self, "_gpu_runtime_state", "discovering")
-            self._gpu_device_status.value = t(
-                _GPU_STATE_LABEL_KEYS.get(state, _GPU_STATE_LABEL_KEYS["activation_failed"])
-            )
-        action = (
-            "install"
-            if self._gpu_runtime_state in {"not_installed", "invalid", "install_failed"}
-            else "retry"
-        )
-        _set_text_button_label(self._gpu_action_button, t(_GPU_ACTION_LABEL_KEYS[action]))
-        self._gpu_action_button.visible = self._gpu_runtime_state in {
-            "not_installed",
-            "invalid",
-            "install_failed",
-            "unsupported",
-            "discovery_failed",
-            "activation_failed",
-        }
 
-    def set_gpu_runtime_state(
+    def set_gpu_devices(
         self,
-        state: str,
         *,
-        devices: tuple[tuple[str, str], ...] | None = None,
-        progress_percent: int | None = None,
+        devices: tuple[tuple[str, str], ...],
     ) -> None:
-        self._gpu_runtime_state = state
-        self._gpu_progress_percent = progress_percent
-        if devices is not None:
-            self._gpu_devices = devices
+        self._gpu_devices = devices
         self._sync_gpu_device_card()
         _update_control_if_mounted(self._gpu_device_row)
 
@@ -2290,15 +2238,6 @@ class SettingsView(ft.Column):
         draft.stt.gpu_device_id = value
         self.has_provider_changes = True
         self._sync_gpu_device_card()
-
-    def _on_gpu_action_click(self, _event) -> None:
-        callback = (
-            self.on_gpu_install_requested
-            if self._gpu_runtime_state in {"not_installed", "invalid", "install_failed"}
-            else self.on_gpu_retry_requested
-        )
-        if callback is not None:
-            callback()
 
     def _populate_host_apis(self) -> None:
         """Legacy hook for tests; host APIs are handled by AudioSettings."""

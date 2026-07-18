@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import pytest
 
 ft = pytest.importorskip("flet")
 
+from puripuly_heart.ui.gpu_notice import GpuDashboardNotice
 from puripuly_heart.ui.overlay_peer_contract import (
     OverlayPeerConsumerContract,
     OverlayPeerToggleContract,
@@ -53,6 +55,7 @@ class FakeDisplayCard:
         self.translation_calls: list[tuple[str | None, str | None]] = []
         self.translation_metadata_calls: list[dict[str, object]] = []
         self.notice_calls: list[tuple[str | None, str | None]] = []
+        self.notice_actions: list[tuple[str | None, object | None]] = []
         self.input_fonts: list[str | None] = []
         self.locale_calls: list[tuple[str | None, str | None]] = []
         self.input_is_focused = False
@@ -80,8 +83,16 @@ class FakeDisplayCard:
         self.translation_calls.append((text, font_family))
         self.translation_metadata_calls.append(dict(metadata))
 
-    def set_notice(self, text: str | None, tone: str | None = None) -> None:
+    def set_notice(
+        self,
+        text: str | None,
+        tone: str | None = None,
+        *,
+        action_label: str | None = None,
+        on_action=None,
+    ) -> None:
         self.notice_calls.append((text, tone))
+        self.notice_actions.append((action_label, on_action))
 
     def set_input_font(self, font_family: str | None) -> None:
         self.input_fonts.append(font_family)
@@ -448,8 +459,8 @@ def test_dashboard_public_setters_update_components(monkeypatch: pytest.MonkeyPa
     assert view.display_card.display_calls[-1] == ("src", False, "font-ko")
     assert view.display_card.translation_calls[-1] == ("dst", "font-en")
     assert view.display_card.notice_calls[-1] == (
-        dashboard_module.t("dashboard.managed_auth_pending"),
-        "info",
+        dashboard_module.t("dashboard.local_stt_notice_missing"),
+        "warning",
     )
     assert view.language_card.languages[-1] == ("name-ko", "name-en", "name-ko", "name-en")
     assert view.trans_button.states[-1] == {
@@ -478,7 +489,7 @@ def test_dashboard_managed_auth_pending_restores_local_stt_notice_when_cleared(
 
     assert view.display_card.notice_calls == [
         (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
-        (dashboard_module.t("dashboard.managed_auth_pending"), "info"),
+        (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
         (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
     ]
 
@@ -763,11 +774,124 @@ def test_dashboard_overlay_failure_notice_is_lowest_priority_notice_source(
 
     assert view.display_card.notice_calls == [
         (overlay_failure_notice, "error"),
-        (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
-        (dashboard_module.t("dashboard.managed_auth_pending"), "info"),
-        (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
+        (overlay_failure_notice, "error"),
+        (overlay_failure_notice, "error"),
+        (overlay_failure_notice, "error"),
         (overlay_failure_notice, "error"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("status", "key", "action", "action_key", "tone"),
+    (
+        (
+            "discovery_failed",
+            "dashboard.gpu_notice.discovery_failed",
+            "rediscover",
+            "dashboard.gpu_action.rediscover",
+            "error",
+        ),
+        ("unsupported", "dashboard.gpu_notice.unsupported", None, None, "warning"),
+        (
+            "unavailable_device",
+            "dashboard.gpu_notice.unavailable_device",
+            None,
+            None,
+            "warning",
+        ),
+        (
+            "not_installed",
+            "dashboard.gpu_notice.not_installed",
+            "install",
+            "dashboard.gpu_action.install",
+            "warning",
+        ),
+        (
+            "invalid",
+            "dashboard.gpu_notice.invalid",
+            "repair",
+            "dashboard.gpu_action.repair",
+            "warning",
+        ),
+        (
+            "install_failed",
+            "dashboard.gpu_notice.install_failed",
+            "reinstall",
+            "dashboard.gpu_action.reinstall",
+            "error",
+        ),
+        (
+            "activation_failed",
+            "dashboard.gpu_notice.activation_failed",
+            "restart",
+            "dashboard.gpu_action.restart",
+            "error",
+        ),
+    ),
+)
+def test_dashboard_gpu_notice_text_tone_and_action(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    key: str,
+    action: str | None,
+    action_key: str | None,
+    tone: str,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+
+    view.set_gpu_notice(GpuDashboardNotice(status=status, action=action))
+
+    assert view.display_card.notice_calls[-1] == (dashboard_module.t(key), tone)
+    assert view.display_card.notice_actions[-1][0] == (
+        dashboard_module.t(action_key) if action_key is not None else None
+    )
+
+
+def test_dashboard_gpu_download_preempts_and_restores_first_active_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    view.set_vrchat_osc_notice(True)
+    view.set_managed_auth_pending(True)
+
+    view.set_gpu_notice(GpuDashboardNotice(status="installing", progress_percent=37))
+    assert view.display_card.notice_calls[-1] == (
+        dashboard_module.t("dashboard.gpu_notice.installing", percent=37),
+        "info",
+    )
+
+    view.set_gpu_notice(None)
+    assert view.display_card.notice_calls[-1] == (
+        dashboard_module.t("dashboard.vrchat_osc_disabled"),
+        "warning",
+    )
+
+
+@pytest.mark.asyncio
+async def test_dashboard_gpu_action_runs_as_page_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    tasks: list[asyncio.Task[None]] = []
+    actions: list[str] = []
+
+    class Page:
+        def run_task(self, callback) -> None:
+            tasks.append(asyncio.create_task(callback()))
+
+    async def on_action(action: str) -> None:
+        actions.append(action)
+
+    attach_dummy_page(monkeypatch, view, Page())
+    view.on_gpu_notice_action = on_action
+    view.set_gpu_notice(GpuDashboardNotice(status="not_installed", action="install"))
+    action_callback = view.display_card.notice_actions[-1][1]
+    assert callable(action_callback)
+
+    action_callback()
+    await tasks[-1]
+
+    assert actions == ["install"]
 
 
 def test_dashboard_steamvr_overlay_failure_notice_uses_actionable_reason_without_status_prefix(

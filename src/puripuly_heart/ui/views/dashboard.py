@@ -1,3 +1,4 @@
+import inspect
 from typing import Callable
 
 import flet as ft
@@ -10,6 +11,7 @@ from puripuly_heart.ui.components.language_card import LanguageCard
 from puripuly_heart.ui.components.language_modal import LanguageModal
 from puripuly_heart.ui.components.power_button import PowerButton
 from puripuly_heart.ui.fonts import font_for_language
+from puripuly_heart.ui.gpu_notice import GpuDashboardNotice, GpuNoticeAction
 from puripuly_heart.ui.i18n import get_locale, language_name, t
 from puripuly_heart.ui.overlay_peer_contract import (
     OverlayPeerConsumerContract,
@@ -35,6 +37,32 @@ _LOCAL_STT_TARGETED_NOTICE_KEYS = {
     "invalid": "dashboard.local_stt_notice_invalid_model",
     "downloading": "dashboard.local_stt_notice_downloading_model",
     "download_failed": "dashboard.local_stt_notice_download_failed_model",
+}
+_GPU_NOTICE_KEYS = {
+    "discovery_failed": "dashboard.gpu_notice.discovery_failed",
+    "unsupported": "dashboard.gpu_notice.unsupported",
+    "unavailable_device": "dashboard.gpu_notice.unavailable_device",
+    "not_installed": "dashboard.gpu_notice.not_installed",
+    "invalid": "dashboard.gpu_notice.invalid",
+    "installing": "dashboard.gpu_notice.installing",
+    "install_failed": "dashboard.gpu_notice.install_failed",
+    "activation_failed": "dashboard.gpu_notice.activation_failed",
+}
+_GPU_NOTICE_TONES = {
+    "discovery_failed": "error",
+    "unsupported": "warning",
+    "unavailable_device": "warning",
+    "not_installed": "warning",
+    "invalid": "warning",
+    "install_failed": "error",
+    "activation_failed": "error",
+}
+_GPU_ACTION_KEYS = {
+    "install": "dashboard.gpu_action.install",
+    "repair": "dashboard.gpu_action.repair",
+    "reinstall": "dashboard.gpu_action.reinstall",
+    "rediscover": "dashboard.gpu_action.rediscover",
+    "restart": "dashboard.gpu_action.restart",
 }
 
 
@@ -64,6 +92,10 @@ class DashboardView(ft.Column):
         self._local_stt_notice_status: str | None = None
         self._local_stt_notice_percent: int | None = None
         self._local_stt_notice_model_id: str | None = None
+        self._gpu_notice: GpuDashboardNotice | None = None
+        self._notice_sequence = 0
+        self._notice_started: dict[str, int] = {}
+        self._visible_notice_source: str | None = None
         self._vrchat_osc_notice_active = False
         self._overlay_session_fallback_notice_active = False
         self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
@@ -95,6 +127,7 @@ class DashboardView(ft.Column):
         self.on_toggle_overlay = None
         self.on_toggle_peer_translation = None
         self.on_retry_peer_process_capture = None
+        self.on_gpu_notice_action: Callable[[GpuNoticeAction], object] | None = None
         self.on_language_change: Callable[[LanguageSelectionChange], None] | None = None
         self.on_message_input_activity = None
         self.runtime_log_detailed: Callable[..., bool | None] | None = None
@@ -666,6 +699,24 @@ class DashboardView(ft.Column):
         self._local_stt_notice_model_id = model_id
         self._sync_notice()
 
+    def set_gpu_notice(self, notice: GpuDashboardNotice | None) -> None:
+        self._gpu_notice = notice
+        self._sync_notice()
+
+    def _run_gpu_notice_action(self, action: GpuNoticeAction) -> None:
+        callback = self.on_gpu_notice_action
+        page = getattr(self, "page", None)
+        run_task = getattr(page, "run_task", None)
+        if callback is None or not callable(run_task):
+            return
+
+        async def invoke() -> None:
+            result = callback(action)
+            if inspect.isawaitable(result):
+                await result
+
+        run_task(invoke)
+
     def set_vrchat_osc_notice(self, active: bool) -> None:
         self._vrchat_osc_notice_active = bool(active)
         self._sync_notice()
@@ -757,27 +808,77 @@ class DashboardView(ft.Column):
             "error",
         )
 
+    def _notice_candidates(self) -> dict[str, tuple[str, str | None, str | None]]:
+        candidates: dict[str, tuple[str, str | None, str | None]] = {}
+        if self._managed_auth_pending:
+            candidates["managed_auth"] = (t("dashboard.managed_auth_pending"), "info", None)
+        notice_text, tone = self._current_local_stt_notice()
+        if notice_text is not None:
+            candidates["local_stt"] = (notice_text, tone, None)
+        gpu_notice = self._gpu_notice
+        if gpu_notice is not None and gpu_notice.status in _GPU_NOTICE_KEYS:
+            key = _GPU_NOTICE_KEYS[gpu_notice.status]
+            text = (
+                t(key, percent=gpu_notice.progress_percent or 0)
+                if gpu_notice.status == "installing"
+                else t(key)
+            )
+            candidates["gpu"] = (
+                text,
+                _GPU_NOTICE_TONES.get(gpu_notice.status, "info"),
+                gpu_notice.action,
+            )
+        if self._overlay_session_fallback_notice_active:
+            candidates["overlay_fallback"] = (
+                t("dashboard.overlay_session_fallback_desktop"),
+                "info",
+                None,
+            )
+        if self._vrchat_osc_notice_active:
+            candidates["vrchat_osc"] = (t("dashboard.vrchat_osc_disabled"), "warning", None)
+        overlay_text, overlay_tone = self._current_overlay_failure_notice()
+        if overlay_text is not None:
+            candidates["overlay_failure"] = (overlay_text, overlay_tone, None)
+        return candidates
+
     def _sync_notice(self) -> None:
         if not hasattr(self, "display_card"):
             return
-        if self._managed_auth_pending:
-            self.display_card.set_notice(t("dashboard.managed_auth_pending"), "info")
+        candidates = self._notice_candidates()
+        for source in tuple(self._notice_started):
+            if source not in candidates:
+                self._notice_started.pop(source, None)
+        for source in candidates:
+            if source not in self._notice_started:
+                self._notice_sequence += 1
+                self._notice_started[source] = self._notice_sequence
+
+        download_source = None
+        if self._gpu_notice is not None and self._gpu_notice.status == "installing":
+            download_source = "gpu"
+        elif self._local_stt_notice_status == "downloading":
+            download_source = "local_stt"
+        if download_source is not None:
+            selected = download_source
+        elif self._visible_notice_source in candidates:
+            selected = self._visible_notice_source
+        else:
+            selected = min(candidates, key=self._notice_started.__getitem__) if candidates else None
+        self._visible_notice_source = selected
+        if selected is None:
+            self.display_card.set_notice(None, None)
             return
-        notice_text, tone = self._current_local_stt_notice()
-        if notice_text is not None:
-            self.display_card.set_notice(notice_text, tone)
-            return
-        if self._overlay_session_fallback_notice_active:
+        text, tone, action = candidates[selected]
+        action_label = t(_GPU_ACTION_KEYS[action]) if action is not None else None
+        try:
             self.display_card.set_notice(
-                t("dashboard.overlay_session_fallback_desktop"),
-                "info",
+                text,
+                tone,
+                action_label=action_label,
+                on_action=(None if action is None else lambda: self._run_gpu_notice_action(action)),
             )
-            return
-        if self._vrchat_osc_notice_active:
-            self.display_card.set_notice(t("dashboard.vrchat_osc_disabled"), "warning")
-            return
-        notice_text, tone = self._current_overlay_failure_notice()
-        self.display_card.set_notice(notice_text, tone)
+        except TypeError:
+            self.display_card.set_notice(text, tone)
 
     def apply_locale(self) -> None:
         self.stt_button.set_label(t("dashboard.stt_label"))

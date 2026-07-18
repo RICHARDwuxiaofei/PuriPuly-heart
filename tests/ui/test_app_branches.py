@@ -1205,30 +1205,27 @@ def test_debug_preview_gpu_states_cycle_in_memory() -> None:
     app.debug_ui_preview = True
     app.page = DummyPage()
     app.view_settings = SimpleNamespace(
-        states=[],
-        set_gpu_runtime_state=lambda state, **kwargs: app.view_settings.states.append(
-            (state, kwargs)
-        ),
+        devices=[],
+        set_gpu_devices=lambda **kwargs: app.view_settings.devices.append(kwargs["devices"]),
     )
-    for _ in range(14):
+    app.view_dashboard = SimpleNamespace(
+        notices=[],
+        set_gpu_notice=lambda notice: app.view_dashboard.notices.append(notice),
+    )
+    for _ in range(8):
         app._cycle_debug_preview_gpu_state()
 
-    assert [state for state, _kwargs in app.view_settings.states] == [
-        "discovering",
-        "discovery_pending",
+    assert [notice.status for notice in app.view_dashboard.notices] == [
         "discovery_failed",
         "not_installed",
         "invalid",
         "installing",
         "install_failed",
-        "installed",
         "unsupported",
-        "validating",
-        "loading",
-        "warming",
-        "ready",
+        "unavailable_device",
         "activation_failed",
     ]
+    assert len(app.view_settings.devices) == 8
 
 
 class PreviewDashboard:

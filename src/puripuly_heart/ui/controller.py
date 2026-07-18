@@ -327,6 +327,7 @@ from puripuly_heart.ui.event_bridge import (
     AppHistoryEventDestination,
     UIEventBridge,
 )
+from puripuly_heart.ui.gpu_notice import GpuDashboardNotice, GpuNoticeAction
 from puripuly_heart.ui.i18n import get_locale, set_locale, t
 from puripuly_heart.ui.overlay_peer_contract import (
     OverlayPeerConsumerContract,
@@ -1124,6 +1125,12 @@ class GuiController:
         default=frozenset(),
         repr=False,
     )
+    _gpu_pending_enable_channels: frozenset[GpuASRChannel] = field(
+        init=False,
+        default=frozenset(),
+        repr=False,
+    )
+    _gpu_ui_state: str | None = field(init=False, default=None, repr=False)
     _gpu_devices: tuple[GpuWorkerDevice, ...] = field(init=False, default=(), repr=False)
     _gpu_discovery_task: asyncio.Task[tuple[GpuWorkerDevice, ...]] | None = field(
         init=False,
@@ -1134,6 +1141,7 @@ class GuiController:
     _gpu_discovery_failed: bool = field(init=False, default=False, repr=False)
     _gpu_discovery_failure_state: str | None = field(init=False, default=None, repr=False)
     _gpu_discovery_generation: int = field(init=False, default=0, repr=False)
+    _gpu_discovery_origin: str = field(init=False, default="settings", repr=False)
     _gpu_install_runtime: LocalSTTDownloadRuntime | None = field(
         init=False,
         default=None,
@@ -1144,6 +1152,7 @@ class GuiController:
         default=None,
         repr=False,
     )
+    _gpu_install_percent: int | None = field(init=False, default=None, repr=False)
     _peer_local_stt_probe_task: asyncio.Task[LocalCPUInstallSnapshot] | None = field(
         init=False,
         default=None,
@@ -1484,7 +1493,7 @@ class GuiController:
             self.settings.provider.peer_stt != STTProviderName.LOCAL_QWEN_GPU
         ):
             return ()
-        return await self.ensure_gpu_device_discovery()
+        return await self.ensure_gpu_device_discovery(origin="startup")
 
     def _schedule_process_discovery_idle_preparation(self) -> None:
         if self._process_idle_preparation_scheduled:
@@ -1518,11 +1527,15 @@ class GuiController:
         state: str,
         *,
         progress_percent: int | None = None,
+        publish_notice: bool = False,
+        origin: str = "runtime",
     ) -> None:
+        self._gpu_ui_state = state
+        fields = [f"state={state}", f"origin={origin}"]
+        if progress_percent is not None:
+            fields.append(f"progress_percent={progress_percent}")
+        self.log_detailed(f"[GPU ASR] {' '.join(fields)}")
         settings_view = getattr(self.app, "view_settings", None)
-        setter = getattr(settings_view, "set_gpu_runtime_state", None)
-        if not callable(setter):
-            return
         devices = tuple(
             (
                 device.device_id,
@@ -1530,25 +1543,88 @@ class GuiController:
             )
             for device in self._gpu_devices
         )
-        setter(state, devices=devices, progress_percent=progress_percent)
+        set_devices = getattr(settings_view, "set_gpu_devices", None)
+        if callable(set_devices):
+            set_devices(devices=devices)
+        action_by_state: dict[str, GpuNoticeAction] = {
+            "discovery_failed": "rediscover",
+            "not_installed": "install",
+            "invalid": "repair",
+            "install_failed": "reinstall",
+            "activation_failed": "restart",
+        }
+        dashboard = getattr(self.app, "view_dashboard", None)
+        set_notice = getattr(dashboard, "set_gpu_notice", None)
+        if callable(set_notice):
+            if publish_notice:
+                set_notice(
+                    GpuDashboardNotice(
+                        status=state,
+                        progress_percent=progress_percent,
+                        action=action_by_state.get(state),
+                    )
+                )
+            else:
+                set_notice(None)
+        elif publish_notice and not callable(set_devices):
+            legacy_setter = getattr(settings_view, "set_gpu_runtime_state", None)
+            if callable(legacy_setter):
+                legacy_setter(state, devices=devices, progress_percent=progress_percent)
+
+    async def handle_gpu_notice_action(self, action: GpuNoticeAction) -> None:
+        if action in {"install", "repair", "reinstall"}:
+            await self.install_or_repair_gpu_model()
+            return
+        if action == "rediscover":
+            await self.ensure_gpu_device_discovery(force=True, origin="manual_rediscovery")
+            if self._gpu_discovery_failed:
+                self._set_gpu_ui_state(
+                    self._gpu_discovery_failure_state or "discovery_failed",
+                    publish_notice=True,
+                    origin="manual_rediscovery",
+                )
+            elif not self._gpu_devices:
+                self._set_gpu_ui_state(
+                    "unsupported",
+                    publish_notice=True,
+                    origin="manual_rediscovery",
+                )
+            return
+        if action == "restart":
+            await self.retry_gpu_activation()
 
     async def _on_gpu_asr_diagnostic(self, diagnostic: GpuASRDiagnostic) -> None:
         self.log_detailed(f"[GPU ASR] lifecycle={diagnostic.kind} fields={dict(diagnostic.fields)}")
         if diagnostic.kind == "worker_lifecycle":
             phase = diagnostic.fields.get("phase")
             if phase in {"validating", "loading", "warming", "ready"}:
-                self._set_gpu_ui_state(str(phase))
+                self._set_gpu_ui_state(str(phase), origin="worker_lifecycle")
         elif diagnostic.kind == "activation_ready":
-            self._set_gpu_ui_state("ready")
+            self._set_gpu_ui_state("ready", origin="activation")
         elif diagnostic.kind == "discovery_pending":
-            self._set_gpu_ui_state("discovery_pending")
+            self._set_gpu_ui_state(
+                "discovery_pending",
+                origin=self._gpu_discovery_origin,
+            )
         elif diagnostic.kind in {"activation_failed", "worker_failed"}:
-            self._set_gpu_ui_state("activation_failed")
+            if self.settings is not None:
+                self._gpu_manual_retry_channels = frozenset(
+                    {
+                        *self._gpu_manual_retry_channels,
+                        *self._desired_gpu_channels(self.settings),
+                    }
+                )
+            self._set_gpu_ui_state(
+                "activation_failed",
+                publish_notice=True,
+                origin="worker",
+            )
 
     async def ensure_gpu_device_discovery(
         self,
         *,
         force: bool = False,
+        origin: str = "settings",
     ) -> tuple[GpuWorkerDevice, ...]:
         task = self._gpu_discovery_task
         if task is not None and not task.done():
@@ -1557,9 +1633,10 @@ class GuiController:
             self._gpu_discovery_attempted = True
             return self._gpu_devices
         self._gpu_discovery_generation += 1
+        self._gpu_discovery_origin = origin
         task = start_lifecycle_task(
             self._ui_background_scope,
-            self._run_gpu_device_discovery(),
+            self._run_gpu_device_discovery(origin=origin),
             name=f"gpu-device-discovery-{self._gpu_discovery_generation}",
         )
         self._gpu_discovery_task = task
@@ -1569,8 +1646,8 @@ class GuiController:
             if self._gpu_discovery_task is task and task.done():
                 self._gpu_discovery_task = None
 
-    async def _run_gpu_device_discovery(self) -> tuple[GpuWorkerDevice, ...]:
-        self._set_gpu_ui_state("discovering")
+    async def _run_gpu_device_discovery(self, *, origin: str) -> tuple[GpuWorkerDevice, ...]:
+        self._set_gpu_ui_state("discovering", origin=origin)
         runtime = self._get_gpu_asr_runtime()
         try:
             self._gpu_devices = await runtime.discover_devices()
@@ -1578,9 +1655,12 @@ class GuiController:
             self._gpu_discovery_failed = False
             self._gpu_discovery_failure_state = None
             if not self._gpu_devices:
-                self._set_gpu_ui_state("unsupported")
+                self._set_gpu_ui_state("unsupported", origin=origin)
                 return self._gpu_devices
-            self._set_gpu_ui_state(self._gpu_idle_ui_state())
+            self._set_gpu_ui_state(
+                self._gpu_idle_ui_state(),
+                origin=origin,
+            )
             return self._gpu_devices
         except asyncio.CancelledError:
             raise
@@ -1595,7 +1675,12 @@ class GuiController:
                 else "discovery_failed"
             )
             self._gpu_discovery_failure_state = state
-            self._set_gpu_ui_state(state)
+            self.log_detailed(
+                f"[GPU ASR] discovery failure={code}",
+                level=logging.WARNING,
+                exception=exc,
+            )
+            self._set_gpu_ui_state(state, origin=origin)
             return self._gpu_devices
         except Exception as exc:
             self._gpu_discovery_attempted = True
@@ -1607,7 +1692,7 @@ class GuiController:
                 level=logging.WARNING,
                 exception=exc,
             )
-            self._set_gpu_ui_state("discovery_failed")
+            self._set_gpu_ui_state("discovery_failed", origin=origin)
             return self._gpu_devices
 
     def _gpu_idle_ui_state(self) -> str:
@@ -1626,20 +1711,53 @@ class GuiController:
             and self._gpu_asr_runtime.state == GpuASRRuntimeState.READY
             and self._gpu_asr_runtime.configured_device_id == self.settings.stt.gpu_device_id
         ):
-            self._set_gpu_ui_state("ready")
+            self._set_gpu_ui_state("ready", origin="activation")
             return True
-        await self.ensure_gpu_device_discovery()
+        await self.ensure_gpu_device_discovery(origin="activation")
         if self._gpu_discovery_failed:
-            self._set_gpu_ui_state(self._gpu_discovery_failure_state or "discovery_failed")
+            self._set_gpu_ui_state(
+                self._gpu_discovery_failure_state or "discovery_failed",
+                publish_notice=True,
+                origin="activation",
+            )
             return False
         selected_device = self.settings.stt.gpu_device_id
         known_devices = {device.device_id for device in self._gpu_devices}
-        if not self._gpu_devices or (
-            selected_device != "auto" and selected_device not in known_devices
-        ):
-            self._set_gpu_ui_state("unsupported")
+        if not self._gpu_devices:
+            self._set_gpu_ui_state(
+                "unsupported",
+                publish_notice=True,
+                origin="activation",
+            )
             return False
-        self._set_gpu_ui_state("validating")
+        if selected_device != "auto" and selected_device not in known_devices:
+            self._set_gpu_ui_state(
+                "unavailable_device",
+                publish_notice=True,
+                origin="activation",
+            )
+            return False
+        install_runtime = self._gpu_install_runtime
+        if (
+            install_runtime is not None
+            and install_runtime.download_task is not None
+            and not install_runtime.download_task.done()
+        ):
+            self._set_gpu_ui_state(
+                "installing",
+                progress_percent=self._gpu_install_percent or 0,
+                publish_notice=True,
+                origin="explicit_install",
+            )
+            return False
+        if self._gpu_ui_state == "install_failed":
+            self._set_gpu_ui_state(
+                "install_failed",
+                publish_notice=True,
+                origin="explicit_install",
+            )
+            return False
+        self._set_gpu_ui_state("validating", origin="activation")
         snapshot = await run_owned_thread_call(
             lambda: inspect_local_gpu_install(
                 explicit_opt_in=True,
@@ -1648,12 +1766,20 @@ class GuiController:
         )
         self._gpu_install_snapshot = snapshot
         if snapshot.status == "missing":
-            self._set_gpu_ui_state("not_installed")
+            self._set_gpu_ui_state(
+                "not_installed",
+                publish_notice=True,
+                origin="activation",
+            )
             return False
         if not snapshot.activation_allowed:
-            self._set_gpu_ui_state("invalid")
+            self._set_gpu_ui_state(
+                "invalid",
+                publish_notice=True,
+                origin="activation",
+            )
             return False
-        self._set_gpu_ui_state("loading")
+        self._set_gpu_ui_state("loading", origin="activation")
         return True
 
     async def install_or_repair_gpu_model(self) -> None:
@@ -1668,7 +1794,13 @@ class GuiController:
         async def run_install(cancel_event: threading.Event, generation: int) -> object:
             async def on_status(update: RuntimeLocalSTTStatusUpdate) -> None:
                 if runtime.is_current_generation(generation):
-                    self._set_gpu_ui_state("installing", progress_percent=update.percent)
+                    self._gpu_install_percent = update.percent
+                    self._set_gpu_ui_state(
+                        "installing",
+                        progress_percent=update.percent,
+                        publish_notice=True,
+                        origin="explicit_install",
+                    )
 
             return await ensure_local_stt_installed(
                 model_id=manifest.model_id,
@@ -1678,7 +1810,13 @@ class GuiController:
                 cancel_event=cancel_event,
             )
 
-        self._set_gpu_ui_state("installing", progress_percent=0)
+        self._gpu_install_percent = 0
+        self._set_gpu_ui_state(
+            "installing",
+            progress_percent=0,
+            publish_notice=True,
+            origin="explicit_install",
+        )
         task = runtime.start(origin="explicit_gpu_opt_in", run_download=run_install)
         try:
             await task
@@ -1689,11 +1827,33 @@ class GuiController:
                 )
             )
             self._gpu_install_snapshot = snapshot
-            self._set_gpu_ui_state("installed" if snapshot.activation_allowed else "invalid")
+            if not snapshot.activation_allowed:
+                self._gpu_install_percent = None
+                self._set_gpu_ui_state(
+                    "invalid",
+                    publish_notice=True,
+                    origin="explicit_install",
+                )
+                return
+            pending = self._gpu_pending_enable_channels
+            self._gpu_install_percent = None
+            self._set_gpu_ui_state("installed", origin="explicit_install")
+            if pending:
+                await self.retry_gpu_activation()
         except asyncio.CancelledError:
             raise
-        except Exception:
-            self._set_gpu_ui_state("install_failed")
+        except Exception as exc:
+            self._gpu_install_percent = None
+            self.log_detailed(
+                "[GPU ASR] model_install failure=unexpected",
+                level=logging.WARNING,
+                exception=exc,
+            )
+            self._set_gpu_ui_state(
+                "install_failed",
+                publish_notice=True,
+                origin="explicit_install",
+            )
 
     async def retry_gpu_activation(self) -> None:
         if self.settings is None:
@@ -1711,7 +1871,7 @@ class GuiController:
         if not self._gpu_devices or (
             selected_device != "auto" and selected_device not in known_devices
         ):
-            await self.ensure_gpu_device_discovery(force=True)
+            await self.ensure_gpu_device_discovery(force=True, origin="manual_retry")
         if not await self._validate_gpu_activation():
             return
         await self._restore_gpu_channels_after_manual_retry()
@@ -1726,7 +1886,7 @@ class GuiController:
         try:
             if runtime.state == GpuASRRuntimeState.FAILED and runtime.active_channels:
                 await runtime.retry()
-                self._set_gpu_ui_state("ready")
+                self._set_gpu_ui_state("ready", origin="manual_retry")
                 restore_channels.difference_update(runtime.active_channels)
             if (
                 self.settings.provider.stt == STTProviderName.LOCAL_QWEN_GPU
@@ -1747,11 +1907,20 @@ class GuiController:
                     runtime.last_failure_code or "manual_retry_required"
                 )
             self._gpu_manual_retry_channels = frozenset()
-            self._set_gpu_ui_state("ready")
+            self._gpu_pending_enable_channels = frozenset(
+                channel
+                for channel in self._gpu_pending_enable_channels
+                if channel not in restore_channels
+            )
+            self._set_gpu_ui_state("ready", origin="manual_retry")
         except Exception:
             self._gpu_manual_retry_channels = frozenset(restore_channels)
             await self._quiesce_shared_gpu_consumers(self.settings)
-            self._set_gpu_ui_state("activation_failed")
+            self._set_gpu_ui_state(
+                "activation_failed",
+                publish_notice=True,
+                origin="manual_retry",
+            )
 
     def _create_ui_event_bridge(self, *, runtime_logging) -> UIEventBridge:  # noqa: ANN001
         assert self.hub is not None
@@ -4712,6 +4881,9 @@ class GuiController:
                 self._peer_activation_starting = False
         else:
             self._reset_local_stt_pending_peer_enable_after_install()
+            self._gpu_pending_enable_channels = frozenset(
+                channel for channel in self._gpu_pending_enable_channels if channel != "peer"
+            )
             await self._cancel_peer_local_stt_probe()
         self._clear_local_stt_pending_enable_if_provider_switched_away()
         self._sync_local_stt_notice()
@@ -5409,6 +5581,9 @@ class GuiController:
         self._stt_force_immediate = force_immediate
         if not enabled:
             self._reset_local_stt_pending_enable_after_install()
+            self._gpu_pending_enable_channels = frozenset(
+                channel for channel in self._gpu_pending_enable_channels if channel != "self"
+            )
 
         # Log provider info when enabling
         if enabled and self.settings is not None:
@@ -5453,6 +5628,12 @@ class GuiController:
             and self.settings.provider.stt == STTProviderName.LOCAL_QWEN_GPU
             and not await self._validate_gpu_activation()
         ):
+            if self._gpu_ui_state in {"not_installed", "invalid", "install_failed", "installing"}:
+                self._gpu_pending_enable_channels = frozenset(
+                    {*self._gpu_pending_enable_channels, "self"}
+                )
+                self._stt_activation_starting = False
+                return
             self._stt_desired = False
             self._stt_activation_failed = True
             self._stt_activation_starting = False
@@ -6359,7 +6540,17 @@ class GuiController:
             self.settings is not None
             and self.settings.provider.peer_stt == STTProviderName.LOCAL_QWEN_GPU
         ):
-            return await self._validate_gpu_activation()
+            ready = await self._validate_gpu_activation()
+            if not ready and self._gpu_ui_state in {
+                "not_installed",
+                "invalid",
+                "install_failed",
+                "installing",
+            }:
+                self._gpu_pending_enable_channels = frozenset(
+                    {*self._gpu_pending_enable_channels, "peer"}
+                )
+            return ready
         if self.settings is None or not self._peer_local_stt_requested(self.settings):
             return True
         decision = resolve_local_asr_selection(
@@ -8528,7 +8719,11 @@ class GuiController:
                 self._gpu_manual_retry_channels = frozenset()
             except Exception:
                 await self._quiesce_shared_gpu_consumers(next_settings)
-                self._set_gpu_ui_state("activation_failed")
+                self._set_gpu_ui_state(
+                    "activation_failed",
+                    publish_notice=True,
+                    origin="settings_apply",
+                )
 
     def _desired_gpu_channels(self, settings: AppSettings) -> frozenset[GpuASRChannel]:
         runtime = self._gpu_asr_runtime
