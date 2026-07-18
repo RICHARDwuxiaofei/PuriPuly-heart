@@ -245,6 +245,39 @@ def test_stt_runtime_resolution_resolves_qwen_region_endpoint_and_custom_terms()
     assert config.custom_terms == {"ko-KR": ("Puripuly", "VRChat")}
 
 
+def test_peer_auto_source_mode_requires_provider_capability() -> None:
+    runtime_resolution = _runtime_resolution_module()
+
+    gpu = runtime_resolution.resolve_stt_config(
+        runtime_resolution.STTRuntimeIntent(
+            channel="peer",
+            provider=runtime_resolution.STT_PROVIDER_LOCAL_QWEN_GPU,
+            source_language="ja",
+            source_mode="auto",
+        )
+    )
+    unsupported = runtime_resolution.resolve_stt_config(
+        runtime_resolution.STTRuntimeIntent(
+            channel="peer",
+            provider=runtime_resolution.STT_PROVIDER_LOCAL_CPU_AUTO,
+            source_language="ja",
+            source_mode="auto",
+        )
+    )
+    self_gpu = runtime_resolution.resolve_stt_config(
+        runtime_resolution.STTRuntimeIntent(
+            channel="self",
+            provider=runtime_resolution.STT_PROVIDER_LOCAL_QWEN_GPU,
+            source_language="ja",
+            source_mode="auto",
+        )
+    )
+
+    assert gpu.source_mode == "auto"
+    assert unsupported.source_mode == "manual"
+    assert self_gpu.source_mode == "manual"
+
+
 def test_default_peer_stt_runtime_intent_uses_desktop_peer_vad_defaults() -> None:
     runtime_resolution = _runtime_resolution_module()
     resolved = _resolved_module()
@@ -269,6 +302,28 @@ def test_default_self_stt_runtime_intent_uses_low_latency_vad_defaults() -> None
     assert config.vad_speech_threshold == 0.4
     assert config.vad_hangover_ms == 500
     assert config.vad_pre_roll_ms == 500
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [
+        "local_cpu_auto",
+        "local_parakeet_v3",
+        "local_parakeet_ja",
+        "local_qwen",
+        "local_qwen_gpu",
+    ],
+)
+def test_stt_runtime_resolution_preserves_local_provider_identity(provider: str) -> None:
+    runtime_resolution = _runtime_resolution_module()
+
+    config = runtime_resolution.resolve_stt_config(
+        runtime_resolution.STTRuntimeIntent(provider=provider)
+    )
+
+    assert config.provider == provider
+    assert config.credential.source == "none"
+    assert config.credential.required is False
 
 
 def test_soniox_runtime_default_uses_realtime_v5_model() -> None:

@@ -108,6 +108,46 @@ def test_peer_contract_exposes_starting_before_readiness() -> None:
     assert contract.peer.status_text == t("settings.peer_translation.status.starting")
 
 
+def test_peer_contract_keeps_starting_visible_during_effective_model_transition() -> None:
+    contract = build_overlay_peer_consumer_contract(
+        overlay_intent_enabled=True,
+        overlay_state="connected",
+        overlay_failure_reason=None,
+        peer_intent_enabled=True,
+        peer_effective_enabled=True,
+        peer_activation_starting=True,
+    )
+
+    assert contract.peer.state == "starting"
+
+
+def test_peer_contract_treats_overlay_startup_as_peer_starting() -> None:
+    contract = build_overlay_peer_consumer_contract(
+        overlay_intent_enabled=True,
+        overlay_state="starting",
+        overlay_failure_reason=None,
+        peer_intent_enabled=True,
+        peer_effective_enabled=False,
+    )
+
+    assert contract.peer.state == "starting"
+    assert contract.peer.helper_text == ""
+
+
+def test_peer_contract_keeps_process_failure_warning_during_overlay_startup() -> None:
+    contract = build_overlay_peer_consumer_contract(
+        overlay_intent_enabled=True,
+        overlay_state="starting",
+        overlay_failure_reason=None,
+        peer_intent_enabled=True,
+        peer_effective_enabled=False,
+        peer_warning_reason="process_provider_failed",
+    )
+
+    assert contract.peer.state == "warning"
+    assert contract.peer.warning_reason == "process_provider_failed"
+
+
 @pytest.mark.asyncio
 async def test_process_identity_resolution_is_fresh_and_does_not_block_heartbeat(
     monkeypatch: pytest.MonkeyPatch,
@@ -235,7 +275,7 @@ async def test_peer_starting_is_published_before_delayed_readiness_and_latest_in
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def delayed_ready(_self) -> bool:  # noqa: ANN001
+    async def delayed_ready(_self, **_kwargs) -> bool:  # noqa: ANN001
         entered.set()
         await release.wait()
         return True
@@ -274,7 +314,7 @@ async def test_self_delayed_local_qwen_latest_intent_owns_microphone_start(
     release = asyncio.Event()
     starts: list[int] = []
 
-    async def delayed_ready(_self) -> bool:  # noqa: ANN001
+    async def delayed_ready(_self, **_kwargs) -> bool:  # noqa: ANN001
         entered.set()
         await release.wait()
         return True
@@ -321,7 +361,9 @@ async def test_self_microphone_start_failure_becomes_effective_off_failure_notic
     controller.settings.provider.stt = STTProviderName.LOCAL_QWEN
     controller.hub = SimpleNamespace(stt=object(), mark_promo_eligible=lambda: None)
     monkeypatch.setattr(
-        GuiController, "_ensure_local_stt_ready", lambda self: asyncio.sleep(0, result=True)
+        GuiController,
+        "_ensure_local_stt_ready",
+        lambda self, **_kwargs: asyncio.sleep(0, result=True),
     )
     monkeypatch.setattr(
         GuiController, "_start_mic_loop", lambda self: asyncio.sleep(0, result=False)
@@ -353,7 +395,7 @@ async def test_stale_self_start_failure_cannot_disable_latest_generation(
     release_failure = asyncio.Event()
     starts = 0
 
-    async def ready(_self) -> bool:  # noqa: ANN001
+    async def ready(_self, **_kwargs) -> bool:  # noqa: ANN001
         return True
 
     async def start(_self) -> bool:  # noqa: ANN001
@@ -381,7 +423,7 @@ async def test_stale_self_start_failure_cannot_disable_latest_generation(
     assert controller._stt_desired is True
     assert controller._stt_activation_failed is False
     assert controller._stt_activation_starting is False
-    assert dash.enabled == []
+    assert dash.enabled == [True]
 
 
 @pytest.mark.asyncio
@@ -415,7 +457,9 @@ async def test_peer_post_readiness_runtime_completion_cannot_publish_after_super
 
     controller._peer_runtime = Runtime()  # type: ignore[assignment]
     monkeypatch.setattr(
-        GuiController, "_ensure_peer_local_stt_ready", lambda self: asyncio.sleep(0, result=True)
+        GuiController,
+        "_ensure_peer_local_stt_ready",
+        lambda self, **_kwargs: asyncio.sleep(0, result=True),
     )
     monkeypatch.setattr(
         GuiController,
@@ -1057,11 +1101,12 @@ async def test_failed_process_warning_survives_unrelated_draft_apply_without_dev
 @pytest.mark.asyncio
 async def test_controller_capture_target_apply_uses_narrow_settings_refresh(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     controller = GuiController(
         page=SimpleNamespace(),
         app=SimpleNamespace(),
-        config_path=Path("settings.json"),
+        config_path=tmp_path / "settings.json",
     )
     controller.settings = AppSettings()
     saved = AppSettings()

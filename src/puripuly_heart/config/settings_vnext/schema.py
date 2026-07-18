@@ -12,7 +12,7 @@ from typing import Final, Literal
 from puripuly_heart.config.audio_host_api import WINDOWS_WASAPI_COMPATIBILITY_HOST_API
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
 
-VNEXT_SETTINGS_SCHEMA_VERSION: Final = 29
+VNEXT_SETTINGS_SCHEMA_VERSION: Final = 31
 
 DEFAULT_OPENROUTER_BROKER_BASE_URL: Final = "https://puripuly-heart-broker.kapitalismho.workers.dev"
 DEFAULT_CUSTOM_VOCAB_TERMS: Final[Mapping[str, tuple[str, ...]]] = {}
@@ -391,7 +391,7 @@ class SonioxSTTIntent:
 
 @dataclass(frozen=True, slots=True)
 class STTIntent:
-    provider: str = "local_qwen"
+    provider: str = "local_cpu_auto"
     drain_timeout_s: float = 2.0
     vad_speech_threshold: float = 0.4
     low_latency_mode: bool = True
@@ -400,14 +400,19 @@ class STTIntent:
     low_latency_spec_retry_max: int = 10
     custom_vocabulary_enabled: bool = True
     custom_terms: dict[str, list[str]] = field(default_factory=_default_custom_terms)
+    gpu_device_id: str = "auto"
     deepgram: DeepgramSTTIntent = field(default_factory=DeepgramSTTIntent)
     qwen_asr: QwenASRSTTIntent = field(default_factory=QwenASRSTTIntent)
     soniox: SonioxSTTIntent = field(default_factory=SonioxSTTIntent)
 
+    def __post_init__(self) -> None:
+        device_id = self.gpu_device_id if isinstance(self.gpu_device_id, str) else "auto"
+        object.__setattr__(self, "gpu_device_id", device_id.strip() or "auto")
+
 
 @dataclass(frozen=True, slots=True)
 class PeerSTTIntent:
-    provider: str = "local_qwen"
+    provider: str = "local_cpu_auto"
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,7 +432,7 @@ class LanguageIntent:
         object.__setattr__(
             self,
             "peer_source_mode",
-            mode if mode in {"manual", "soniox_auto"} else "manual",
+            mode if mode in {"manual", "auto"} else "manual",
         )
         languages = self.peer_expected_languages
         if not isinstance(languages, list):

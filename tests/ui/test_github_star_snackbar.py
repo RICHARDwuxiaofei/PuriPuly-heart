@@ -12,6 +12,7 @@ import flet as ft
 
 from puripuly_heart.config.settings import (
     AppSettings,
+    STTProviderName,
     TranslationConnection,
     TranslationModel,
     materialize_translation_settings,
@@ -75,6 +76,8 @@ class Flet028SnackBarPage(DummyPage):
 
 def _settings_for_connection(connection: TranslationConnection) -> AppSettings:
     settings = AppSettings()
+    settings.provider.stt = STTProviderName.DEEPGRAM
+    settings.provider.peer_stt = STTProviderName.DEEPGRAM
     settings.translation.connection = connection
     if connection == TranslationConnection.MANAGED_CHINA:
         settings.translation.model = TranslationModel.DEEPSEEK_V4_FLASH
@@ -744,6 +747,8 @@ async def test_main_gui_runs_github_star_prompt_after_update_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
+    after_launch_tasks: list[asyncio.Task[None]] = []
+    update_gate = asyncio.Event()
     page = DummyPage()
 
     class FakeController:
@@ -753,6 +758,7 @@ async def test_main_gui_runs_github_star_prompt_after_update_check(
     class FakeApp:
         def __init__(self, incoming_page, *, config_path, debug_ui_preview=False):  # noqa: ANN001
             _ = (incoming_page, config_path, debug_ui_preview)
+            self.page = incoming_page
             self.controller = FakeController()
 
         def _log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
@@ -765,16 +771,183 @@ async def test_main_gui_runs_github_star_prompt_after_update_check(
             events.append("github-star")
             return True
 
+        def schedule_after_launch_tasks(self) -> None:
+            async def run() -> None:
+                await app_module._check_and_notify_update(self.page)
+                await self.maybe_show_github_star_prompt_after_launch()
+
+            after_launch_tasks.append(asyncio.create_task(run()))
+
     async def fake_check_and_notify_update(incoming_page, **kwargs) -> None:  # noqa: ANN001
         _ = (incoming_page, kwargs)
+        events.append("update-started")
+        await update_gate.wait()
         events.append("update")
 
     monkeypatch.setattr(app_module, "TranslatorApp", FakeApp)
     monkeypatch.setattr(app_module, "_check_and_notify_update", fake_check_and_notify_update)
 
     await app_module.main_gui(page, config_path=Path("settings.json"))
+    assert events == ["start"]
+    assert not after_launch_tasks[0].done()
 
-    assert events == ["start", "update", "github-star"]
+    update_gate.set()
+    await after_launch_tasks[0]
+
+    assert events == ["start", "update-started", "update", "github-star"]
+
+
+@pytest.mark.asyncio
+async def test_after_launch_update_failure_still_runs_github_star_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    logged: list[str] = []
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._log_detailed = lambda message, **_kwargs: logged.append(message)
+
+    async def fail_update(_page, **_kwargs) -> None:
+        events.append("update")
+        raise TimeoutError("network gate")
+
+    async def show_prompt() -> bool:
+        events.append("github-star")
+        return True
+
+    app.maybe_show_github_star_prompt_after_launch = show_prompt
+    monkeypatch.setattr(app_module, "_check_and_notify_update", fail_update)
+
+    await app._run_after_launch_tasks()
+
+    assert events == ["update", "github-star"]
+    assert any("Update check failed" in message for message in logged)
+
+
+@pytest.mark.asyncio
+async def test_after_launch_usage_and_update_run_in_parallel_before_github_star(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    usage_gate = asyncio.Event()
+    update_gate = asyncio.Event()
+    usage_started = asyncio.Event()
+    update_started = asyncio.Event()
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._launch_high_priority_feedback_shown = False
+    app._launch_high_priority_feedback_reason = None
+    app._launch_high_priority_snackbar = None
+    app._github_star_prompt_launch_pending = True
+    app._log_detailed = lambda *_args, **_kwargs: None
+
+    class Controller:
+        async def refresh_openrouter_usage_after_launch(self) -> bool:
+            events.append("usage-started")
+            usage_started.set()
+            await usage_gate.wait()
+            events.append("usage-finished")
+            return False
+
+        async def prepare_runtime_after_launch(self) -> None:
+            events.append("runtime-preparation")
+
+    app.controller = Controller()
+
+    async def check_update(_page, **_kwargs) -> None:
+        events.append("update-started")
+        update_started.set()
+        await update_gate.wait()
+        events.append("update-finished")
+
+    async def show_prompt() -> bool:
+        events.append("github-star")
+        return True
+
+    app.maybe_show_github_star_prompt_after_launch = show_prompt
+    monkeypatch.setattr(app_module, "_check_and_notify_update", check_update)
+
+    task = asyncio.create_task(app._run_after_launch_tasks())
+    await asyncio.wait_for(
+        asyncio.gather(usage_started.wait(), update_started.wait()),
+        timeout=1,
+    )
+    assert {"usage-started", "update-started", "runtime-preparation"} <= set(events)
+    assert "github-star" not in events
+
+    usage_gate.set()
+    await asyncio.sleep(0)
+    assert "github-star" not in events
+    update_gate.set()
+    await task
+    assert events[-1] == "github-star"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("priority", ["usage", "update"])
+async def test_after_launch_high_priority_feedback_suppresses_github_star(
+    monkeypatch: pytest.MonkeyPatch,
+    priority: str,
+) -> None:
+    conflicts: list[bool] = []
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._launch_high_priority_feedback_shown = False
+    app._launch_high_priority_feedback_reason = None
+    app._launch_high_priority_snackbar = None
+    app._github_star_prompt_launch_pending = True
+    app._log_detailed = lambda *_args, **_kwargs: None
+
+    class Controller:
+        async def refresh_openrouter_usage_after_launch(self) -> bool:
+            return priority == "usage"
+
+        async def prepare_runtime_after_launch(self) -> None:
+            return None
+
+    app.controller = Controller()
+
+    async def check_update(_page, **kwargs) -> None:
+        if priority == "update":
+            kwargs["on_launch_snackbar_shown"](SimpleNamespace(open=True))
+
+    async def show_prompt() -> bool:
+        conflicts.append(app._launch_feedback_conflicts_with_github_star_prompt())
+        return False
+
+    app.maybe_show_github_star_prompt_after_launch = show_prompt
+    monkeypatch.setattr(app_module, "_check_and_notify_update", check_update)
+
+    await app._run_after_launch_tasks()
+
+    assert conflicts == [True]
+
+
+@pytest.mark.asyncio
+async def test_after_launch_close_cancels_owner_before_prompt_runtime_close() -> None:
+    events: list[str] = []
+    gate = asyncio.Event()
+    app = TranslatorApp.__new__(TranslatorApp)
+    app._github_star_prompt_launch_pending = True
+
+    async def after_launch() -> None:
+        try:
+            await gate.wait()
+        finally:
+            events.append("after-launch-stopped")
+
+    class Runtime:
+        async def close(self) -> None:
+            events.append("prompt-runtime-closed")
+
+    app._after_launch_task_handle = asyncio.create_task(after_launch())
+    app._github_star_prompt_runtime = Runtime()
+    await asyncio.sleep(0)
+
+    await app.close_after_launch_tasks()
+
+    assert events == ["after-launch-stopped", "prompt-runtime-closed"]
+    assert app._after_launch_task_handle is None
 
 
 @pytest.mark.asyncio
@@ -870,6 +1043,7 @@ def test_debug_preview_panel_includes_github_star_snackbar_action() -> None:
         on_capture_fault_cycle=noop,
         on_stt_fault_cycle=noop,
         on_audio_fault_clear=noop,
+        on_gpu_state_cycle=noop,
         on_github_star_snackbar=lambda: invoked.append("github-star"),
         on_telemetry_consent=noop,
     )

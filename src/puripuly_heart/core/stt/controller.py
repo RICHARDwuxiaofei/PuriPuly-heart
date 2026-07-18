@@ -20,8 +20,10 @@ from puripuly_heart.core.audio.format import float32_to_pcm16le_bytes
 from puripuly_heart.core.audio.ring_buffer import RingBufferF32
 from puripuly_heart.core.clock import Clock, SystemClock
 from puripuly_heart.core.error_messages import format_error_report_for_log, stt_failure_report
+from puripuly_heart.core.runtime.local_asr_transition import LocalASRSessionOptions
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.backend import (
+    LocalASRReconfigurableBackend,
     STTBackend,
     STTBackendFloat32Session,
     STTBackendSession,
@@ -45,6 +47,11 @@ class FinalTranscriptSuppressedNotification:
     utterance_id: UUID
     channel: ChannelId
     stt_provider_name: STTProviderName
+
+
+@dataclass(frozen=True, slots=True)
+class _EventIngressBarrier:
+    reached: asyncio.Event
 
 
 @dataclass(slots=True)
@@ -91,6 +98,11 @@ class ManagedSTTProvider:
     _stt_fault_logged_for_utterance: bool = False
     _backend_closed: bool = False
     _closing: bool = False
+    _pending_session_options: LocalASRSessionOptions | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if self.channel not in ("self", "peer"):
@@ -336,7 +348,22 @@ class ManagedSTTProvider:
     async def events(self) -> AsyncIterator[object]:
         while True:
             item = await self._events.get()
+            if isinstance(item, _EventIngressBarrier):
+                item.reached.set()
+                continue
             yield item
+
+    @property
+    def is_at_utterance_boundary(self) -> bool:
+        return self._active_utterance_id is None
+
+    async def wait_for_event_ingress_drain(self) -> None:
+        reached = asyncio.Event()
+        await self._events.put(_EventIngressBarrier(reached))
+        await reached.wait()
+
+    async def reconfigure_session_options(self, options: LocalASRSessionOptions) -> None:
+        self._pending_session_options = options
 
     async def warmup(self) -> None:
         """Pre-establish STT session for faster first response."""
@@ -344,6 +371,7 @@ class ManagedSTTProvider:
             self._emit_detailed("[STT] Session pre-warmed", fallback_level=logging.INFO)
 
     async def _on_speech_start(self, event: SpeechStart) -> None:
+        await self._apply_pending_session_options()
         self._active_utterance_id = event.utterance_id
         self._diagnostic_chunk_count = 0
         self._diagnostic_sample_count = 0
@@ -357,6 +385,15 @@ class ManagedSTTProvider:
 
         await self._send_audio(event.pre_roll)
         await self._send_audio(event.chunk)
+
+    async def _apply_pending_session_options(self) -> None:
+        options = self._pending_session_options
+        if options is None:
+            return
+        backend = self.backend
+        if isinstance(backend, LocalASRReconfigurableBackend):
+            await backend.reconfigure_session_options(options)
+        self._pending_session_options = None
 
     async def _on_speech_chunk(self, event: SpeechChunk) -> None:
         self._active_utterance_id = event.utterance_id

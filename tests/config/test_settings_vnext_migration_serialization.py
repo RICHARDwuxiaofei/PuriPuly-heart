@@ -146,17 +146,46 @@ def test_peer_auto_detection_intent_roundtrips_through_legacy_compatibility_proj
     migration = _migration()
     serialization = _serialization()
     legacy = AppSettings()
-    legacy.languages.peer_source_mode = "soniox_auto"
+    legacy.languages.peer_source_mode = "auto"
     legacy.languages.peer_expected_languages = ["ja", "zh-TW", "ja"]
 
     vnext = migration.from_legacy_app_settings(legacy)
     serialized = serialization.to_dict(vnext)
     projected = migration.to_legacy_dict(vnext)
 
-    assert serialized["intent"]["languages"]["peer_source_mode"] == "soniox_auto"
+    assert serialized["intent"]["languages"]["peer_source_mode"] == "auto"
     assert serialized["intent"]["languages"]["peer_expected_languages"] == ["ja", "zh-TW"]
-    assert projected["languages"]["peer_source_mode"] == "soniox_auto"
+    assert projected["languages"]["peer_source_mode"] == "auto"
     assert projected["languages"]["peer_expected_languages"] == ["ja", "zh-TW"]
+
+
+def test_v30_soniox_auto_is_backed_up_and_migrated_once(tmp_path: Path) -> None:
+    compat = _compat()
+    serialization = _serialization()
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["settings_version"] = 30
+    raw["intent"]["languages"]["peer_source_mode"] = "soniox_auto"
+    path = tmp_path / "settings.json"
+    original_bytes = _write_json_bytes(path, raw)
+    fixed_now = datetime(2026, 7, 18, 1, 2, 3, tzinfo=timezone.utc)
+
+    first = compat.load_vnext_settings(path, now=fixed_now)
+
+    assert first.ok
+    assert first.migrated is True
+    assert first.backup_path == tmp_path / "settings.json.pre-v30.20260718T010203Z.bak"
+    assert first.backup_path.read_bytes() == original_bytes
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["settings_version"] == VNEXT_SETTINGS_SCHEMA_VERSION
+    assert persisted["intent"]["languages"]["peer_source_mode"] == "auto"
+    assert "soniox_auto" not in path.read_text(encoding="utf-8")
+
+    second = compat.load_vnext_settings(path, now=fixed_now)
+
+    assert second.ok
+    assert second.migrated is False
+    assert second.backup_path is None
+    assert list(tmp_path.glob("*.bak")) == [first.backup_path]
 
 
 def test_high_version_legacy_shape_migrates_by_shape_not_settings_version() -> None:
@@ -754,7 +783,11 @@ def test_current_vnext_dict_reads_and_serializes_idempotently() -> None:
     migration = _migration()
     serialization = _serialization()
 
-    original = AppSettingsVNext()
+    original = with_telemetry_consent(
+        AppSettingsVNext(),
+        "allow",
+        identifier_factory=lambda: "current-settings-test-id",
+    )
     raw = serialization.to_dict(original)
 
     loaded = migration.from_dict(raw)
@@ -864,16 +897,20 @@ def test_process_capture_target_round_trips_with_discord_update_resistant_identi
     migration = _migration()
     from puripuly_heart.config.capture_target_resolution import resolve_desktop_audio_capture_target
 
-    settings = AppSettingsVNext(
-        intent=replace(
-            AppSettingsVNext().intent,
-            desktop_audio=replace(
-                AppSettingsVNext().intent.desktop_audio,
-                capture_target=CaptureTargetIntent.process_target(
-                    ProcessCaptureTargetIntent.discord(input_channel)
+    settings = with_telemetry_consent(
+        AppSettingsVNext(
+            intent=replace(
+                AppSettingsVNext().intent,
+                desktop_audio=replace(
+                    AppSettingsVNext().intent.desktop_audio,
+                    capture_target=CaptureTargetIntent.process_target(
+                        ProcessCaptureTargetIntent.discord(input_channel)
+                    ),
                 ),
             ),
-        )
+        ),
+        "allow",
+        identifier_factory=lambda: "capture-target-test-id",
     )
 
     serialized = serialization.to_dict(settings)
@@ -1592,7 +1629,12 @@ def test_vnext_settings_version_only_difference_does_not_backup_or_overwrite(
     serialization = _serialization()
     fixed_now = datetime(2026, 6, 9, 1, 2, 3, tzinfo=timezone.utc)
     path = tmp_path / "settings.json"
-    raw = serialization.to_dict(AppSettingsVNext())
+    settings = with_telemetry_consent(
+        AppSettingsVNext(),
+        "allow",
+        identifier_factory=lambda: "version-only-test-id",
+    )
+    raw = serialization.to_dict(settings)
     raw["settings_version"] = VNEXT_SETTINGS_SCHEMA_VERSION - 1
     raw["intent"]["ui"]["locale"] = "ja"
     original_bytes = _write_json_bytes(path, raw)
@@ -1615,7 +1657,12 @@ def test_facade_projection_failure_returns_explicit_result_without_overwrite(
     compat = _compat()
     serialization = _serialization()
     path = tmp_path / "settings.json"
-    raw = serialization.to_dict(AppSettingsVNext())
+    settings = with_telemetry_consent(
+        AppSettingsVNext(),
+        "allow",
+        identifier_factory=lambda: "projection-failure-test-id",
+    )
+    raw = serialization.to_dict(settings)
     raw["intent"]["osc"]["port"] = "not-an-int"
     original_bytes = _write_json_bytes(path, raw)
 

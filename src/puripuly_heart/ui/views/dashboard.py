@@ -1,3 +1,4 @@
+import inspect
 from typing import Callable
 
 import flet as ft
@@ -10,6 +11,7 @@ from puripuly_heart.ui.components.language_card import LanguageCard
 from puripuly_heart.ui.components.language_modal import LanguageModal
 from puripuly_heart.ui.components.power_button import PowerButton
 from puripuly_heart.ui.fonts import font_for_language
+from puripuly_heart.ui.gpu_notice import GpuDashboardNotice, GpuNoticeAction
 from puripuly_heart.ui.i18n import get_locale, language_name, t
 from puripuly_heart.ui.overlay_peer_contract import (
     OverlayPeerConsumerContract,
@@ -24,7 +26,44 @@ DASHBOARD_LANGUAGE_CARD_EXPAND = 1
 DASHBOARD_POWER_BUTTON_ICON_SIZE = 80
 DASHBOARD_POWER_BUTTON_LABEL_SIZE = 32
 OVERLAY_FAILURE_REASON_ONLY_NOTICE_REASONS = {"steamvr_not_running"}
-PEER_SOURCE_MODE_SONIOX_AUTO = "soniox_auto"
+PEER_SOURCE_MODE_AUTO = "auto"
+_LOCAL_STT_MODEL_LABEL_KEYS = {
+    "parakeet-tdt-0.6b-v3-int8-sherpa": "local_stt.model.parakeet-tdt-0.6b-v3-int8-sherpa",
+    "parakeet-tdt-ctc-0.6b-ja-int8-sherpa": "local_stt.model.parakeet-tdt-ctc-0.6b-ja-int8-sherpa",
+    "qwen3-asr-0.6b-int8-sherpa": "local_stt.model.qwen3-asr-0.6b-int8-sherpa",
+}
+_LOCAL_STT_TARGETED_NOTICE_KEYS = {
+    "missing": "dashboard.local_stt_notice_missing_model",
+    "invalid": "dashboard.local_stt_notice_invalid_model",
+    "downloading": "dashboard.local_stt_notice_downloading_model",
+    "download_failed": "dashboard.local_stt_notice_download_failed_model",
+}
+_GPU_NOTICE_KEYS = {
+    "discovery_failed": "dashboard.gpu_notice.discovery_failed",
+    "unsupported": "dashboard.gpu_notice.unsupported",
+    "unavailable_device": "dashboard.gpu_notice.unavailable_device",
+    "not_installed": "dashboard.gpu_notice.not_installed",
+    "invalid": "dashboard.gpu_notice.invalid",
+    "installing": "dashboard.gpu_notice.installing",
+    "install_failed": "dashboard.gpu_notice.install_failed",
+    "activation_failed": "dashboard.gpu_notice.activation_failed",
+}
+_GPU_NOTICE_TONES = {
+    "discovery_failed": "error",
+    "unsupported": "warning",
+    "unavailable_device": "warning",
+    "not_installed": "warning",
+    "invalid": "warning",
+    "install_failed": "error",
+    "activation_failed": "error",
+}
+_GPU_ACTION_KEYS = {
+    "install": "dashboard.gpu_action.install",
+    "repair": "dashboard.gpu_action.repair",
+    "reinstall": "dashboard.gpu_action.reinstall",
+    "rediscover": "dashboard.gpu_action.rediscover",
+    "restart": "dashboard.gpu_action.restart",
+}
 
 
 class DashboardView(ft.Column):
@@ -41,6 +80,7 @@ class DashboardView(ft.Column):
         self.is_power_on = False
         self.is_translation_on = False
         self.is_stt_on = False
+        self._stt_is_starting = False
         self.translation_needs_key = False
         self.stt_needs_key = False
         self.last_sent_text = t("dashboard.ready")
@@ -52,6 +92,11 @@ class DashboardView(ft.Column):
         self._managed_auth_pending = False
         self._local_stt_notice_status: str | None = None
         self._local_stt_notice_percent: int | None = None
+        self._local_stt_notice_model_id: str | None = None
+        self._gpu_notice: GpuDashboardNotice | None = None
+        self._notice_sequence = 0
+        self._notice_started: dict[str, int] = {}
+        self._visible_notice_source: str | None = None
         self._vrchat_osc_notice_active = False
         self._overlay_session_fallback_notice_active = False
         self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
@@ -83,6 +128,7 @@ class DashboardView(ft.Column):
         self.on_toggle_overlay = None
         self.on_toggle_peer_translation = None
         self.on_retry_peer_process_capture = None
+        self.on_gpu_notice_action: Callable[[GpuNoticeAction], object] | None = None
         self.on_language_change: Callable[[LanguageSelectionChange], None] | None = None
         self.on_message_input_activity = None
         self.runtime_log_detailed: Callable[..., bool | None] | None = None
@@ -226,6 +272,7 @@ class DashboardView(ft.Column):
         self.stt_button.set_state(
             self.is_stt_on,
             needs_key=self._stt_showing_warning,
+            is_starting=self._stt_is_starting,
         )
 
     def _sync_translation_button_state(self) -> None:
@@ -245,6 +292,7 @@ class DashboardView(ft.Column):
         self.peer_button.set_state(
             contract.peer.state == "on",
             needs_key=contract.peer.state == "warning",
+            is_starting=contract.peer.state == "starting",
         )
         self.overlay_button.set_state(
             contract.overlay.state == "on",
@@ -253,7 +301,12 @@ class DashboardView(ft.Column):
         self._sync_notice()
 
     def _restore_status_display(self) -> None:
-        status = self._connection_status or "disconnected"
+        status = getattr(self, "_connection_status", "disconnected") or "disconnected"
+        if not hasattr(self, "display_card"):
+            self._connection_status = status
+            self.is_connected = status == "connected"
+            self.set_display_text("")
+            return
         self.set_status(status)
 
     def _dismiss_api_key_warning_display(self) -> None:
@@ -269,8 +322,9 @@ class DashboardView(ft.Column):
         self._restore_status_display()
 
     def _toggle_stt(self):
-        if self.is_stt_on:
+        if self._stt_is_starting or self.is_stt_on:
             self.is_stt_on = False
+            self._stt_is_starting = False
             self._stt_showing_warning = False
         elif self._stt_showing_warning:
             self._stt_showing_warning = False
@@ -280,6 +334,7 @@ class DashboardView(ft.Column):
             self.set_display_text(t("dashboard.warn_stt_key"))
         else:
             self.is_stt_on = True
+            self._stt_is_starting = True
             self._stt_showing_warning = False
 
         self._sync_stt_button_state()
@@ -346,26 +401,24 @@ class DashboardView(ft.Column):
     def _open_peer_source_dialog(self):
         modal = LanguageModal(
             page=self.page,
-            languages=((PEER_SOURCE_MODE_SONIOX_AUTO, ""), *self._LANG_OPTIONS),
+            languages=((PEER_SOURCE_MODE_AUTO, ""), *self._LANG_OPTIONS),
             on_select=self._on_peer_source_select,
             label_for_code=lambda code: (
-                t("dashboard.peer_source.automatic_soniox")
-                if code == PEER_SOURCE_MODE_SONIOX_AUTO
+                t("dashboard.peer_source.automatic")
+                if code == PEER_SOURCE_MODE_AUTO
                 else language_name(code)
             ),
             description_for_code=lambda code: (
-                t("dashboard.peer_source.automatic_soniox.description")
-                if code == PEER_SOURCE_MODE_SONIOX_AUTO
+                t("dashboard.peer_source.automatic.description")
+                if code == PEER_SOURCE_MODE_AUTO
                 else ""
             ),
-            disabled_codes=(
-                set() if self._peer_auto_detect_available else {PEER_SOURCE_MODE_SONIOX_AUTO}
-            ),
+            disabled_codes=(set() if self._peer_auto_detect_available else {PEER_SOURCE_MODE_AUTO}),
         )
         modal.open(
             current=(
-                PEER_SOURCE_MODE_SONIOX_AUTO
-                if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO
+                PEER_SOURCE_MODE_AUTO
+                if self._peer_source_mode == PEER_SOURCE_MODE_AUTO
                 else self._effective_peer_source_lang_code()
             ),
             recent=self._recent_source_langs,
@@ -397,8 +450,8 @@ class DashboardView(ft.Column):
         self._notify_language_change()
 
     def _on_peer_source_select(self, lang_code: str):
-        if lang_code == PEER_SOURCE_MODE_SONIOX_AUTO:
-            self._peer_source_mode = PEER_SOURCE_MODE_SONIOX_AUTO
+        if lang_code == PEER_SOURCE_MODE_AUTO:
+            self._peer_source_mode = PEER_SOURCE_MODE_AUTO
             self._refresh_language_card()
             self._notify_language_change()
             return
@@ -425,7 +478,7 @@ class DashboardView(ft.Column):
         self._notify_language_change()
 
     def _swap_peer_languages(self):
-        if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO:
+        if self._peer_source_mode == PEER_SOURCE_MODE_AUTO:
             manual_peer_source = self._peer_source_lang_code or self._source_lang_code
             self._peer_source_lang_code = self._effective_peer_target_lang_code()
             self._peer_target_lang_code = manual_peer_source
@@ -463,8 +516,8 @@ class DashboardView(ft.Column):
             )
 
     def _effective_peer_source_lang_code(self) -> str:
-        if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO:
-            return PEER_SOURCE_MODE_SONIOX_AUTO
+        if self._peer_source_mode == PEER_SOURCE_MODE_AUTO:
+            return PEER_SOURCE_MODE_AUTO
         return self._peer_source_lang_code or self._source_lang_code
 
     def _effective_peer_target_lang_code(self) -> str:
@@ -475,8 +528,8 @@ class DashboardView(ft.Column):
             language_name(self._source_lang_code),
             language_name(self._target_lang_code),
             (
-                t("dashboard.peer_source.automatic_soniox")
-                if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO
+                t("dashboard.peer_source.automatic")
+                if self._peer_source_mode == PEER_SOURCE_MODE_AUTO
                 else language_name(self._effective_peer_source_lang_code())
             ),
             language_name(self._effective_peer_target_lang_code()),
@@ -516,8 +569,13 @@ class DashboardView(ft.Column):
 
     def set_stt_enabled(self, enabled: bool) -> None:
         self.is_stt_on = bool(enabled)
+        self._stt_is_starting = False
         if self.is_stt_on:
             self._stt_showing_warning = False
+        self._sync_stt_button_state()
+
+    def set_stt_starting(self, starting: bool) -> None:
+        self._stt_is_starting = bool(starting)
         self._sync_stt_button_state()
 
     def set_overlay_peer_contract(self, contract: OverlayPeerConsumerContract) -> None:
@@ -647,6 +705,28 @@ class DashboardView(ft.Column):
 
         self._sync_notice()
 
+    def set_local_stt_notice_model(self, model_id: str | None) -> None:
+        self._local_stt_notice_model_id = model_id
+        self._sync_notice()
+
+    def set_gpu_notice(self, notice: GpuDashboardNotice | None) -> None:
+        self._gpu_notice = notice
+        self._sync_notice()
+
+    def _run_gpu_notice_action(self, action: GpuNoticeAction) -> None:
+        callback = self.on_gpu_notice_action
+        page = getattr(self, "page", None)
+        run_task = getattr(page, "run_task", None)
+        if callback is None or not callable(run_task):
+            return
+
+        async def invoke() -> None:
+            result = callback(action)
+            if inspect.isawaitable(result):
+                await result
+
+        run_task(invoke)
+
     def set_vrchat_osc_notice(self, active: bool) -> None:
         self._vrchat_osc_notice_active = bool(active)
         self._sync_notice()
@@ -662,6 +742,8 @@ class DashboardView(ft.Column):
 
         notice_key_by_status = {
             "starting": "dashboard.local_stt_notice_starting",
+            "self_loading": "dashboard.local_stt_notice_self_loading",
+            "peer_loading": "dashboard.local_stt_notice_peer_loading",
             "start_failed": "dashboard.local_stt_notice_start_failed",
             "missing": "dashboard.local_stt_notice_missing",
             "invalid": "dashboard.local_stt_notice_invalid",
@@ -670,6 +752,8 @@ class DashboardView(ft.Column):
         }
         tone_by_status = {
             "starting": "info",
+            "self_loading": "info",
+            "peer_loading": "info",
             "start_failed": "error",
             "missing": "warning",
             "invalid": "warning",
@@ -679,14 +763,33 @@ class DashboardView(ft.Column):
         notice_key = notice_key_by_status.get(status)
         if notice_key is None:
             return None, None
-        notice_text = (
-            t(
-                "dashboard.local_stt_notice_downloading_progress",
-                percent=self._local_stt_notice_percent,
+        model_id = self._local_stt_notice_model_id
+        if model_id is not None and status in {
+            "missing",
+            "invalid",
+            "downloading",
+            "download_failed",
+        }:
+            model = t(_LOCAL_STT_MODEL_LABEL_KEYS.get(model_id, ""), default=model_id)
+            targeted_key = _LOCAL_STT_TARGETED_NOTICE_KEYS[status]
+            notice_text = (
+                t(
+                    "dashboard.local_stt_notice_downloading_progress_model",
+                    model=model,
+                    percent=self._local_stt_notice_percent,
+                )
+                if status == "downloading" and self._local_stt_notice_percent is not None
+                else t(targeted_key, model=model)
             )
-            if status == "downloading" and self._local_stt_notice_percent is not None
-            else t(notice_key)
-        )
+        else:
+            notice_text = (
+                t(
+                    "dashboard.local_stt_notice_downloading_progress",
+                    percent=self._local_stt_notice_percent,
+                )
+                if status == "downloading" and self._local_stt_notice_percent is not None
+                else t(notice_key)
+            )
         return notice_text, tone_by_status.get(status)
 
     def _current_overlay_failure_notice(self) -> tuple[str | None, str | None]:
@@ -715,27 +818,77 @@ class DashboardView(ft.Column):
             "error",
         )
 
+    def _notice_candidates(self) -> dict[str, tuple[str, str | None, str | None]]:
+        candidates: dict[str, tuple[str, str | None, str | None]] = {}
+        if self._managed_auth_pending:
+            candidates["managed_auth"] = (t("dashboard.managed_auth_pending"), "info", None)
+        notice_text, tone = self._current_local_stt_notice()
+        if notice_text is not None:
+            candidates["local_stt"] = (notice_text, tone, None)
+        gpu_notice = self._gpu_notice
+        if gpu_notice is not None and gpu_notice.status in _GPU_NOTICE_KEYS:
+            key = _GPU_NOTICE_KEYS[gpu_notice.status]
+            text = (
+                t(key, percent=gpu_notice.progress_percent or 0)
+                if gpu_notice.status == "installing"
+                else t(key)
+            )
+            candidates["gpu"] = (
+                text,
+                _GPU_NOTICE_TONES.get(gpu_notice.status, "info"),
+                gpu_notice.action,
+            )
+        if self._overlay_session_fallback_notice_active:
+            candidates["overlay_fallback"] = (
+                t("dashboard.overlay_session_fallback_desktop"),
+                "info",
+                None,
+            )
+        if self._vrchat_osc_notice_active:
+            candidates["vrchat_osc"] = (t("dashboard.vrchat_osc_disabled"), "warning", None)
+        overlay_text, overlay_tone = self._current_overlay_failure_notice()
+        if overlay_text is not None:
+            candidates["overlay_failure"] = (overlay_text, overlay_tone, None)
+        return candidates
+
     def _sync_notice(self) -> None:
         if not hasattr(self, "display_card"):
             return
-        if self._managed_auth_pending:
-            self.display_card.set_notice(t("dashboard.managed_auth_pending"), "info")
+        candidates = self._notice_candidates()
+        for source in tuple(self._notice_started):
+            if source not in candidates:
+                self._notice_started.pop(source, None)
+        for source in candidates:
+            if source not in self._notice_started:
+                self._notice_sequence += 1
+                self._notice_started[source] = self._notice_sequence
+
+        download_source = None
+        if self._gpu_notice is not None and self._gpu_notice.status == "installing":
+            download_source = "gpu"
+        elif self._local_stt_notice_status == "downloading":
+            download_source = "local_stt"
+        if download_source is not None:
+            selected = download_source
+        elif self._visible_notice_source in candidates:
+            selected = self._visible_notice_source
+        else:
+            selected = min(candidates, key=self._notice_started.__getitem__) if candidates else None
+        self._visible_notice_source = selected
+        if selected is None:
+            self.display_card.set_notice(None, None)
             return
-        notice_text, tone = self._current_local_stt_notice()
-        if notice_text is not None:
-            self.display_card.set_notice(notice_text, tone)
-            return
-        if self._overlay_session_fallback_notice_active:
+        text, tone, action = candidates[selected]
+        action_label = t(_GPU_ACTION_KEYS[action]) if action is not None else None
+        try:
             self.display_card.set_notice(
-                t("dashboard.overlay_session_fallback_desktop"),
-                "info",
+                text,
+                tone,
+                action_label=action_label,
+                on_action=(None if action is None else lambda: self._run_gpu_notice_action(action)),
             )
-            return
-        if self._vrchat_osc_notice_active:
-            self.display_card.set_notice(t("dashboard.vrchat_osc_disabled"), "warning")
-            return
-        notice_text, tone = self._current_overlay_failure_notice()
-        self.display_card.set_notice(notice_text, tone)
+        except TypeError:
+            self.display_card.set_notice(text, tone)
 
     def apply_locale(self) -> None:
         self.stt_button.set_label(t("dashboard.stt_label"))

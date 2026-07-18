@@ -270,7 +270,12 @@ def test_missing_fields_load_and_serialize_for_every_current_path() -> None:
         assert (
             V24_MIGRATION_CLASSIFICATION[path].missing_default_fixture == "missing_field_defaults"
         )
-        assert path_get(loaded_data, path) == expected
+        loaded_value = path_get(loaded_data, path)
+        if path == "telemetry_state.anonymous_id":
+            assert isinstance(loaded_value, str)
+            assert len(loaded_value) == 32
+        else:
+            assert loaded_value == expected
 
 
 def test_non_obvious_missing_fields_load_and_serialize_documented_defaults() -> None:

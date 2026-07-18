@@ -150,6 +150,7 @@ CURRENT_USER_INTENT_DESTINATIONS = {
     "stt.custom_terms": "intent.stt.custom_terms",
     "stt.custom_vocabulary_enabled": "intent.stt.custom_vocabulary_enabled",
     "stt.drain_timeout_s": "intent.stt.drain_timeout_s",
+    "stt.gpu_device_id": "intent.stt.gpu_device_id",
     "stt.low_latency_merge_gap_ms": "intent.stt.low_latency_merge_gap_ms",
     "stt.low_latency_mode": "intent.stt.low_latency_mode",
     "stt.low_latency_spec_retry_max": "intent.stt.low_latency_spec_retry_max",
@@ -331,7 +332,7 @@ def maximal_v24_settings_fixture() -> dict[str, Any]:
     settings.languages.target_language = "zh-CN"
     settings.languages.peer_source_language = "fr"
     settings.languages.peer_target_language = "es"
-    settings.languages.peer_source_mode = "soniox_auto"
+    settings.languages.peer_source_mode = "auto"
     settings.languages.peer_expected_languages = ["fr", "ja"]
     settings.languages.recent_source_languages = ["fr", "de", "it"]
     settings.languages.recent_target_languages = ["es", "th", "vi"]
@@ -365,6 +366,7 @@ def maximal_v24_settings_fixture() -> dict[str, Any]:
     settings.stt.low_latency_spec_retry_max = 5
     settings.stt.custom_vocabulary_enabled = False
     settings.stt.custom_terms = {"en": ["fixture-term"], "ja": ["フィクスチャ"]}
+    settings.stt.gpu_device_id = "vulkan-device-fixture"
     settings.deepgram_stt.model = "nova-2"
     settings.qwen_asr_stt.model = "qwen-asr-fixture"
     settings.soniox_stt.model = "stt-rt-fixture"

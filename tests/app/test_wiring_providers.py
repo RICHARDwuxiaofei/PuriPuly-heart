@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -87,6 +88,11 @@ from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
+from puripuly_heart.providers.stt.local_cpu import LocalCPUAutoSTTBackend
+from puripuly_heart.providers.stt.local_parakeet_sherpa import (
+    LocalParakeetJapaneseSherpaSTTBackend,
+    LocalParakeetV3SherpaSTTBackend,
+)
 from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaSTTBackend
 from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
 from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
@@ -1571,7 +1577,99 @@ def test_create_stt_backend_from_resolved_local_qwen_uses_channel_language_and_n
     assert backend.model_dir == default_local_stt_model_dir()
     assert backend.sample_rate_hz == 16000
     assert backend.stream_label == "self"
-    assert backend.language_hint == "Chinese"
+    assert backend.language_hint == "zh"
+
+
+@pytest.mark.parametrize(
+    ("provider", "backend_type"),
+    [
+        ("local_parakeet_v3", LocalParakeetV3SherpaSTTBackend),
+        ("local_parakeet_ja", LocalParakeetJapaneseSherpaSTTBackend),
+    ],
+)
+def test_create_stt_backend_from_resolved_direct_parakeet_provider(
+    provider: str,
+    backend_type: type,
+) -> None:
+    resolved = _resolved_stt_config(
+        provider=provider,
+        source_language="ja",
+        model=None,
+        credential_reference=None,
+    )
+
+    backend = wiring_module.create_stt_backend_from_resolved_config(
+        resolved,
+        secrets=InMemorySecretStore(),
+    )
+
+    assert isinstance(backend, backend_type)
+    assert backend.sample_rate_hz == 16000
+    assert backend.stream_label == "self"
+
+
+def test_create_stt_backend_from_resolved_cpu_auto_provider() -> None:
+    resolved = _resolved_stt_config(
+        provider="local_cpu_auto",
+        source_language="ja",
+        model=None,
+        credential_reference=None,
+    )
+
+    backend = wiring_module.create_stt_backend_from_resolved_config(
+        resolved,
+        secrets=InMemorySecretStore(),
+    )
+
+    assert isinstance(backend, LocalCPUAutoSTTBackend)
+    assert backend.source_language == "ja"
+    assert backend.stream_label == "self"
+
+
+def test_create_stt_backend_from_resolved_gpu_provider_fails_without_cpu_fallback() -> None:
+    resolved = _resolved_stt_config(
+        provider="local_qwen_gpu",
+        source_language="ja",
+        model=None,
+        credential_reference=None,
+    )
+
+    with pytest.raises(RuntimeError, match="Vulkan ASR worker is not available"):
+        wiring_module.create_stt_backend_from_resolved_config(
+            resolved,
+            secrets=InMemorySecretStore(),
+        )
+
+
+def test_peer_qwen_gpu_auto_omits_hint_while_manual_uses_qwen_code(tmp_path: Path) -> None:
+    runtime = object()
+    automatic = _resolved_stt_config(
+        channel="peer",
+        provider="local_qwen_gpu",
+        source_language="ja",
+        model=None,
+        credential_reference=None,
+    )
+    automatic = replace(automatic, source_mode="auto")
+    manual = replace(automatic, source_mode="manual")
+
+    automatic_backend = wiring_module.create_stt_backend_from_resolved_config(
+        automatic,
+        secrets=InMemorySecretStore(),
+        gpu_runtime=runtime,
+        gpu_model_path=tmp_path / "model.gguf",
+    )
+    manual_backend = wiring_module.create_stt_backend_from_resolved_config(
+        manual,
+        secrets=InMemorySecretStore(),
+        gpu_runtime=runtime,
+        gpu_model_path=tmp_path / "model.gguf",
+    )
+
+    assert automatic_backend.source_mode == "auto"
+    assert automatic_backend.language_hint is None
+    assert manual_backend.source_mode == "manual"
+    assert manual_backend.language_hint == "ja"
 
 
 def test_create_peer_stt_backend_from_resolved_uses_peer_dto_without_raw_self_settings() -> None:
@@ -1712,7 +1810,7 @@ def test_create_stt_backend_local_qwen_passes_language_hint_without_hotwords() -
     backend = create_stt_backend(settings, secrets=secrets)
 
     assert isinstance(backend, LocalQwenSherpaSTTBackend)
-    assert getattr(backend, "language_hint", None) == "Korean"
+    assert getattr(backend, "language_hint", None) == "ko"
     assert getattr(backend, "hotwords", ()) == ()
 
 
@@ -1887,11 +1985,11 @@ def test_build_peer_stt_provider_signature_includes_backend_affecting_values() -
     assert 350 in signature
 
 
-def test_peer_soniox_auto_detection_keeps_self_language_restriction_separate() -> None:
+def test_peer_auto_detection_keeps_self_language_restriction_separate() -> None:
     settings = AppSettings()
     settings.provider.stt = STTProviderName.SONIOX
     settings.provider.peer_stt = STTProviderName.SONIOX
-    settings.languages.peer_source_mode = "soniox_auto"
+    settings.languages.peer_source_mode = "auto"
     settings.languages.peer_expected_languages = ["ja", "zh-TW"]
 
     peer = resolve_peer_stt_runtime_config(settings)
@@ -1908,7 +2006,7 @@ def test_peer_soniox_auto_detection_keeps_self_language_restriction_separate() -
 def test_peer_auto_detection_falls_back_to_manual_configuration_for_other_providers() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.DEEPGRAM
-    settings.languages.peer_source_mode = "soniox_auto"
+    settings.languages.peer_source_mode = "auto"
     settings.languages.peer_expected_languages = ["ja"]
 
     peer = resolve_peer_stt_runtime_config(settings)
@@ -1926,7 +2024,7 @@ def test_vnext_peer_runtime_resolution_and_signature_use_canonical_auto_intent()
             peer_stt=replace(settings.intent.peer_stt, provider="soniox"),
             languages=replace(
                 settings.intent.languages,
-                peer_source_mode="soniox_auto",
+                peer_source_mode="auto",
                 peer_expected_languages=["ja", "zh-TW"],
             ),
         ),
@@ -1953,7 +2051,7 @@ def test_vnext_peer_runtime_resolution_and_signature_use_canonical_auto_intent()
     assert "language_hints_strict" not in automatic.provider_options
 
 
-def test_vnext_peer_soniox_auto_without_expected_languages_omits_hints() -> None:
+def test_vnext_peer_auto_without_expected_languages_omits_hints() -> None:
     settings = AppSettingsVNext()
     settings = replace(
         settings,
@@ -1962,7 +2060,7 @@ def test_vnext_peer_soniox_auto_without_expected_languages_omits_hints() -> None
             peer_stt=replace(settings.intent.peer_stt, provider="soniox"),
             languages=replace(
                 settings.intent.languages,
-                peer_source_mode="soniox_auto",
+                peer_source_mode="auto",
                 peer_expected_languages=[],
             ),
         ),
@@ -1985,7 +2083,7 @@ def test_vnext_peer_runtime_keeps_self_and_non_soniox_paths_manual() -> None:
             peer_stt=replace(settings.intent.peer_stt, provider="deepgram"),
             languages=replace(
                 settings.intent.languages,
-                peer_source_mode="soniox_auto",
+                peer_source_mode="auto",
                 peer_expected_languages=["ja"],
             ),
         ),
@@ -2098,7 +2196,7 @@ def test_create_peer_stt_backend_local_qwen_uses_peer_language_without_hotwords(
     backend = create_peer_stt_backend(settings, secrets=secrets)
 
     assert isinstance(backend, LocalQwenSherpaSTTBackend)
-    assert getattr(backend, "language_hint", None) == "Chinese"
+    assert getattr(backend, "language_hint", None) == "zh"
     assert getattr(backend, "hotwords", ()) == ()
 
 

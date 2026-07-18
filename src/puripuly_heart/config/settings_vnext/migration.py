@@ -85,6 +85,10 @@ _PROVIDER_VERIFICATION_SECRET_KEYS = {
 }
 _LEGACY_VERIFICATION_REVISION = "legacy-dev-settings"
 _LEGACY_VERIFICATION_CONTEXT = {"flow": "legacy_settings_migration"}
+_LOCAL_QWEN_PROVIDER = "local_qwen"
+_LOCAL_CPU_AUTO_PROVIDER = "local_cpu_auto"
+_LOCAL_QWEN_CPU_AUTO_MIGRATION_VERSION = 30
+_PEER_SOURCE_AUTO_MIGRATION_VERSION = 31
 
 _TEMPORARY_GENERIC_FALLBACK_ALIASES: dict[str, TranslationFallbackIntent] = {
     "none": TranslationFallbackIntent(enabled=False),
@@ -124,6 +128,8 @@ _FALLBACK_FIELDS_ALIAS: dict[tuple[bool, str, str], str] = {
 
 
 def _prepare_vnext_migration_dict(data: Mapping[str, Any]) -> dict[str, Any]:
+    migrate_local_qwen = _requires_local_qwen_cpu_auto_migration(data.get("settings_version"))
+    migrate_peer_source_auto = _requires_peer_source_auto_migration(data.get("settings_version"))
     prepared = dict(copy.deepcopy(data))
     prepared["settings_version"] = VNEXT_SETTINGS_SCHEMA_VERSION
     intent = prepared.get("intent") if isinstance(prepared.get("intent"), dict) else {}
@@ -142,6 +148,11 @@ def _prepare_vnext_migration_dict(data: Mapping[str, Any]) -> dict[str, Any]:
         intent["translation"] = translation
         prepared["intent"] = intent
     if isinstance(intent, dict):
+        if migrate_peer_source_auto:
+            _migrate_peer_source_auto_mode(intent)
+        if migrate_local_qwen:
+            _migrate_canonical_local_qwen_provider(intent, "stt")
+            _migrate_canonical_local_qwen_provider(intent, "peer_stt")
         desktop_audio = (
             dict(intent.get("desktop_audio", {}))
             if isinstance(intent.get("desktop_audio"), Mapping)
@@ -162,6 +173,51 @@ def _prepare_vnext_migration_dict(data: Mapping[str, Any]) -> dict[str, Any]:
         intent["desktop_audio"] = desktop_audio
         prepared["intent"] = intent
     return prepared
+
+
+def _requires_local_qwen_cpu_auto_migration(settings_version: object) -> bool:
+    if isinstance(settings_version, bool):
+        return True
+    if isinstance(settings_version, int):
+        return settings_version < _LOCAL_QWEN_CPU_AUTO_MIGRATION_VERSION
+    if isinstance(settings_version, str) and settings_version.strip().isdigit():
+        return int(settings_version.strip()) < _LOCAL_QWEN_CPU_AUTO_MIGRATION_VERSION
+    return True
+
+
+def _requires_peer_source_auto_migration(settings_version: object) -> bool:
+    if isinstance(settings_version, bool):
+        return True
+    if isinstance(settings_version, int):
+        return settings_version < _PEER_SOURCE_AUTO_MIGRATION_VERSION
+    if isinstance(settings_version, str) and settings_version.strip().isdigit():
+        return int(settings_version.strip()) < _PEER_SOURCE_AUTO_MIGRATION_VERSION
+    return True
+
+
+def _migrate_peer_source_auto_mode(intent: dict[str, Any]) -> None:
+    raw = intent.get("languages")
+    languages = dict(raw) if isinstance(raw, Mapping) else {}
+    if languages.get("peer_source_mode") == "soniox_auto":
+        languages["peer_source_mode"] = "auto"
+        intent["languages"] = languages
+
+
+def _migrate_canonical_local_qwen_provider(intent: dict[str, Any], key: str) -> None:
+    raw = intent.get(key)
+    block = dict(raw) if isinstance(raw, Mapping) else {}
+    if block.get("provider") == _LOCAL_QWEN_PROVIDER:
+        block["provider"] = _LOCAL_CPU_AUTO_PROVIDER
+        intent[key] = block
+
+
+def _migrate_legacy_local_qwen_providers(data: dict[str, Any]) -> None:
+    provider = data.get("provider")
+    if not isinstance(provider, dict):
+        return
+    for key in ("stt", "peer_stt"):
+        if provider.get(key) == _LOCAL_QWEN_PROVIDER:
+            provider[key] = _LOCAL_CPU_AUTO_PROVIDER
 
 
 def _capture_target_from_legacy_output_device(value: object) -> CaptureTargetIntent:
@@ -324,6 +380,7 @@ def from_dict(data: Mapping[str, Any]) -> AppSettingsVNext:
     telemetry_consent = _telemetry_consent_from_legacy_raw_dict(data)
     telemetry_state = _telemetry_state_from_legacy_raw_dict(data)
     prepared_legacy = dict(copy.deepcopy(data))
+    _migrate_legacy_local_qwen_providers(prepared_legacy)
     managed_identity = prepared_legacy.get("managed_identity")
     if isinstance(managed_identity, dict):
         pending_delivery_ack_id = managed_identity.get("pending_delivery_ack_id")
@@ -405,6 +462,7 @@ def from_legacy_app_settings(
                 low_latency_spec_retry_max=int(data["stt"]["low_latency_spec_retry_max"]),
                 custom_vocabulary_enabled=bool(data["stt"]["custom_vocabulary_enabled"]),
                 custom_terms=copy.deepcopy(data["stt"]["custom_terms"]),
+                gpu_device_id=data["stt"]["gpu_device_id"],
                 deepgram=DeepgramSTTIntent(model=data["deepgram_stt"]["model"]),
                 qwen_asr=QwenASRSTTIntent(model=data["qwen_asr_stt"]["model"]),
                 soniox=SonioxSTTIntent(
@@ -420,7 +478,11 @@ def from_legacy_app_settings(
                 target_language=data["languages"]["target_language"],
                 peer_source_language=data["languages"]["peer_source_language"],
                 peer_target_language=data["languages"]["peer_target_language"],
-                peer_source_mode=data["languages"].get("peer_source_mode", "manual"),
+                peer_source_mode=(
+                    "auto"
+                    if data["languages"].get("peer_source_mode") == "soniox_auto"
+                    else data["languages"].get("peer_source_mode", "manual")
+                ),
                 peer_expected_languages=list(
                     data["languages"].get("peer_expected_languages") or []
                 ),
@@ -699,6 +761,7 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
         "low_latency_spec_retry_max": intent.stt.low_latency_spec_retry_max,
         "custom_vocabulary_enabled": intent.stt.custom_vocabulary_enabled,
         "custom_terms": copy.deepcopy(intent.stt.custom_terms),
+        "gpu_device_id": intent.stt.gpu_device_id,
     }
     data["deepgram_stt"] = {"model": intent.stt.deepgram.model}
     data["qwen_asr_stt"]["model"] = intent.stt.qwen_asr.model

@@ -10,6 +10,7 @@ from puripuly_heart.providers.stt.local_decode import (
     LocalDecodeBacklog,
     LocalDecodeCompletion,
     LocalDecodeCoordinator,
+    LocalDecodeExpired,
     LocalDecodeFailure,
 )
 
@@ -281,3 +282,101 @@ async def test_local_decode_coordinator_contains_failure_callback_errors(
     assert coordinator.accepting is False
     assert coordinator.pending_jobs == 0
     assert any("decode failure callback failed" in message for message in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_local_decode_pending_ttl_expires_only_before_start_at_twelve_seconds() -> None:
+    now = 0.0
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    decoded: list[int] = []
+    completions: list[LocalDecodeCompletion] = []
+    expired: list[LocalDecodeExpired] = []
+
+    def queue_clock() -> float:
+        return now
+
+    async def decode(samples_f32: np.ndarray) -> str:
+        decoded.append(int(samples_f32[0]))
+        if len(decoded) == 1:
+            first_started.set()
+            await release_first.wait()
+        return str(decoded[-1])
+
+    async def on_completion(completion: LocalDecodeCompletion) -> None:
+        completions.append(completion)
+
+    async def on_failure(failure: LocalDecodeFailure) -> None:
+        raise AssertionError("unexpected failure") from failure.error
+
+    async def on_expired(expiry: LocalDecodeExpired) -> None:
+        expired.append(expiry)
+
+    coordinator = LocalDecodeCoordinator(
+        owner_name="test-local-decode-ttl",
+        sample_rate_hz=16000,
+        decode=decode,
+        on_completion=on_completion,
+        on_failure=on_failure,
+        on_expired=on_expired,
+        pending_ttl_s=12.0,
+        queue_clock=queue_clock,
+    )
+
+    assert coordinator.enqueue(np.full(160, 1.0, dtype=np.float32)) is True
+    await asyncio.wait_for(first_started.wait(), timeout=0.1)
+    assert coordinator.enqueue(np.full(160, 2.0, dtype=np.float32), speech_end_at=1.0) is True
+
+    now = 13.0
+    release_first.set()
+    await asyncio.wait_for(coordinator.stop(), timeout=1.0)
+
+    assert decoded == [1]
+    assert [completion.job.sequence for completion in completions] == [1]
+    assert len(expired) == 1
+    assert expired[0].job.sequence == 2
+    assert expired[0].queue_wait_ms == pytest.approx(12000.0)
+    assert expired[0].reason == "pending_ttl_exceeded"
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_local_decode_pending_ttl_has_no_pending_count_limit() -> None:
+    release = asyncio.Event()
+    first_started = asyncio.Event()
+    completions: list[LocalDecodeCompletion] = []
+
+    async def decode(samples_f32: np.ndarray) -> str:
+        if not first_started.is_set():
+            first_started.set()
+            await release.wait()
+        return str(int(samples_f32[0]))
+
+    async def on_completion(completion: LocalDecodeCompletion) -> None:
+        completions.append(completion)
+
+    async def on_failure(failure: LocalDecodeFailure) -> None:
+        raise AssertionError("unexpected failure") from failure.error
+
+    coordinator = LocalDecodeCoordinator(
+        owner_name="test-local-decode-unbounded",
+        sample_rate_hz=16000,
+        decode=decode,
+        on_completion=on_completion,
+        on_failure=on_failure,
+        pending_ttl_s=12.0,
+        queue_clock=lambda: 1.0,
+    )
+
+    assert coordinator.enqueue(np.ones(160, dtype=np.float32)) is True
+    await asyncio.wait_for(first_started.wait(), timeout=0.1)
+    for value in range(2, 102):
+        assert coordinator.enqueue(np.full(160, value, dtype=np.float32)) is True
+    assert coordinator.pending_jobs == 101
+
+    release.set()
+    await asyncio.wait_for(coordinator.stop(), timeout=1.0)
+
+    assert len(completions) == 101
+    assert [completion.job.sequence for completion in completions] == list(range(1, 102))
+    await coordinator.close()

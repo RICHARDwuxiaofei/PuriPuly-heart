@@ -456,7 +456,7 @@ def validate_desktop_renderer_event(
 
 
 def validate_desktop_overlay_repro_record(
-    record: Mapping[str, object]
+    record: Mapping[str, object],
 ) -> Mapping[str, object] | None:
     candidate = dict(record)
     if set(candidate) != _DESKTOP_OVERLAY_REPRO_RECORD_FIELDS:
@@ -494,7 +494,7 @@ def validate_desktop_overlay_repro_record(
 
 
 def validate_desktop_overlay_repro_result(
-    result: Mapping[str, object]
+    result: Mapping[str, object],
 ) -> Mapping[str, object] | None:
     candidate = dict(result)
     if set(candidate) != _DESKTOP_OVERLAY_REPRO_RESULT_FIELDS:

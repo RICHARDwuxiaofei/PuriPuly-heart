@@ -113,12 +113,14 @@ def test_run_gui_forwards_main_logging_sinks_when_supported(monkeypatch, tmp_pat
         config_path,
         debug_ui_preview=False,
         runtime_logging_sinks=None,
+        vrchat_osc_presence=None,
     ):
         calls.update(
             page=page,
             config_path=config_path,
             debug_ui_preview=debug_ui_preview,
             runtime_logging_sinks=runtime_logging_sinks,
+            vrchat_osc_presence=vrchat_osc_presence,
         )
 
     fake_ui_app.main_gui = main_gui
@@ -138,6 +140,7 @@ def test_run_gui_forwards_main_logging_sinks_when_supported(monkeypatch, tmp_pat
     assert result == 0
     assert calls["config_path"] == config_path
     assert calls["runtime_logging_sinks"] is logging_sinks
+    assert calls["vrchat_osc_presence"] is not None
 
 
 def test_main_default_invokes_gui(monkeypatch, tmp_path) -> None:
@@ -211,6 +214,51 @@ def test_main_run_gui_passes_debug_ui_preview_flag(monkeypatch, tmp_path) -> Non
     asyncio.run(calls["target"](object()))
     assert calls["config_path"] == config_path
     assert calls["debug_ui_preview"] is True
+
+
+def test_run_gui_debug_preview_constructs_vrchat_presence(monkeypatch, tmp_path) -> None:
+    calls: dict[str, object] = {}
+    fake_flet = ModuleType("flet")
+
+    def fake_app(*, target, assets_dir):
+        _ = assets_dir
+        asyncio.run(target(object()))
+
+    fake_flet.app = fake_app
+    monkeypatch.setitem(sys.modules, "flet", fake_flet)
+    fake_ui_app = ModuleType("puripuly_heart.ui.app")
+
+    async def main_gui(
+        page,
+        *,
+        config_path,
+        debug_ui_preview=False,
+        runtime_logging_sinks=None,
+        vrchat_osc_presence=None,
+    ):
+        calls.update(
+            page=page,
+            config_path=config_path,
+            debug_ui_preview=debug_ui_preview,
+            runtime_logging_sinks=runtime_logging_sinks,
+            vrchat_osc_presence=vrchat_osc_presence,
+        )
+
+    fake_ui_app.main_gui = main_gui
+    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.app", fake_ui_app)
+    fake_fonts = ModuleType("puripuly_heart.ui.fonts")
+    fake_fonts.assets_dir = lambda: tmp_path
+    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.fonts", fake_fonts)
+
+    result = main_module._run_gui(
+        tmp_path / "settings.json",
+        debug_ui_preview=True,
+        runtime_logging_sinks=object(),
+    )
+
+    assert result == 0
+    assert calls["debug_ui_preview"] is True
+    assert calls["vrchat_osc_presence"] is not None
 
 
 def test_main_run_gui_force_closes_logging_when_gui_runtime_logging_leaks(
@@ -366,6 +414,52 @@ def test_main_soxr_runtime_check_dispatches_runner(monkeypatch, tmp_path) -> Non
 
     assert result == 0
     assert calls["called"] is True
+
+
+def test_main_local_cpu_real_model_check_dispatches_isolated_paths(monkeypatch, tmp_path) -> None:
+    calls: dict[str, Path] = {}
+
+    def fake_run_local_cpu_real_model_check(
+        *,
+        model_root: Path,
+        audio_root: Path,
+        report_path: Path,
+    ) -> int:
+        calls["model_root"] = model_root
+        calls["audio_root"] = audio_root
+        calls["report_path"] = report_path
+        return 0
+
+    monkeypatch.setattr(
+        main_module,
+        "run_local_cpu_real_model_check",
+        fake_run_local_cpu_real_model_check,
+    )
+    config_path = tmp_path / "settings.json"
+    model_root = tmp_path / "models"
+    audio_root = tmp_path / "audio"
+    report_path = tmp_path / "report.json"
+
+    result = main_module.main(
+        [
+            "--config",
+            str(config_path),
+            "local-cpu-real-model-check",
+            "--model-root",
+            str(model_root),
+            "--audio-root",
+            str(audio_root),
+            "--report",
+            str(report_path),
+        ]
+    )
+
+    assert result == 0
+    assert calls == {
+        "model_root": model_root,
+        "audio_root": audio_root,
+        "report_path": report_path,
+    }
 
 
 def test_run_soxr_runtime_check_rejects_non_windows(monkeypatch, capsys) -> None:

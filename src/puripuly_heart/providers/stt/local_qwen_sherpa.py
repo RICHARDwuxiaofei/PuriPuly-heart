@@ -6,6 +6,7 @@ import importlib
 import logging
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import AsyncIterator, Callable
 
@@ -18,9 +19,13 @@ from puripuly_heart.core.local_qwen_runtime import (
     ensure_local_qwen_windows_runtime,
 )
 from puripuly_heart.core.local_stt_assets import (
+    LOCAL_STT_MODEL_ID,
     LocalQwenSherpaLoadError,
+    load_local_stt_asset_manifest,
     validate_local_stt_runtime_ready,
 )
+from puripuly_heart.core.owned_thread import run_owned_thread_call
+from puripuly_heart.core.runtime.local_asr_transition import LocalASRSessionOptions
 from puripuly_heart.core.stt.backend import (
     STTBackend,
     STTBackendSession,
@@ -33,11 +38,13 @@ from puripuly_heart.providers.stt.local_decode import (
     LocalDecodeBacklog,
     LocalDecodeCompletion,
     LocalDecodeCoordinator,
+    LocalDecodeExpired,
     LocalDecodeFailure,
 )
 
 DEFAULT_SHERPA_NUM_THREADS = 3
 LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ = 16000
+LOCAL_ASR_PENDING_TTL_S = 12.0
 _KNOWN_HALLUCINATION_LOG_REDACTION = "<known-local-qwen-hallucination>"
 logger = logging.getLogger(__name__)
 
@@ -50,15 +57,15 @@ class _LocalQwenSherpaImportError(ImportError):
     """Internal sentinel for sherpa_onnx import failures."""
 
 
-def _log_prefix(stream_label: str | None) -> str:
-    prefix = "[STT][local_qwen]"
+def _log_prefix(provider_id: str, stream_label: str | None) -> str:
+    prefix = f"[STT][{provider_id}]"
     if stream_label:
         return f"{prefix}[{stream_label}]"
     return prefix
 
 
-def _audio_diag_prefix(stream_label: str | None) -> str:
-    prefix = "[AudioDiag][local_qwen]"
+def _audio_diag_prefix(provider_id: str, stream_label: str | None) -> str:
+    prefix = f"[AudioDiag][{provider_id}]"
     if stream_label:
         return f"{prefix}[{stream_label}]"
     return prefix
@@ -157,21 +164,38 @@ class LocalQwenSherpaSTTBackend(STTBackend):
     language_hint: str | None = None
     hotwords: tuple[str, ...] = ()
     diagnostics_enabled: Callable[[], bool] | None = None
+    model_id: str = field(default=LOCAL_STT_MODEL_ID, init=False)
+    provider_id: str = field(default="local_qwen", init=False)
+    pending_ttl_s: float = LOCAL_ASR_PENDING_TTL_S
+    decode_clock: Callable[[], float] = field(default_factory=lambda: time.perf_counter)
+    queue_clock: Callable[[], float] = field(default_factory=lambda: time.monotonic)
     _recognizer: object | None = field(init=False, default=None, repr=False)
     _load_lock: asyncio.Lock = field(init=False, repr=False)
     _decode_lock: asyncio.Lock = field(init=False, repr=False)
     _session_handoff_tail: asyncio.Event | None = field(init=False, default=None, repr=False)
+    _closed: bool = field(init=False, default=False, repr=False)
+    _close_started: bool = field(init=False, default=False, repr=False)
+    _close_complete: asyncio.Event = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.sample_rate_hz != LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ:
             raise ValueError(f"sample_rate_hz must be {LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ}")
         if self.num_threads <= 0:
             raise ValueError("num_threads must be > 0")
+        if self.pending_ttl_s <= 0:
+            raise ValueError("pending_ttl_s must be > 0")
         self._load_lock = asyncio.Lock()
         self._decode_lock = asyncio.Lock()
+        self._close_complete = asyncio.Event()
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._recognizer is not None
 
     async def open_session(self) -> STTBackendSession:
         await self._ensure_recognizer()
+        if self._closed:
+            raise RuntimeError("Local STT backend is closed")
         session = _LocalQwenSherpaSession(
             backend=self,
             decode_start_after=self._session_handoff_tail,
@@ -179,20 +203,63 @@ class LocalQwenSherpaSTTBackend(STTBackend):
         self._session_handoff_tail = session.handoff_complete_event
         return session
 
+    async def reconfigure_session_options(self, options: LocalASRSessionOptions) -> None:
+        self.language_hint = options.language_hint
+
     async def close(self) -> None:
-        self._recognizer = None
-        self._session_handoff_tail = None
+        if self._close_started:
+            await asyncio.shield(self._close_complete.wait())
+            return
+        self._close_started = True
+        self._closed = True
+        cleanup_cancelled = False
+        try:
+            while True:
+                try:
+                    async with self._load_lock:
+                        self._recognizer = None
+                        self._session_handoff_tail = None
+                    async with self._decode_lock:
+                        pass
+                    break
+                except asyncio.CancelledError:
+                    current_task = asyncio.current_task()
+                    if current_task is None or not current_task.cancelling():
+                        raise
+                    cleanup_cancelled = True
+        finally:
+            self._close_complete.set()
+        if cleanup_cancelled:
+            raise asyncio.CancelledError
 
     async def _ensure_recognizer(self) -> object:
+        if self._closed:
+            raise RuntimeError("Local STT backend is closed")
         if self._recognizer is not None:
             return self._recognizer
 
         async with self._load_lock:
+            if self._closed:
+                raise RuntimeError("Local STT backend is closed")
             if self._recognizer is not None:
                 return self._recognizer
-            await asyncio.to_thread(validate_local_stt_runtime_ready, self.model_dir)
-            self._recognizer = await asyncio.to_thread(self._create_recognizer)
-            return self._recognizer
+            await run_owned_thread_call(self._validate_runtime_assets)
+            if self._closed:
+                raise RuntimeError("Local STT backend is closed")
+            recognizer = await run_owned_thread_call(self._create_recognizer)
+            if self._closed:
+                raise RuntimeError("Local STT backend is closed")
+            self._recognizer = recognizer
+            return recognizer
+
+    def _validate_runtime_assets(self) -> None:
+        if self.model_id == LOCAL_STT_MODEL_ID:
+            validate_local_stt_runtime_ready(self.model_dir)
+            return
+        validate_local_stt_runtime_ready(
+            self.model_dir,
+            manifest=load_local_stt_asset_manifest(self.model_id),
+        )
 
     def _create_recognizer(self) -> object:
         try:
@@ -216,14 +283,24 @@ class LocalQwenSherpaSTTBackend(STTBackend):
     async def decode_f32(self, samples_f32: np.ndarray) -> str:
         recognizer = await self._ensure_recognizer()
         async with self._decode_lock:
+            if self._closed:
+                raise RuntimeError("Local STT backend is closed")
             try:
-                return await asyncio.to_thread(
-                    self._decode_f32_sync,
-                    recognizer,
-                    samples_f32,
+                return await run_owned_thread_call(
+                    partial(
+                        self._decode_f32_sync,
+                        recognizer,
+                        samples_f32,
+                    )
                 )
             except Exception as exc:
-                raise LocalQwenSherpaInferenceError(str(exc)) from exc
+                raise self._inference_error(exc) from exc
+
+    def _inference_error(self, exc: Exception) -> RuntimeError:
+        return LocalQwenSherpaInferenceError(str(exc))
+
+    def is_known_hallucination(self, text: str) -> bool:
+        return is_known_local_qwen_hallucination(text)
 
     def _decode_f32_sync(self, recognizer: object, samples_f32: np.ndarray) -> str:
         samples = np.asarray(samples_f32, dtype=np.float32).reshape(-1).copy()
@@ -271,14 +348,17 @@ class _LocalQwenSherpaSession(STTBackendSession):
         self._handoff_complete = asyncio.Event()
         self._close_complete = asyncio.Event()
         self._decode_coordinator = LocalDecodeCoordinator(
-            owner_name="local-qwen-session",
+            owner_name=f"{self.backend.provider_id}-session",
             sample_rate_hz=self.backend.sample_rate_hz,
             decode=self._decode_samples,
             on_completion=self._handle_decode_completion,
             on_failure=self._handle_decode_failure,
+            on_expired=self._handle_decode_expired,
             on_backlog_warning=self._log_decode_backlog_warning,
             start_after=self.decode_start_after,
-            clock=time.perf_counter,
+            pending_ttl_s=self.backend.pending_ttl_s,
+            clock=self.backend.decode_clock,
+            queue_clock=self.backend.queue_clock,
         )
 
     @property
@@ -338,26 +418,52 @@ class _LocalQwenSherpaSession(STTBackendSession):
         if text:
             logger.info(
                 "%s Transcript final text_len=%s known_hallucination=%s audio_ms=%.1f inference_ms=%.1f rtf=%.3f",
-                _log_prefix(self.backend.stream_label),
+                _log_prefix(self.backend.provider_id, self.backend.stream_label),
                 len(text),
-                is_known_local_qwen_hallucination(text),
+                self.backend.is_known_hallucination(text),
                 audio_ms,
                 inference_ms,
                 rtf,
             )
+        if audio_ms > 0 and self._diagnostics_enabled():
+            self._log_attempt_diagnostic(
+                audio_ms=audio_ms,
+                inference_ms=inference_ms,
+                queue_wait_ms=completion.queue_wait_ms,
+                result="success",
+            )
         await self._events.put(STTBackendTranscriptEvent(text=text, is_final=True))
 
     async def _handle_decode_failure(self, failure: LocalDecodeFailure) -> None:
+        if failure.job.audio_ms > 0 and self._diagnostics_enabled():
+            self._log_attempt_diagnostic(
+                audio_ms=failure.job.audio_ms,
+                inference_ms=failure.inference_ms,
+                queue_wait_ms=failure.queue_wait_ms,
+                result="failure",
+            )
         retired_jobs = (failure.job, *failure.discarded_jobs)
         for _ in retired_jobs:
             await self._events.put(STTBackendTranscriptEvent(text="", is_final=True))
         self._failure_handoff_safe = True
         await self._events.put(failure.error)
 
+    async def _handle_decode_expired(self, expired: LocalDecodeExpired) -> None:
+        if self._diagnostics_enabled():
+            logger.info(
+                "[LocalASR][Expiry] channel=%s model=%s intended_provider=%s reason=%s queue_wait_seconds=%.3f",
+                self.backend.stream_label or "unknown",
+                self.backend.model_id,
+                self.backend.provider_id,
+                expired.reason,
+                expired.queue_wait_ms / 1000.0,
+            )
+        await self._events.put(STTBackendTranscriptEvent(text="", is_final=True))
+
     def _log_decode_backlog_warning(self, backlog: LocalDecodeBacklog) -> None:
         logger.warning(
             "%s Decode backlog is unexpectedly high: pending_jobs=%s buffered_audio_ms=%.1f threshold=%s",
-            _log_prefix(self.backend.stream_label),
+            _log_prefix(self.backend.provider_id, self.backend.stream_label),
             backlog.pending_jobs,
             backlog.buffered_audio_ms,
             backlog.warning_threshold,
@@ -379,7 +485,7 @@ class _LocalQwenSherpaSession(STTBackendSession):
             if self._decode_coordinator.pending_jobs:
                 logger.info(
                     "%s Decode cancellation requested: pending_jobs=%s buffered_audio_ms=%.1f",
-                    _log_prefix(self.backend.stream_label),
+                    _log_prefix(self.backend.provider_id, self.backend.stream_label),
                     self._decode_coordinator.pending_jobs,
                     self._decode_coordinator.buffered_audio_ms,
                 )
@@ -425,7 +531,7 @@ class _LocalQwenSherpaSession(STTBackendSession):
             )
             logger.info(
                 "%s decode_start audio_ms=%.1f rms_db=%.1f peak_db=%.1f zero_ratio=%.3f language_hint=%r",
-                _audio_diag_prefix(self.backend.stream_label),
+                _audio_diag_prefix(self.backend.provider_id, self.backend.stream_label),
                 metrics.audio_ms,
                 metrics.rms_db,
                 metrics.peak_db,
@@ -444,7 +550,7 @@ class _LocalQwenSherpaSession(STTBackendSession):
         with contextlib.suppress(Exception):
             logger.info(
                 "%s decode_done audio_ms=%.1f inference_ms=%.1f rtf=%.3f text_len=%s empty_result=%s suspicious_repetition=%s suspicious_script=%s",
-                _audio_diag_prefix(self.backend.stream_label),
+                _audio_diag_prefix(self.backend.provider_id, self.backend.stream_label),
                 audio_ms,
                 inference_ms,
                 rtf,
@@ -464,10 +570,30 @@ class _LocalQwenSherpaSession(STTBackendSession):
         mean_rtf = self._total_rtf / self._utterances if self._utterances > 0 else 0.0
         logger.info(
             "%s Session summary: utterances=%s total_audio_ms=%.1f total_inference_ms=%.1f weighted_total_rtf=%.3f mean_rtf=%.3f",
-            _log_prefix(self.backend.stream_label),
+            _log_prefix(self.backend.provider_id, self.backend.stream_label),
             self._utterances,
             self._total_audio_ms,
             self._total_inference_ms,
             weighted_total_rtf,
             mean_rtf,
+        )
+
+    def _log_attempt_diagnostic(
+        self,
+        *,
+        audio_ms: float,
+        inference_ms: float,
+        queue_wait_ms: float,
+        result: str,
+    ) -> None:
+        rtf = inference_ms / audio_ms if audio_ms > 0 else 0.0
+        logger.info(
+            "[LocalASR][Attempt] channel=%s model=%s backend=CPU audio_seconds=%.3f decode_seconds=%.3f rtf=%.6f result=%s queue_wait_seconds=%.3f",
+            self.backend.stream_label or "unknown",
+            self.backend.model_id,
+            audio_ms / 1000.0,
+            inference_ms / 1000.0,
+            rtf,
+            result,
+            queue_wait_ms / 1000.0,
         )

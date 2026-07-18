@@ -751,6 +751,42 @@ async def test_handle_stt_event_logs_basic_channel_state_breadcrumb() -> None:
 
 
 @pytest.mark.asyncio
+async def test_retired_stt_ingress_forwards_only_final_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handled: list[object] = []
+
+    async def record_event(_self: ClientHub, event: object) -> None:
+        handled.append(event)
+
+    monkeypatch.setattr(ClientHub, "_handle_stt_event", record_event)
+    hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), clock=FakeClock())
+    utterance_id = uuid4()
+    transcript = Transcript(
+        utterance_id=utterance_id,
+        text="retired final",
+        is_final=True,
+        created_at=1.0,
+    )
+    partial = Transcript(
+        utterance_id=utterance_id,
+        text="retired partial",
+        is_final=False,
+        created_at=0.5,
+    )
+    final_event = STTFinalEvent(utterance_id=utterance_id, transcript=transcript)
+
+    await hub._handle_retired_stt_event(STTSessionStateEvent(state=STTSessionState.DISCONNECTED))
+    await hub._handle_retired_stt_event(STTErrorEvent(message="retired failure"))
+    await hub._handle_retired_stt_event(
+        STTPartialEvent(utterance_id=utterance_id, transcript=partial)
+    )
+    await hub._handle_retired_stt_event(final_event)
+
+    assert handled == [final_event]
+
+
+@pytest.mark.asyncio
 async def test_handle_stt_partial_runtime_log_uses_metadata_without_transcript_text() -> None:
     runtime_logging, log_stream = _make_runtime_logging_capture()
     runtime_logging.set_mode(SessionLoggingMode.DETAILED)

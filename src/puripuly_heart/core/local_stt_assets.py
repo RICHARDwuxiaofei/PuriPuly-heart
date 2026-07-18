@@ -14,6 +14,20 @@ LOCAL_STT_ENGINE = "sherpa-onnx"
 LOCAL_STT_INSTALL_DIRNAME = "qwen3-asr-0.6b-int8-sherpa"
 LOCAL_STT_INSTALLED_MANIFEST_FILENAME = "installed-manifest.json"
 LOCAL_STT_MANIFEST_RELATIVE_PATH = f"data/models/{LOCAL_STT_INSTALL_DIRNAME}.manifest.json"
+PARAKEET_V3_MODEL_ID = "parakeet-tdt-0.6b-v3-int8-sherpa"
+PARAKEET_JAPANESE_MODEL_ID = "parakeet-tdt-ctc-0.6b-ja-int8-sherpa"
+LOCAL_QWEN_GPU_MODEL_ID = "qwen3-asr-1.7b-q6-k-transcribe-vulkan"
+REQUIRED_CPU_LOCAL_STT_MODEL_IDS = (
+    PARAKEET_V3_MODEL_ID,
+    PARAKEET_JAPANESE_MODEL_ID,
+    LOCAL_STT_MODEL_ID,
+)
+LOCAL_STT_MANIFEST_RELATIVE_PATHS = {
+    LOCAL_STT_MODEL_ID: LOCAL_STT_MANIFEST_RELATIVE_PATH,
+    PARAKEET_V3_MODEL_ID: f"data/models/{PARAKEET_V3_MODEL_ID}.manifest.json",
+    PARAKEET_JAPANESE_MODEL_ID: f"data/models/{PARAKEET_JAPANESE_MODEL_ID}.manifest.json",
+    LOCAL_QWEN_GPU_MODEL_ID: f"data/models/{LOCAL_QWEN_GPU_MODEL_ID}.manifest.json",
+}
 
 
 class LocalSTTAssetError(RuntimeError):
@@ -30,6 +44,10 @@ class LocalSTTManifestInvalidError(LocalSTTAssetError):
 
 class LocalQwenSherpaLoadError(RuntimeError):
     """Raised when the local sherpa recognizer cannot be initialized."""
+
+
+class LocalParakeetSherpaLoadError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,8 +231,13 @@ def default_local_stt_model_root() -> Path:
     return paths.default_models_dir()
 
 
-def default_local_stt_model_dir() -> Path:
-    return default_local_stt_model_root() / LOCAL_STT_INSTALL_DIRNAME
+def default_local_stt_model_dir(model_id: str = LOCAL_STT_MODEL_ID) -> Path:
+    manifest_relative_path = LOCAL_STT_MANIFEST_RELATIVE_PATHS.get(model_id)
+    if manifest_relative_path is None:
+        raise LocalSTTManifestInvalidError(f"unknown local STT model_id: {model_id}")
+    return default_local_stt_model_root() / Path(manifest_relative_path).name.removesuffix(
+        ".manifest.json"
+    )
 
 
 def default_local_stt_installed_manifest_path(model_dir: Path | None = None) -> Path:
@@ -229,13 +252,19 @@ def default_local_stt_source_for_locale(locale: str | None) -> str:
     return "huggingface"
 
 
-def load_local_stt_asset_manifest() -> LocalSTTAssetManifest:
-    manifest_path = resources.files("puripuly_heart").joinpath(LOCAL_STT_MANIFEST_RELATIVE_PATH)
+def load_local_stt_asset_manifest(model_id: str = LOCAL_STT_MODEL_ID) -> LocalSTTAssetManifest:
+    manifest_relative_path = LOCAL_STT_MANIFEST_RELATIVE_PATHS.get(model_id)
+    if manifest_relative_path is None:
+        raise LocalSTTManifestInvalidError(f"unknown local STT model_id: {model_id}")
+    manifest_path = resources.files("puripuly_heart").joinpath(manifest_relative_path)
     with manifest_path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if not isinstance(payload, dict):
         raise LocalSTTManifestInvalidError("local STT asset manifest must be a JSON object")
-    return LocalSTTAssetManifest.from_dict(payload)
+    manifest = LocalSTTAssetManifest.from_dict(payload)
+    if manifest.model_id != model_id:
+        raise LocalSTTManifestInvalidError("local STT asset manifest model_id does not match")
+    return manifest
 
 
 def _load_installed_local_stt_manifest(
@@ -243,7 +272,7 @@ def _load_installed_local_stt_manifest(
     *,
     manifest: LocalSTTAssetManifest,
 ) -> InstalledLocalSTTManifest:
-    installed_manifest_path = default_local_stt_installed_manifest_path(model_dir)
+    installed_manifest_path = model_dir / manifest.installed_manifest_filename
     if not installed_manifest_path.exists():
         raise LocalSTTModelMissingError("local STT installed manifest is missing")
     try:
@@ -320,8 +349,10 @@ def validate_local_stt_runtime_ready(
     *,
     manifest: LocalSTTAssetManifest | None = None,
 ) -> InstalledLocalSTTManifest:
-    resolved_model_dir = model_dir or default_local_stt_model_dir()
     resolved_manifest = manifest or load_local_stt_asset_manifest()
+    resolved_model_dir = (
+        model_dir or default_local_stt_model_root() / resolved_manifest.install_dirname
+    )
 
     _validate_local_stt_model_dir(resolved_model_dir)
     installed = _load_installed_local_stt_manifest(
@@ -341,8 +372,10 @@ def validate_local_stt_install(
     *,
     manifest: LocalSTTAssetManifest | None = None,
 ) -> InstalledLocalSTTManifest:
-    resolved_model_dir = model_dir or default_local_stt_model_dir()
     resolved_manifest = manifest or load_local_stt_asset_manifest()
+    resolved_model_dir = (
+        model_dir or default_local_stt_model_root() / resolved_manifest.install_dirname
+    )
 
     _validate_local_stt_model_dir(resolved_model_dir)
     installed = _load_installed_local_stt_manifest(
@@ -361,14 +394,17 @@ def inspect_local_stt_install_state(
     model_dir: Path | None = None,
     *,
     manifest: LocalSTTAssetManifest | None = None,
+    verify_checksums: bool = False,
 ) -> LocalSTTInstallState:
-    resolved_model_dir = model_dir or default_local_stt_model_dir()
     resolved_manifest = manifest or load_local_stt_asset_manifest()
+    resolved_model_dir = (
+        model_dir or default_local_stt_model_root() / resolved_manifest.install_dirname
+    )
     try:
-        installed = validate_local_stt_runtime_ready(
-            resolved_model_dir,
-            manifest=resolved_manifest,
+        validator = (
+            validate_local_stt_install if verify_checksums else validate_local_stt_runtime_ready
         )
+        installed = validator(resolved_model_dir, manifest=resolved_manifest)
     except LocalSTTModelMissingError:
         return LocalSTTInstallState(status="missing")
     except LocalSTTManifestInvalidError as exc:

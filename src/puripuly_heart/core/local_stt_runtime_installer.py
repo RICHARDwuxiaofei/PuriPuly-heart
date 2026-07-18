@@ -14,6 +14,7 @@ from uuid import uuid4
 import httpx
 
 from puripuly_heart.core.local_stt_assets import (
+    LOCAL_STT_MODEL_ID,
     InstalledLocalSTTManifest,
     LocalSTTAssetError,
     LocalSTTAssetManifest,
@@ -189,6 +190,7 @@ def _promote_staging_install(
 
 async def ensure_local_stt_installed(
     *,
+    model_id: str | None = None,
     preferred_source: str | None = None,
     locale: str | None = None,
     model_root: Path | None = None,
@@ -196,7 +198,11 @@ async def ensure_local_stt_installed(
     on_status: StatusCallback | None = None,
     cancel_event: threading.Event | None = None,
 ) -> InstalledLocalSTTManifest:
-    resolved_manifest = manifest or load_local_stt_asset_manifest()
+    if manifest is not None and model_id is not None and manifest.model_id != model_id:
+        raise LocalSTTRuntimeInstallError(
+            "runtime local STT model_id does not match the supplied manifest"
+        )
+    resolved_manifest = manifest or load_local_stt_asset_manifest(model_id or LOCAL_STT_MODEL_ID)
     resolved_root = model_root or default_local_stt_model_root()
     install_dir = resolved_root / resolved_manifest.install_dirname
     total_bytes = sum(asset.size_bytes or 0 for asset in resolved_manifest.files)

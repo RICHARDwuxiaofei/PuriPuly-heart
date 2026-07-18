@@ -6,13 +6,22 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import TypeVar
 
 import numpy as np
 
 from puripuly_heart.core.lifecycle import LifecycleScope, start_lifecycle_task
+from puripuly_heart.core.owned_thread import run_owned_thread_call as _run_owned_thread_call
 
 DEFAULT_LOCAL_DECODE_BACKLOG_WARN_SIZE = 8
 logger = logging.getLogger(__name__)
+_ThreadResultT = TypeVar("_ThreadResultT")
+
+
+async def run_owned_thread_call(
+    operation: Callable[[], _ThreadResultT],
+) -> _ThreadResultT:
+    return await _run_owned_thread_call(operation)
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +29,7 @@ class LocalDecodeJob:
     sequence: int
     samples_f32: np.ndarray
     audio_ms: float
+    speech_end_at: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +37,7 @@ class LocalDecodeCompletion:
     job: LocalDecodeJob
     text: str
     inference_ms: float
+    queue_wait_ms: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +52,15 @@ class LocalDecodeFailure:
     job: LocalDecodeJob
     error: Exception
     discarded_jobs: tuple[LocalDecodeJob, ...]
+    inference_ms: float = 0.0
+    queue_wait_ms: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class LocalDecodeExpired:
+    job: LocalDecodeJob
+    queue_wait_ms: float
+    reason: str = "pending_ttl_exceeded"
 
 
 @dataclass(slots=True)
@@ -51,9 +71,12 @@ class LocalDecodeCoordinator:
     on_completion: Callable[[LocalDecodeCompletion], Awaitable[None]]
     on_failure: Callable[[LocalDecodeFailure], Awaitable[None]]
     on_backlog_warning: Callable[[LocalDecodeBacklog], object] | None = None
+    on_expired: Callable[[LocalDecodeExpired], Awaitable[None]] | None = None
     start_after: asyncio.Event | None = None
     backlog_warn_size: int = DEFAULT_LOCAL_DECODE_BACKLOG_WARN_SIZE
+    pending_ttl_s: float | None = None
     clock: Callable[[], float] = time.perf_counter
+    queue_clock: Callable[[], float] = time.monotonic
     _queue: deque[LocalDecodeJob] = field(init=False, repr=False)
     _scope: LifecycleScope = field(init=False, repr=False)
     _worker_task: asyncio.Task[None] | None = field(init=False, default=None, repr=False)
@@ -72,6 +95,8 @@ class LocalDecodeCoordinator:
             raise ValueError("sample_rate_hz must be > 0")
         if self.backlog_warn_size <= 0:
             raise ValueError("backlog_warn_size must be > 0")
+        if self.pending_ttl_s is not None and self.pending_ttl_s <= 0:
+            raise ValueError("pending_ttl_s must be > 0")
         self._queue = deque()
         self._scope = LifecycleScope(f"{self.owner_name}-{id(self):x}")
         self._close_complete = asyncio.Event()
@@ -89,7 +114,12 @@ class LocalDecodeCoordinator:
         active_audio_ms = self._active_job.audio_ms if self._active_job is not None else 0.0
         return self._queued_audio_ms + active_audio_ms
 
-    def enqueue(self, samples_f32: np.ndarray) -> bool:
+    def enqueue(
+        self,
+        samples_f32: np.ndarray,
+        *,
+        speech_end_at: float | None = None,
+    ) -> bool:
         if not self.accepting:
             return False
         samples = np.asarray(samples_f32, dtype=np.float32).reshape(-1).copy()
@@ -98,6 +128,7 @@ class LocalDecodeCoordinator:
             sequence=self._next_sequence,
             samples_f32=samples,
             audio_ms=audio_ms,
+            speech_end_at=self.queue_clock() if speech_end_at is None else speech_end_at,
         )
         self._next_sequence += 1
         self._queue.append(job)
@@ -160,30 +191,56 @@ class LocalDecodeCoordinator:
                 job = self._queue.popleft()
                 self._queued_audio_ms = max(0.0, self._queued_audio_ms - job.audio_ms)
                 self._active_job = job
+                queue_wait_ms = 0.0
+                decode_started_at: float | None = None
+                decode_finished = False
+                inference_ms = 0.0
                 try:
+                    queue_wait_ms = max(0.0, (self.queue_clock() - job.speech_end_at) * 1000.0)
+                    if (
+                        self.pending_ttl_s is not None
+                        and queue_wait_ms >= self.pending_ttl_s * 1000.0
+                    ):
+                        if self.on_expired is not None:
+                            await self.on_expired(
+                                LocalDecodeExpired(
+                                    job=job,
+                                    queue_wait_ms=queue_wait_ms,
+                                )
+                            )
+                        continue
                     if job.samples_f32.size == 0:
                         text = ""
                         inference_ms = 0.0
                     else:
-                        started_at = self.clock()
+                        decode_started_at = self.clock()
                         text = await self.decode(job.samples_f32)
-                        inference_ms = (self.clock() - started_at) * 1000.0
+                        inference_ms = (self.clock() - decode_started_at) * 1000.0
+                        decode_finished = True
                     await self.on_completion(
                         LocalDecodeCompletion(
                             job=job,
                             text=str(text),
                             inference_ms=inference_ms,
+                            queue_wait_ms=queue_wait_ms,
                         )
                     )
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    inference_ms = (
+                        (self.clock() - decode_started_at) * 1000.0
+                        if decode_started_at is not None and not decode_finished
+                        else inference_ms
+                    )
                     self._failed = True
                     self._accepting = False
                     failure = LocalDecodeFailure(
                         job=job,
                         error=exc,
                         discarded_jobs=tuple(self._queue),
+                        inference_ms=inference_ms,
+                        queue_wait_ms=queue_wait_ms,
                     )
                     self._queue.clear()
                     self._queued_audio_ms = 0.0

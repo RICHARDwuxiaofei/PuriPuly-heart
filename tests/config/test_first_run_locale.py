@@ -129,7 +129,7 @@ def test_first_run_settings_preserve_prompt_defaults() -> None:
 def test_first_run_settings_preserve_provider_defaults() -> None:
     settings = _new_first_run_settings("zh_CN")
 
-    assert settings.provider.stt == STTProviderName.LOCAL_QWEN
+    assert settings.provider.stt == STTProviderName.LOCAL_CPU_AUTO
     assert settings.provider.llm == LLMProviderName.OPENROUTER
     assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert settings.translation.model == TranslationModel.DEEPSEEK_V4_FLASH
@@ -159,7 +159,7 @@ def test_first_run_settings_roundtrip_through_dict_serialization() -> None:
     restored = from_dict(to_dict(settings))
 
     assert restored.ui.locale == "ko"
-    assert restored.provider.stt == STTProviderName.LOCAL_QWEN
+    assert restored.provider.stt == STTProviderName.LOCAL_CPU_AUTO
     assert restored.provider.llm == LLMProviderName.OPENROUTER
     assert restored.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert restored.system_prompt == settings.system_prompt

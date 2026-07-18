@@ -73,7 +73,7 @@ class SettingsModal:
         self._two_column = two_column
         self._dialog: ft.AlertDialog | None = None
         self._option_list: ft.ListView | ft.Row | None = None
-        self._section_lists: list[tuple[str, ft.ListView]] | None = None
+        self._section_lists: list[tuple[ft.ListView, list[str]]] | None = None
         self._current: str = ""
         self._loading_section: str = ""
 
@@ -136,8 +136,8 @@ class SettingsModal:
         self._options = options
         self._loading_section = ""
         if self._section_lists is not None:
-            for section, list_view in self._section_lists:
-                list_view.controls = self._build_section_items(self._current, section)
+            for list_view, assigned_sections in self._section_lists:
+                list_view.controls = self._build_column_items(self._current, assigned_sections)
                 try:
                     list_view.update()
                 except Exception:
@@ -186,15 +186,14 @@ class SettingsModal:
     def _build_two_column_list(self, current: str, sections: list[str]) -> ft.Row:
         columns: list[ft.Control] = []
         self._section_lists = []
-        for section in sections:
-            section_items = self._build_section_items(current, section)
+        for assigned_sections in self._partition_sections(sections, 2):
             list_view = ft.ListView(
-                controls=section_items,
+                controls=self._build_column_items(current, assigned_sections),
                 expand=True,
                 spacing=12,
                 padding=ft.padding.only(right=8, bottom=12),
             )
-            self._section_lists.append((section, list_view))
+            self._section_lists.append((list_view, assigned_sections))
             columns.append(ft.Container(content=list_view, width=400))
         self._option_list = ft.Row(
             controls=columns,
@@ -203,16 +202,51 @@ class SettingsModal:
         )
         return self._option_list
 
-    def _build_section_items(self, current: str, section: str) -> list[ft.Control]:
-        """Build option items for a specific section (2-column mode)."""
-        items: list[ft.Control] = [self._build_section_header(section, is_first=True)]
-        if self._loading_section and section == self._loading_section:
-            items.append(self._build_loading_placeholder())
-            return items
-        for option in self._options:
-            if option.section != section:
-                continue
-            items.append(self._build_option_card(option, current))
+    @staticmethod
+    def _partition_sections(sections: list[str], n_columns: int) -> list[list[str]]:
+        """Distribute sections across a fixed number of columns.
+
+        The first column receives a single section (when available); the
+        remaining sections are balanced across the other columns. This
+        keeps the recommended grouping prominent on the left while the
+        detailed classifications flow down the right column.
+        """
+        n = len(sections)
+        if n == 0:
+            return [[] for _ in range(n_columns)]
+        if n_columns <= 1:
+            return [list(sections)]
+        left = [sections[0]]
+        rest = sections[1:]
+        remaining = n_columns - 1
+        base = len(rest) // remaining
+        extra = len(rest) % remaining
+        cols: list[list[str]] = [left]
+        idx = 0
+        for i in range(remaining):
+            size = base + (1 if i < extra else 0)
+            cols.append(list(rest[idx : idx + size]))
+            idx += size
+        return cols
+
+    def _build_column_items(
+        self,
+        current: str,
+        assigned_sections: list[str],
+    ) -> list[ft.Control]:
+        """Build items for a single column, including headers for each assigned section."""
+        items: list[ft.Control] = []
+        is_first = True
+        for section in assigned_sections:
+            items.append(self._build_section_header(section, is_first=is_first))
+            if self._loading_section and section == self._loading_section:
+                items.append(self._build_loading_placeholder())
+            else:
+                for option in self._options:
+                    if option.section != section:
+                        continue
+                    items.append(self._build_option_card(option, current))
+            is_first = False
         return items
 
     def _build_option_items(self, current: str) -> list[ft.Control]:

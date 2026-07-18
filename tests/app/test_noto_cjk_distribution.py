@@ -95,7 +95,8 @@ def test_installer_configuration_places_noto_cjk_font_under_packaged_app_data_fo
     )
     assert (
         'Source: "{#MyPackagedAppDir}\\*"; DestDir: "{app}"; Flags: ignoreversion '
-        'recursesubdirs createallsubdirs; Excludes: "{#MyAppExeName},{#MyOverlayExeName}"' in script
+        "recursesubdirs createallsubdirs; Excludes: "
+        '"{#MyAppExeName},{#MyOverlayExeName},{#MyGpuWorkerExeName}"' in script
     )
     assert "NotoSansCJK-Medium.ttc" not in script.split("Excludes:", maxsplit=1)[1]
 

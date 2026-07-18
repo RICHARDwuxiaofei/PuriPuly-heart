@@ -375,7 +375,7 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert page.window.min_height == app_module.MIN_WINDOW_HEIGHT
     assert page.window.width >= page.window.min_width
     assert page.window.height >= page.window.min_height
-    assert page.window.center_calls == 1
+    assert page.window.center_calls == 0
     assert page.added
     assert app.view_dashboard.on_send_message == app._on_manual_submit
     assert app.view_dashboard.on_message_input_activity == app._on_message_input_activity
@@ -549,6 +549,8 @@ def test_translator_app_mounts_debug_preview_when_enabled(
         "on_capture_fault_cycle",
         "on_stt_fault_cycle",
         "on_audio_fault_clear",
+        "on_gpu_state_cycle",
+        "on_stt_loading_button_cycle",
     }
     discord_callback = seen["callbacks"]["on_discord_auth"]
     assert getattr(discord_callback, "__self__", None) is app
@@ -1127,6 +1129,15 @@ async def test_main_gui_routes_update_check_through_app_log_helper(
         def _log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
             _ = (message, level)
 
+        def schedule_after_launch_tasks(self) -> None:
+            async def run() -> None:
+                await app_module._check_and_notify_update(
+                    self.page,
+                    log_detailed=self._log_detailed,
+                )
+
+            seen["after_launch_task"] = asyncio.create_task(run())
+
     async def fake_check_and_notify_update(incoming_page, *, log_detailed=None) -> None:
         seen["check"] = (incoming_page, log_detailed)
 
@@ -1134,6 +1145,7 @@ async def test_main_gui_routes_update_check_through_app_log_helper(
     monkeypatch.setattr(app_module, "_check_and_notify_update", fake_check_and_notify_update)
 
     await app_module.main_gui(page, config_path=Path("settings.json"))
+    await seen["after_launch_task"]
 
     assert seen["started"] is True
     assert seen["check"][0] is page
@@ -1162,6 +1174,15 @@ async def test_main_gui_forwards_debug_ui_preview_flag(
         def _log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
             _ = (message, level)
 
+        def schedule_after_launch_tasks(self) -> None:
+            async def run() -> None:
+                await app_module._check_and_notify_update(
+                    self.page,
+                    log_detailed=self._log_detailed,
+                )
+
+            seen["after_launch_task"] = asyncio.create_task(run())
+
     async def fake_check_and_notify_update(incoming_page, *, log_detailed=None) -> None:
         seen["check"] = (incoming_page, log_detailed)
 
@@ -1173,10 +1194,39 @@ async def test_main_gui_forwards_debug_ui_preview_flag(
         config_path=Path("settings.json"),
         debug_ui_preview=True,
     )
+    await seen["after_launch_task"]
 
     assert seen["started"] is True
     assert seen["init"] == (page, Path("settings.json"), True)
     assert seen["check"][0] is page
+
+
+def test_debug_preview_gpu_states_cycle_in_memory() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.debug_ui_preview = True
+    app.page = DummyPage()
+    app.view_settings = SimpleNamespace(
+        devices=[],
+        set_gpu_devices=lambda **kwargs: app.view_settings.devices.append(kwargs["devices"]),
+    )
+    app.view_dashboard = SimpleNamespace(
+        notices=[],
+        set_gpu_notice=lambda notice: app.view_dashboard.notices.append(notice),
+    )
+    for _ in range(8):
+        app._cycle_debug_preview_gpu_state()
+
+    assert [notice.status for notice in app.view_dashboard.notices] == [
+        "discovery_failed",
+        "not_installed",
+        "invalid",
+        "installing",
+        "install_failed",
+        "unsupported",
+        "unavailable_device",
+        "activation_failed",
+    ]
+    assert len(app.view_settings.devices) == 8
 
 
 class PreviewDashboard:
@@ -2527,20 +2577,32 @@ async def test_prompt_apply_keeps_dashboard_target_for_next_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_on_settings_changed_applies_raw_settings_without_prompt_merge() -> None:
+async def test_on_settings_changed_captures_patch_before_queued_apply() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
     raw_settings = object()
+    captured_change = object()
+    merged_settings = object()
     seen: list[object] = []
 
     def fake_merge_settings(_settings) -> object:
         raise AssertionError("prompt merge should not run for generic settings changes")
+
+    def fake_capture_settings_view_change(settings) -> object:
+        assert settings is raw_settings
+        return captured_change
+
+    def fake_merge_settings_view_change(change) -> object:
+        assert change is captured_change
+        return merged_settings
 
     async def fake_apply_settings(settings) -> None:
         seen.append(settings)
 
     app.controller = SimpleNamespace(
         merge_settings_tab_apply_with_current_languages=fake_merge_settings,
+        capture_settings_view_change=fake_capture_settings_view_change,
+        merge_settings_view_change_with_current=fake_merge_settings_view_change,
         apply_settings=fake_apply_settings,
     )
 
@@ -2548,7 +2610,7 @@ async def test_on_settings_changed_applies_raw_settings_without_prompt_merge() -
 
     assert len(app.page.tasks) == 1
     await app.page.tasks[0]()
-    assert seen == [raw_settings]
+    assert seen == [merged_settings]
 
 
 @pytest.mark.asyncio
@@ -3314,8 +3376,11 @@ def test_on_overlay_state_changed_updates_settings_view_runtime_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -> None:
+async def test_debug_preview_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -> (
+    None
+):
     app = TranslatorApp.__new__(TranslatorApp)
+    app.debug_ui_preview = True
     app.page = DummyPage()
     seen: list[tuple[str, object]] = []
 
@@ -3554,7 +3619,7 @@ async def test_on_language_change_forwards_automatic_peer_mode(
         target_code="en",
         peer_source_code="ja",
         peer_target_code="fr",
-        peer_source_mode="soniox_auto",
+        peer_source_mode="auto",
         recent_source_codes=(),
         recent_target_codes=(),
     )

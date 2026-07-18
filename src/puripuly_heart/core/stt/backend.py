@@ -5,6 +5,7 @@ from typing import AsyncIterator, Protocol, runtime_checkable
 
 import numpy as np
 
+from puripuly_heart.core.runtime.local_asr_transition import LocalASRSessionOptions
 from puripuly_heart.domain.models import FinalLanguageRun
 
 
@@ -32,3 +33,8 @@ class STTBackendFloat32Session(Protocol):
 
 class STTBackend(Protocol):
     async def open_session(self) -> STTBackendSession: ...
+
+
+@runtime_checkable
+class LocalASRReconfigurableBackend(Protocol):
+    async def reconfigure_session_options(self, options: LocalASRSessionOptions) -> None: ...

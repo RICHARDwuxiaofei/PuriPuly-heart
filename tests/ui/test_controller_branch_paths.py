@@ -112,6 +112,14 @@ from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 PEER_DISCLOSURE_KEY = "peer_translation.disclosure"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_relative_settings_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+
 class DummySecrets:
     def __init__(self, values: dict[str, str]):
         self._values = dict(values)
@@ -136,6 +144,8 @@ class DummyDashboard:
         self.translation_enabled: bool | None = None
         self.stt_needs_key: bool | None = None
         self.stt_enabled: bool | None = None
+        self.stt_starting: bool | None = None
+        self.stt_starting_calls: list[bool] = []
         self.local_stt_notice_status: str | None = None
         self.local_stt_notice_percent: int | None = None
         self.languages: tuple[str, str] | None = None
@@ -158,6 +168,10 @@ class DummyDashboard:
 
     def set_stt_enabled(self, value: bool) -> None:
         self.stt_enabled = value
+
+    def set_stt_starting(self, value: bool) -> None:
+        self.stt_starting = value
+        self.stt_starting_calls.append(value)
 
     def set_local_stt_notice(self, status: str | None, percent: int | None = None) -> None:
         self.local_stt_notice_status = status
@@ -1101,6 +1115,35 @@ def test_settings_view_order22_baseline_uses_path_snapshot_not_legacy_settings()
     assert base_settings.provider.llm == LLMProviderName.DEEPSEEK
 
 
+def test_settings_view_change_rebases_audio_patch_without_restoring_stale_peer_language() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings_view_snapshot = AppSettings()
+    settings_view_snapshot.provider.peer_stt = STTProviderName.LOCAL_CPU_AUTO
+    controller._remember_settings_view_order22_baseline(settings_view_snapshot)
+    controller._remember_settings_view_order23_baseline(settings_view_snapshot)
+    controller._remember_settings_view_order24_baseline(settings_view_snapshot)
+
+    pending = copy.deepcopy(settings_view_snapshot)
+    pending.desktop_audio.output_device = "Speakers (Loopback)"
+    change = controller.capture_settings_view_change(pending)
+
+    current = copy.deepcopy(settings_view_snapshot)
+    current.languages.peer_source_language = "ja"
+    controller.settings = current
+    controller._remember_settings_view_order22_baseline(current)
+
+    merged = controller.merge_settings_view_change_with_current(change)
+
+    assert merged.desktop_audio.output_device == "Speakers (Loopback)"
+    assert merged.languages.peer_source_language == "ja"
+    assert controller.settings.languages.peer_source_language == "ja"
+    decision = controller_module.resolve_local_asr_selection(
+        merged.provider.peer_stt.value,
+        merged.languages.effective_peer_source,
+    )
+    assert decision.model_id == "parakeet-tdt-ctc-0.6b-ja-int8-sherpa"
+
+
 @pytest.mark.parametrize(
     "failure_reason",
     [
@@ -1143,7 +1186,9 @@ def _patch_init_pipeline_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[s
     monkeypatch.setattr(controller_module, "create_llm_provider", lambda *_a, **_k: "llm")
     monkeypatch.setattr(controller_module, "create_stt_backend", lambda *_a, **_k: "backend")
     monkeypatch.setattr(
-        controller_module, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend"
+        controller_module,
+        "create_peer_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "peer-backend",
     )
     monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "stt")
 
@@ -1264,7 +1309,11 @@ def test_create_peer_stt_provider_wires_fault_provider_with_debug_gate(
     controller._debug_stt_fault_profile = "stt_input_low_snr_vad_pass"
     config = controller._build_peer_runtime_config(controller.settings)
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
-    monkeypatch.setattr(controller_module, "create_peer_stt_backend", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        controller_module,
+        "create_peer_stt_backend_from_resolved_config",
+        lambda *_a, **_k: object(),
+    )
     monkeypatch.setattr(controller_module, "ManagedSTTProvider", fake_stt_provider)
 
     controller._create_peer_stt_provider_from_runtime_config(config, lambda _exc: None)
@@ -3814,7 +3863,7 @@ def test_peer_runtime_uses_canonical_vnext_intent_over_legacy_projection() -> No
             peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
             languages=replace(
                 vnext_settings.intent.languages,
-                peer_source_mode="soniox_auto",
+                peer_source_mode="auto",
                 peer_expected_languages=["ja"],
             ),
         ),
@@ -3844,7 +3893,7 @@ def test_direct_peer_settings_mutation_refreshes_canonical_runtime_intent() -> N
     controller._vnext_settings_authoritative = True
 
     pending = copy.deepcopy(settings)
-    pending.languages.peer_source_mode = "soniox_auto"
+    pending.languages.peer_source_mode = "auto"
     pending.languages.peer_expected_languages = ["ja"]
     pending.desktop_audio.output_device = "Headphones (Loopback)"
     pending.desktop_audio.vad_speech_threshold = 0.72
@@ -3852,7 +3901,7 @@ def test_direct_peer_settings_mutation_refreshes_canonical_runtime_intent() -> N
     controller._update_canonical_settings_from_compatibility_mutation(pending)
     config = controller._build_peer_runtime_config(pending)
 
-    assert controller.vnext_settings.intent.languages.peer_source_mode == "soniox_auto"
+    assert controller.vnext_settings.intent.languages.peer_source_mode == "auto"
     assert controller.vnext_settings.intent.languages.peer_expected_languages == ["ja"]
     assert config.backend.provider_options["enable_language_identification"] is True
     assert config.output_device == "Headphones (Loopback)"
@@ -3877,7 +3926,7 @@ def test_unrelated_legacy_apply_preserves_canonical_peer_auto_intent_after_save_
             peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
             languages=replace(
                 vnext_settings.intent.languages,
-                peer_source_mode="soniox_auto",
+                peer_source_mode="auto",
                 peer_expected_languages=["ja"],
             ),
         ),
@@ -3897,7 +3946,7 @@ def test_unrelated_legacy_apply_preserves_canonical_peer_auto_intent_after_save_
     runtime = controller._build_peer_runtime_config(pending)
 
     assert loaded.settings is not None
-    assert loaded.settings.intent.languages.peer_source_mode == "soniox_auto"
+    assert loaded.settings.intent.languages.peer_source_mode == "auto"
     assert loaded.settings.intent.languages.peer_expected_languages == ["ja"]
     assert runtime.backend.provider == "soniox"
     assert runtime.backend.provider_options["enable_language_identification"] is True
@@ -3919,7 +3968,7 @@ def test_failed_canonical_persistence_rolls_back_peer_auto_intent(
             peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
             languages=replace(
                 vnext_settings.intent.languages,
-                peer_source_mode="soniox_auto",
+                peer_source_mode="auto",
                 peer_expected_languages=["ja"],
             ),
         ),
@@ -3961,7 +4010,7 @@ def test_active_controller_persistence_preserves_canonical_peer_intent(
             peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
             languages=replace(
                 vnext_settings.intent.languages,
-                peer_source_mode="soniox_auto",
+                peer_source_mode="auto",
                 peer_expected_languages=["ja"],
             ),
         ),
@@ -3983,7 +4032,7 @@ def test_active_controller_persistence_preserves_canonical_peer_intent(
 
     assert len(saved) == 1
     assert saved[0].intent.peer_stt.provider == "soniox"
-    assert saved[0].intent.languages.peer_source_mode == "soniox_auto"
+    assert saved[0].intent.languages.peer_source_mode == "auto"
     assert saved[0].intent.languages.peer_expected_languages == ["ja"]
     assert saved[0].state.managed_connection.referral_id == "234567"
 
@@ -4003,7 +4052,7 @@ def test_failed_active_in_place_managed_persistence_restores_legacy_and_canonica
             peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
             languages=replace(
                 vnext_settings.intent.languages,
-                peer_source_mode="soniox_auto",
+                peer_source_mode="auto",
                 peer_expected_languages=["ja"],
             ),
         ),
@@ -4049,7 +4098,7 @@ def test_stale_managed_adapter_persists_only_managed_delta_on_current_settings(
             peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
             languages=replace(
                 vnext_settings.intent.languages,
-                peer_source_mode="soniox_auto",
+                peer_source_mode="auto",
                 peer_expected_languages=["ja"],
             ),
         ),
@@ -4073,7 +4122,7 @@ def test_stale_managed_adapter_persists_only_managed_delta_on_current_settings(
     assert saved[0].intent.ui.locale == "ja"
     assert saved[0].state.managed_connection.referral_id == "234567"
     assert saved[0].intent.peer_stt.provider == "soniox"
-    assert saved[0].intent.languages.peer_source_mode == "soniox_auto"
+    assert saved[0].intent.languages.peer_source_mode == "auto"
     assert saved[0].intent.languages.peer_expected_languages == ["ja"]
 
 
@@ -4100,7 +4149,7 @@ def test_failed_stale_managed_adapter_persistence_restores_active_and_bound_sett
             peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
             languages=replace(
                 vnext_settings.intent.languages,
-                peer_source_mode="soniox_auto",
+                peer_source_mode="auto",
                 peer_expected_languages=["ja"],
             ),
         ),
@@ -4138,7 +4187,7 @@ def test_direct_save_stages_legacy_delta_without_overwriting_canonical_peer_inte
             peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
             languages=replace(
                 vnext_settings.intent.languages,
-                peer_source_mode="soniox_auto",
+                peer_source_mode="auto",
                 peer_expected_languages=["ja"],
             ),
         ),
@@ -4161,7 +4210,7 @@ def test_direct_save_stages_legacy_delta_without_overwriting_canonical_peer_inte
     assert saved[0].intent.ui.locale == "ja"
     assert saved[0].state.managed_connection.referral_id == "234567"
     assert saved[0].intent.peer_stt.provider == "soniox"
-    assert saved[0].intent.languages.peer_source_mode == "soniox_auto"
+    assert saved[0].intent.languages.peer_source_mode == "auto"
     assert saved[0].intent.languages.peer_expected_languages == ["ja"]
 
     controller.settings.ui.locale = "ko"
@@ -4170,7 +4219,7 @@ def test_direct_save_stages_legacy_delta_without_overwriting_canonical_peer_inte
     assert len(saved) == 2
     assert saved[1].intent.ui.locale == "ko"
     assert saved[1].intent.peer_stt.provider == "soniox"
-    assert saved[1].intent.languages.peer_source_mode == "soniox_auto"
+    assert saved[1].intent.languages.peer_source_mode == "auto"
     assert saved[1].intent.languages.peer_expected_languages == ["ja"]
 
 
@@ -4219,7 +4268,7 @@ async def test_settings_repository_commits_only_scoped_delta_to_canonical_vnext(
             peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
             languages=replace(
                 vnext_settings.intent.languages,
-                peer_source_mode="soniox_auto",
+                peer_source_mode="auto",
                 peer_expected_languages=["ja"],
             ),
         ),
@@ -4251,7 +4300,7 @@ async def test_settings_repository_commits_only_scoped_delta_to_canonical_vnext(
 
     assert result.succeeded is True
     assert len(saved) == 1
-    assert saved[0].intent.languages.peer_source_mode == "soniox_auto"
+    assert saved[0].intent.languages.peer_source_mode == "auto"
     assert saved[0].intent.languages.peer_expected_languages == ["ja"]
     assert saved[0].intent.peer_stt.provider == "soniox"
     assert saved[0].intent.ui.locale == "ja"
@@ -4272,7 +4321,7 @@ async def test_failed_scoped_persistence_restores_canonical_and_legacy_before_ru
             peer_stt=replace(vnext_settings.intent.peer_stt, provider="soniox"),
             languages=replace(
                 vnext_settings.intent.languages,
-                peer_source_mode="soniox_auto",
+                peer_source_mode="auto",
                 peer_expected_languages=["ja"],
             ),
         ),
@@ -4583,8 +4632,13 @@ async def test_apply_settings_deactivates_peer_runtime_when_eula_flag_mutates_cu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider",
+    [STTProviderName.LOCAL_QWEN, STTProviderName.LOCAL_QWEN_GPU],
+)
 async def test_set_peer_translation_enabled_routes_through_controller_runtime_rules(
     monkeypatch: pytest.MonkeyPatch,
+    provider: STTProviderName,
 ) -> None:
     refresh_calls: list[str] = []
     controller = _make_controller(
@@ -4592,12 +4646,18 @@ async def test_set_peer_translation_enabled_routes_through_controller_runtime_ru
     )
     controller.settings = AppSettings()
     controller.settings.ui.peer_translation_eula_accepted = True
+    controller.settings.provider.peer_stt = provider
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
 
     async def fake_begin_overlay_start(self: GuiController) -> None:
         self.overlay_state = "starting"
 
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_ensure_peer_local_stt_ready",
+        lambda self, **_kwargs: asyncio.sleep(0, result=True),
+    )
     monkeypatch.setattr(GuiController, "_begin_overlay_start", fake_begin_overlay_start)
     monkeypatch.setattr(
         GuiController, "_refresh_overlay_runtime_dependencies", lambda self: asyncio.sleep(0)
@@ -4614,8 +4674,8 @@ async def test_set_peer_translation_enabled_routes_through_controller_runtime_ru
 
     contract = controller.build_overlay_peer_consumer_contract()
     assert contract is not None
-    assert contract.peer.state == "warning"
-    assert contract.peer.helper_text == t("settings.peer_translation.warning.overlay_starting")
+    assert contract.peer.state == "starting"
+    assert contract.peer.helper_text == ""
 
 
 @pytest.mark.asyncio
@@ -5148,6 +5208,55 @@ async def test_refresh_peer_stt_runtime_does_not_warm_peer_runtime() -> None:
 
 
 @pytest.mark.asyncio
+async def test_initial_peer_local_activation_publishes_starting_until_provider_attaches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contracts = []
+    app = SimpleNamespace()
+    controller = _make_controller(app=app)
+    app.refresh_overlay_peer_contract = lambda: contracts.append(
+        controller.build_overlay_peer_consumer_contract()
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
+    controller.overlay_state = "connected"
+    _attach_overlay_bridge(controller, object())
+    activation_started = asyncio.Event()
+    finish_activation = asyncio.Event()
+
+    class DelayedPeerRuntime:
+        current_signature = None
+
+        async def apply_policy(self, *, config, desired_active) -> None:
+            _ = config
+            assert desired_active is True
+            activation_started.set()
+            await finish_activation.wait()
+            controller.hub.peer_stt = object()
+
+    async def ready(_self: GuiController, **_kwargs) -> bool:
+        return True
+
+    controller._peer_runtime = DelayedPeerRuntime()
+    monkeypatch.setattr(GuiController, "_ensure_peer_local_stt_ready", ready)
+
+    task = asyncio.create_task(controller._refresh_peer_stt_runtime())
+    await activation_started.wait()
+
+    assert controller._peer_asr_model_loading is True
+    assert contracts[-1].peer.state == "starting"
+
+    finish_activation.set()
+    await task
+
+    assert controller._peer_asr_model_loading is False
+    assert contracts[-1].peer.state == "on"
+
+
+@pytest.mark.asyncio
 async def test_refresh_peer_stt_runtime_blocks_peer_local_qwen_until_local_runtime_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5226,8 +5335,21 @@ async def test_peer_local_qwen_download_completion_resumes_peer_runtime_after_re
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
     monkeypatch.setattr(
         controller_module,
-        "create_peer_stt_backend",
+        "create_peer_stt_backend_from_resolved_config",
         lambda *_a, **_k: SuccessfulPeerBackend(),
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_cpu_model_installs",
+        lambda model_ids, *_a, **_k: controller_module.LocalCPUInstallSnapshot(
+            models=tuple(
+                controller_module.LocalCPUModelInstall(
+                    model_id=model_id,
+                    state=controller_module.LocalSTTInstallState(status="ready"),
+                )
+                for model_id in model_ids
+            )
+        ),
     )
 
     await controller._run_local_stt_download(origin="manual")
@@ -5261,8 +5383,21 @@ async def test_refresh_peer_stt_runtime_does_not_create_disposable_local_qwen_pr
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
     monkeypatch.setattr(
         controller_module,
-        "create_peer_stt_backend",
+        "create_peer_stt_backend_from_resolved_config",
         lambda *_a, **_k: pytest.fail("disposable Peer backend probe created"),
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_cpu_model_installs",
+        lambda model_ids, *_a, **_k: controller_module.LocalCPUInstallSnapshot(
+            models=tuple(
+                controller_module.LocalCPUModelInstall(
+                    model_id=model_id,
+                    state=controller_module.LocalSTTInstallState(status="ready"),
+                )
+                for model_id in model_ids
+            )
+        ),
     )
     monkeypatch.setattr(
         GuiController,
@@ -8996,8 +9131,6 @@ async def test_overlay_start_failure_keeps_saved_preferences_but_effective_state
         "vendored_openvr_dll_missing",
         "packaged_openvr_dll_missing",
         "openvr_dll_hash_mismatch",
-        "steamvr_not_installed",
-        "steamvr_not_running",
         "hmd_not_found",
     ],
 )
@@ -9033,7 +9166,11 @@ async def test_overlay_runtime_disconnect_keeps_saved_preferences_without_auto_r
         GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
     )
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
-    monkeypatch.setattr(controller_module, "create_peer_stt_backend", lambda *_a, **_k: "peer")
+    monkeypatch.setattr(
+        controller_module,
+        "create_peer_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "peer",
+    )
     monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "peer-stt")
 
     controller = _make_controller(app=SimpleNamespace())
@@ -9070,7 +9207,11 @@ async def test_overlay_runtime_crash_keeps_saved_preferences_without_auto_restar
         GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
     )
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
-    monkeypatch.setattr(controller_module, "create_peer_stt_backend", lambda *_a, **_k: "peer")
+    monkeypatch.setattr(
+        controller_module,
+        "create_peer_stt_backend_from_resolved_config",
+        lambda *_a, **_k: "peer",
+    )
     monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "peer-stt")
 
     controller = _make_controller(app=SimpleNamespace())
@@ -12469,6 +12610,7 @@ async def test_start_initializes_dashboard_and_bridge(
     locale_calls: list[str] = []
     sync_calls: list[str] = []
     bridge_events: list[object] = []
+    gpu_discovery_requests: list[str] = []
     hub = DummyHub(llm=object(), stt=object())
 
     class FakeBridge:
@@ -12505,11 +12647,17 @@ async def test_start_initializes_dashboard_and_bridge(
     monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
     monkeypatch.setattr(controller_module, "set_locale", lambda locale: locale_calls.append(locale))
     monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
+    monkeypatch.setattr(
+        GuiController,
+        "_get_gpu_asr_runtime",
+        lambda _self: pytest.fail("non-GPU startup must not create the GPU runtime"),
+    )
 
     app = SimpleNamespace(
         view_dashboard=dash,
         view_logs=logs,
         apply_locale=lambda: locale_calls.append("apply"),
+        _on_gpu_discovery_requested=lambda: gpu_discovery_requests.append("discover"),
     )
     controller = _make_controller(app=app)
 
@@ -12531,8 +12679,58 @@ async def test_start_initializes_dashboard_and_bridge(
     assert dash.translation_enabled is False
     assert hub.translation_enabled is False
     assert hub.start_calls == [True]
+    assert gpu_discovery_requests == []
     assert bridge_events[0] == ("init", hub.ui_events, controller.runtime_logging)
     assert "run" in bridge_events
+
+
+@pytest.mark.asyncio
+async def test_bridge_start_wait_propagates_early_failure_and_collects_waiter() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    failure = RuntimeError("bridge startup failed")
+    blocker = asyncio.Event()
+
+    class Bridge:
+        async def wait_started(self) -> None:
+            await blocker.wait()
+
+    async def fail() -> None:
+        raise failure
+
+    controller._bridge_task = asyncio.create_task(fail())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await controller._wait_for_ui_event_bridge_started(Bridge())
+
+    assert exc_info.value is failure
+    assert not any(
+        task.get_name() == "ui-event-bridge-started-wait" and not task.done()
+        for task in asyncio.all_tasks()
+    )
+
+
+@pytest.mark.asyncio
+async def test_controller_start_failure_runs_best_effort_cleanup_and_reraises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    failure = RuntimeError("pipeline failed")
+    cleanup_calls: list[str] = []
+
+    async def fail_start(self: GuiController) -> None:
+        raise failure
+
+    async def stop(self: GuiController) -> None:
+        cleanup_calls.append("stop")
+
+    monkeypatch.setattr(GuiController, "_start_impl", fail_start)
+    monkeypatch.setattr(GuiController, "stop", stop)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await controller.start()
+
+    assert exc_info.value is failure
+    assert cleanup_calls == ["stop"]
 
 
 @pytest.mark.asyncio
@@ -12543,11 +12741,13 @@ async def test_start_does_not_auto_restore_transient_overlay_or_peer_toggles(
     settings.ui.overlay_enabled = True
     settings.ui.peer_translation_enabled = True
     settings.ui.peer_translation_eula_accepted = True
+    settings.provider.peer_stt = STTProviderName.LOCAL_QWEN_GPU
 
     dash = DummyDashboard()
     logs = DummyLogsView()
     hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
     overlay_calls: list[bool] = []
+    gpu_discovery_requests: list[str] = []
 
     async def fake_init_pipeline(self) -> None:
         self.hub = hub
@@ -12570,13 +12770,20 @@ async def test_start_does_not_auto_restore_transient_overlay_or_peer_toggles(
     monkeypatch.setattr(controller_module, "set_locale", lambda _locale: None)
     monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
 
-    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash, view_logs=logs))
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=dash,
+            view_logs=logs,
+            _on_gpu_discovery_requested=lambda: gpu_discovery_requests.append("discover"),
+        )
+    )
 
     await controller.start()
     await asyncio.sleep(0)
 
     assert overlay_calls == []
     assert hub.peer_translation_enabled is False
+    assert gpu_discovery_requests == []
 
 
 @pytest.mark.asyncio
@@ -12748,6 +12955,9 @@ async def test_start_keeps_managed_openrouter_dashboard_toggle_available_without
 
     assert dash.translation_needs_key is False
     assert dash.translation_enabled is False
+    assert settings_view.managed_trial_usage_state is None
+
+    assert await controller.refresh_openrouter_usage_after_launch() is False
     assert settings_view.managed_trial_usage_state == {
         "visible": True,
         "remaining_percent": None,
@@ -14178,6 +14388,47 @@ async def test_set_stt_enabled_marks_promo_and_runs_switch(
             "[STT] Toggle detail: desired_before=False overlay_state=off",
         )
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider",
+    [STTProviderName.LOCAL_QWEN, STTProviderName.LOCAL_QWEN_GPU],
+)
+async def test_local_stt_button_stays_starting_until_activation_completes(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: STTProviderName,
+) -> None:
+    dashboard = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dashboard))
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = provider
+    controller.hub = DummyHub(stt=object())
+    activation_started = asyncio.Event()
+    finish_activation = asyncio.Event()
+
+    async def validate_gpu(_self: GuiController) -> bool:
+        return True
+
+    async def activate(_self: GuiController) -> None:
+        activation_started.set()
+        await finish_activation.wait()
+        controller._mic_task = SimpleNamespace()
+
+    monkeypatch.setattr(GuiController, "_validate_gpu_activation", validate_gpu)
+    monkeypatch.setattr(GuiController, "_ensure_stt_switch", activate)
+
+    task = asyncio.create_task(controller.set_stt_enabled(True))
+    await activation_started.wait()
+
+    assert dashboard.stt_starting is True
+    assert dashboard.stt_enabled is None
+
+    finish_activation.set()
+    await task
+
+    assert dashboard.stt_starting is False
+    assert dashboard.stt_enabled is True
 
 
 @pytest.mark.asyncio
@@ -16109,6 +16360,38 @@ def test_merge_settings_tab_apply_with_current_languages_preserves_all_language_
     assert merged.managed_identity.verified_hardware_hash_salt_version == 7
     assert merged.system_prompt == "draft prompt"
     assert merged.system_prompts == {}
+
+
+def test_peer_auto_mode_survives_soniox_to_qwen_gpu_provider_switch() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.SONIOX
+    controller.settings.languages.peer_source_mode = "auto"
+    controller.settings.languages.peer_source_language = "ja"
+    pending = copy.deepcopy(controller.settings)
+    pending.provider.peer_stt = STTProviderName.LOCAL_QWEN_GPU
+
+    merged = controller.merge_settings_tab_apply_with_current_languages(pending)
+
+    assert merged.provider.peer_stt == STTProviderName.LOCAL_QWEN_GPU
+    assert merged.languages.peer_source_mode == "auto"
+    assert merged.languages.peer_source_language == "ja"
+
+
+def test_peer_auto_mode_falls_back_to_manual_without_replacing_saved_language() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.SONIOX
+    controller.settings.languages.peer_source_mode = "auto"
+    controller.settings.languages.peer_source_language = "ja"
+    pending = copy.deepcopy(controller.settings)
+    pending.provider.peer_stt = STTProviderName.DEEPGRAM
+
+    merged = controller.merge_settings_tab_apply_with_current_languages(pending)
+
+    assert merged.provider.peer_stt == STTProviderName.DEEPGRAM
+    assert merged.languages.peer_source_mode == "manual"
+    assert merged.languages.peer_source_language == "ja"
 
 
 @pytest.mark.asyncio
@@ -18736,21 +19019,27 @@ async def test_on_dashboard_language_change_persists_explicit_automatic_peer_mod
             target_code="en",
             peer_source_code="ja",
             peer_target_code="fr",
-            peer_source_mode="soniox_auto",
+            peer_source_mode="auto",
         )
     )
 
     assert captured[0].languages.peer_source_language == "ja"
-    assert captured[0].languages.peer_source_mode == "soniox_auto"
+    assert captured[0].languages.peer_source_mode == "auto"
     assert controller.vnext_settings is not None
-    assert controller.vnext_settings.intent.languages.peer_source_mode == "soniox_auto"
+    assert controller.vnext_settings.intent.languages.peer_source_mode == "auto"
 
 
 @pytest.mark.asyncio
 async def test_dashboard_peer_language_change_refreshes_peer_translation_pipeline_immediately(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=DummyDashboard(),
+            view_settings=settings_view,
+        )
+    )
     controller.settings = AppSettings()
     controller.hub = DummyHub()
     controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
@@ -18793,6 +19082,11 @@ async def test_dashboard_peer_language_change_refreshes_peer_translation_pipelin
     assert refreshed == ["peer"]
     assert controller.hub.peer_source_language == "ja"
     assert controller.hub.peer_target_language == "fr"
+    assert len(settings_view.calls) == 1
+    reloaded_settings, _config_path, preserve_custom_vocab_draft = settings_view.calls[0]
+    assert reloaded_settings.languages.peer_source_language == "ja"
+    assert reloaded_settings.languages.peer_target_language == "fr"
+    assert preserve_custom_vocab_draft is True
 
 
 @pytest.mark.asyncio

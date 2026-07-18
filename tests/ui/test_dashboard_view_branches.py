@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import pytest
 
 ft = pytest.importorskip("flet")
 
+from puripuly_heart.ui.gpu_notice import GpuDashboardNotice
 from puripuly_heart.ui.overlay_peer_contract import (
     OverlayPeerConsumerContract,
     OverlayPeerToggleContract,
@@ -27,17 +29,19 @@ class FakePowerButton:
         is_on: bool,
         needs_key: bool = False,
         *,
+        is_starting: bool = False,
         status_text: str | None = None,
         helper_text: str | None = None,
     ):
-        self.states.append(
-            {
-                "is_on": is_on,
-                "needs_key": needs_key,
-                "status_text": status_text,
-                "helper_text": helper_text,
-            }
-        )
+        state = {
+            "is_on": is_on,
+            "needs_key": needs_key,
+            "status_text": status_text,
+            "helper_text": helper_text,
+        }
+        if is_starting:
+            state["is_starting"] = True
+        self.states.append(state)
 
     def set_label(self, label: str) -> None:
         self.label = label
@@ -53,6 +57,7 @@ class FakeDisplayCard:
         self.translation_calls: list[tuple[str | None, str | None]] = []
         self.translation_metadata_calls: list[dict[str, object]] = []
         self.notice_calls: list[tuple[str | None, str | None]] = []
+        self.notice_actions: list[tuple[str | None, object | None]] = []
         self.input_fonts: list[str | None] = []
         self.locale_calls: list[tuple[str | None, str | None]] = []
         self.input_is_focused = False
@@ -80,8 +85,16 @@ class FakeDisplayCard:
         self.translation_calls.append((text, font_family))
         self.translation_metadata_calls.append(dict(metadata))
 
-    def set_notice(self, text: str | None, tone: str | None = None) -> None:
+    def set_notice(
+        self,
+        text: str | None,
+        tone: str | None = None,
+        *,
+        action_label: str | None = None,
+        on_action=None,
+    ) -> None:
         self.notice_calls.append((text, tone))
+        self.notice_actions.append((action_label, on_action))
 
     def set_input_font(self, font_family: str | None) -> None:
         self.input_fonts.append(font_family)
@@ -183,6 +196,7 @@ def _make_overlay_peer_contract(
     peer_effective_enabled: bool,
     peer_status_text: str,
     peer_helper_text: str = "",
+    peer_state: str | None = None,
 ) -> OverlayPeerConsumerContract:
     return OverlayPeerConsumerContract(
         overlay=OverlayPeerToggleContract(
@@ -202,9 +216,12 @@ def _make_overlay_peer_contract(
             effective_enabled=peer_effective_enabled,
             action_enabled=True,
             state=(
-                "on"
-                if peer_effective_enabled
-                else ("off" if not peer_intent_enabled else "warning")
+                peer_state
+                or (
+                    "on"
+                    if peer_effective_enabled
+                    else ("off" if not peer_intent_enabled else "warning")
+                )
             ),
             status_text=peer_status_text,
             helper_text=peer_helper_text,
@@ -254,6 +271,7 @@ def test_dashboard_stt_toggle_warning_and_enable_flow(monkeypatch: pytest.Monkey
 
     view.stt_needs_key = False
     view._toggle_stt()
+    assert view.stt_button.states[-1]["is_starting"] is True
     view._toggle_stt()
 
     assert seen == [False, False, False, True, False]
@@ -448,8 +466,8 @@ def test_dashboard_public_setters_update_components(monkeypatch: pytest.MonkeyPa
     assert view.display_card.display_calls[-1] == ("src", False, "font-ko")
     assert view.display_card.translation_calls[-1] == ("dst", "font-en")
     assert view.display_card.notice_calls[-1] == (
-        dashboard_module.t("dashboard.managed_auth_pending"),
-        "info",
+        dashboard_module.t("dashboard.local_stt_notice_missing"),
+        "warning",
     )
     assert view.language_card.languages[-1] == ("name-ko", "name-en", "name-ko", "name-en")
     assert view.trans_button.states[-1] == {
@@ -478,7 +496,7 @@ def test_dashboard_managed_auth_pending_restores_local_stt_notice_when_cleared(
 
     assert view.display_card.notice_calls == [
         (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
-        (dashboard_module.t("dashboard.managed_auth_pending"), "info"),
+        (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
         (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
     ]
 
@@ -598,7 +616,7 @@ def test_dashboard_apply_locale_and_dialog_open_paths(monkeypatch: pytest.Monkey
     assert dashboard_module.t("dashboard.warn_llm_key") in warning_texts
 
 
-def test_dashboard_peer_source_dialog_lists_automatic_soniox_first(
+def test_dashboard_peer_source_dialog_lists_automatic_detection_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view = _make_dashboard(monkeypatch)
@@ -606,7 +624,7 @@ def test_dashboard_peer_source_dialog_lists_automatic_soniox_first(
 
     view._open_peer_source_dialog()
 
-    assert FakeLanguageModal.languages[0][0] == dashboard_module.PEER_SOURCE_MODE_SONIOX_AUTO
+    assert FakeLanguageModal.languages[0][0] == dashboard_module.PEER_SOURCE_MODE_AUTO
 
 
 def test_dashboard_automatic_peer_selection_preserves_manual_source_and_emits_auto_mode(
@@ -625,10 +643,10 @@ def test_dashboard_automatic_peer_selection_preserves_manual_source_and_emits_au
     )
     view.set_languages_from_codes("ko", "en", "ja", "fr")
 
-    view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_SONIOX_AUTO)
+    view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_AUTO)
 
     assert view._peer_source_lang_code == "ja"
-    assert changes[-1] == ("ko", "en", "ja", "fr", "soniox_auto")
+    assert changes[-1] == ("ko", "en", "ja", "fr", "auto")
 
 
 def test_dashboard_automatic_peer_callback_type_error_is_not_retried(
@@ -644,10 +662,10 @@ def test_dashboard_automatic_peer_callback_type_error_is_not_retried(
     view.on_language_change = fail_after_recording
 
     with pytest.raises(TypeError, match="callback failure"):
-        view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_SONIOX_AUTO)
+        view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_AUTO)
 
     assert len(calls) == 1
-    assert calls[0][0].peer_source_mode == "soniox_auto"
+    assert calls[0][0].peer_source_mode == "auto"
 
 
 def test_dashboard_automatic_peer_selection_emits_typed_change(
@@ -657,9 +675,9 @@ def test_dashboard_automatic_peer_selection_emits_typed_change(
     calls = []
     view.on_language_change = calls.append
 
-    view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_SONIOX_AUTO)
+    view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_AUTO)
 
-    assert calls[-1].peer_source_mode == "soniox_auto"
+    assert calls[-1].peer_source_mode == "auto"
 
 
 def test_dashboard_peer_swap_keeps_automatic_mode_and_valid_languages(
@@ -676,18 +694,18 @@ def test_dashboard_peer_swap_keeps_automatic_mode_and_valid_languages(
             change.peer_source_mode,
         )
     )
-    view.set_languages_from_codes("ko", "en", "ja", "fr", "soniox_auto")
+    view.set_languages_from_codes("ko", "en", "ja", "fr", "auto")
 
     view._swap_peer_languages()
 
-    assert view._peer_source_mode == "soniox_auto"
+    assert view._peer_source_mode == "auto"
     assert view._peer_source_lang_code == "fr"
     assert view._peer_target_lang_code == "ja"
-    assert changes[-1] == ("ko", "en", "fr", "ja", "soniox_auto")
+    assert changes[-1] == ("ko", "en", "fr", "ja", "auto")
     assert view.language_card.languages[-1] == (
         "name-ko",
         "name-en",
-        dashboard_module.t("dashboard.peer_source.automatic_soniox"),
+        dashboard_module.t("dashboard.peer_source.automatic"),
         "name-ja",
     )
 
@@ -721,6 +739,25 @@ def test_dashboard_overlay_peer_buttons_render_consumer_contract_state_only(
         "status_text": None,
         "helper_text": None,
     }
+
+
+def test_dashboard_peer_button_renders_starting_contract_with_spinner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    contract = _make_overlay_peer_contract(
+        overlay_intent_enabled=True,
+        overlay_state="connected",
+        overlay_status_text="Overlay ready",
+        peer_intent_enabled=True,
+        peer_effective_enabled=False,
+        peer_status_text="Peer starting",
+        peer_state="starting",
+    )
+
+    view.set_overlay_peer_contract(contract)
+
+    assert view.peer_button.states[-1]["is_starting"] is True
 
 
 def test_dashboard_overlay_failure_notice_is_lowest_priority_notice_source(
@@ -763,11 +800,124 @@ def test_dashboard_overlay_failure_notice_is_lowest_priority_notice_source(
 
     assert view.display_card.notice_calls == [
         (overlay_failure_notice, "error"),
-        (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
-        (dashboard_module.t("dashboard.managed_auth_pending"), "info"),
-        (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
+        (overlay_failure_notice, "error"),
+        (overlay_failure_notice, "error"),
+        (overlay_failure_notice, "error"),
         (overlay_failure_notice, "error"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("status", "key", "action", "action_key", "tone"),
+    (
+        (
+            "discovery_failed",
+            "dashboard.gpu_notice.discovery_failed",
+            "rediscover",
+            "dashboard.gpu_action.rediscover",
+            "error",
+        ),
+        ("unsupported", "dashboard.gpu_notice.unsupported", None, None, "warning"),
+        (
+            "unavailable_device",
+            "dashboard.gpu_notice.unavailable_device",
+            None,
+            None,
+            "warning",
+        ),
+        (
+            "not_installed",
+            "dashboard.gpu_notice.not_installed",
+            "install",
+            "dashboard.gpu_action.install",
+            "warning",
+        ),
+        (
+            "invalid",
+            "dashboard.gpu_notice.invalid",
+            "repair",
+            "dashboard.gpu_action.repair",
+            "warning",
+        ),
+        (
+            "install_failed",
+            "dashboard.gpu_notice.install_failed",
+            "reinstall",
+            "dashboard.gpu_action.reinstall",
+            "error",
+        ),
+        (
+            "activation_failed",
+            "dashboard.gpu_notice.activation_failed",
+            "restart",
+            "dashboard.gpu_action.restart",
+            "error",
+        ),
+    ),
+)
+def test_dashboard_gpu_notice_text_tone_and_action(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    key: str,
+    action: str | None,
+    action_key: str | None,
+    tone: str,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+
+    view.set_gpu_notice(GpuDashboardNotice(status=status, action=action))
+
+    assert view.display_card.notice_calls[-1] == (dashboard_module.t(key), tone)
+    assert view.display_card.notice_actions[-1][0] == (
+        dashboard_module.t(action_key) if action_key is not None else None
+    )
+
+
+def test_dashboard_gpu_download_preempts_and_restores_first_active_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    view.set_vrchat_osc_notice(True)
+    view.set_managed_auth_pending(True)
+
+    view.set_gpu_notice(GpuDashboardNotice(status="installing", progress_percent=37))
+    assert view.display_card.notice_calls[-1] == (
+        dashboard_module.t("dashboard.gpu_notice.installing", percent=37),
+        "info",
+    )
+
+    view.set_gpu_notice(None)
+    assert view.display_card.notice_calls[-1] == (
+        dashboard_module.t("dashboard.vrchat_osc_disabled"),
+        "warning",
+    )
+
+
+@pytest.mark.asyncio
+async def test_dashboard_gpu_action_runs_as_page_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    tasks: list[asyncio.Task[None]] = []
+    actions: list[str] = []
+
+    class Page:
+        def run_task(self, callback) -> None:
+            tasks.append(asyncio.create_task(callback()))
+
+    async def on_action(action: str) -> None:
+        actions.append(action)
+
+    attach_dummy_page(monkeypatch, view, Page())
+    view.on_gpu_notice_action = on_action
+    view.set_gpu_notice(GpuDashboardNotice(status="not_installed", action="install"))
+    action_callback = view.display_card.notice_actions[-1][1]
+    assert callable(action_callback)
+
+    action_callback()
+    await tasks[-1]
+
+    assert actions == ["install"]
 
 
 def test_dashboard_steamvr_overlay_failure_notice_uses_actionable_reason_without_status_prefix(

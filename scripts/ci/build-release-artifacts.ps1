@@ -359,6 +359,7 @@ if (-not [string]::IsNullOrWhiteSpace($cmakeCommandDirectory)) {
 $env:CMAKE = $cmakeCommand
 
 $overlayManifestPath = Join-Path $PWD "native/overlay/Cargo.toml"
+$gpuWorkerManifestPath = Join-Path $PWD "native/gpu_worker/Cargo.toml"
 $releaseBuildRoot = $env:PURIPULY_HEART_RELEASE_BUILD_ROOT
 if ([string]::IsNullOrWhiteSpace($releaseBuildRoot)) {
     $releaseBuildRoot = Join-Path $env:TEMP "PuriPulyHeart-ReleaseBuild-$AppVersion"
@@ -368,6 +369,10 @@ $overlayBuildDir = Join-Path $PWD "build/overlay"
 $overlayReleasePath = Join-Path $overlayTargetDir "release/PuriPulyHeartOverlay.exe"
 $overlayStagedPath = Join-Path $overlayBuildDir "PuriPulyHeartOverlay.exe"
 $overlayBundledDllPath = Join-Path $overlayBuildDir "openvr_api.dll"
+$gpuWorkerTargetDir = Join-Path $releaseBuildRoot "gpu-worker-target"
+$gpuWorkerBuildDir = Join-Path $PWD "build/gpu_worker"
+$gpuWorkerReleasePath = Join-Path $gpuWorkerTargetDir "release/PuriPulyHeartGpuWorker.exe"
+$gpuWorkerStagedPath = Join-Path $gpuWorkerBuildDir "PuriPulyHeartGpuWorker.exe"
 $openVrVendorDllPath = Join-Path $PWD "third_party/openvr/win64/openvr_api.dll"
 $openVrVendorSha256Path = Join-Path $PWD "third_party/openvr/win64/openvr_api.dll.sha256"
 $notoCjkFontSourcePath = Join-Path $PWD "src/puripuly_heart/data/fonts/NotoSansCJK-Medium.ttc"
@@ -448,6 +453,35 @@ if (-not (Test-Path $overlayBundledDllPath)) {
     throw "Staged OpenVR runtime DLL not found: $overlayBundledDllPath"
 }
 Assert-FileSha256Equals -Path $overlayBundledDllPath -ExpectedSha256 $PinnedOpenVrVendorDllSha256 -Label "Staged OpenVR runtime DLL"
+
+Write-Host "Building Rust GPU worker executable..."
+Invoke-External -FilePath $cargoCommand -ArgumentList @(
+    "build",
+    "--manifest-path",
+    $gpuWorkerManifestPath,
+    "--locked",
+    "--release",
+    "--bin",
+    "PuriPulyHeartGpuWorker",
+    "--target-dir",
+    $gpuWorkerTargetDir
+)
+
+if (-not (Test-Path $gpuWorkerReleasePath)) {
+    throw "Rust GPU worker executable not found: $gpuWorkerReleasePath"
+}
+$gpuWorkerVersion = (& $gpuWorkerReleasePath --version | Out-String).Trim()
+if ($gpuWorkerVersion -ne $AppVersion) {
+    throw "Rust GPU worker version mismatch: expected $AppVersion, found $gpuWorkerVersion"
+}
+$gpuWorkerReleaseSha256 = Get-FileSha256 -Path $gpuWorkerReleasePath
+Write-Host "Built Rust GPU worker version=$gpuWorkerVersion sha256=$gpuWorkerReleaseSha256"
+
+New-Item -ItemType Directory -Force -Path $gpuWorkerBuildDir | Out-Null
+Copy-Item -Path $gpuWorkerReleasePath -Destination $gpuWorkerStagedPath -Force
+if (-not (Test-Path $gpuWorkerStagedPath)) {
+    throw "Staged GPU worker executable not found: $gpuWorkerStagedPath"
+}
 
 Write-Host "Smoke-testing staged overlay executable..."
 Invoke-External -FilePath $overlayStagedPath -ArgumentList @("--check-startup-contract")
@@ -610,10 +644,14 @@ if (-not (Test-Path $packagedSoxrSourceBundlePath)) {
 }
 
 $packagedOverlayPath = Join-Path $PWD "dist/PuriPulyHeart/PuriPulyHeartOverlay.exe"
+$packagedGpuWorkerPath = Join-Path $PWD "dist/PuriPulyHeart/PuriPulyHeartGpuWorker.exe"
 Copy-Item -Path $overlayStagedPath -Destination $packagedOverlayPath -Force
 
 if (-not (Test-Path $packagedOverlayPath)) {
     throw "Packaged overlay executable not found: $packagedOverlayPath"
+}
+if (-not (Test-Path $packagedGpuWorkerPath)) {
+    throw "Packaged GPU worker executable not found: $packagedGpuWorkerPath"
 }
 if (-not (Test-Path $packagedOverlayDllPath)) {
     throw "Packaged OpenVR runtime DLL not found: $packagedOverlayDllPath"
@@ -641,6 +679,12 @@ Invoke-ProcessCaptureRuntimeSmokeCheck -HelperExePath $processCaptureSmokeHelper
 
 Write-Host "Smoke-testing packaged overlay executable..."
 Invoke-External -FilePath $packagedOverlayPath -ArgumentList @("--check-startup-contract")
+
+Write-Host "Smoke-testing packaged GPU worker executable..."
+$packagedGpuWorkerVersion = (& $packagedGpuWorkerPath --version | Out-String).Trim()
+if ($packagedGpuWorkerVersion -ne $AppVersion) {
+    throw "Packaged GPU worker version mismatch: expected $AppVersion, found $packagedGpuWorkerVersion"
+}
 
 $isccPath = Join-Path ([Environment]::GetFolderPath("ProgramFilesX86")) "Inno Setup 6\ISCC.exe"
 $currentInnoVersion = Get-InnoSetupVersion

@@ -55,6 +55,7 @@ def build_overlay_peer_consumer_contract(
         peer_intent_enabled,
         peer_effective_enabled,
         peer_activation_starting,
+        resolved_peer_warning_reason,
     )
     peer_contract = OverlayPeerToggleContract(
         intent_enabled=peer_intent_enabled,
@@ -126,13 +127,14 @@ def _peer_surface_state(
     peer_intent_enabled: bool,
     peer_effective_enabled: bool,
     peer_activation_starting: bool,
+    peer_warning_reason: str | None,
 ) -> OverlayPeerSurfaceState:
     if not peer_intent_enabled:
         return "off"
+    if peer_activation_starting or peer_warning_reason == "overlay_starting":
+        return "starting"
     if peer_effective_enabled:
         return "on"
-    if peer_activation_starting:
-        return "starting"
     return "warning"
 
 

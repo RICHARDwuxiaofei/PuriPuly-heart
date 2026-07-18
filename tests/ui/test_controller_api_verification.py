@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,11 +17,23 @@ from puripuly_heart.config.settings import (
     QwenRegion,
     STTProviderName,
 )
-from puripuly_heart.core.local_stt_assets import LocalSTTInstallState
+from puripuly_heart.core.local_stt_assets import (
+    LOCAL_STT_MODEL_ID,
+    PARAKEET_JAPANESE_MODEL_ID,
+    PARAKEET_V3_MODEL_ID,
+    LocalSTTInstallState,
+    load_local_stt_asset_manifest,
+)
+from puripuly_heart.core.local_stt_catalog import (
+    LocalCPUInstallSnapshot,
+    LocalCPUModelInstall,
+)
+from puripuly_heart.core.local_stt_runtime_installer import LocalSTTRuntimeInstallError
 from puripuly_heart.providers.llm.deepseek import DeepSeekLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
+from puripuly_heart.providers.stt.local_cpu import LocalCPUAutoUnavailableError
 from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
 from puripuly_heart.ui import controller as controller_module
 from puripuly_heart.ui import i18n as i18n_module
@@ -43,6 +56,7 @@ class DummyDashboard:
         self.stt_enabled: bool | None = None
         self.local_stt_notice_status: str | None = None
         self.local_stt_notice_percent: int | None = None
+        self.local_stt_notice_model_id: str | None = None
 
     def set_translation_needs_key(self, value: bool) -> None:
         self.translation_needs_key = value
@@ -59,6 +73,9 @@ class DummyDashboard:
     def set_local_stt_notice(self, status: str | None, percent: int | None = None) -> None:
         self.local_stt_notice_status = status
         self.local_stt_notice_percent = percent
+
+    def set_local_stt_notice_model(self, model_id: str | None) -> None:
+        self.local_stt_notice_model_id = model_id
 
 
 class DummyOutputRuntime:
@@ -99,9 +116,53 @@ def _local_stt_download_task(controller: GuiController) -> asyncio.Task[object] 
     return runtime.download_task if runtime is not None else None
 
 
+def _cpu_snapshot(
+    *,
+    parakeet_v3: str = "ready",
+    parakeet_ja: str = "ready",
+    qwen: str = "ready",
+) -> LocalCPUInstallSnapshot:
+    return LocalCPUInstallSnapshot(
+        models=(
+            LocalCPUModelInstall(
+                model_id=PARAKEET_V3_MODEL_ID,
+                state=LocalSTTInstallState(status=parakeet_v3),
+            ),
+            LocalCPUModelInstall(
+                model_id=PARAKEET_JAPANESE_MODEL_ID,
+                state=LocalSTTInstallState(status=parakeet_ja),
+            ),
+            LocalCPUModelInstall(
+                model_id=LOCAL_STT_MODEL_ID,
+                state=LocalSTTInstallState(status=qwen),
+            ),
+        )
+    )
+
+
+def _cpu_ready_snapshot() -> LocalCPUInstallSnapshot:
+    return LocalCPUInstallSnapshot(
+        models=tuple(
+            LocalCPUModelInstall(
+                model_id=model_id,
+                state=LocalSTTInstallState(
+                    status="ready",
+                    installed_manifest=SimpleNamespace(model_id=model_id),
+                ),
+            )
+            for model_id in (
+                PARAKEET_V3_MODEL_ID,
+                PARAKEET_JAPANESE_MODEL_ID,
+                LOCAL_STT_MODEL_ID,
+            )
+        )
+    )
+
+
 async def _start_controller_with_inspected_stt_state(
     monkeypatch: pytest.MonkeyPatch,
     *,
+    config_path: Path,
     provider: STTProviderName,
     install_state: LocalSTTInstallState,
     hub_stt: object | None = object(),
@@ -131,6 +192,9 @@ async def _start_controller_with_inspected_stt_state(
     async def fake_init_pipeline(self) -> None:
         self.hub = hub
 
+    async def fake_verify_and_update_status(self) -> None:
+        return None
+
     async def fake_install(**kwargs):
         _ = kwargs
         install_calls.append("install")
@@ -143,6 +207,7 @@ async def _start_controller_with_inspected_stt_state(
     monkeypatch.setattr(GuiController, "_load_or_init_settings", lambda self, path: settings)
     monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
     monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
+    monkeypatch.setattr(GuiController, "_verify_and_update_status", fake_verify_and_update_status)
     monkeypatch.setattr(controller_module, "set_locale", lambda _locale: None)
     monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
     monkeypatch.setattr(controller_module, "inspect_local_stt_install_state", fake_inspect)
@@ -151,7 +216,7 @@ async def _start_controller_with_inspected_stt_state(
     controller = GuiController(
         page=SimpleNamespace(),
         app=SimpleNamespace(view_dashboard=dash),
-        config_path=Path("settings.json"),
+        config_path=config_path,
     )
 
     await controller.start()
@@ -162,6 +227,514 @@ async def _start_controller_with_inspected_stt_state(
 def test_local_stt_download_prompt_helpers_removed() -> None:
     assert not hasattr(GuiController, "_show_local_stt_download_prompt")
     assert not hasattr(GuiController, "_on_local_stt_download_action")
+
+
+def test_manual_local_asr_mismatches_persist_qwen_for_self_and_peer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_PARAKEET_V3
+    settings.provider.peer_stt = STTProviderName.LOCAL_PARAKEET_JAPANESE
+    settings.languages.source_language = "ko"
+    settings.languages.peer_source_language = "en"
+    saved: list[AppSettings] = []
+    messages: list[str] = []
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(
+            _show_snackbar=lambda message, _color: messages.append(message),
+        ),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = settings
+
+    monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_save_settings",
+        lambda self: saved.append(self.settings) or True,
+    )
+
+    assert controller._persist_current_manual_local_asr_fallback() is True
+    assert controller.settings.provider.stt == STTProviderName.LOCAL_QWEN
+    assert controller.settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
+    assert len(saved) == 1
+    assert messages == [controller_module.t("local_stt.language_fallback_qwen")]
+
+
+def test_cpu_auto_with_missing_parakeet_persists_qwen_without_downloading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_CPU_AUTO
+    installed_model_ids: list[str] = []
+    saved: list[AppSettings] = []
+    messages: list[str] = []
+
+    async def fake_install(*, model_id: str, **_kwargs):
+        installed_model_ids.append(model_id)
+        return load_local_stt_asset_manifest(model_id)
+
+    snapshot = LocalCPUInstallSnapshot(
+        models=(
+            LocalCPUModelInstall(
+                model_id=PARAKEET_V3_MODEL_ID,
+                state=LocalSTTInstallState(status="ready"),
+            ),
+            LocalCPUModelInstall(
+                model_id=PARAKEET_JAPANESE_MODEL_ID,
+                state=LocalSTTInstallState(status="missing"),
+            ),
+            LocalCPUModelInstall(
+                model_id=LOCAL_STT_MODEL_ID,
+                state=LocalSTTInstallState(status="ready"),
+            ),
+        )
+    )
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_save_settings",
+        lambda self: saved.append(self.settings) or True,
+    )
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(
+            _show_snackbar=lambda message, _color: messages.append(message),
+        ),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = settings
+    controller._local_cpu_install_snapshot = snapshot
+    monkeypatch.setattr(
+        GuiController,
+        "_inspect_local_cpu_model_installs_for_selection",
+        lambda self: snapshot,
+    )
+
+    assert controller._persist_current_manual_local_asr_fallback() is True
+    assert controller.settings.provider.stt == STTProviderName.LOCAL_QWEN
+    assert installed_model_ids == []
+    assert len(saved) == 1
+    assert messages == [controller_module.t("local_stt.installation_fallback_qwen")]
+
+
+def test_successful_cpu_auto_probe_preserves_installed_model_identities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.LOCAL_CPU_AUTO
+    controller._set_local_cpu_install_snapshot(_cpu_ready_snapshot())
+    strict_snapshot = _cpu_ready_snapshot()
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_cpu_model_installs",
+        lambda model_ids, *_args, **_kwargs: LocalCPUInstallSnapshot(
+            models=tuple(
+                strict_snapshot.models[
+                    (
+                        PARAKEET_V3_MODEL_ID,
+                        PARAKEET_JAPANESE_MODEL_ID,
+                        LOCAL_STT_MODEL_ID,
+                    ).index(model_id)
+                ]
+                for model_id in model_ids
+            )
+        ),
+    )
+
+    controller._record_strict_local_stt_ready(
+        (PARAKEET_V3_MODEL_ID, PARAKEET_JAPANESE_MODEL_ID, LOCAL_STT_MODEL_ID)
+    )
+
+    assert controller._local_cpu_install_snapshot is not None
+    assert controller._local_cpu_install_snapshot.cpu_auto_available is True
+    for language in ("bg", "ar", "ko", "en", "ja"):
+        controller.settings.languages.source_language = language
+        normalized, channels, installation_fallback = (
+            controller._normalize_manual_local_asr_fallbacks(controller.settings)
+        )
+        assert normalized is controller.settings
+        assert channels == ()
+        assert installation_fallback is False
+
+
+def test_runtime_refresh_clears_recovered_parakeet_download_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dashboard = DummyDashboard()
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(view_dashboard=dashboard),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.LOCAL_CPU_AUTO
+    controller._local_stt_runtime_status = "download_failed"
+    controller._local_stt_download_model_ids = (PARAKEET_V3_MODEL_ID,)
+    controller._local_stt_notice_model_id = PARAKEET_V3_MODEL_ID
+    ready_snapshot = _cpu_ready_snapshot()
+    monkeypatch.setattr(
+        GuiController,
+        "_inspect_local_cpu_model_installs_for_selection",
+        lambda self: ready_snapshot,
+    )
+
+    controller._refresh_local_stt_runtime_state()
+
+    assert controller._local_stt_runtime_status == "ready"
+    assert controller._local_stt_download_model_ids == ()
+    assert controller._local_stt_notice_model_id is None
+    assert dashboard.local_stt_notice_status is None
+
+
+@pytest.mark.asyncio
+async def test_cpu_auto_repair_attempts_remaining_models_after_partial_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_CPU_AUTO
+    attempted_model_ids: list[str] = []
+
+    async def fake_install(*, model_id: str, **_kwargs):
+        attempted_model_ids.append(model_id)
+        if model_id == PARAKEET_V3_MODEL_ID:
+            raise LocalSTTRuntimeInstallError("failed")
+        return load_local_stt_asset_manifest(model_id)
+
+    snapshot = LocalCPUInstallSnapshot(
+        models=(
+            LocalCPUModelInstall(
+                model_id=PARAKEET_V3_MODEL_ID,
+                state=LocalSTTInstallState(status="missing"),
+            ),
+            LocalCPUModelInstall(
+                model_id=PARAKEET_JAPANESE_MODEL_ID,
+                state=LocalSTTInstallState(status="missing"),
+            ),
+            LocalCPUModelInstall(
+                model_id=LOCAL_STT_MODEL_ID,
+                state=LocalSTTInstallState(status="ready"),
+            ),
+        )
+    )
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(view_dashboard=DummyDashboard()),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = settings
+    controller._local_cpu_install_snapshot = snapshot
+    controller._local_stt_download_model_ids = (
+        PARAKEET_V3_MODEL_ID,
+        PARAKEET_JAPANESE_MODEL_ID,
+    )
+
+    await controller._run_local_stt_download(origin="automatic")
+
+    assert attempted_model_ids == [PARAKEET_V3_MODEL_ID, PARAKEET_JAPANESE_MODEL_ID]
+    assert controller._local_stt_runtime_status == "download_failed"
+    assert controller._local_stt_download_model_ids == (PARAKEET_V3_MODEL_ID,)
+    assert (
+        controller._local_cpu_install_snapshot.state_for(PARAKEET_V3_MODEL_ID).status == "missing"
+    )
+    assert (
+        controller._local_cpu_install_snapshot.state_for(PARAKEET_JAPANESE_MODEL_ID).status
+        == "ready"
+    )
+
+
+@pytest.mark.asyncio
+async def test_self_cpu_auto_strict_corruption_falls_back_without_parakeet_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_CPU_AUTO
+    settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    settings.ui.peer_translation_enabled = True
+    settings.ui.peer_translation_eula_accepted = True
+    strict_snapshot = _cpu_snapshot(parakeet_v3="invalid")
+    download_origins: list[str] = []
+    probed_providers: list[STTProviderName] = []
+    saved: list[AppSettings] = []
+
+    async def fake_probe(self, *, activation_generation=None) -> None:
+        _ = activation_generation
+        probed_providers.append(self.settings.provider.stt)
+        if self.settings.provider.stt == STTProviderName.LOCAL_CPU_AUTO:
+            raise LocalCPUAutoUnavailableError(strict_snapshot)
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(_show_snackbar=lambda *_args, **_kwargs: None),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = settings
+    controller.hub = SimpleNamespace(
+        stt=object(),
+        peer_stt=object(),
+    )
+    controller._set_local_cpu_install_snapshot(_cpu_snapshot())
+    ready_snapshot = _cpu_ready_snapshot()
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_cpu_model_installs",
+        lambda model_ids, *_args, **_kwargs: LocalCPUInstallSnapshot(
+            models=tuple(model for model in ready_snapshot.models if model.model_id in model_ids)
+        ),
+    )
+    monkeypatch.setattr(GuiController, "_probe_self_local_stt_runtime_load", fake_probe)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_save_settings",
+        lambda self: saved.append(self.settings) or True,
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_start_local_stt_download",
+        lambda self, *, origin: download_origins.append(origin) or True,
+    )
+
+    assert await controller._ensure_local_stt_ready() is True
+    assert controller.settings.provider.stt == STTProviderName.LOCAL_QWEN
+    assert probed_providers == [STTProviderName.LOCAL_CPU_AUTO, STTProviderName.LOCAL_QWEN]
+    assert len(saved) == 1
+    assert controller._local_stt_pending_enable_after_install is False
+    assert controller._local_stt_pending_peer_enable_after_install is False
+    assert controller._local_cpu_install_snapshot.state_for(LOCAL_STT_MODEL_ID).status == "ready"
+    assert (
+        controller._local_stt_runtime_status_for_provider(STTProviderName.LOCAL_QWEN.value)
+        == "ready"
+    )
+    assert download_origins == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_self_parakeet_preserves_valid_peer_qwen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_PARAKEET_V3
+    settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    settings.languages.source_language = "en"
+    settings.ui.peer_translation_enabled = True
+    settings.ui.peer_translation_eula_accepted = True
+
+    class Backend:
+        async def open_session(self):
+            raise controller_module.LocalSTTManifestInvalidError("corrupt")
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(view_dashboard=DummyDashboard()),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = settings
+    controller.hub = SimpleNamespace(
+        stt=SimpleNamespace(backend=Backend()),
+        peer_stt=object(),
+    )
+    controller._set_local_cpu_install_snapshot(_cpu_snapshot())
+    monkeypatch.setattr(
+        GuiController,
+        "_start_local_stt_download",
+        lambda self, *, origin: True,
+    )
+
+    assert await controller._ensure_local_stt_ready() is False
+    assert controller._local_cpu_install_snapshot.state_for(PARAKEET_V3_MODEL_ID).status == (
+        "invalid"
+    )
+    assert controller._local_cpu_install_snapshot.state_for(LOCAL_STT_MODEL_ID).status == "ready"
+    assert (
+        controller._local_stt_runtime_status_for_provider(STTProviderName.LOCAL_QWEN.value)
+        == "ready"
+    )
+    assert controller._local_stt_pending_enable_after_install is True
+    assert controller._local_stt_pending_peer_enable_after_install is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_peer_parakeet_strict_probe_preserves_valid_self_qwen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    settings.provider.peer_stt = STTProviderName.LOCAL_PARAKEET_V3
+    settings.languages.peer_source_language = "en"
+    settings.ui.peer_translation_enabled = True
+    settings.ui.peer_translation_eula_accepted = True
+    probe_calls: list[str] = []
+
+    async def fail_strict_probe(self) -> None:
+        probe_calls.append("peer")
+        raise controller_module.LocalSTTManifestInvalidError("corrupt")
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(view_dashboard=DummyDashboard()),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = settings
+    controller.hub = SimpleNamespace(stt=object(), peer_stt=object())
+    controller._set_local_cpu_install_snapshot(_cpu_snapshot())
+    monkeypatch.setattr(GuiController, "_probe_peer_local_stt_runtime_load", fail_strict_probe)
+    monkeypatch.setattr(
+        GuiController,
+        "_start_local_stt_download",
+        lambda self, *, origin: True,
+    )
+
+    assert await controller._ensure_peer_local_stt_ready() is False
+    assert probe_calls == ["peer"]
+    assert controller._local_cpu_install_snapshot.state_for(PARAKEET_V3_MODEL_ID).status == (
+        "invalid"
+    )
+    assert controller._local_cpu_install_snapshot.state_for(LOCAL_STT_MODEL_ID).status == "ready"
+    assert controller._current_local_stt_runtime_status() == "ready"
+    assert controller._local_stt_pending_enable_after_install is False
+    assert controller._local_stt_pending_peer_enable_after_install is True
+
+
+@pytest.mark.asyncio
+async def test_stale_self_strict_failure_after_disable_cannot_repair_or_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    download_origins: list[str] = []
+    rebuilds: list[str] = []
+
+    class Backend:
+        async def open_session(self):
+            entered.set()
+            await release.wait()
+            raise controller_module.LocalSTTManifestInvalidError("corrupt")
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(view_dashboard=DummyDashboard()),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN
+    controller.hub = SimpleNamespace(
+        stt=SimpleNamespace(backend=Backend()),
+        mark_promo_eligible=lambda: None,
+    )
+    controller._set_local_cpu_install_snapshot(_cpu_snapshot())
+    monkeypatch.setattr(
+        GuiController,
+        "_start_local_stt_download",
+        lambda self, *, origin: download_origins.append(origin) or True,
+    )
+
+    enabling = asyncio.create_task(controller.set_stt_enabled(True))
+    await entered.wait()
+    disabling = asyncio.create_task(controller.set_stt_enabled(False))
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(enabling, disabling)
+
+    assert controller._stt_desired is False
+    assert controller._local_stt_pending_enable_after_install is False
+    assert controller._local_stt_pending_enable_generation is None
+    assert download_origins == []
+
+    async def fake_install(*, locale: str, on_status, cancel_event):
+        _ = (locale, on_status, cancel_event)
+        return load_local_stt_asset_manifest(LOCAL_STT_MODEL_ID)
+
+    async def fake_rebuild(_self) -> None:
+        rebuilds.append("rebuild")
+
+    controller._local_stt_download_model_ids = (LOCAL_STT_MODEL_ID,)
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild)
+    await controller._run_local_stt_download(origin="manual")
+
+    assert controller._stt_desired is False
+    assert controller._local_stt_pending_enable_after_install is False
+    assert rebuilds == []
+
+
+@pytest.mark.asyncio
+async def test_peer_disable_waits_for_cancelled_owned_checksum_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_started = threading.Event()
+    thread_release = threading.Event()
+    thread_finished = threading.Event()
+
+    def blocking_probe(model_ids, *_args, **_kwargs):
+        thread_started.set()
+        try:
+            assert thread_release.wait(timeout=5)
+            return LocalCPUInstallSnapshot(
+                models=tuple(
+                    LocalCPUModelInstall(
+                        model_id=model_id,
+                        state=LocalSTTInstallState(status="ready"),
+                    )
+                    for model_id in model_ids
+                )
+            )
+        finally:
+            thread_finished.set()
+
+    async def no_refresh(_self) -> None:
+        return None
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(view_dashboard=DummyDashboard()),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    controller.settings.ui.peer_translation_eula_accepted = True
+    controller.settings.ui.overlay_enabled = True
+    controller.overlay_state = "connected"
+    controller.hub = SimpleNamespace(
+        peer_stt=None,
+        peer_translation_enabled=False,
+        integrated_context_enabled=False,
+    )
+    controller._set_local_cpu_install_snapshot(_cpu_snapshot())
+    monkeypatch.setattr(controller_module, "inspect_local_cpu_model_installs", blocking_probe)
+    monkeypatch.setattr(GuiController, "_refresh_overlay_runtime_dependencies", no_refresh)
+
+    enabling = asyncio.create_task(controller.set_peer_translation_enabled(True))
+    while not thread_started.is_set():
+        await asyncio.sleep(0)
+    disabling = asyncio.create_task(controller.set_peer_translation_enabled(False))
+    await asyncio.sleep(0)
+
+    assert disabling.done() is False
+    assert thread_finished.is_set() is False
+
+    thread_release.set()
+    results = await asyncio.gather(enabling, disabling, return_exceptions=True)
+
+    assert isinstance(results[0], asyncio.CancelledError)
+    assert results[1] is None
+    assert thread_finished.is_set() is True
+    assert controller.settings.ui.peer_translation_enabled is False
+    assert controller._local_stt_pending_peer_enable_after_install is False
+    assert controller._peer_local_stt_probe_task is None
+    assert not any(
+        name.startswith("peer-local-stt-probe-")
+        for name in controller._ui_background_scope.active_task_names
+    )
 
 
 def test_action_snackbar_helper_removed_from_app_source() -> None:
@@ -1149,6 +1722,7 @@ async def test_local_qwen_reenable_during_runtime_install_rearms_pending_auto_en
 
     async def fake_switch(self):
         switch_calls.append(self._stt_desired)
+        self._mic_task = object() if self._stt_desired else None
 
     monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
     monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild)
@@ -1193,6 +1767,7 @@ async def test_local_qwen_reenable_during_runtime_install_rearms_pending_auto_en
 )
 async def test_start_with_local_qwen_inspects_runtime_read_only(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     install_state: LocalSTTInstallState,
     expected_notice: str | None,
 ) -> None:
@@ -1203,12 +1778,13 @@ async def test_start_with_local_qwen_inspects_runtime_read_only(
         install_calls,
     ) = await _start_controller_with_inspected_stt_state(
         monkeypatch,
+        config_path=tmp_path / "settings.json",
         provider=STTProviderName.LOCAL_QWEN,
         install_state=install_state,
         hub_stt=object(),
     )
 
-    assert inspect_calls == ["inspect"]
+    assert inspect_calls == ["inspect", "inspect"]
     assert install_calls == []
     assert _local_stt_download_task(controller) is None
     assert dash.stt_enabled is False
@@ -1283,6 +1859,7 @@ async def test_set_stt_enabled_local_qwen_download_path_does_not_prepare_managed
 @pytest.mark.asyncio
 async def test_start_inspects_local_stt_without_auto_download_for_non_local_provider(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     (
         controller,
@@ -1291,11 +1868,12 @@ async def test_start_inspects_local_stt_without_auto_download_for_non_local_prov
         install_calls,
     ) = await _start_controller_with_inspected_stt_state(
         monkeypatch,
+        config_path=tmp_path / "settings.json",
         provider=STTProviderName.DEEPGRAM,
         install_state=LocalSTTInstallState(status="missing"),
     )
 
-    assert inspect_calls == ["inspect"]
+    assert inspect_calls == ["inspect", "inspect"]
     assert install_calls == []
     assert _local_stt_download_task(controller) is None
     assert dash.local_stt_notice_status is None
