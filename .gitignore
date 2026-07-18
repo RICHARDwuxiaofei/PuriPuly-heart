@@ -256,6 +256,7 @@ docs/superpowers/specs/*
 .worktrees/
 .superpowers/
 /settings.json
+/settings.json.pre-v*.bak
 opencode.json
 .skills/
 .opencode/
