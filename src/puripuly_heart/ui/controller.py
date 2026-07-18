@@ -1597,6 +1597,41 @@ class GuiController:
 
     async def _on_gpu_asr_diagnostic(self, diagnostic: GpuASRDiagnostic) -> None:
         self.log_detailed(f"[GPU ASR] lifecycle={diagnostic.kind} fields={dict(diagnostic.fields)}")
+        if diagnostic.kind == "activation_ready":
+            active_channels = tuple(
+                sorted(getattr(self._gpu_asr_runtime, "active_channels", ()) or ())
+            )
+            self._log_local_asr_load_result(
+                channel=",".join(active_channels) or "unknown",
+                model_id=str(diagnostic.fields.get("model") or "unknown"),
+                backend="Vulkan",
+                device=str(diagnostic.fields.get("device") or "unknown"),
+                outcome="ready",
+                load_seconds=float(diagnostic.fields.get("model_load_seconds") or 0.0),
+                warmup_seconds=float(diagnostic.fields.get("warmup_seconds") or 0.0),
+            )
+        elif diagnostic.kind == "activation_failed":
+            self._log_local_asr_load_result(
+                channel=(
+                    ",".join(sorted(self._desired_gpu_channels(self.settings)))
+                    if self.settings is not None
+                    else "unknown"
+                ),
+                model_id=str(diagnostic.fields.get("model") or "unknown"),
+                backend="Vulkan",
+                outcome="failed",
+                load_seconds=0.0,
+                failure_code=str(diagnostic.fields.get("failure") or "activation_failed"),
+            )
+        elif diagnostic.kind == "worker_failed":
+            failure_code = str(diagnostic.fields.get("failure") or "worker_failed")
+            exit_code = diagnostic.fields.get("exit_code")
+            suffix = f" exit_code={exit_code}" if exit_code is not None else ""
+            self.log_basic(
+                "[LocalASR][Worker] backend=Vulkan outcome=failed "
+                f"failure_code={failure_code}{suffix}",
+                level=logging.ERROR,
+            )
         if diagnostic.kind == "worker_lifecycle":
             phase = diagnostic.fields.get("phase")
             if phase in {"validating", "loading", "warming", "ready"}:
@@ -1657,6 +1692,11 @@ class GuiController:
             self._gpu_discovery_failed = False
             self._gpu_discovery_failure_state = None
             if not self._gpu_devices:
+                self.log_basic(
+                    "[LocalASR][Device] backend=Vulkan outcome=unavailable "
+                    f"reason=no_supported_gpu origin={origin}",
+                    level=logging.WARNING,
+                )
                 self._set_gpu_ui_state("unsupported", origin=origin)
                 return self._gpu_devices
             self._set_gpu_ui_state(
@@ -1682,6 +1722,11 @@ class GuiController:
                 level=logging.WARNING,
                 exception=exc,
             )
+            self.log_basic(
+                "[LocalASR][Device] backend=Vulkan outcome=failed "
+                f"failure_code={code} origin={origin}",
+                level=logging.ERROR,
+            )
             self._set_gpu_ui_state(state, origin=origin)
             return self._gpu_devices
         except Exception as exc:
@@ -1693,6 +1738,11 @@ class GuiController:
                 "[GPU ASR] Device discovery failed",
                 level=logging.WARNING,
                 exception=exc,
+            )
+            self.log_basic(
+                "[LocalASR][Device] backend=Vulkan outcome=failed "
+                f"failure_type={type(exc).__name__} origin={origin}",
+                level=logging.ERROR,
             )
             self._set_gpu_ui_state("discovery_failed", origin=origin)
             return self._gpu_devices
@@ -1733,6 +1783,11 @@ class GuiController:
             )
             return False
         if selected_device != "auto" and selected_device not in known_devices:
+            self.log_basic(
+                "[LocalASR][Device] backend=Vulkan outcome=unavailable "
+                f"device={selected_device} reason=saved_device_missing",
+                level=logging.WARNING,
+            )
             self._set_gpu_ui_state(
                 "unavailable_device",
                 publish_notice=True,
@@ -1819,6 +1874,10 @@ class GuiController:
             publish_notice=True,
             origin="explicit_install",
         )
+        install_started_at = time.monotonic()
+        self.log_basic(
+            "[LocalASR][Install] " f"model={manifest.model_id} origin=manual outcome=started"
+        )
         task = runtime.start(origin="explicit_gpu_opt_in", run_download=run_install)
         try:
             await task
@@ -1831,6 +1890,13 @@ class GuiController:
             self._gpu_install_snapshot = snapshot
             if not snapshot.activation_allowed:
                 self._gpu_install_percent = None
+                self.log_basic(
+                    "[LocalASR][Install] "
+                    f"model={manifest.model_id} origin=manual outcome=failed "
+                    f"elapsed_seconds={time.monotonic() - install_started_at:.3f} "
+                    "failure_code=post_install_validation_failed",
+                    level=logging.ERROR,
+                )
                 self._set_gpu_ui_state(
                     "invalid",
                     publish_notice=True,
@@ -1840,9 +1906,19 @@ class GuiController:
             pending = self._gpu_pending_enable_channels
             self._gpu_install_percent = None
             self._set_gpu_ui_state("installed", origin="explicit_install")
+            self.log_basic(
+                "[LocalASR][Install] "
+                f"model={manifest.model_id} origin=manual outcome=ready "
+                f"elapsed_seconds={time.monotonic() - install_started_at:.3f}"
+            )
             if pending:
                 await self.retry_gpu_activation()
         except asyncio.CancelledError:
+            self.log_detailed(
+                "[LocalASR][Install] "
+                f"model={manifest.model_id} origin=manual outcome=cancelled "
+                f"elapsed_seconds={time.monotonic() - install_started_at:.3f}"
+            )
             raise
         except Exception as exc:
             self._gpu_install_percent = None
@@ -1850,6 +1926,13 @@ class GuiController:
                 "[GPU ASR] model_install failure=unexpected",
                 level=logging.WARNING,
                 exception=exc,
+            )
+            self.log_basic(
+                "[LocalASR][Install] "
+                f"model={manifest.model_id} origin=manual outcome=failed "
+                f"elapsed_seconds={time.monotonic() - install_started_at:.3f} "
+                f"failure_type={type(exc).__name__}",
+                level=logging.ERROR,
             )
             self._set_gpu_ui_state(
                 "install_failed",
@@ -5928,6 +6011,7 @@ class GuiController:
                 fallback_channels,
                 installation_fallback=installation_fallback,
             )
+            self._log_manual_local_asr_fallbacks(previous, normalized, fallback_channels)
             return True
         scoped = copy.deepcopy(previous)
         if channel == "self":
@@ -5960,7 +6044,30 @@ class GuiController:
             fallback_channels,
             installation_fallback=installation_fallback,
         )
+        self._log_manual_local_asr_fallbacks(previous, normalized, fallback_channels)
         return True
+
+    def _log_manual_local_asr_fallbacks(
+        self,
+        previous: AppSettings,
+        normalized: AppSettings,
+        channels: tuple[str, ...],
+    ) -> None:
+        for channel in channels:
+            if channel == "self":
+                requested = previous.provider.stt.value
+                actual = normalized.provider.stt.value
+                source_language = normalized.languages.source_language
+            else:
+                requested = previous.provider.peer_stt.value
+                actual = normalized.provider.peer_stt.value
+                source_language = normalized.languages.effective_peer_source
+            decision = resolve_local_asr_selection(actual, source_language)
+            self.log_basic(
+                "[LocalASR][Selection] "
+                f"channel={channel} requested={requested} actual={actual} "
+                f"model={decision.model_id or 'unknown'} reason=preferred_model_unavailable"
+            )
 
     def _refresh_local_stt_runtime_state(self) -> None:
         if self.settings is None:
@@ -6213,8 +6320,15 @@ class GuiController:
         self._sync_local_stt_notice()
         installed_manifests: dict[str, object] = {}
         failures: list[tuple[str, LocalSTTRuntimeInstallError]] = []
+        active_model_id: str | None = None
+        active_install_started_at: float | None = None
         try:
             for model_id in self._local_stt_download_model_ids:
+                active_model_id = model_id
+                active_install_started_at = time.monotonic()
+                self.log_basic(
+                    "[LocalASR][Install] " f"model={model_id} origin={origin} outcome=started"
+                )
                 self._local_stt_notice_model_id = model_id
                 self._local_stt_download_percent = 0
                 self._sync_local_stt_notice()
@@ -6244,9 +6358,27 @@ class GuiController:
                             cancel_event=cancel_event,
                         )
                     installed_manifests[model_id] = installed
+                    self.log_basic(
+                        "[LocalASR][Install] "
+                        f"model={model_id} origin={origin} outcome=ready "
+                        f"elapsed_seconds={time.monotonic() - active_install_started_at:.3f}"
+                    )
                 except LocalSTTRuntimeInstallError as exc:
                     failures.append((model_id, exc))
+                    self.log_basic(
+                        "[LocalASR][Install] "
+                        f"model={model_id} origin={origin} outcome=failed "
+                        f"elapsed_seconds={time.monotonic() - active_install_started_at:.3f} "
+                        f"failure_type={type(exc).__name__}",
+                        level=logging.ERROR,
+                    )
         except (asyncio.CancelledError, LocalSTTRuntimeInstallCancelled):
+            if active_model_id is not None and active_install_started_at is not None:
+                self.log_detailed(
+                    "[LocalASR][Install] "
+                    f"model={active_model_id} origin={origin} outcome=cancelled "
+                    f"elapsed_seconds={time.monotonic() - active_install_started_at:.3f}"
+                )
             return
         if installed_manifests:
             self._replace_local_stt_model_states(
@@ -6269,8 +6401,6 @@ class GuiController:
             self._sync_local_stt_notice()
             if origin == "manual":
                 self._show_short_stt_message("local_stt.download_failed")
-            failure_text = "; ".join(f"{model_id}: {exc}" for model_id, exc in failures)
-            self._log_error(f"Local STT download failed: {failure_text}")
             return
         if generation is not None and runtime is not None:
             if not runtime.is_current_generation(generation):
@@ -6509,12 +6639,24 @@ class GuiController:
                 dash.set_stt_needs_key(False)
             self._show_short_stt_message("error.local_stt_model_invalid")
             return False
+        backend = getattr(self.hub.stt, "backend", None)
+        was_loaded = bool(getattr(backend, "is_loaded", False))
+        load_started_at = time.monotonic()
         try:
             await self._probe_self_local_stt_runtime_load(
                 activation_generation=activation_generation
             )
             if not self._self_local_stt_activation_is_current(activation_generation):
                 return False
+            loaded_model_id = self._managed_local_asr_model_id(self.hub.stt) or decision.model_id
+            if not was_loaded:
+                self._log_local_asr_load_result(
+                    channel="self",
+                    model_id=str(loaded_model_id or "unknown"),
+                    backend="CPU",
+                    outcome="ready",
+                    load_seconds=time.monotonic() - load_started_at,
+                )
             self._record_strict_local_stt_ready(
                 self._required_local_stt_model_ids_for_provider(self.settings.provider.stt.value)
             )
@@ -6539,7 +6681,15 @@ class GuiController:
                 snapshot=exc.snapshot,
                 activation_generation=activation_generation,
             )
-        except LocalSTTModelMissingError:
+        except LocalSTTModelMissingError as exc:
+            self._log_local_asr_load_result(
+                channel="self",
+                model_id=str(decision.model_id or "unknown"),
+                backend="CPU",
+                outcome="failed",
+                load_seconds=time.monotonic() - load_started_at,
+                failure_type=type(exc).__name__,
+            )
             return self._handle_local_stt_unavailable(
                 "missing",
                 channel="self",
@@ -6550,7 +6700,15 @@ class GuiController:
             LocalSTTManifestInvalidError,
             LocalQwenSherpaLoadError,
             LocalParakeetSherpaLoadError,
-        ):
+        ) as exc:
+            self._log_local_asr_load_result(
+                channel="self",
+                model_id=str(decision.model_id or "unknown"),
+                backend="CPU",
+                outcome="failed",
+                load_seconds=time.monotonic() - load_started_at,
+                failure_type=type(exc).__name__,
+            )
             return self._handle_local_stt_unavailable(
                 "invalid",
                 channel="self",
@@ -9337,6 +9495,54 @@ class GuiController:
     def _local_asr_transition_diagnostic(self, fields: dict[str, object]) -> None:
         ordered = " ".join(f"{key}={value}" for key, value in fields.items())
         self.log_detailed(f"[LocalASR][Transition] {ordered}")
+        actual_provider = str(fields.get("actual_provider") or "")
+        if actual_provider == STTProviderName.LOCAL_QWEN_GPU.value:
+            return
+        outcome = str(fields.get("outcome") or "")
+        if outcome not in {"applied", "failed"}:
+            return
+        self._log_local_asr_load_result(
+            channel=str(fields.get("channel") or "unknown"),
+            model_id=str(fields.get("model_id") or "unknown"),
+            backend="CPU",
+            outcome="ready" if outcome == "applied" else "failed",
+            load_seconds=max(0.0, float(fields.get("load_ms") or 0) / 1000.0),
+            failure_type=(
+                str(fields["failure_type"]) if fields.get("failure_type") is not None else None
+            ),
+        )
+
+    def _log_local_asr_load_result(
+        self,
+        *,
+        channel: str,
+        model_id: str,
+        backend: str,
+        outcome: str,
+        load_seconds: float,
+        failure_type: str | None = None,
+        device: str | None = None,
+        warmup_seconds: float | None = None,
+        failure_code: str | None = None,
+    ) -> None:
+        fields = [
+            f"channel={channel}",
+            f"model={model_id}",
+            f"backend={backend}",
+        ]
+        if device is not None:
+            fields.append(f"device={device}")
+        fields.extend((f"outcome={outcome}", f"load_seconds={max(0.0, load_seconds):.3f}"))
+        if warmup_seconds is not None:
+            fields.append(f"warmup_seconds={max(0.0, warmup_seconds):.3f}")
+        if failure_type is not None:
+            fields.append(f"failure_type={failure_type}")
+        if failure_code is not None:
+            fields.append(f"failure_code={failure_code}")
+        self.log_basic(
+            f"[LocalASR][Load] {' '.join(fields)}",
+            level=logging.ERROR if outcome == "failed" else logging.INFO,
+        )
 
     def _create_peer_stt_provider_from_runtime_config(
         self,
@@ -9377,6 +9583,17 @@ class GuiController:
             f"capture_kind={diagnostic.capture_kind} "
             f"unavailable_reason={diagnostic.process_unavailable_reason}"
         )
+        if diagnostic.reason is not PeerRuntimeFailureReason.PROCESS_PROVIDER_FAILED:
+            suffix = (
+                f" unavailable_reason={diagnostic.process_unavailable_reason}"
+                if diagnostic.process_unavailable_reason is not None
+                else ""
+            )
+            self.log_basic(
+                "[PeerRuntime] outcome=failed "
+                f"reason={diagnostic.reason.value} capture_kind={diagnostic.capture_kind}{suffix}",
+                level=logging.ERROR,
+            )
         if diagnostic.capture_kind == "process":
             self._peer_process_warning_reason = self._peer_process_warning_reason_for_diagnostic(
                 diagnostic
@@ -10079,6 +10296,7 @@ class GuiController:
             vad_model_resolver=ensure_silero_vad_onnx,
             run_audio_loop=self._run_peer_audio_vad_loop,
             diagnostic_sink=self._on_peer_runtime_diagnostic,
+            local_asr_diagnostic_sink=self._local_asr_transition_diagnostic,
             idle_release_seconds=LOCAL_QWEN_IDLE_RELEASE_SECONDS,
         )
         self._last_peer_translation_enabled = self.settings.ui.peer_translation_enabled

@@ -112,6 +112,10 @@ class LocalCPUAutoSTTBackend(STTBackend):
     def resolved_model_id(self) -> str | None:
         return self._resolved_model_id
 
+    @property
+    def is_loaded(self) -> bool:
+        return bool(self._delegate is not None and getattr(self._delegate, "is_loaded", False))
+
     async def open_session(self) -> STTBackendSession:
         if self._closed:
             raise RuntimeError("CPU Auto backend is closed")

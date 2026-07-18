@@ -432,7 +432,7 @@ class SharedGpuASRRuntime:
                 {
                     "model": config.model_id,
                     "backend": "Vulkan",
-                    "failure": failure_code,
+                    **_failure_diagnostic_fields(exc),
                 },
             )
             return _ActivationOutcome(failure_code=failure_code)
@@ -711,7 +711,7 @@ class SharedGpuASRRuntime:
                                 "channel": work.channel,
                                 "model": config.model_id,
                                 "provider": "gpu_qwen",
-                                "failure": _failure_code(exc),
+                                **_failure_diagnostic_fields(exc),
                                 "queue_wait_seconds": final_queue_wait,
                             },
                         )
@@ -788,7 +788,7 @@ class SharedGpuASRRuntime:
                 "worker_failed",
                 {
                     "backend": "Vulkan",
-                    "failure": self._last_failure_code,
+                    **_failure_diagnostic_fields(exception),
                     "retry": "manual",
                     "fallback": "none",
                 },
@@ -1022,8 +1022,18 @@ def _failure_code(exception: BaseException) -> str:
     if isinstance(exception, GpuWorkerRequestError):
         return exception.code
     if isinstance(exception, GpuWorkerClosedError):
-        return "worker_closed"
+        return exception.code
     return type(exception).__name__
+
+
+def _failure_diagnostic_fields(exception: BaseException) -> dict[str, object]:
+    fields: dict[str, object] = {"failure": _failure_code(exception)}
+    if isinstance(exception, GpuWorkerClosedError):
+        if exception.exit_code is not None:
+            fields["exit_code"] = exception.exit_code
+        if exception.failure_type is not None:
+            fields["failure_type"] = exception.failure_type
+    return fields
 
 
 __all__ = [

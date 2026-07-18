@@ -474,6 +474,7 @@ async def test_local_cpu_attempt_diagnostic_separates_queue_wait_and_decode_rtf(
         stream_label="self",
         queue_clock=lambda: queue_now,
         decode_clock=lambda: next(decode_times),
+        diagnostics_enabled=lambda: True,
     )
 
     async def ensure_recognizer() -> object:
@@ -520,6 +521,7 @@ async def test_local_cpu_failed_started_attempt_retains_decode_timing(
         stream_label="peer",
         queue_clock=lambda: 3.0,
         decode_clock=lambda: next(decode_times),
+        diagnostics_enabled=lambda: True,
     )
 
     async def ensure_recognizer() -> object:
@@ -570,6 +572,7 @@ async def test_local_cpu_expiry_emits_boundary_and_safe_diagnostic_without_decod
         stream_label="self",
         queue_clock=lambda: queue_now,
         decode_clock=lambda: next(decode_times),
+        diagnostics_enabled=lambda: True,
     )
 
     async def ensure_recognizer() -> object:

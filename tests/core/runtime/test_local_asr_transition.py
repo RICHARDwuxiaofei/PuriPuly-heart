@@ -115,3 +115,34 @@ async def test_native_load_finishes_then_superseded_candidate_is_discarded() -> 
     assert snapshot["active_generation"] == second_outcome.generation
     assert snapshot["temporary_candidate_count"] == 0
     await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_prepare_diagnostic_preserves_failure_type() -> None:
+    diagnostics: list[dict[str, object]] = []
+    coordinator = LocalASRTransitionCoordinator(
+        channel="self",
+        stabilization_s=0,
+        diagnostic_sink=diagnostics.append,
+    )
+
+    async def prepare(
+        _value: LocalASRTransitionRequest,
+        _generation: int,
+    ) -> PreparedLocalASRTransition:
+        raise RuntimeError("private model path")
+
+    async def commit(_value: PreparedLocalASRTransition) -> None:
+        raise AssertionError("commit must not run")
+
+    outcome = await coordinator.request_transition(
+        request("qwen"),
+        prepare=prepare,
+        commit=commit,
+    )
+
+    assert outcome.status == "failed"
+    assert diagnostics[-1]["outcome"] == "failed"
+    assert diagnostics[-1]["failure_type"] == "RuntimeError"
+    assert "private model path" not in str(diagnostics[-1])
+    await coordinator.close()

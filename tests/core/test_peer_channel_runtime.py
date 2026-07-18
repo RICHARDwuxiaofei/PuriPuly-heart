@@ -497,6 +497,77 @@ async def test_local_qwen_provider_is_warmed_reused_replaced_and_closed_at_shutd
 
 
 @pytest.mark.asyncio
+async def test_initial_peer_local_asr_load_emits_model_timing_and_outcome() -> None:
+    hub = DormantReuseHub()
+    clock = FakeClock()
+    diagnostics: list[dict[str, object]] = []
+
+    class TimedWarmupSTT(DummyManagedSTT):
+        async def warmup(self) -> None:
+            await super().warmup()
+            clock.advance(1.25)
+
+    runtime = PeerChannelRuntime(
+        hub=hub,
+        clock=clock,
+        stt_factory=lambda _config, _on_terminal_failure: TimedWarmupSTT(),
+        source_factory=lambda _config: DummySource(),
+        vad_factory=lambda _config, _model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=fake_run_audio_loop,
+        local_asr_diagnostic_sink=diagnostics.append,
+    )
+    config = replace(make_local_qwen_runtime_config(), model_id="qwen-model")
+
+    await runtime.apply_policy(config=config, desired_active=True)
+
+    assert diagnostics == [
+        {
+            "channel": "peer",
+            "requested_provider": STTProviderName.LOCAL_QWEN.value,
+            "actual_provider": STTProviderName.LOCAL_QWEN.value,
+            "model_id": "qwen-model",
+            "trigger": "activation",
+            "load_ms": 1250,
+            "outcome": "applied",
+        }
+    ]
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_initial_peer_local_asr_load_failure_preserves_failure_type() -> None:
+    hub = DormantReuseHub()
+    clock = FakeClock()
+    diagnostics: list[dict[str, object]] = []
+
+    class FailingWarmupSTT(DummyManagedSTT):
+        async def warmup(self) -> None:
+            clock.advance(0.5)
+            raise RuntimeError("private model path")
+
+    runtime = PeerChannelRuntime(
+        hub=hub,
+        clock=clock,
+        stt_factory=lambda _config, _on_terminal_failure: FailingWarmupSTT(),
+        source_factory=lambda _config: DummySource(),
+        vad_factory=lambda _config, _model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=fake_run_audio_loop,
+        local_asr_diagnostic_sink=diagnostics.append,
+    )
+    config = replace(make_local_qwen_runtime_config(), model_id="qwen-model")
+
+    await runtime.apply_policy(config=config, desired_active=True)
+
+    assert diagnostics[-1]["outcome"] == "failed"
+    assert diagnostics[-1]["load_ms"] == 500
+    assert diagnostics[-1]["failure_type"] == "RuntimeError"
+    assert "private model path" not in str(diagnostics[-1])
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_peer_dormant_backend_is_released_after_idle_ttl() -> None:
     sleep_started = asyncio.Event()
     release_sleep = asyncio.Event()

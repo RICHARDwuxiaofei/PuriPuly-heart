@@ -188,6 +188,10 @@ class LocalQwenSherpaSTTBackend(STTBackend):
         self._decode_lock = asyncio.Lock()
         self._close_complete = asyncio.Event()
 
+    @property
+    def is_loaded(self) -> bool:
+        return self._recognizer is not None
+
     async def open_session(self) -> STTBackendSession:
         await self._ensure_recognizer()
         if self._closed:
@@ -421,7 +425,7 @@ class _LocalQwenSherpaSession(STTBackendSession):
                 inference_ms,
                 rtf,
             )
-        if audio_ms > 0:
+        if audio_ms > 0 and self._diagnostics_enabled():
             self._log_attempt_diagnostic(
                 audio_ms=audio_ms,
                 inference_ms=inference_ms,
@@ -431,7 +435,7 @@ class _LocalQwenSherpaSession(STTBackendSession):
         await self._events.put(STTBackendTranscriptEvent(text=text, is_final=True))
 
     async def _handle_decode_failure(self, failure: LocalDecodeFailure) -> None:
-        if failure.job.audio_ms > 0:
+        if failure.job.audio_ms > 0 and self._diagnostics_enabled():
             self._log_attempt_diagnostic(
                 audio_ms=failure.job.audio_ms,
                 inference_ms=failure.inference_ms,
@@ -445,14 +449,15 @@ class _LocalQwenSherpaSession(STTBackendSession):
         await self._events.put(failure.error)
 
     async def _handle_decode_expired(self, expired: LocalDecodeExpired) -> None:
-        logger.info(
-            "[LocalASR][Expiry] channel=%s model=%s intended_provider=%s reason=%s queue_wait_seconds=%.3f",
-            self.backend.stream_label or "unknown",
-            self.backend.model_id,
-            self.backend.provider_id,
-            expired.reason,
-            expired.queue_wait_ms / 1000.0,
-        )
+        if self._diagnostics_enabled():
+            logger.info(
+                "[LocalASR][Expiry] channel=%s model=%s intended_provider=%s reason=%s queue_wait_seconds=%.3f",
+                self.backend.stream_label or "unknown",
+                self.backend.model_id,
+                self.backend.provider_id,
+                expired.reason,
+                expired.queue_wait_ms / 1000.0,
+            )
         await self._events.put(STTBackendTranscriptEvent(text="", is_final=True))
 
     def _log_decode_backlog_warning(self, backlog: LocalDecodeBacklog) -> None:

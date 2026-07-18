@@ -61,7 +61,18 @@ class GpuWorkerRequestError(GpuWorkerError):
 
 
 class GpuWorkerClosedError(GpuWorkerError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "worker_closed",
+        exit_code: int | None = None,
+        failure_type: str | None = None,
+    ) -> None:
+        self.code = code
+        self.exit_code = exit_code
+        self.failure_type = failure_type
+        super().__init__(message)
 
 
 class GpuWorkerClientPort(Protocol):

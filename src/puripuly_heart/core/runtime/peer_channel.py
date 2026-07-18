@@ -17,6 +17,7 @@ from puripuly_heart.core.clock import Clock
 from puripuly_heart.core.runtime.local_asr_transition import (
     LocalASRSessionOptions,
     LocalASRTransitionCoordinator,
+    LocalASRTransitionDiagnosticSink,
     LocalASRTransitionRequest,
     PreparedLocalASRTransition,
 )
@@ -134,6 +135,7 @@ class PeerChannelRuntime:
         vad_model_resolver: Callable[[], Path],
         run_audio_loop: Callable[..., Awaitable[None]],
         diagnostic_sink: Callable[[PeerRuntimeDiagnostic], object] | None = None,
+        local_asr_diagnostic_sink: LocalASRTransitionDiagnosticSink | None = None,
         idle_release_seconds: float | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -145,6 +147,7 @@ class PeerChannelRuntime:
         self._vad_model_resolver = vad_model_resolver
         self._run_audio_loop = run_audio_loop
         self._diagnostic_sink = diagnostic_sink
+        self._local_asr_diagnostic_sink = local_asr_diagnostic_sink
         self._idle_release_seconds = idle_release_seconds
         self._sleep = sleep
 
@@ -173,7 +176,10 @@ class PeerChannelRuntime:
         self._last_idle_release_error_type: str | None = None
         self._retry_required_capture_target: ResolvedDesktopAudioCaptureTarget | None = None
         self._deferred_loop_diagnostics: dict[asyncio.Task[None], PeerRuntimeDiagnostic] = {}
-        self._transition_coordinator = LocalASRTransitionCoordinator(channel="peer")
+        self._transition_coordinator = LocalASRTransitionCoordinator(
+            channel="peer",
+            diagnostic_sink=local_asr_diagnostic_sink,
+        )
         self._last_local_asr_transition_status = "idle"
 
     @property
@@ -409,6 +415,7 @@ class PeerChannelRuntime:
             prepared_request: LocalASRTransitionRequest,
             transition_generation: int,
         ) -> PreparedLocalASRTransition:
+            load_started_at = self.clock.now()
             candidate = self._stt_factory(
                 config,
                 lambda exc, *, _generation=generation: self._on_terminal_stt_failure(
@@ -431,6 +438,7 @@ class PeerChannelRuntime:
                 request=prepared_request,
                 provider=candidate,
                 generation=transition_generation,
+                load_ms=max(0, int(round((self.clock.now() - load_started_at) * 1000))),
             )
 
         async def commit(prepared: PreparedLocalASRTransition) -> None:
@@ -490,31 +498,48 @@ class PeerChannelRuntime:
 
             async def build_and_warm() -> object:
                 nonlocal created_candidate, fresh_candidate
-                stt = (
-                    self._retained_stt
-                    if reusable and self._provider_signature == config.provider_signature
-                    else None
-                )
-                if stt is None:
-                    fresh_candidate = True
-                    stt = self._stt_factory(
-                        config,
-                        lambda exc, *, _generation=generation: self._on_terminal_stt_failure(
-                            exc, generation=_generation
-                        ),
+                load_started_at = self.clock.now()
+                try:
+                    stt = (
+                        self._retained_stt
+                        if reusable and self._provider_signature == config.provider_signature
+                        else None
                     )
-                    if inspect.isawaitable(stt):
-                        stt = await stt
-                    created_candidate = stt
-                warmup = (
-                    getattr(stt, "warmup", None)
-                    if config.backend.provider in _LOCAL_ASR_PROVIDERS
-                    else None
-                )
-                if callable(warmup):
-                    result = warmup()
-                    if inspect.isawaitable(result):
-                        await result
+                    if stt is None:
+                        fresh_candidate = True
+                        stt = self._stt_factory(
+                            config,
+                            lambda exc, *, _generation=generation: self._on_terminal_stt_failure(
+                                exc, generation=_generation
+                            ),
+                        )
+                        if inspect.isawaitable(stt):
+                            stt = await stt
+                        created_candidate = stt
+                    warmup = (
+                        getattr(stt, "warmup", None)
+                        if config.backend.provider in _LOCAL_ASR_PROVIDERS
+                        else None
+                    )
+                    if callable(warmup):
+                        result = warmup()
+                        if inspect.isawaitable(result):
+                            await result
+                except Exception as exc:
+                    if fresh_candidate and config.backend.provider in _LOCAL_ASR_PROVIDERS:
+                        self._emit_local_asr_diagnostic(
+                            config,
+                            outcome="failed",
+                            load_started_at=load_started_at,
+                            failure_type=type(exc).__name__,
+                        )
+                    raise
+                if fresh_candidate and config.backend.provider in _LOCAL_ASR_PROVIDERS:
+                    self._emit_local_asr_diagnostic(
+                        config,
+                        outcome="applied",
+                        load_started_at=load_started_at,
+                    )
                 if reusable and fresh_candidate:
                     async with self._lock:
                         current_config = self._config
@@ -833,7 +858,7 @@ class PeerChannelRuntime:
         current_task = asyncio.current_task()
         defer_diagnostic = current_task is not None and self._loop_task is current_task
         diagnostic = None
-        if config is not None and config.capture_target.kind == "process":
+        if config is not None:
             unavailable_reason = None
             if reason is PeerRuntimeFailureReason.PROCESS_TARGET_UNAVAILABLE:
                 unavailable_reason = self._last_failure_unavailable_reason
@@ -842,7 +867,8 @@ class PeerChannelRuntime:
                 capture_kind=config.capture_target.kind,
                 process_unavailable_reason=unavailable_reason,
             )
-            self._retry_required_capture_target = config.capture_target
+            if config.capture_target.kind == "process":
+                self._retry_required_capture_target = config.capture_target
         try:
             await self._mark_faulted_if_current(
                 generation,
@@ -1378,3 +1404,30 @@ class PeerChannelRuntime:
                 self._diagnostic_sink(diagnostic)
             except Exception:
                 pass
+
+    def _emit_local_asr_diagnostic(
+        self,
+        config: PeerRuntimeConfig,
+        *,
+        outcome: str,
+        load_started_at: float,
+        failure_type: str | None = None,
+    ) -> None:
+        sink = self._local_asr_diagnostic_sink
+        if sink is None:
+            return
+        fields: dict[str, object] = {
+            "channel": "peer",
+            "requested_provider": config.backend.provider,
+            "actual_provider": config.backend.provider,
+            "model_id": config.model_id,
+            "trigger": "activation",
+            "load_ms": max(0, int(round((self.clock.now() - load_started_at) * 1000))),
+            "outcome": outcome,
+        }
+        if failure_type is not None:
+            fields["failure_type"] = failure_type
+        try:
+            sink(fields)
+        except Exception:
+            pass

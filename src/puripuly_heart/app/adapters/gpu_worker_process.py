@@ -256,6 +256,7 @@ class _DefaultGpuWorkerClient(GpuWorkerClientPort):
     _close_lock: asyncio.Lock = field(init=False, repr=False)
     _close_complete: asyncio.Event = field(init=False, repr=False)
     _last_heartbeat: float = field(init=False, repr=False)
+    _terminal_error: GpuWorkerClosedError | None = field(init=False, default=None, repr=False)
     _closed: bool = field(init=False, default=False, repr=False)
     _closing: bool = field(init=False, default=False, repr=False)
 
@@ -369,7 +370,7 @@ class _DefaultGpuWorkerClient(GpuWorkerClientPort):
     async def next_event(self) -> GpuWorkerEvent:
         event = await self._events.get()
         if event is None:
-            raise GpuWorkerClosedError("worker event stream closed")
+            raise self._terminal_error or GpuWorkerClosedError("worker event stream closed")
         return event
 
     async def close(self) -> None:
@@ -490,6 +491,12 @@ class _DefaultGpuWorkerClient(GpuWorkerClientPort):
             while True:
                 raw = await self.reader.readline()
                 if not raw:
+                    if not self._closing and self._terminal_error is None:
+                        self._terminal_error = GpuWorkerClosedError(
+                            "worker event stream closed",
+                            code="event_stream_closed",
+                            exit_code=self.process.returncode,
+                        )
                     return
                 payload = _decode_frame(raw)
                 if not _valid_session_frame(payload, self.session_id):
@@ -510,7 +517,13 @@ class _DefaultGpuWorkerClient(GpuWorkerClientPort):
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
-            self._fail_pending(GpuWorkerClosedError("worker frame reader failed"))
+            error = GpuWorkerClosedError(
+                "worker frame reader failed",
+                code="frame_reader_failed",
+                failure_type=type(exc).__name__,
+            )
+            self._terminal_error = error
+            self._fail_pending(error)
         finally:
             await self._events.put(None)
 
@@ -561,7 +574,13 @@ class _DefaultGpuWorkerClient(GpuWorkerClientPort):
     async def _monitor_process(self) -> None:
         await self.process.wait()
         if not self._closing:
-            self._fail_pending(GpuWorkerClosedError("worker process exited"))
+            error = GpuWorkerClosedError(
+                "worker process exited",
+                code="worker_process_exited",
+                exit_code=self.process.returncode,
+            )
+            self._terminal_error = error
+            self._fail_pending(error)
 
     async def _monitor_heartbeat(self) -> None:
         interval = max(0.1, min(self.heartbeat_timeout_s / 3.0, 1.0))
@@ -569,7 +588,12 @@ class _DefaultGpuWorkerClient(GpuWorkerClientPort):
             await asyncio.sleep(interval)
             if time.monotonic() - self._last_heartbeat <= self.heartbeat_timeout_s:
                 continue
-            self._fail_pending(GpuWorkerClosedError("worker heartbeat timed out"))
+            error = GpuWorkerClosedError(
+                "worker heartbeat timed out",
+                code="heartbeat_timeout",
+            )
+            self._terminal_error = error
+            self._fail_pending(error)
             if self.process.returncode is None:
                 self.process.terminate()
             return

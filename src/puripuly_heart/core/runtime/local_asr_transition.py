@@ -195,6 +195,7 @@ class LocalASRTransitionCoordinator:
                 self._pending = None
                 self._phase = "preparing"
                 prepared: PreparedLocalASRTransition | None = None
+                prepare_started_at = self.clock()
                 try:
                     prepared = await queued.prepare(queued.request, queued.generation)
                     if prepared.generation != queued.generation:
@@ -204,9 +205,17 @@ class LocalASRTransitionCoordinator:
                     self._prepared_candidates[queued.generation] = prepared
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as exc:
                     self._resolve(queued, "failed")
-                    self._emit(queued, "failed")
+                    self._emit(
+                        queued,
+                        "failed",
+                        exception=exc,
+                        load_ms=max(
+                            0,
+                            int(round((self.clock() - prepare_started_at) * 1000)),
+                        ),
+                    )
                     continue
                 if (
                     self._closed
@@ -230,11 +239,11 @@ class LocalASRTransitionCoordinator:
                     if self._closed:
                         return
                     raise
-                except Exception:
+                except Exception as exc:
                     self._prepared_candidates.pop(queued.generation, None)
                     self._schedule_discard(prepared.provider)
                     self._resolve(queued, "failed", prepared)
-                    self._emit(queued, "failed", prepared)
+                    self._emit(queued, "failed", prepared, exception=exc)
                     continue
                 self._prepared_candidates.pop(queued.generation, None)
                 self._active_generation = queued.generation
@@ -272,11 +281,14 @@ class LocalASRTransitionCoordinator:
         queued: _QueuedTransition,
         status: LocalASRTransitionStatus,
         prepared: PreparedLocalASRTransition | None = None,
+        *,
+        exception: Exception | None = None,
+        load_ms: int | None = None,
     ) -> None:
         if self.diagnostic_sink is None:
             return
         validation_ms = prepared.validation_ms if prepared is not None else 0
-        load_ms = prepared.load_ms if prepared is not None else 0
+        resolved_load_ms = prepared.load_ms if prepared is not None else (load_ms or 0)
         fields = {
             "channel": queued.request.channel,
             "requested_provider": queued.request.requested_provider,
@@ -285,14 +297,18 @@ class LocalASRTransitionCoordinator:
             "generation": queued.generation,
             "trigger": queued.request.trigger,
             "validation_ms": validation_ms,
-            "load_ms": load_ms,
+            "load_ms": resolved_load_ms,
             "boundary_wait_ms": max(
                 0,
-                int(round((self.clock() - queued.submitted_at) * 1000)) - validation_ms - load_ms,
+                int(round((self.clock() - queued.submitted_at) * 1000))
+                - validation_ms
+                - resolved_load_ms,
             ),
             "switch_ms": 0,
             "outcome": status,
         }
+        if exception is not None:
+            fields["failure_type"] = type(exception).__name__
         try:
             self.diagnostic_sink(fields)
         except Exception:
