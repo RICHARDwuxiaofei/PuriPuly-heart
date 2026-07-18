@@ -157,6 +157,7 @@ jobs:
           LIBCLANG_PATH: ${{ github.workspace }}\.venv\Lib\site-packages\clang\native
         shell: pwsh
         run: |
+          $env:CMAKE_PREFIX_PATH = $env:VULKAN_SDK
           cargo build `
             --manifest-path native/gpu_worker/Cargo.toml `
             --locked `
