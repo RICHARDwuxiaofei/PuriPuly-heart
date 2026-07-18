@@ -16,7 +16,7 @@ env:
   PYTHON_VERSION: "3.12.10"
   UV_VERSION: "0.9.17"
   INNOSETUP_VERSION: "6.6.1"
-  VULKAN_SDK_VERSION: "1.4.350.0"
+  VULKAN_SDK_VERSION: "1.4.328.1"
 
 jobs:
   verify-version:
