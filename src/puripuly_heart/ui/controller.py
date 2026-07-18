@@ -25,6 +25,7 @@ import flet as ft
 import numpy as np
 
 from puripuly_heart.app.language_selection import LanguageSelectionChange
+from puripuly_heart.app.ports._settings_values import freeze_settings_values
 from puripuly_heart.app.ports.canonical_settings_persistence import (
     CanonicalSettingsPersistencePort,
     ProviderVerificationBinding,
@@ -822,6 +823,17 @@ class _ControllerSecretStorePortAdapter:
 def _copy_runtime_only_ui_state(source: AppSettings, target: AppSettings) -> None:
     target.ui.overlay_enabled = bool(source.ui.overlay_enabled)
     target.ui.peer_translation_enabled = bool(source.ui.peer_translation_enabled)
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsViewSettingsChange:
+    values_by_path: Mapping[str, object]
+    pending_settings: AppSettings
+    can_rebase: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "values_by_path", freeze_settings_values(self.values_by_path))
+        object.__setattr__(self, "pending_settings", copy.deepcopy(self.pending_settings))
 
 
 def _settings_mutation_committed(result: TransactionResult) -> bool:
@@ -1878,7 +1890,7 @@ class GuiController:
         )
         install_started_at = time.monotonic()
         self.log_basic(
-            "[LocalASR][Install] " f"model={manifest.model_id} origin=manual outcome=started"
+            f"[LocalASR][Install] model={manifest.model_id} origin=manual outcome=started"
         )
         task = runtime.start(origin="explicit_gpu_opt_in", run_download=run_install)
         try:
@@ -6329,7 +6341,7 @@ class GuiController:
                 active_model_id = model_id
                 active_install_started_at = time.monotonic()
                 self.log_basic(
-                    "[LocalASR][Install] " f"model={model_id} origin={origin} outcome=started"
+                    f"[LocalASR][Install] model={model_id} origin={origin} outcome=started"
                 )
                 self._local_stt_notice_model_id = model_id
                 self._local_stt_download_percent = 0
@@ -7284,6 +7296,11 @@ class GuiController:
         self._update_canonical_settings_from_legacy_delta(self.settings, updated)
         try:
             await self.apply_settings(updated)
+            if self.settings is not None:
+                self._reload_settings_view_from_settings(
+                    self.settings,
+                    preserve_custom_vocab_draft=True,
+                )
         finally:
             self._complete_canonical_mutation()
 
@@ -7307,6 +7324,42 @@ class GuiController:
             if settings is not None
             else None
         )
+
+    def capture_settings_view_change(
+        self,
+        pending_settings: AppSettings,
+    ) -> SettingsViewSettingsChange:
+        baselines = (
+            self._settings_view_order22_baseline,
+            self._settings_view_order23_baseline,
+            self._settings_view_order24_baseline,
+        )
+        if any(baseline is None for baseline in baselines):
+            return SettingsViewSettingsChange(
+                values_by_path={},
+                pending_settings=pending_settings,
+                can_rebase=False,
+            )
+
+        values_by_path: dict[str, object] = {}
+        for baseline in baselines:
+            if baseline is not None:
+                values_by_path.update(baseline.patch_to(pending_settings))
+        return SettingsViewSettingsChange(
+            values_by_path=values_by_path,
+            pending_settings=pending_settings,
+            can_rebase=True,
+        )
+
+    def merge_settings_view_change_with_current(
+        self,
+        change: SettingsViewSettingsChange,
+    ) -> AppSettings:
+        if not change.can_rebase or self.settings is None:
+            return copy.deepcopy(change.pending_settings)
+        merged_settings = copy.deepcopy(self.settings)
+        _apply_settings_path_patch(merged_settings, change.values_by_path)
+        return merged_settings
 
     def _reload_settings_view_from_settings(
         self,
@@ -7617,6 +7670,11 @@ class GuiController:
         prev_peer_target_lang = (
             getattr(self.hub, "peer_target_language", None) if self.hub else None
         )
+        prev_peer_source_mode = (
+            previous_settings_for_desktop.languages.peer_source_mode
+            if previous_settings_for_desktop is not None
+            else None
+        )
         prev_effective_peer_source = (
             _effective_peer_language(prev_source_lang, prev_peer_source_lang)
             if prev_source_lang is not None and prev_peer_source_lang is not None
@@ -7649,6 +7707,18 @@ class GuiController:
                 settings.languages.target_language,
                 settings.languages.peer_target_language,
             )
+        )
+        peer_source_language_changed = (
+            prev_peer_source_lang is not None
+            and prev_peer_source_lang != settings.languages.peer_source_language
+        )
+        peer_target_language_changed = (
+            prev_peer_target_lang is not None
+            and prev_peer_target_lang != settings.languages.peer_target_language
+        )
+        peer_source_mode_changed = (
+            prev_peer_source_mode is not None
+            and prev_peer_source_mode != settings.languages.peer_source_mode
         )
         if source_language_changed or target_language_changed:
             presenter = self._current_overlay_presenter_for_direct_runtime_command()
@@ -7801,7 +7871,13 @@ class GuiController:
             )
             await self._apply_stt_runtime_replacement(smooth_local=smooth_local)
 
-        if reload_settings_view and (source_language_changed or target_language_changed):
+        if reload_settings_view and (
+            source_language_changed
+            or target_language_changed
+            or peer_source_language_changed
+            or peer_target_language_changed
+            or peer_source_mode_changed
+        ):
             self._reload_settings_view_from_settings(
                 settings,
                 preserve_custom_vocab_draft=True,

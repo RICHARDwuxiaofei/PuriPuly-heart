@@ -2577,20 +2577,32 @@ async def test_prompt_apply_keeps_dashboard_target_for_next_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_on_settings_changed_applies_raw_settings_without_prompt_merge() -> None:
+async def test_on_settings_changed_captures_patch_before_queued_apply() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
     raw_settings = object()
+    captured_change = object()
+    merged_settings = object()
     seen: list[object] = []
 
     def fake_merge_settings(_settings) -> object:
         raise AssertionError("prompt merge should not run for generic settings changes")
+
+    def fake_capture_settings_view_change(settings) -> object:
+        assert settings is raw_settings
+        return captured_change
+
+    def fake_merge_settings_view_change(change) -> object:
+        assert change is captured_change
+        return merged_settings
 
     async def fake_apply_settings(settings) -> None:
         seen.append(settings)
 
     app.controller = SimpleNamespace(
         merge_settings_tab_apply_with_current_languages=fake_merge_settings,
+        capture_settings_view_change=fake_capture_settings_view_change,
+        merge_settings_view_change_with_current=fake_merge_settings_view_change,
         apply_settings=fake_apply_settings,
     )
 
@@ -2598,7 +2610,7 @@ async def test_on_settings_changed_applies_raw_settings_without_prompt_merge() -
 
     assert len(app.page.tasks) == 1
     await app.page.tasks[0]()
-    assert seen == [raw_settings]
+    assert seen == [merged_settings]
 
 
 @pytest.mark.asyncio

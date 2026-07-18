@@ -1287,8 +1287,23 @@ class TranslatorApp:
         self._queue_settings_mutation_task(_task)
 
     def _on_settings_changed(self, settings) -> None:
+        capture_change = getattr(self.controller, "capture_settings_view_change", None)
+        merge_change = getattr(
+            self.controller,
+            "merge_settings_view_change_with_current",
+            None,
+        )
+        captured_change = (
+            capture_change(settings)
+            if callable(capture_change) and callable(merge_change)
+            else None
+        )
+
         async def _task():
-            await self.controller.apply_settings(settings)
+            next_settings = (
+                merge_change(captured_change) if captured_change is not None else settings
+            )
+            await self.controller.apply_settings(next_settings)
             self._sync_microphone_test_dialog_if_inactive()
 
         self._queue_settings_mutation_task(_task)

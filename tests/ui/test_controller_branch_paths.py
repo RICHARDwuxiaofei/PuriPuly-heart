@@ -1115,6 +1115,35 @@ def test_settings_view_order22_baseline_uses_path_snapshot_not_legacy_settings()
     assert base_settings.provider.llm == LLMProviderName.DEEPSEEK
 
 
+def test_settings_view_change_rebases_audio_patch_without_restoring_stale_peer_language() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings_view_snapshot = AppSettings()
+    settings_view_snapshot.provider.peer_stt = STTProviderName.LOCAL_CPU_AUTO
+    controller._remember_settings_view_order22_baseline(settings_view_snapshot)
+    controller._remember_settings_view_order23_baseline(settings_view_snapshot)
+    controller._remember_settings_view_order24_baseline(settings_view_snapshot)
+
+    pending = copy.deepcopy(settings_view_snapshot)
+    pending.desktop_audio.output_device = "Speakers (Loopback)"
+    change = controller.capture_settings_view_change(pending)
+
+    current = copy.deepcopy(settings_view_snapshot)
+    current.languages.peer_source_language = "ja"
+    controller.settings = current
+    controller._remember_settings_view_order22_baseline(current)
+
+    merged = controller.merge_settings_view_change_with_current(change)
+
+    assert merged.desktop_audio.output_device == "Speakers (Loopback)"
+    assert merged.languages.peer_source_language == "ja"
+    assert controller.settings.languages.peer_source_language == "ja"
+    decision = controller_module.resolve_local_asr_selection(
+        merged.provider.peer_stt.value,
+        merged.languages.effective_peer_source,
+    )
+    assert decision.model_id == "parakeet-tdt-ctc-0.6b-ja-int8-sherpa"
+
+
 @pytest.mark.parametrize(
     "failure_reason",
     [
@@ -19004,7 +19033,13 @@ async def test_on_dashboard_language_change_persists_explicit_automatic_peer_mod
 async def test_dashboard_peer_language_change_refreshes_peer_translation_pipeline_immediately(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=DummyDashboard(),
+            view_settings=settings_view,
+        )
+    )
     controller.settings = AppSettings()
     controller.hub = DummyHub()
     controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
@@ -19047,6 +19082,11 @@ async def test_dashboard_peer_language_change_refreshes_peer_translation_pipelin
     assert refreshed == ["peer"]
     assert controller.hub.peer_source_language == "ja"
     assert controller.hub.peer_target_language == "fr"
+    assert len(settings_view.calls) == 1
+    reloaded_settings, _config_path, preserve_custom_vocab_draft = settings_view.calls[0]
+    assert reloaded_settings.languages.peer_source_language == "ja"
+    assert reloaded_settings.languages.peer_target_language == "fr"
+    assert preserve_custom_vocab_draft is True
 
 
 @pytest.mark.asyncio
