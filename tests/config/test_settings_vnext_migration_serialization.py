@@ -146,17 +146,46 @@ def test_peer_auto_detection_intent_roundtrips_through_legacy_compatibility_proj
     migration = _migration()
     serialization = _serialization()
     legacy = AppSettings()
-    legacy.languages.peer_source_mode = "soniox_auto"
+    legacy.languages.peer_source_mode = "auto"
     legacy.languages.peer_expected_languages = ["ja", "zh-TW", "ja"]
 
     vnext = migration.from_legacy_app_settings(legacy)
     serialized = serialization.to_dict(vnext)
     projected = migration.to_legacy_dict(vnext)
 
-    assert serialized["intent"]["languages"]["peer_source_mode"] == "soniox_auto"
+    assert serialized["intent"]["languages"]["peer_source_mode"] == "auto"
     assert serialized["intent"]["languages"]["peer_expected_languages"] == ["ja", "zh-TW"]
-    assert projected["languages"]["peer_source_mode"] == "soniox_auto"
+    assert projected["languages"]["peer_source_mode"] == "auto"
     assert projected["languages"]["peer_expected_languages"] == ["ja", "zh-TW"]
+
+
+def test_v30_soniox_auto_is_backed_up_and_migrated_once(tmp_path: Path) -> None:
+    compat = _compat()
+    serialization = _serialization()
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["settings_version"] = 30
+    raw["intent"]["languages"]["peer_source_mode"] = "soniox_auto"
+    path = tmp_path / "settings.json"
+    original_bytes = _write_json_bytes(path, raw)
+    fixed_now = datetime(2026, 7, 18, 1, 2, 3, tzinfo=timezone.utc)
+
+    first = compat.load_vnext_settings(path, now=fixed_now)
+
+    assert first.ok
+    assert first.migrated is True
+    assert first.backup_path == tmp_path / "settings.json.pre-v30.20260718T010203Z.bak"
+    assert first.backup_path.read_bytes() == original_bytes
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["settings_version"] == VNEXT_SETTINGS_SCHEMA_VERSION
+    assert persisted["intent"]["languages"]["peer_source_mode"] == "auto"
+    assert "soniox_auto" not in path.read_text(encoding="utf-8")
+
+    second = compat.load_vnext_settings(path, now=fixed_now)
+
+    assert second.ok
+    assert second.migrated is False
+    assert second.backup_path is None
+    assert list(tmp_path.glob("*.bak")) == [first.backup_path]
 
 
 def test_high_version_legacy_shape_migrates_by_shape_not_settings_version() -> None:

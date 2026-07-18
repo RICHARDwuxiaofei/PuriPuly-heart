@@ -402,6 +402,7 @@ class UIEventBridge:
         )
         self._running = False
         self._closed = False
+        self._started = asyncio.Event()
 
     def _get_language_codes(self) -> tuple[str | None, str | None]:
         if callable(self._get_language_codes_callback):
@@ -491,6 +492,7 @@ class UIEventBridge:
 
     async def run(self) -> None:
         self._running = True
+        self._started.set()
         logger.info("UI Event Bridge started")
         try:
             while self._running and not self._closed:
@@ -506,6 +508,9 @@ class UIEventBridge:
             raise
         finally:
             self._running = False
+
+    async def wait_started(self) -> None:
+        await self._started.wait()
 
     def close(self) -> None:
         self._closed = True

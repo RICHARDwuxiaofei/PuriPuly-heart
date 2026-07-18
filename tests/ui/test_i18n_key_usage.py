@@ -435,7 +435,7 @@ def test_zh_cn_qwen_labels_use_qwen_brand_name() -> None:
         "provider.qwen": "Qwen 3.5",
         "provider.qwen35_flash": "Qwen 3.5 Flash",
         "provider.qwen35_plus": "Qwen 3.5 Plus",
-        "provider.qwen_asr": "Qwen ASR",
+        "provider.qwen_asr": "Qwen3 ASR Flash Realtime",
     }
 
     for key, expected in expected_qwen_labels.items():

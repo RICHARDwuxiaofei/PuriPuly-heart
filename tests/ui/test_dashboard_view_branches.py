@@ -598,7 +598,7 @@ def test_dashboard_apply_locale_and_dialog_open_paths(monkeypatch: pytest.Monkey
     assert dashboard_module.t("dashboard.warn_llm_key") in warning_texts
 
 
-def test_dashboard_peer_source_dialog_lists_automatic_soniox_first(
+def test_dashboard_peer_source_dialog_lists_automatic_detection_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view = _make_dashboard(monkeypatch)
@@ -606,7 +606,7 @@ def test_dashboard_peer_source_dialog_lists_automatic_soniox_first(
 
     view._open_peer_source_dialog()
 
-    assert FakeLanguageModal.languages[0][0] == dashboard_module.PEER_SOURCE_MODE_SONIOX_AUTO
+    assert FakeLanguageModal.languages[0][0] == dashboard_module.PEER_SOURCE_MODE_AUTO
 
 
 def test_dashboard_automatic_peer_selection_preserves_manual_source_and_emits_auto_mode(
@@ -625,10 +625,10 @@ def test_dashboard_automatic_peer_selection_preserves_manual_source_and_emits_au
     )
     view.set_languages_from_codes("ko", "en", "ja", "fr")
 
-    view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_SONIOX_AUTO)
+    view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_AUTO)
 
     assert view._peer_source_lang_code == "ja"
-    assert changes[-1] == ("ko", "en", "ja", "fr", "soniox_auto")
+    assert changes[-1] == ("ko", "en", "ja", "fr", "auto")
 
 
 def test_dashboard_automatic_peer_callback_type_error_is_not_retried(
@@ -644,10 +644,10 @@ def test_dashboard_automatic_peer_callback_type_error_is_not_retried(
     view.on_language_change = fail_after_recording
 
     with pytest.raises(TypeError, match="callback failure"):
-        view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_SONIOX_AUTO)
+        view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_AUTO)
 
     assert len(calls) == 1
-    assert calls[0][0].peer_source_mode == "soniox_auto"
+    assert calls[0][0].peer_source_mode == "auto"
 
 
 def test_dashboard_automatic_peer_selection_emits_typed_change(
@@ -657,9 +657,9 @@ def test_dashboard_automatic_peer_selection_emits_typed_change(
     calls = []
     view.on_language_change = calls.append
 
-    view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_SONIOX_AUTO)
+    view._on_peer_source_select(dashboard_module.PEER_SOURCE_MODE_AUTO)
 
-    assert calls[-1].peer_source_mode == "soniox_auto"
+    assert calls[-1].peer_source_mode == "auto"
 
 
 def test_dashboard_peer_swap_keeps_automatic_mode_and_valid_languages(
@@ -676,18 +676,18 @@ def test_dashboard_peer_swap_keeps_automatic_mode_and_valid_languages(
             change.peer_source_mode,
         )
     )
-    view.set_languages_from_codes("ko", "en", "ja", "fr", "soniox_auto")
+    view.set_languages_from_codes("ko", "en", "ja", "fr", "auto")
 
     view._swap_peer_languages()
 
-    assert view._peer_source_mode == "soniox_auto"
+    assert view._peer_source_mode == "auto"
     assert view._peer_source_lang_code == "fr"
     assert view._peer_target_lang_code == "ja"
-    assert changes[-1] == ("ko", "en", "fr", "ja", "soniox_auto")
+    assert changes[-1] == ("ko", "en", "fr", "ja", "auto")
     assert view.language_card.languages[-1] == (
         "name-ko",
         "name-en",
-        dashboard_module.t("dashboard.peer_source.automatic_soniox"),
+        dashboard_module.t("dashboard.peer_source.automatic"),
         "name-ja",
     )
 

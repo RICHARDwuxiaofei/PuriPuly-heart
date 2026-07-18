@@ -252,9 +252,11 @@ class ResolvedSTTConfig:
     custom_vocabulary_enabled: bool
     custom_terms: Mapping[str, tuple[str, ...]]
     provider_options: Mapping[str, ResolvedOptionValue]
+    source_mode: Literal["manual", "auto"] = "manual"
 
     def __post_init__(self) -> None:
         _ensure_known_value(self.channel, RUNTIME_CHANNELS, field_name="channel")
+        _ensure_known_value(self.source_mode, ("manual", "auto"), field_name="source_mode")
         if not isinstance(self.source_language, str) or not self.source_language.strip():
             raise ValueError("source_language must be non-empty")
         if self.sample_rate_hz <= 0:

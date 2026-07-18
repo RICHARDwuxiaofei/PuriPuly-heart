@@ -158,6 +158,7 @@ class TranslatorApp:
         self._github_star_prompt_runtime = GithubStarPromptRuntime(
             diagnostics_sink=self._github_star_prompt_runtime_diagnostics_sink,
         )
+        self._after_launch_task_handle = None
         self._launch_high_priority_feedback_shown = False
         self._launch_high_priority_feedback_reason: str | None = None
         self._launch_high_priority_snackbar = None
@@ -188,6 +189,7 @@ class TranslatorApp:
         self.view_settings.on_start_microphone_test = self._on_start_microphone_test
         self.view_settings.on_gpu_install_requested = self._on_gpu_install_requested
         self.view_settings.on_gpu_retry_requested = self._on_gpu_retry_requested
+        self.view_settings.on_gpu_discovery_requested = self._on_gpu_discovery_requested
         self.view_settings.on_telemetry_consent_change = self._on_telemetry_consent_change
         self.view_settings.on_list_loopback_capture_options = (
             lambda: self.controller.list_loopback_capture_options()
@@ -257,7 +259,6 @@ class TranslatorApp:
         self.page.window.min_width = MIN_WINDOW_WIDTH
         self.page.window.min_height = MIN_WINDOW_HEIGHT
         self.page.window.icon = "icons/icon.ico"
-        self.page.window.center()
         self.page.on_keyboard_event = self._on_keyboard_event
 
     def _build_layout(self):
@@ -436,6 +437,115 @@ class TranslatorApp:
             return
         await runtime.close()
         self._github_star_prompt_launch_pending = False
+
+    def schedule_after_launch_tasks(self) -> None:
+        handle = getattr(self, "_after_launch_task_handle", None)
+        if handle is not None and not handle.done():
+            return
+        self._after_launch_task_handle = self.page.run_task(self._run_after_launch_tasks)
+
+    async def _run_after_launch_tasks(self) -> None:
+        await asyncio.gather(
+            self._run_launch_notification_flow(),
+            self._run_after_launch_runtime_preparation(),
+        )
+
+    async def _run_launch_notification_flow(self) -> None:
+        exhausted, _ = await asyncio.gather(
+            self._refresh_openrouter_usage_after_launch(),
+            self._check_for_update_after_launch(),
+        )
+        if exhausted:
+            self._mark_launch_high_priority_feedback_shown("usage_exhaustion")
+
+        try:
+            await self.maybe_show_github_star_prompt_after_launch()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._log_detailed(
+                f"[Startup] GitHub star prompt failed: {exc!r}",
+                level=logging.WARNING,
+            )
+
+    async def _refresh_openrouter_usage_after_launch(self) -> bool:
+        controller = getattr(self, "controller", None)
+        refresh_usage = getattr(
+            controller,
+            "refresh_openrouter_usage_after_launch",
+            None,
+        )
+        if not callable(refresh_usage):
+            return False
+        try:
+            return bool(await refresh_usage())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._log_detailed(
+                f"[Startup] OpenRouter usage refresh failed: {exc!r}",
+                level=logging.WARNING,
+            )
+            return False
+
+    async def _check_for_update_after_launch(self) -> None:
+        update_kwargs = {"log_detailed": self._log_detailed}
+        try:
+            update_parameters = inspect.signature(_check_and_notify_update).parameters
+        except (TypeError, ValueError):
+            update_parameters = {}
+        if "on_launch_snackbar_shown" in update_parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in update_parameters.values()
+        ):
+            update_kwargs["on_launch_snackbar_shown"] = (
+                lambda snackbar: self._mark_launch_high_priority_feedback_shown("update", snackbar)
+            )
+        try:
+            await _check_and_notify_update(self.page, **update_kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._log_detailed(
+                f"[Startup] Update check failed: {exc!r}",
+                level=logging.WARNING,
+            )
+
+    async def _run_after_launch_runtime_preparation(self) -> None:
+        controller = getattr(self, "controller", None)
+        prepare = getattr(controller, "prepare_runtime_after_launch", None)
+        if not callable(prepare):
+            return
+        try:
+            await prepare()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._log_detailed(
+                f"[Startup] Runtime preparation failed: {exc!r}",
+                level=logging.WARNING,
+            )
+
+    async def close_after_launch_tasks(self) -> None:
+        handle = getattr(self, "_after_launch_task_handle", None)
+        if handle is not None:
+            if not handle.done():
+                handle.cancel()
+            try:
+                if isinstance(handle, asyncio.Future):
+                    await asyncio.gather(handle, return_exceptions=True)
+                elif inspect.isawaitable(handle):
+                    await handle
+                else:
+                    await asyncio.wrap_future(handle)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            finally:
+                if self._after_launch_task_handle is handle:
+                    self._after_launch_task_handle = None
+        await self.close_github_star_prompt_runtime()
 
     async def _open_github_star_prompt_snackbar(self, *, should_open=None) -> bool:  # noqa: ANN001
         if getattr(self, "_github_star_prompt_shown_this_launch", False):
@@ -1104,6 +1214,9 @@ class TranslatorApp:
 
     def _on_gpu_retry_requested(self) -> None:
         self.page.run_task(self.controller.retry_gpu_activation)
+
+    def _on_gpu_discovery_requested(self) -> None:
+        self.page.run_task(self.controller.ensure_gpu_device_discovery)
 
     def _on_language_change(
         self,
@@ -1842,24 +1955,9 @@ async def main_gui(
         app_kwargs["vrchat_osc_presence"] = vrchat_osc_presence
     app = TranslatorApp(page, **app_kwargs)
     await app.controller.start()
-
-    # Check for updates in background
-    update_kwargs = {"log_detailed": app._log_detailed}
-    try:
-        update_parameters = inspect.signature(_check_and_notify_update).parameters
-    except (TypeError, ValueError):
-        update_parameters = {}
-    if "on_launch_snackbar_shown" in update_parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in update_parameters.values()
-    ):
-        update_kwargs["on_launch_snackbar_shown"] = (
-            lambda snackbar: app._mark_launch_high_priority_feedback_shown("update", snackbar)
-        )
-    await _check_and_notify_update(page, **update_kwargs)
-
-    show_github_star_prompt = getattr(app, "maybe_show_github_star_prompt_after_launch", None)
-    if callable(show_github_star_prompt):
-        await show_github_star_prompt()
+    schedule_after_launch = getattr(app, "schedule_after_launch_tasks", None)
+    if callable(schedule_after_launch):
+        schedule_after_launch()
 
 
 async def _check_and_notify_update(

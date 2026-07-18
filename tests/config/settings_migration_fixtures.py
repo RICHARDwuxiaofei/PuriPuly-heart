@@ -332,7 +332,7 @@ def maximal_v24_settings_fixture() -> dict[str, Any]:
     settings.languages.target_language = "zh-CN"
     settings.languages.peer_source_language = "fr"
     settings.languages.peer_target_language = "es"
-    settings.languages.peer_source_mode = "soniox_auto"
+    settings.languages.peer_source_mode = "auto"
     settings.languages.peer_expected_languages = ["fr", "ja"]
     settings.languages.recent_source_languages = ["fr", "de", "it"]
     settings.languages.recent_target_languages = ["es", "th", "vi"]

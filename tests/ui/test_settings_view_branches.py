@@ -86,7 +86,7 @@ def test_cpu_auto_option_is_disabled_until_all_models_are_available(
 
     unavailable = view._stt_option_item(STTProviderName.LOCAL_CPU_AUTO)
     assert unavailable.disabled is True
-    assert unavailable.description == t("provider.local_cpu_auto.unavailable")
+    assert unavailable.description == t("provider.local_cpu_auto.description")
 
     view.set_local_cpu_auto_available(True)
     available = view._stt_option_item(STTProviderName.LOCAL_CPU_AUTO)
@@ -2231,7 +2231,7 @@ def test_peer_stt_local_qwen_option_is_selectable_with_provider_description(
     assert captured["title"] == t("settings.section.peer_stt")
     assert captured["show_description"] is True
     assert captured["two_column"] is True
-    assert local_qwen_option.label == "Qwen ASR 0.6B"
+    assert local_qwen_option.label == "Qwen3 ASR 0.6B"
     assert local_qwen_option.disabled is False
     assert local_qwen_option.description == t("provider.local_qwen.description")
     assert all(
@@ -2299,6 +2299,25 @@ def test_gpu_selection_shows_one_shared_device_card_and_retains_unavailable_save
         "vk:saved",
     ]
     assert view._gpu_device_status.value == t("settings.gpu_state.ready")
+
+
+def test_selecting_gpu_for_self_or_peer_requests_discovery_once_per_new_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.DEEPGRAM
+    settings.provider.peer_stt = STTProviderName.DEEPGRAM
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    requests: list[str] = []
+    view.on_gpu_discovery_requested = lambda: requests.append("discover")
+
+    view._on_stt_selected(STTProviderName.LOCAL_QWEN_GPU.value)
+    view._on_stt_selected(STTProviderName.LOCAL_QWEN_GPU.value)
+    view._on_peer_stt_selected(STTProviderName.LOCAL_QWEN_GPU.value)
+    view._on_peer_stt_selected(STTProviderName.LOCAL_QWEN_GPU.value)
+
+    assert requests == ["discover", "discover"]
 
 
 @pytest.mark.parametrize("locale", ("en", "ko", "zh-CN", "ja", "ru"))

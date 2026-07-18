@@ -88,6 +88,7 @@ _LEGACY_VERIFICATION_CONTEXT = {"flow": "legacy_settings_migration"}
 _LOCAL_QWEN_PROVIDER = "local_qwen"
 _LOCAL_CPU_AUTO_PROVIDER = "local_cpu_auto"
 _LOCAL_QWEN_CPU_AUTO_MIGRATION_VERSION = 30
+_PEER_SOURCE_AUTO_MIGRATION_VERSION = 31
 
 _TEMPORARY_GENERIC_FALLBACK_ALIASES: dict[str, TranslationFallbackIntent] = {
     "none": TranslationFallbackIntent(enabled=False),
@@ -128,6 +129,7 @@ _FALLBACK_FIELDS_ALIAS: dict[tuple[bool, str, str], str] = {
 
 def _prepare_vnext_migration_dict(data: Mapping[str, Any]) -> dict[str, Any]:
     migrate_local_qwen = _requires_local_qwen_cpu_auto_migration(data.get("settings_version"))
+    migrate_peer_source_auto = _requires_peer_source_auto_migration(data.get("settings_version"))
     prepared = dict(copy.deepcopy(data))
     prepared["settings_version"] = VNEXT_SETTINGS_SCHEMA_VERSION
     intent = prepared.get("intent") if isinstance(prepared.get("intent"), dict) else {}
@@ -146,6 +148,8 @@ def _prepare_vnext_migration_dict(data: Mapping[str, Any]) -> dict[str, Any]:
         intent["translation"] = translation
         prepared["intent"] = intent
     if isinstance(intent, dict):
+        if migrate_peer_source_auto:
+            _migrate_peer_source_auto_mode(intent)
         if migrate_local_qwen:
             _migrate_canonical_local_qwen_provider(intent, "stt")
             _migrate_canonical_local_qwen_provider(intent, "peer_stt")
@@ -179,6 +183,24 @@ def _requires_local_qwen_cpu_auto_migration(settings_version: object) -> bool:
     if isinstance(settings_version, str) and settings_version.strip().isdigit():
         return int(settings_version.strip()) < _LOCAL_QWEN_CPU_AUTO_MIGRATION_VERSION
     return True
+
+
+def _requires_peer_source_auto_migration(settings_version: object) -> bool:
+    if isinstance(settings_version, bool):
+        return True
+    if isinstance(settings_version, int):
+        return settings_version < _PEER_SOURCE_AUTO_MIGRATION_VERSION
+    if isinstance(settings_version, str) and settings_version.strip().isdigit():
+        return int(settings_version.strip()) < _PEER_SOURCE_AUTO_MIGRATION_VERSION
+    return True
+
+
+def _migrate_peer_source_auto_mode(intent: dict[str, Any]) -> None:
+    raw = intent.get("languages")
+    languages = dict(raw) if isinstance(raw, Mapping) else {}
+    if languages.get("peer_source_mode") == "soniox_auto":
+        languages["peer_source_mode"] = "auto"
+        intent["languages"] = languages
 
 
 def _migrate_canonical_local_qwen_provider(intent: dict[str, Any], key: str) -> None:
@@ -456,7 +478,11 @@ def from_legacy_app_settings(
                 target_language=data["languages"]["target_language"],
                 peer_source_language=data["languages"]["peer_source_language"],
                 peer_target_language=data["languages"]["peer_target_language"],
-                peer_source_mode=data["languages"].get("peer_source_mode", "manual"),
+                peer_source_mode=(
+                    "auto"
+                    if data["languages"].get("peer_source_mode") == "soniox_auto"
+                    else data["languages"].get("peer_source_mode", "manual")
+                ),
                 peer_expected_languages=list(
                     data["languages"].get("peer_expected_languages") or []
                 ),

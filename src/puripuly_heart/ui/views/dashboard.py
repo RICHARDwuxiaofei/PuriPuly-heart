@@ -24,7 +24,7 @@ DASHBOARD_LANGUAGE_CARD_EXPAND = 1
 DASHBOARD_POWER_BUTTON_ICON_SIZE = 80
 DASHBOARD_POWER_BUTTON_LABEL_SIZE = 32
 OVERLAY_FAILURE_REASON_ONLY_NOTICE_REASONS = {"steamvr_not_running"}
-PEER_SOURCE_MODE_SONIOX_AUTO = "soniox_auto"
+PEER_SOURCE_MODE_AUTO = "auto"
 _LOCAL_STT_MODEL_LABEL_KEYS = {
     "parakeet-tdt-0.6b-v3-int8-sherpa": "local_stt.model.parakeet-tdt-0.6b-v3-int8-sherpa",
     "parakeet-tdt-ctc-0.6b-ja-int8-sherpa": "local_stt.model.parakeet-tdt-ctc-0.6b-ja-int8-sherpa",
@@ -363,26 +363,24 @@ class DashboardView(ft.Column):
     def _open_peer_source_dialog(self):
         modal = LanguageModal(
             page=self.page,
-            languages=((PEER_SOURCE_MODE_SONIOX_AUTO, ""), *self._LANG_OPTIONS),
+            languages=((PEER_SOURCE_MODE_AUTO, ""), *self._LANG_OPTIONS),
             on_select=self._on_peer_source_select,
             label_for_code=lambda code: (
-                t("dashboard.peer_source.automatic_soniox")
-                if code == PEER_SOURCE_MODE_SONIOX_AUTO
+                t("dashboard.peer_source.automatic")
+                if code == PEER_SOURCE_MODE_AUTO
                 else language_name(code)
             ),
             description_for_code=lambda code: (
-                t("dashboard.peer_source.automatic_soniox.description")
-                if code == PEER_SOURCE_MODE_SONIOX_AUTO
+                t("dashboard.peer_source.automatic.description")
+                if code == PEER_SOURCE_MODE_AUTO
                 else ""
             ),
-            disabled_codes=(
-                set() if self._peer_auto_detect_available else {PEER_SOURCE_MODE_SONIOX_AUTO}
-            ),
+            disabled_codes=(set() if self._peer_auto_detect_available else {PEER_SOURCE_MODE_AUTO}),
         )
         modal.open(
             current=(
-                PEER_SOURCE_MODE_SONIOX_AUTO
-                if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO
+                PEER_SOURCE_MODE_AUTO
+                if self._peer_source_mode == PEER_SOURCE_MODE_AUTO
                 else self._effective_peer_source_lang_code()
             ),
             recent=self._recent_source_langs,
@@ -414,8 +412,8 @@ class DashboardView(ft.Column):
         self._notify_language_change()
 
     def _on_peer_source_select(self, lang_code: str):
-        if lang_code == PEER_SOURCE_MODE_SONIOX_AUTO:
-            self._peer_source_mode = PEER_SOURCE_MODE_SONIOX_AUTO
+        if lang_code == PEER_SOURCE_MODE_AUTO:
+            self._peer_source_mode = PEER_SOURCE_MODE_AUTO
             self._refresh_language_card()
             self._notify_language_change()
             return
@@ -442,7 +440,7 @@ class DashboardView(ft.Column):
         self._notify_language_change()
 
     def _swap_peer_languages(self):
-        if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO:
+        if self._peer_source_mode == PEER_SOURCE_MODE_AUTO:
             manual_peer_source = self._peer_source_lang_code or self._source_lang_code
             self._peer_source_lang_code = self._effective_peer_target_lang_code()
             self._peer_target_lang_code = manual_peer_source
@@ -480,8 +478,8 @@ class DashboardView(ft.Column):
             )
 
     def _effective_peer_source_lang_code(self) -> str:
-        if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO:
-            return PEER_SOURCE_MODE_SONIOX_AUTO
+        if self._peer_source_mode == PEER_SOURCE_MODE_AUTO:
+            return PEER_SOURCE_MODE_AUTO
         return self._peer_source_lang_code or self._source_lang_code
 
     def _effective_peer_target_lang_code(self) -> str:
@@ -492,8 +490,8 @@ class DashboardView(ft.Column):
             language_name(self._source_lang_code),
             language_name(self._target_lang_code),
             (
-                t("dashboard.peer_source.automatic_soniox")
-                if self._peer_source_mode == PEER_SOURCE_MODE_SONIOX_AUTO
+                t("dashboard.peer_source.automatic")
+                if self._peer_source_mode == PEER_SOURCE_MODE_AUTO
                 else language_name(self._effective_peer_source_lang_code())
             ),
             language_name(self._effective_peer_target_lang_code()),
@@ -683,6 +681,8 @@ class DashboardView(ft.Column):
 
         notice_key_by_status = {
             "starting": "dashboard.local_stt_notice_starting",
+            "self_loading": "dashboard.local_stt_notice_self_loading",
+            "peer_loading": "dashboard.local_stt_notice_peer_loading",
             "start_failed": "dashboard.local_stt_notice_start_failed",
             "missing": "dashboard.local_stt_notice_missing",
             "invalid": "dashboard.local_stt_notice_invalid",
@@ -691,6 +691,8 @@ class DashboardView(ft.Column):
         }
         tone_by_status = {
             "starting": "info",
+            "self_loading": "info",
+            "peer_loading": "info",
             "start_failed": "error",
             "missing": "warning",
             "invalid": "warning",

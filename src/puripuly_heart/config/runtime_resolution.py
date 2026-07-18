@@ -199,6 +199,10 @@ STT_PROVIDERS: Final[tuple[str, ...]] = (
     STT_PROVIDER_QWEN_ASR,
     STT_PROVIDER_SONIOX,
 )
+PEER_AUTO_DETECTION_STT_PROVIDERS: Final[tuple[str, ...]] = (
+    STT_PROVIDER_LOCAL_QWEN_GPU,
+    STT_PROVIDER_SONIOX,
+)
 STT_DEFAULT_SOURCE_LANGUAGE: Final = "ko"
 STT_DEFAULT_PEER_SOURCE_LANGUAGE: Final = "en"
 STT_DEFAULT_SAMPLE_RATE_HZ: Final = 16000
@@ -585,6 +589,7 @@ class STTRuntimeIntent:
     channel: str = RUNTIME_CHANNEL_SELF
     provider: str = STT_PROVIDER_LOCAL_CPU_AUTO
     source_language: str = STT_DEFAULT_SOURCE_LANGUAGE
+    source_mode: str = "manual"
     input_host_api: str | None = None
     input_device: str | None = None
     output_device: str | None = None
@@ -630,6 +635,13 @@ class STTRuntimeIntent:
                 else STT_DEFAULT_SOURCE_LANGUAGE
             ),
         )
+        source_mode = _normalize_allowed(
+            self.source_mode,
+            allowed=("manual", "auto"),
+            default="manual",
+        )
+        if channel != RUNTIME_CHANNEL_PEER or provider not in PEER_AUTO_DETECTION_STT_PROVIDERS:
+            source_mode = "manual"
         qwen_region = _normalize_allowed(
             self.qwen_region,
             allowed=(QWEN_REGION_BEIJING, QWEN_REGION_SINGAPORE),
@@ -638,6 +650,7 @@ class STTRuntimeIntent:
         object.__setattr__(self, "channel", channel)
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "source_language", source_language)
+        object.__setattr__(self, "source_mode", source_mode)
         object.__setattr__(
             self,
             "sample_rate_hz",
@@ -1100,6 +1113,7 @@ def resolve_stt_config(intent: STTRuntimeIntent) -> ResolvedSTTConfig:
     return ResolvedSTTConfig(
         channel=cast(str, intent.channel),
         source_language=intent.source_language,
+        source_mode=cast(Literal["manual", "auto"], intent.source_mode),
         provider=provider,
         model=model,
         endpoint=endpoint,
@@ -1391,6 +1405,7 @@ __all__ = [
     "STT_PROVIDER_LOCAL_PARAKEET_V3",
     "STT_PROVIDER_LOCAL_QWEN",
     "STT_PROVIDER_LOCAL_QWEN_GPU",
+    "PEER_AUTO_DETECTION_STT_PROVIDERS",
     "STT_PROVIDER_QWEN_ASR",
     "STT_PROVIDER_SONIOX",
     "STT_PROVIDERS",

@@ -199,9 +199,8 @@ def _peer_stt_runtime_intent_from_compatibility_settings(settings: AppSettings) 
 def peer_stt_runtime_intent_from_vnext(settings: AppSettingsVNext) -> STTRuntimeIntent:
     intent = settings.intent
     provider = intent.peer_stt.provider
-    automatic_soniox = (
-        provider == STT_PROVIDER_SONIOX and intent.languages.peer_source_mode == "soniox_auto"
-    )
+    automatic = intent.languages.peer_source_mode == "auto"
+    automatic_soniox = provider == STT_PROVIDER_SONIOX and automatic
     source_language = intent.languages.peer_source_language or intent.languages.source_language
     language_hints = None
     language_hints_strict = False
@@ -223,6 +222,7 @@ def peer_stt_runtime_intent_from_vnext(settings: AppSettingsVNext) -> STTRuntime
         channel="peer",
         provider=provider,
         source_language=source_language,
+        source_mode="auto" if automatic else "manual",
         input_host_api=None,
         input_device=None,
         output_device=intent.desktop_audio.output_device,
@@ -396,6 +396,7 @@ def create_stt_backend_from_resolved_config(
             raise RuntimeError("Local Vulkan ASR worker is not available")
         if config.channel not in {"self", "peer"}:
             raise ValueError(f"Unsupported GPU ASR channel: {config.channel}")
+        from puripuly_heart.core.language import get_local_qwen_language_hint
         from puripuly_heart.core.local_gpu_assets import local_gpu_model_path
         from puripuly_heart.providers.stt.local_gpu import LocalGpuSTTBackend
 
@@ -406,6 +407,12 @@ def create_stt_backend_from_resolved_config(
             model_id=LOCAL_QWEN_GPU_MODEL_ID,
             device_id=gpu_device_id,
             sample_rate_hz=config.sample_rate_hz,
+            source_mode=config.source_mode,
+            language_hint=(
+                None
+                if config.source_mode == "auto"
+                else get_local_qwen_language_hint(config.source_language)
+            ),
         )
 
     if config.provider == STT_PROVIDER_DEEPGRAM:
@@ -496,7 +503,7 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
         )
 
     if provider == STTProviderName.SONIOX:
-        automatic_soniox = settings.languages.peer_source_mode == "soniox_auto"
+        automatic_soniox = settings.languages.peer_source_mode == "auto"
         from puripuly_heart.core.language import get_soniox_language_hints
 
         if automatic_soniox:
@@ -581,6 +588,7 @@ def build_peer_stt_provider_signature_from_vnext(settings: AppSettingsVNext) -> 
             else None
         ),
         resolved.provider_options.get("language_hints_strict", False),
+        resolved.source_mode,
     )
 
 

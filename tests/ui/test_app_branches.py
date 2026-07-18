@@ -375,7 +375,7 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert page.window.min_height == app_module.MIN_WINDOW_HEIGHT
     assert page.window.width >= page.window.min_width
     assert page.window.height >= page.window.min_height
-    assert page.window.center_calls == 1
+    assert page.window.center_calls == 0
     assert page.added
     assert app.view_dashboard.on_send_message == app._on_manual_submit
     assert app.view_dashboard.on_message_input_activity == app._on_message_input_activity
@@ -1128,6 +1128,15 @@ async def test_main_gui_routes_update_check_through_app_log_helper(
         def _log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
             _ = (message, level)
 
+        def schedule_after_launch_tasks(self) -> None:
+            async def run() -> None:
+                await app_module._check_and_notify_update(
+                    self.page,
+                    log_detailed=self._log_detailed,
+                )
+
+            seen["after_launch_task"] = asyncio.create_task(run())
+
     async def fake_check_and_notify_update(incoming_page, *, log_detailed=None) -> None:
         seen["check"] = (incoming_page, log_detailed)
 
@@ -1135,6 +1144,7 @@ async def test_main_gui_routes_update_check_through_app_log_helper(
     monkeypatch.setattr(app_module, "_check_and_notify_update", fake_check_and_notify_update)
 
     await app_module.main_gui(page, config_path=Path("settings.json"))
+    await seen["after_launch_task"]
 
     assert seen["started"] is True
     assert seen["check"][0] is page
@@ -1163,6 +1173,15 @@ async def test_main_gui_forwards_debug_ui_preview_flag(
         def _log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
             _ = (message, level)
 
+        def schedule_after_launch_tasks(self) -> None:
+            async def run() -> None:
+                await app_module._check_and_notify_update(
+                    self.page,
+                    log_detailed=self._log_detailed,
+                )
+
+            seen["after_launch_task"] = asyncio.create_task(run())
+
     async def fake_check_and_notify_update(incoming_page, *, log_detailed=None) -> None:
         seen["check"] = (incoming_page, log_detailed)
 
@@ -1174,6 +1193,7 @@ async def test_main_gui_forwards_debug_ui_preview_flag(
         config_path=Path("settings.json"),
         debug_ui_preview=True,
     )
+    await seen["after_launch_task"]
 
     assert seen["started"] is True
     assert seen["init"] == (page, Path("settings.json"), True)
@@ -3589,7 +3609,7 @@ async def test_on_language_change_forwards_automatic_peer_mode(
         target_code="en",
         peer_source_code="ja",
         peer_target_code="fr",
-        peer_source_mode="soniox_auto",
+        peer_source_mode="auto",
         recent_source_codes=(),
         recent_target_codes=(),
     )

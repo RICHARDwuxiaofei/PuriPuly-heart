@@ -12,7 +12,7 @@ from typing import Final, Literal
 from puripuly_heart.config.audio_host_api import WINDOWS_WASAPI_COMPATIBILITY_HOST_API
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
 
-VNEXT_SETTINGS_SCHEMA_VERSION: Final = 30
+VNEXT_SETTINGS_SCHEMA_VERSION: Final = 31
 
 DEFAULT_OPENROUTER_BROKER_BASE_URL: Final = "https://puripuly-heart-broker.kapitalismho.workers.dev"
 DEFAULT_CUSTOM_VOCAB_TERMS: Final[Mapping[str, tuple[str, ...]]] = {}
@@ -432,7 +432,7 @@ class LanguageIntent:
         object.__setattr__(
             self,
             "peer_source_mode",
-            mode if mode in {"manual", "soniox_auto"} else "manual",
+            mode if mode in {"manual", "auto"} else "manual",
         )
         languages = self.peer_expected_languages
         if not isinstance(languages, list):

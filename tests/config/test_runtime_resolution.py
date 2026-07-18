@@ -245,6 +245,39 @@ def test_stt_runtime_resolution_resolves_qwen_region_endpoint_and_custom_terms()
     assert config.custom_terms == {"ko-KR": ("Puripuly", "VRChat")}
 
 
+def test_peer_auto_source_mode_requires_provider_capability() -> None:
+    runtime_resolution = _runtime_resolution_module()
+
+    gpu = runtime_resolution.resolve_stt_config(
+        runtime_resolution.STTRuntimeIntent(
+            channel="peer",
+            provider=runtime_resolution.STT_PROVIDER_LOCAL_QWEN_GPU,
+            source_language="ja",
+            source_mode="auto",
+        )
+    )
+    unsupported = runtime_resolution.resolve_stt_config(
+        runtime_resolution.STTRuntimeIntent(
+            channel="peer",
+            provider=runtime_resolution.STT_PROVIDER_LOCAL_CPU_AUTO,
+            source_language="ja",
+            source_mode="auto",
+        )
+    )
+    self_gpu = runtime_resolution.resolve_stt_config(
+        runtime_resolution.STTRuntimeIntent(
+            channel="self",
+            provider=runtime_resolution.STT_PROVIDER_LOCAL_QWEN_GPU,
+            source_language="ja",
+            source_mode="auto",
+        )
+    )
+
+    assert gpu.source_mode == "auto"
+    assert unsupported.source_mode == "manual"
+    assert self_gpu.source_mode == "manual"
+
+
 def test_default_peer_stt_runtime_intent_uses_desktop_peer_vad_defaults() -> None:
     runtime_resolution = _runtime_resolution_module()
     resolved = _resolved_module()

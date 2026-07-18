@@ -140,6 +140,25 @@ def _cpu_snapshot(
     )
 
 
+def _cpu_ready_snapshot() -> LocalCPUInstallSnapshot:
+    return LocalCPUInstallSnapshot(
+        models=tuple(
+            LocalCPUModelInstall(
+                model_id=model_id,
+                state=LocalSTTInstallState(
+                    status="ready",
+                    installed_manifest=SimpleNamespace(model_id=model_id),
+                ),
+            )
+            for model_id in (
+                PARAKEET_V3_MODEL_ID,
+                PARAKEET_JAPANESE_MODEL_ID,
+                LOCAL_STT_MODEL_ID,
+            )
+        )
+    )
+
+
 async def _start_controller_with_inspected_stt_state(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -288,12 +307,91 @@ def test_cpu_auto_with_missing_parakeet_persists_qwen_without_downloading(
     )
     controller.settings = settings
     controller._local_cpu_install_snapshot = snapshot
+    monkeypatch.setattr(
+        GuiController,
+        "_inspect_local_cpu_model_installs_for_selection",
+        lambda self: snapshot,
+    )
 
     assert controller._persist_current_manual_local_asr_fallback() is True
     assert controller.settings.provider.stt == STTProviderName.LOCAL_QWEN
     assert installed_model_ids == []
     assert len(saved) == 1
     assert messages == [controller_module.t("local_stt.installation_fallback_qwen")]
+
+
+def test_successful_cpu_auto_probe_preserves_installed_model_identities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.LOCAL_CPU_AUTO
+    controller._set_local_cpu_install_snapshot(_cpu_ready_snapshot())
+    strict_snapshot = _cpu_ready_snapshot()
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_cpu_model_installs",
+        lambda model_ids, *_args, **_kwargs: LocalCPUInstallSnapshot(
+            models=tuple(
+                strict_snapshot.models[
+                    (
+                        PARAKEET_V3_MODEL_ID,
+                        PARAKEET_JAPANESE_MODEL_ID,
+                        LOCAL_STT_MODEL_ID,
+                    ).index(model_id)
+                ]
+                for model_id in model_ids
+            )
+        ),
+    )
+
+    controller._record_strict_local_stt_ready(
+        (PARAKEET_V3_MODEL_ID, PARAKEET_JAPANESE_MODEL_ID, LOCAL_STT_MODEL_ID)
+    )
+
+    assert controller._local_cpu_install_snapshot is not None
+    assert controller._local_cpu_install_snapshot.cpu_auto_available is True
+    for language in ("bg", "ar", "ko", "en", "ja"):
+        controller.settings.languages.source_language = language
+        normalized, channels, installation_fallback = (
+            controller._normalize_manual_local_asr_fallbacks(controller.settings)
+        )
+        assert normalized is controller.settings
+        assert channels == ()
+        assert installation_fallback is False
+
+
+def test_runtime_refresh_clears_recovered_parakeet_download_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dashboard = DummyDashboard()
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(view_dashboard=dashboard),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.LOCAL_CPU_AUTO
+    controller._local_stt_runtime_status = "download_failed"
+    controller._local_stt_download_model_ids = (PARAKEET_V3_MODEL_ID,)
+    controller._local_stt_notice_model_id = PARAKEET_V3_MODEL_ID
+    ready_snapshot = _cpu_ready_snapshot()
+    monkeypatch.setattr(
+        GuiController,
+        "_inspect_local_cpu_model_installs_for_selection",
+        lambda self: ready_snapshot,
+    )
+
+    controller._refresh_local_stt_runtime_state()
+
+    assert controller._local_stt_runtime_status == "ready"
+    assert controller._local_stt_download_model_ids == ()
+    assert controller._local_stt_notice_model_id is None
+    assert dashboard.local_stt_notice_status is None
 
 
 @pytest.mark.asyncio
@@ -384,6 +482,14 @@ async def test_self_cpu_auto_strict_corruption_falls_back_without_parakeet_downl
         peer_stt=object(),
     )
     controller._set_local_cpu_install_snapshot(_cpu_snapshot())
+    ready_snapshot = _cpu_ready_snapshot()
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_cpu_model_installs",
+        lambda model_ids, *_args, **_kwargs: LocalCPUInstallSnapshot(
+            models=tuple(model for model in ready_snapshot.models if model.model_id in model_ids)
+        ),
+    )
     monkeypatch.setattr(GuiController, "_probe_self_local_stt_runtime_load", fake_probe)
     monkeypatch.setattr(GuiController, "_rebuild_stt_provider", lambda self: asyncio.sleep(0))
     monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)

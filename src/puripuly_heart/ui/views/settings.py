@@ -356,6 +356,7 @@ class SettingsView(ft.Column):
         self.on_start_microphone_test: Callable[[], None] | None = None
         self.on_gpu_install_requested: Callable[[], object] | None = None
         self.on_gpu_retry_requested: Callable[[], object] | None = None
+        self.on_gpu_discovery_requested: Callable[[], object] | None = None
         self.on_telemetry_consent_change: Callable[[str], None] | None = None
         self.on_list_loopback_capture_options: Callable[[], object] | None = None
         self.on_list_loopback_process_options: Callable[[], object] | None = None
@@ -2849,11 +2850,7 @@ class SettingsView(ft.Column):
         return OptionItem(
             value=provider.value,
             label=provider_label(provider.value),
-            description=(
-                t("provider.local_cpu_auto.unavailable")
-                if auto_unavailable
-                else t(f"provider.{provider.value}.description", default="")
-            ),
+            description=t(f"provider.{provider.value}.description", default=""),
             disabled=auto_unavailable,
         )
 
@@ -3487,6 +3484,11 @@ class SettingsView(ft.Column):
         )
         draft = self._ensure_provider_settings_draft()
         draft.provider.stt = provider
+        if (
+            provider == STTProviderName.LOCAL_QWEN_GPU
+            and self.on_gpu_discovery_requested is not None
+        ):
+            self.on_gpu_discovery_requested()
         self._update_api_visibility()
         self._sync_gpu_device_card()
         self.has_provider_changes = True
@@ -3554,6 +3556,11 @@ class SettingsView(ft.Column):
             return
         draft = self._ensure_provider_settings_draft()
         draft.provider.peer_stt = provider
+        if (
+            provider == STTProviderName.LOCAL_QWEN_GPU
+            and self.on_gpu_discovery_requested is not None
+        ):
+            self.on_gpu_discovery_requested()
         selection = resolve_local_asr_selection(
             provider.value,
             current_settings.languages.effective_peer_source,

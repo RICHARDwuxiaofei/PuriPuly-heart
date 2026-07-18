@@ -525,8 +525,8 @@ class LanguageSettings:
             raise ValueError("source_language must be non-empty")
         if not self.target_language:
             raise ValueError("target_language must be non-empty")
-        if self.peer_source_mode not in {"manual", "soniox_auto"}:
-            raise ValueError("peer_source_mode must be manual or soniox_auto")
+        if self.peer_source_mode not in {"manual", "auto"}:
+            raise ValueError("peer_source_mode must be manual or auto")
 
     @property
     def effective_peer_source(self) -> str:
@@ -3813,10 +3813,14 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             peer_source_language=str(data.get("languages", {}).get("peer_source_language", "")),
             peer_target_language=str(data.get("languages", {}).get("peer_target_language", "")),
             peer_source_mode=(
-                str(data.get("languages", {}).get("peer_source_mode", "manual"))
-                if str(data.get("languages", {}).get("peer_source_mode", "manual"))
-                in {"manual", "soniox_auto"}
-                else "manual"
+                "auto"
+                if str(data.get("languages", {}).get("peer_source_mode", "manual")) == "soniox_auto"
+                else (
+                    str(data.get("languages", {}).get("peer_source_mode", "manual"))
+                    if str(data.get("languages", {}).get("peer_source_mode", "manual"))
+                    in {"manual", "auto"}
+                    else "manual"
+                )
             ),
             peer_expected_languages=(
                 list(

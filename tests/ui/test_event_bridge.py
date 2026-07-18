@@ -349,6 +349,22 @@ def test_event_bridge_constructor_requires_explicit_dispatch_ports() -> None:
         assert signature.parameters[name].default is inspect.Parameter.empty
 
 
+@pytest.mark.asyncio
+async def test_event_bridge_reports_started_only_after_run_loop_entry() -> None:
+    bridge = make_bridge(DummyApp(), event_queue=asyncio.Queue())
+    wait_started = asyncio.create_task(bridge.wait_started())
+    await asyncio.sleep(0)
+    assert not wait_started.done()
+
+    run_task = asyncio.create_task(bridge.run())
+    await wait_started
+
+    assert bridge._running is True
+    bridge.close()
+    run_task.cancel()
+    await asyncio.gather(run_task, return_exceptions=True)
+
+
 def test_event_mapping_is_testable_without_view_mutation() -> None:
     transcript = Transcript(utterance_id=uuid4(), text="partial", is_final=False)
     mapped = map_ui_event(
