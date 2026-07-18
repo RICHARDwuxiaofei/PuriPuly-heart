@@ -252,8 +252,8 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_la
     assert body["reasoning"] == {"effort": "none"}
     assert body["user"] == "managed-user-123"
     assert body["provider"] == {
-        "sort": "latency",
-        "only": ["cloudflare", "wafer"],
+        "order": ["wafer", "cloudflare", "deepinfra"],
+        "only": ["wafer", "cloudflare", "deepinfra"],
         "allow_fallbacks": True,
     }
     assert body["messages"][0] == {"role": "system", "content": "SYSTEM"}
@@ -265,7 +265,7 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_la
 
 
 @pytest.mark.asyncio
-async def test_httpx_openrouter_client_gemma_uses_cloudflare_first_routing(
+async def test_httpx_openrouter_client_gemma_uses_wafer_cloudflare_deepinfra_routing(
     monkeypatch,
 ) -> None:
     fake_client = FakeAsyncClient()
@@ -285,8 +285,8 @@ async def test_httpx_openrouter_client_gemma_uses_cloudflare_first_routing(
 
     body = fake_client.last_request["json"]
     assert body["provider"] == {
-        "sort": "latency",
-        "only": ["cloudflare", "wafer"],
+        "order": ["wafer", "cloudflare", "deepinfra"],
+        "only": ["wafer", "cloudflare", "deepinfra"],
         "allow_fallbacks": True,
     }
 
@@ -377,7 +377,7 @@ async def test_httpx_openrouter_client_deepseek_default_uses_cloudflare_first_ro
 
 
 @pytest.mark.asyncio
-async def test_httpx_openrouter_client_builds_latency_request_with_explicit_routing_mode(
+async def test_httpx_openrouter_client_gemma_order_ignores_explicit_latency_routing_mode(
     monkeypatch,
 ) -> None:
     fake_client = FakeAsyncClient()
@@ -399,8 +399,8 @@ async def test_httpx_openrouter_client_builds_latency_request_with_explicit_rout
     assert result == "OK"
     body = fake_client.last_request["json"]
     assert body["provider"] == {
-        "sort": "latency",
-        "only": ["cloudflare", "wafer"],
+        "order": ["wafer", "cloudflare", "deepinfra"],
+        "only": ["wafer", "cloudflare", "deepinfra"],
         "allow_fallbacks": True,
     }
 
