@@ -1479,7 +1479,6 @@ class SettingsView(ft.Column):
         self._gpu_device_text = self._build_clickable_text(
             t("settings.gpu_device.auto"),
             self._on_gpu_device_click,
-            size=24,
             max_lines=2,
             overflow=ft.TextOverflow.ELLIPSIS,
         )
@@ -2214,7 +2213,7 @@ class SettingsView(ft.Column):
             label = selected_device.display_name
         else:
             label = t("settings.gpu_device.unavailable", device=selected)
-        self._set_unit_card_value_text(self._gpu_device_text, label, size=24)
+        self._set_unit_card_value_text(self._gpu_device_text, label)
         visible = self._gpu_selected(settings)
         self._gpu_device_card.visible = visible
         self._gpu_device_row.visible = visible

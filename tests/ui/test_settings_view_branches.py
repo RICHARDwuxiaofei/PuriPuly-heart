@@ -2318,6 +2318,9 @@ def test_gpu_card_is_standard_one_by_one_and_contains_only_device_selection(
     assert len(column.controls) == 2
     assert column.controls[0] is view._gpu_device_title
     assert column.controls[1].content is view._gpu_device_text
+    assert view._gpu_device_text.content.size == view._stt_text.content.size == 28
+    assert view._gpu_device_text.content.color == view._stt_text.content.color
+    assert view._gpu_device_text.content.text_align == view._stt_text.content.text_align
     assert len(view._gpu_device_row.content.controls) == 3
     assert view._gpu_device_row.content.controls[1].opacity == 1.0
     assert view._gpu_device_row.content.controls[2].opacity == 1.0
