@@ -221,7 +221,7 @@ async def store_pending_ack_in_settings_values(
 
 
 def clear_pending_ack_in_settings_values(
-    settings_values: Mapping[str, object]
+    settings_values: Mapping[str, object],
 ) -> dict[str, object]:
     values = _copy_mapping(settings_values)
     state = values.setdefault("state", {})
