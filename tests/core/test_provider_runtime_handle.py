@@ -335,10 +335,13 @@ async def test_failed_idle_release_detaches_provider_and_retries_on_shutdown() -
 
 
 @pytest.mark.asyncio
-async def test_handoff_keeps_retired_event_ingress_until_final_drain() -> None:
-    handled: list[str] = []
+async def test_handoff_keeps_unhashable_retired_event_ingress_until_final_drain() -> None:
+    current_events: list[str] = []
+    retired_events: list[str] = []
 
     class HandoffProvider:
+        __hash__ = None
+
         def __init__(self, name: str, *, active: bool) -> None:
             self.name = name
             self.active = active
@@ -371,7 +374,10 @@ async def test_handoff_keeps_retired_event_ingress_until_final_drain() -> None:
             self.close_backend_calls += 1
 
     async def handle_event(event: object) -> None:
-        handled.append(str(event))
+        current_events.append(str(event))
+
+    async def handle_retired_event(event: object) -> None:
+        retired_events.append(str(event))
 
     old = HandoffProvider("old", active=True)
     new = HandoffProvider("new", active=False)
@@ -379,6 +385,7 @@ async def test_handoff_keeps_retired_event_ingress_until_final_drain() -> None:
         name="self_stt",
         provider=old,
         event_handler=handle_event,
+        retired_event_handler=handle_retired_event,
     )
     await handle.start()
 
@@ -395,12 +402,12 @@ async def test_handoff_keeps_retired_event_ingress_until_final_drain() -> None:
     await new.queue.put("new-event")
 
     for _ in range(20):
-        if old.close_backend_calls and "new-event" in handled:
+        if old.close_backend_calls and "new-event" in current_events:
             break
         await asyncio.sleep(0)
 
-    assert "old-final" in handled
-    assert "new-event" in handled
+    assert retired_events == ["old-final"]
+    assert current_events == ["new-event"]
     assert old.close_calls == 1
     assert old.close_backend_calls == 1
     await handle.close()

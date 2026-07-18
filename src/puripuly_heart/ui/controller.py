@@ -327,6 +327,7 @@ from puripuly_heart.ui.event_bridge import (
     AppHistoryEventDestination,
     UIEventBridge,
 )
+from puripuly_heart.ui.gpu_device import GpuDeviceOption
 from puripuly_heart.ui.gpu_notice import GpuDashboardNotice, GpuNoticeAction
 from puripuly_heart.ui.i18n import get_locale, set_locale, t
 from puripuly_heart.ui.overlay_peer_contract import (
@@ -1539,9 +1540,10 @@ class GuiController:
         self.log_detailed(f"[GPU ASR] {' '.join(fields)}")
         settings_view = getattr(self.app, "view_settings", None)
         devices = tuple(
-            (
-                device.device_id,
-                f"{device.name} ({device.device_type})",
+            GpuDeviceOption(
+                device_id=device.device_id,
+                display_name=device.description.strip() or device.name,
+                backend_name=device.name,
             )
             for device in self._gpu_devices
         )

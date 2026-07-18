@@ -448,7 +448,7 @@
   "provider.local_parakeet_ja.description": "",
   "provider.local_qwen": "Qwen3 ASR 0.6B",
   "provider.local_qwen_gpu": "Qwen3 ASR 1.7B",
-  "provider.local_qwen_gpu.description": "可以在所有 GPU 上使用。\n需要 3 GB 空闲显存。",
+  "provider.local_qwen_gpu.description": "需要 3 GB 空闲显存。\n也可以在 Radeon 和 Arc GPU 上使用。",
   "settings.gpu_device.title": "GPU 设备",
   "settings.gpu_device.auto": "自动",
   "settings.gpu_device.unavailable": "{device}（不可用）",

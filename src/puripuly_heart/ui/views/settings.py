@@ -66,6 +66,7 @@ from puripuly_heart.ui.components.settings import (
 from puripuly_heart.ui.components.shared_card_wrapper import SharedCardWrapper
 from puripuly_heart.ui.components.subtab_shell import TextSubtab, TextSubtabShell
 from puripuly_heart.ui.fonts import font_for_language
+from puripuly_heart.ui.gpu_device import GpuDeviceOption
 from puripuly_heart.ui.i18n import (
     available_locales,
     get_locale,
@@ -368,7 +369,7 @@ class SettingsView(ft.Column):
         self._managed_key_referral_id: str | None = None
         self._managed_key_pass_status: TalkTogetherPassStatus | None = None
         self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
-        self._gpu_devices: tuple[tuple[str, str], ...] = ()
+        self._gpu_devices: tuple[GpuDeviceOption, ...] = ()
         self._local_cpu_auto_available = False
 
         # Build UI components
@@ -480,6 +481,7 @@ class SettingsView(ft.Column):
             self._integrated_context_button,
             self._stt_text,
             self._peer_stt_text,
+            self._gpu_device_text,
             self._llm_text,
             self._ui_text,
             self._chatbox_source_text,
@@ -1474,24 +1476,20 @@ class SettingsView(ft.Column):
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
         )
-        self._gpu_device_dropdown = ft.Dropdown(
-            value="auto",
-            options=[ft.dropdown.Option(key="auto", text=t("settings.gpu_device.auto"))],
-            text_size=14,
-            border_radius=10,
-            border_color=COLOR_DIVIDER,
-            focused_border_color=COLOR_PRIMARY,
-            on_change=self._on_gpu_device_change,
+        self._gpu_device_text = self._build_clickable_text(
+            t("settings.gpu_device.auto"),
+            self._on_gpu_device_click,
+            size=24,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
         )
         self._gpu_device_card = self._wrap_unit_card(
             title=self._gpu_device_title,
-            value=self._gpu_device_dropdown,
+            value=self._gpu_device_text,
         )
         self._gpu_device_card.visible = False
         gpu_placeholder_1 = self._wrap_empty_unit_card()
-        gpu_placeholder_1.opacity = 0
         gpu_placeholder_2 = self._wrap_empty_unit_card()
-        gpu_placeholder_2.opacity = 0
         self._gpu_device_row = ft.Container(
             content=ft.Row(
                 [
@@ -1503,6 +1501,7 @@ class SettingsView(ft.Column):
                 expand=True,
             ),
         )
+        self._gpu_device_row.visible = False
 
         self._overlay_translation_title = ft.Text(
             t("settings.overlay.show_translation"),
@@ -2163,8 +2162,8 @@ class SettingsView(ft.Column):
             {
                 "api": [
                     row1,
-                    self._gpu_device_row,
                     self._translation_connection_row,
+                    self._gpu_device_row,
                     self._local_llm_connection_card,
                     self._managed_key_card,
                     self._peer_auto_languages_card,
@@ -2200,42 +2199,81 @@ class SettingsView(ft.Column):
         )
 
     def _sync_gpu_device_card(self) -> None:
-        if not hasattr(self, "_gpu_device_dropdown"):
+        if not hasattr(self, "_gpu_device_text"):
             return
         settings = self._build_settings_with_provider_draft()
         selected = settings.stt.gpu_device_id if settings is not None else "auto"
-        options = [ft.dropdown.Option(key="auto", text=t("settings.gpu_device.auto"))]
         devices = getattr(self, "_gpu_devices", ())
-        known_ids = {device_id for device_id, _label in devices}
-        options.extend(
-            ft.dropdown.Option(key=device_id, text=label) for device_id, label in devices
+        selected_device = next(
+            (device for device in devices if device.device_id == selected),
+            None,
         )
-        if selected != "auto" and selected not in known_ids:
-            options.append(
-                ft.dropdown.Option(
-                    key=selected,
-                    text=t("settings.gpu_device.unavailable", device=selected),
-                )
-            )
-        self._gpu_device_dropdown.options = options
-        self._gpu_device_dropdown.value = selected
-        self._gpu_device_card.visible = self._gpu_selected(settings)
+        if selected == "auto":
+            label = t("settings.gpu_device.auto")
+        elif selected_device is not None:
+            label = selected_device.display_name
+        else:
+            label = t("settings.gpu_device.unavailable", device=selected)
+        self._set_unit_card_value_text(self._gpu_device_text, label, size=24)
+        visible = self._gpu_selected(settings)
+        self._gpu_device_card.visible = visible
+        self._gpu_device_row.visible = visible
+        _update_control_if_mounted(self._gpu_device_row)
 
     def set_gpu_devices(
         self,
         *,
-        devices: tuple[tuple[str, str], ...],
+        devices: tuple[GpuDeviceOption, ...],
     ) -> None:
         self._gpu_devices = devices
         self._sync_gpu_device_card()
-        _update_control_if_mounted(self._gpu_device_row)
 
-    def _on_gpu_device_change(self, event) -> None:
+    @staticmethod
+    def _gpu_backend_label(name: str) -> str:
+        match = re.fullmatch(r"Vulkan\s*(\d+)", name.strip(), flags=re.IGNORECASE)
+        if match is not None:
+            return f"Vulkan {match.group(1)}"
+        return name.strip()
+
+    def _on_gpu_device_click(self, _event) -> None:
+        if not self.page:
+            return
+        settings = self._build_settings_with_provider_draft()
+        selected = settings.stt.gpu_device_id if settings is not None else "auto"
+        options = [
+            OptionItem(
+                value="auto",
+                label=t("settings.gpu_device.auto"),
+            )
+        ]
+        options.extend(
+            OptionItem(
+                value=device.device_id,
+                label=device.display_name,
+                description=self._gpu_backend_label(device.backend_name),
+            )
+            for device in self._gpu_devices
+        )
+        if selected != "auto" and all(device.device_id != selected for device in self._gpu_devices):
+            options.append(
+                OptionItem(
+                    value=selected,
+                    label=t("settings.gpu_device.unavailable", device=selected),
+                )
+            )
+        SettingsModal(
+            self.page,
+            t("settings.gpu_device.title"),
+            options,
+            self._on_gpu_device_selected,
+            show_description=True,
+        ).open(selected)
+
+    def _on_gpu_device_selected(self, value: str) -> None:
         if self._settings is None:
             return
-        value = str(getattr(getattr(event, "control", None), "value", "auto") or "auto")
         draft = self._ensure_provider_settings_draft()
-        draft.stt.gpu_device_id = value
+        draft.stt.gpu_device_id = value or "auto"
         self.has_provider_changes = True
         self._sync_gpu_device_card()
 
@@ -2722,6 +2760,7 @@ class SettingsView(ft.Column):
     def _copy_provider_draft_fields(self, source: AppSettings, target: AppSettings) -> None:
         target.provider.stt = source.provider.stt
         target.provider.peer_stt = source.provider.peer_stt
+        target.stt.gpu_device_id = source.stt.gpu_device_id
         target.provider.llm = source.provider.llm
         target.translation = copy.deepcopy(source.translation)
         target.gemini.llm_model = source.gemini.llm_model

@@ -448,7 +448,7 @@
   "provider.local_parakeet_ja.description": "",
   "provider.local_qwen": "Qwen3 ASR 0.6B",
   "provider.local_qwen_gpu": "Qwen3 ASR 1.7B",
-  "provider.local_qwen_gpu.description": "Работает на любом GPU.\nНужно 3 ГБ свободной VRAM.",
+  "provider.local_qwen_gpu.description": "Нужно 3 ГБ свободной VRAM.\nРаботает также на Radeon и Arc.",
   "settings.gpu_device.title": "Устройство GPU",
   "settings.gpu_device.auto": "Авто",
   "settings.gpu_device.unavailable": "{device} (недоступно)",

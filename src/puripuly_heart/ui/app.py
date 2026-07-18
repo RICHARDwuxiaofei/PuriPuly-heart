@@ -37,6 +37,7 @@ from puripuly_heart.ui.components.telemetry_consent_dialog import TelemetryConse
 from puripuly_heart.ui.components.title_bar import TitleBar
 from puripuly_heart.ui.controller import GuiController
 from puripuly_heart.ui.fonts import font_for_language, register_fonts
+from puripuly_heart.ui.gpu_device import GpuDeviceOption
 from puripuly_heart.ui.gpu_notice import GpuDashboardNotice
 from puripuly_heart.ui.i18n import (
     get_locale,
@@ -957,8 +958,8 @@ class TranslatorApp:
         index %= len(states)
         self._debug_preview_gpu_state_index = index
         devices = (
-            ("vulkan-index-0", "Debug Vulkan Device 0"),
-            ("vulkan-index-1", "Debug Vulkan Device 1"),
+            GpuDeviceOption("vulkan-index-0", "Debug GPU 0", "Vulkan0"),
+            GpuDeviceOption("vulkan-index-1", "Debug GPU 1", "Vulkan1"),
         )
         set_devices = getattr(self.view_settings, "set_gpu_devices", None)
         if callable(set_devices):

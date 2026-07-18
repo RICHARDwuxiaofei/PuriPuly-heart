@@ -31,6 +31,7 @@ class ProviderRuntimeHandle:
         name: str,
         provider: object | None = None,
         event_handler: ProviderEventHandler | None = None,
+        retired_event_handler: ProviderEventHandler | None = None,
         exception_handler: ProviderExceptionHandler | None = None,
         state_changed: ProviderStateChanged | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -38,6 +39,7 @@ class ProviderRuntimeHandle:
         self._name = name
         self._provider = provider
         self._event_handler = event_handler
+        self._retired_event_handler = retired_event_handler
         self._exception_handler = exception_handler
         self._state_changed = state_changed
         self._sleep = sleep
@@ -47,7 +49,7 @@ class ProviderRuntimeHandle:
         self._running = False
         self._closed = False
         self._retired_providers: list[object] = []
-        self._draining_event_tasks: dict[object, asyncio.Task[None]] = {}
+        self._draining_event_tasks: list[tuple[object, asyncio.Task[None]]] = []
         self._retirement_tasks: set[asyncio.Task[None]] = set()
         self._pending_handoff: tuple[object, bool, asyncio.Future[object | None]] | None = None
         self._lock = asyncio.Lock()
@@ -199,7 +201,7 @@ class ProviderRuntimeHandle:
         self._generation += 1
         self._event_task = None
         if old_provider is not None and old_provider is not provider and old_event_task is not None:
-            self._draining_event_tasks[old_provider] = old_event_task
+            self._draining_event_tasks.append((old_provider, old_event_task))
         self._provider = provider
         self._closed = False
         self._running = bool(start)
@@ -285,7 +287,7 @@ class ProviderRuntimeHandle:
             results = await asyncio.gather(*retirement_tasks, return_exceptions=True)
             failures.extend(result for result in results if isinstance(result, Exception))
         async with self._lock:
-            draining_tasks = tuple(self._draining_event_tasks.values())
+            draining_tasks = tuple(task for _provider, task in self._draining_event_tasks)
             self._draining_event_tasks.clear()
         for task in draining_tasks:
             if not task.done():
@@ -314,10 +316,10 @@ class ProviderRuntimeHandle:
     async def _run_event_loop(self, *, provider: object, generation: int) -> None:
         try:
             async for event in provider.events():  # type: ignore[attr-defined]
-                if not self._is_current(provider=provider, generation=generation):
+                handler = self._event_handler_for(provider=provider, generation=generation)
+                if handler is None:
                     continue
-                assert self._event_handler is not None
-                await self._event_handler(event)
+                await handler(event)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -327,11 +329,22 @@ class ProviderRuntimeHandle:
                     await result
             raise
 
-    def _is_current(self, *, provider: object, generation: int) -> bool:
-        return self._running and (
-            self.is_current_provider_generation(provider=provider, generation=generation)
-            or provider in self._draining_event_tasks
-        )
+    def _event_handler_for(
+        self,
+        *,
+        provider: object,
+        generation: int,
+    ) -> ProviderEventHandler | None:
+        if not self._running:
+            return None
+        if self.is_current_provider_generation(provider=provider, generation=generation):
+            return self._event_handler
+        if self._is_draining_provider(provider):
+            return self._retired_event_handler
+        return None
+
+    def _is_draining_provider(self, provider: object) -> bool:
+        return any(candidate is provider for candidate, _task in self._draining_event_tasks)
 
     async def _cancel_event_task(self) -> None:
         task = self._event_task
@@ -459,7 +472,9 @@ class ProviderRuntimeHandle:
             if event_task is not None and not event_task.done():
                 event_task.cancel()
                 await asyncio.gather(event_task, return_exceptions=True)
-            self._draining_event_tasks.pop(provider, None)
+            self._draining_event_tasks = [
+                entry for entry in self._draining_event_tasks if entry[0] is not provider
+            ]
         await self._close_provider_for_shutdown(provider)
 
     def _on_retirement_task_done(self, task: asyncio.Task[None]) -> None:

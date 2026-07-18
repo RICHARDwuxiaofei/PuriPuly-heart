@@ -22,6 +22,7 @@ from puripuly_heart.core.runtime.provider_handle import ProviderRuntimeHandle
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.providers.stt.local_gpu import LocalGpuSTTBackend
 from puripuly_heart.ui.controller import GuiController
+from puripuly_heart.ui.gpu_device import GpuDeviceOption
 
 pytestmark = pytest.mark.asyncio
 
@@ -150,6 +151,33 @@ async def test_internal_gpu_states_are_logged_without_dashboard_notice(
     assert controller._gpu_ui_state == state
     assert view.states == []
     assert messages[-1] == f"[GPU ASR] state={state} origin=startup"
+
+
+async def test_gpu_settings_receive_hardware_name_separately_from_vulkan_slot() -> None:
+    controller, view = _controller()
+    captured: list[tuple[GpuDeviceOption, ...]] = []
+    view.set_gpu_devices = lambda *, devices: captured.append(devices)
+    controller._gpu_devices = (
+        GpuWorkerDevice(
+            device_id="0000:01:00.0",
+            registry_index=0,
+            name="Vulkan0",
+            description="NVIDIA GeForce RTX 4070",
+            device_type="gpu",
+            memory_total_bytes=12_000_000_000,
+            memory_free_bytes=8_000_000_000,
+        ),
+    )
+
+    controller._set_gpu_ui_state("installed", origin="settings")
+
+    assert captured[-1] == (
+        GpuDeviceOption(
+            device_id="0000:01:00.0",
+            display_name="NVIDIA GeForce RTX 4070",
+            backend_name="Vulkan0",
+        ),
+    )
 
 
 async def test_self_gpu_toggle_off_releases_worker_and_toggle_on_rebuilds_provider(

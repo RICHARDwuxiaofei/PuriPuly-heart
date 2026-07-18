@@ -44,6 +44,7 @@ from puripuly_heart.ui.components import subtab_shell as subtab_shell_module
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
 from puripuly_heart.ui.controller import GuiController
 from puripuly_heart.ui.fonts import font_for_language
+from puripuly_heart.ui.gpu_device import GpuDeviceOption
 from puripuly_heart.ui.i18n import language_name, provider_label, t
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 from puripuly_heart.ui.overlay_peer_contract import build_overlay_peer_consumer_contract
@@ -2286,15 +2287,21 @@ def test_gpu_selection_shows_one_shared_device_card_and_retains_unavailable_save
     view, _ = _make_settings_view(monkeypatch)
 
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.set_gpu_devices(devices=(("vk:0", "GPU 0"),))
+    view.set_gpu_devices(devices=(GpuDeviceOption("vk:0", "NVIDIA GeForce RTX 4070", "Vulkan0"),))
 
     assert view._gpu_device_card.visible is True
-    assert view._gpu_device_dropdown.value == "vk:saved"
-    assert [option.key for option in view._gpu_device_dropdown.options] == [
-        "auto",
-        "vk:0",
-        "vk:saved",
-    ]
+    assert view._gpu_device_row.visible is True
+    assert view._gpu_device_text.content.value == t(
+        "settings.gpu_device.unavailable",
+        device="vk:saved",
+    )
+
+    view._on_gpu_device_selected("vk:0")
+
+    assert view._gpu_device_text.content.value == "NVIDIA GeForce RTX 4070"
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.stt.gpu_device_id == "vk:0"
 
 
 def test_gpu_card_is_standard_one_by_one_and_contains_only_device_selection(
@@ -2310,8 +2317,94 @@ def test_gpu_card_is_standard_one_by_one_and_contains_only_device_selection(
     assert view._gpu_device_card.height == 228
     assert len(column.controls) == 2
     assert column.controls[0] is view._gpu_device_title
-    assert column.controls[1].content is view._gpu_device_dropdown
+    assert column.controls[1].content is view._gpu_device_text
     assert len(view._gpu_device_row.content.controls) == 3
+    assert view._gpu_device_row.content.controls[1].opacity == 1.0
+    assert view._gpu_device_row.content.controls[2].opacity == 1.0
+
+
+def test_gpu_device_modal_shows_graphics_card_name_and_vulkan_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN_GPU
+    settings.stt.gpu_device_id = "vk:1"
+    view, _ = _make_settings_view(monkeypatch)
+    page = attach_dummy_page(monkeypatch, view)
+    captured: dict[str, object] = {}
+
+    class CapturingModal:
+        def __init__(
+            self,
+            page_arg,
+            title,
+            options,
+            on_select,
+            *,
+            show_description=False,
+        ) -> None:
+            captured.update(
+                page=page_arg,
+                title=title,
+                options=options,
+                on_select=on_select,
+                show_description=show_description,
+            )
+
+        def open(self, current: str) -> None:
+            captured["current"] = current
+
+    monkeypatch.setattr(settings_view, "SettingsModal", CapturingModal)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.set_gpu_devices(
+        devices=(
+            GpuDeviceOption("vk:0", "NVIDIA GeForce RTX 4070", "Vulkan0"),
+            GpuDeviceOption("vk:1", "AMD Radeon RX 7900 XTX", "Vulkan1"),
+        )
+    )
+
+    view._on_gpu_device_click(None)
+
+    options = captured["options"]
+    assert captured["page"] is page
+    assert captured["title"] == t("settings.gpu_device.title")
+    assert captured["show_description"] is True
+    assert captured["current"] == "vk:1"
+    assert [option.value for option in options] == ["auto", "vk:0", "vk:1"]
+    assert [option.label for option in options] == [
+        t("settings.gpu_device.auto"),
+        "NVIDIA GeForce RTX 4070",
+        "AMD Radeon RX 7900 XTX",
+    ]
+    assert [option.description for option in options] == ["", "Vulkan 0", "Vulkan 1"]
+
+
+def test_gpu_row_repaints_and_collapses_immediately_with_provider_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    view, _ = _make_settings_view(monkeypatch)
+    repainted: list[ft.Control] = []
+    monkeypatch.setattr(settings_view, "_update_control_if_mounted", repainted.append)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._gpu_device_card.visible is False
+    assert view._gpu_device_row.visible is False
+
+    repainted.clear()
+    view._on_stt_selected(STTProviderName.LOCAL_QWEN_GPU.value)
+
+    assert view._gpu_device_card.visible is True
+    assert view._gpu_device_row.visible is True
+    assert view._gpu_device_row in repainted
+
+    repainted.clear()
+    view._on_stt_selected(STTProviderName.LOCAL_QWEN.value)
+
+    assert view._gpu_device_card.visible is False
+    assert view._gpu_device_row.visible is False
+    assert view._gpu_device_row in repainted
 
 
 def test_selecting_gpu_for_self_or_peer_requests_discovery_once_per_new_selection(
@@ -2347,11 +2440,12 @@ def test_gpu_card_localizes_device_options_in_each_supported_locale(
         view, _ = _make_settings_view(monkeypatch)
         view.load_from_settings(settings, config_path=Path("settings.json"))
 
-        view.set_gpu_devices(devices=(("vk:0", "GPU 0"),))
+        view.set_gpu_devices(
+            devices=(GpuDeviceOption("vk:0", "NVIDIA GeForce RTX 4070", "Vulkan0"),)
+        )
 
         assert view._gpu_device_card.visible is True
-        assert view._gpu_device_dropdown.options[0].text == t("settings.gpu_device.auto")
-        assert view._gpu_device_dropdown.options[-1].text == t(
+        assert view._gpu_device_text.content.value == t(
             "settings.gpu_device.unavailable",
             device="vk:saved",
         )
@@ -5570,13 +5664,13 @@ def test_api_tab_places_independent_managed_key_card_above_api_keys(
         t("settings.section.peer_stt"),
         t("settings.section.translation"),
     ]
-    assert _row_card_titles(api_controls[1]) == [t("settings.gpu_device.title")]
-    assert view._gpu_device_card.visible is False
-    assert _row_card_titles(api_controls[2]) == [
+    assert _row_card_titles(api_controls[1]) == [
         t("settings.low_latency_mode"),
         t("settings.translation_connection"),
         t("settings.fallback"),
     ]
+    assert _row_card_titles(api_controls[2]) == [t("settings.gpu_device.title")]
+    assert view._gpu_device_card.visible is False
     assert _row_card_titles(api_controls[3]) == [t("settings.local_llm.connection")]
     assert api_controls[3] is view._local_llm_connection_card
     assert api_controls[4] is view._managed_key_card

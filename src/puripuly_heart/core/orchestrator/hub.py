@@ -269,6 +269,7 @@ class ClientHub:
             name="self_stt",
             provider=self.stt,
             event_handler=self._handle_stt_event,
+            retired_event_handler=self._handle_retired_stt_event,
             exception_handler=lambda exc: self._handle_stt_event_loop_exception(
                 exc,
                 channel="self",
@@ -279,6 +280,7 @@ class ClientHub:
             name="peer_stt",
             provider=self.peer_stt,
             event_handler=self._handle_stt_event,
+            retired_event_handler=self._handle_retired_stt_event,
             exception_handler=lambda exc: self._handle_stt_event_loop_exception(
                 exc,
                 channel="peer",
@@ -1424,6 +1426,10 @@ class ClientHub:
             else:
                 await self._ensure_translation(event.transcript)
             return
+
+    async def _handle_retired_stt_event(self, event: object) -> None:
+        if isinstance(event, STTFinalEvent):
+            await self._handle_stt_event(event)
 
     def _send_stt_connected_notification(self) -> None:
         """Send promo message when STT connects (only if user clicked button)."""
