@@ -16,6 +16,10 @@
 - When changing credentials, preserve SecretStore key compatibility and load secrets through SecretStore; encrypted-file storage requires `PURIPULY_HEART_SECRETS_PASSPHRASE`.
 - When adding async or long-running work, keep I/O async and provide an explicit owner, cancellation, shutdown, and diagnostics path; provider teardown must await `close()`.
 - When changing Flet UI, use i18n for user-facing text, keep locale bundles in parity, localize at the UI boundary, and use `page.run_task` for async callbacks.
+- When changing UI, preserve the established visual language and unaffected behavior unless the task explicitly approves a redesign or compatibility break.
+- Reuse the established theme, design tokens, fonts, icons, assets, interaction patterns, and compatible shared components; prefer extending a shared token or primitive over duplicating arbitrary visual values across views.
+- When replacing UI or migrating frameworks, treat the accepted production UI as the compatibility baseline; do not use experimental, reverted, or production-unproven UI as the design reference unless explicitly approved.
+- Verify affected layouts, states, interactions, and locales in the target environment; visually sensitive replacements require reproducible comparison evidence before the old surface is retired.
 - Debug UI preview mode may exist for hard-to-reproduce UI states.
   - Verify the exact CLI flag and preview actions in code before use.
   - Preview actions must not persist settings, mutate secrets, or call external providers/brokers.
