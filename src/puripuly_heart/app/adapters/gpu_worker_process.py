@@ -27,7 +27,7 @@ from puripuly_heart.app.ports.gpu_worker import (
 )
 from puripuly_heart.core.lifecycle import LifecycleScope, start_lifecycle_task
 
-GPU_WORKER_CONTRACT_VERSION = 1
+GPU_WORKER_CONTRACT_VERSION = 2
 GPU_WORKER_EXECUTABLE_NAME = "PuriPulyHeartGpuWorker.exe"
 _MAX_FRAME_BYTES = 4 * 1024 * 1024
 
@@ -139,35 +139,69 @@ class DefaultGpuWorkerProcessFactory(GpuWorkerProcessFactoryPort):
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.startup_timeout_s
-        while process.returncode is None:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                break
-            writer: asyncio.StreamWriter | None = None
-            try:
-                reader, writer = await asyncio.wait_for(queue.get(), timeout=remaining)
-                raw = await asyncio.wait_for(reader.readline(), timeout=remaining)
-            except TimeoutError:
-                if writer is not None:
+        scope = LifecycleScope(f"gpu-worker-startup-{session_id}")
+        process_wait = start_lifecycle_task(scope, process.wait(), name="process-wait")
+        attempt = 0
+        try:
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise GpuWorkerClosedError("worker authentication timed out")
+                attempt += 1
+                connection_wait = start_lifecycle_task(
+                    scope,
+                    queue.get(),
+                    name=f"connection-wait-{attempt}",
+                )
+                done, _pending = await asyncio.wait(
+                    {connection_wait, process_wait},
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if process_wait in done:
+                    raise GpuWorkerClosedError(
+                        f"worker exited before authentication with code {process_wait.result()}"
+                    )
+                if connection_wait not in done:
+                    raise GpuWorkerClosedError("worker authentication timed out")
+                reader, writer = connection_wait.result()
+                remaining = deadline - loop.time()
+                if remaining <= 0:
                     await _close_writer(writer)
-                break
-            except BaseException:
-                if writer is not None:
+                    raise GpuWorkerClosedError("worker authentication timed out")
+                frame_wait = start_lifecycle_task(
+                    scope,
+                    reader.readline(),
+                    name=f"authentication-frame-{attempt}",
+                )
+                done, _pending = await asyncio.wait(
+                    {frame_wait, process_wait},
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if process_wait in done:
                     await _close_writer(writer)
-                raise
-            try:
-                payload = _decode_frame(raw)
-            except GpuWorkerClosedError:
+                    raise GpuWorkerClosedError(
+                        f"worker exited before authentication with code {process_wait.result()}"
+                    )
+                if frame_wait not in done:
+                    await _close_writer(writer)
+                    raise GpuWorkerClosedError("worker authentication timed out")
+                raw = frame_wait.result()
+                try:
+                    payload = _decode_frame(raw)
+                except GpuWorkerClosedError:
+                    await _close_writer(writer)
+                    continue
+                if _authenticated(
+                    payload,
+                    session_id=session_id,
+                    auth_token=auth_token,
+                ):
+                    return reader, writer
                 await _close_writer(writer)
-                continue
-            if _authenticated(
-                payload,
-                session_id=session_id,
-                auth_token=auth_token,
-            ):
-                return reader, writer
-            await _close_writer(writer)
-        raise GpuWorkerClosedError("worker authentication timed out or process exited")
+        finally:
+            await scope.close()
 
     @classmethod
     def default_executable_candidates(
@@ -295,6 +329,7 @@ class _DefaultGpuWorkerClient(GpuWorkerClientPort):
         request_id: str,
         channel: Literal["self", "peer"],
         audio_path: Path,
+        language_hint: str | None = None,
         on_request_sent: Callable[[], None] | None = None,
     ) -> GpuWorkerTranscription:
         payload = await self._request(
@@ -303,6 +338,7 @@ class _DefaultGpuWorkerClient(GpuWorkerClientPort):
             on_request_sent=on_request_sent,
             channel=channel,
             audio_path=str(audio_path.resolve()),
+            language_hint=language_hint,
         )
         raw_transcription = payload.get("transcription")
         if not isinstance(raw_transcription, dict):

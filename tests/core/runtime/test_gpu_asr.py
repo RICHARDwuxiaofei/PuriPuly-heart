@@ -63,7 +63,7 @@ class FakeGpuWorkerClient:
         self.transcribe_error = transcribe_error
         self.send_error = send_error
         self.activate_calls: list[tuple[Path, str]] = []
-        self.transcribe_calls: list[tuple[str, str]] = []
+        self.transcribe_calls: list[tuple[str, str, str | None]] = []
         self.cancel_calls: list[str] = []
         self.close_calls = 0
         self.started = asyncio.Event()
@@ -101,6 +101,7 @@ class FakeGpuWorkerClient:
         request_id: str,
         channel: str,
         audio_path: Path,
+        language_hint: str | None = None,
         on_request_sent: Callable[[], None] | None = None,
     ) -> GpuWorkerTranscription:
         assert audio_path.is_file()
@@ -108,7 +109,7 @@ class FakeGpuWorkerClient:
             raise self.send_error
         if on_request_sent is not None:
             on_request_sent()
-        self.transcribe_calls.append((request_id, channel))
+        self.transcribe_calls.append((request_id, channel, language_hint))
         self.started.set()
         if self.transcribe_gate is not None:
             await self.transcribe_gate.wait()
@@ -339,10 +340,32 @@ async def test_global_speech_end_fifo_has_no_pending_count_cap() -> None:
     await asyncio.gather(blocker, *queued)
 
     assert len(client.transcribe_calls) == 51
-    assert [channel for _request, channel in client.transcribe_calls[1:4]] == [
+    assert [channel for _request, channel, _hint in client.transcribe_calls[1:4]] == [
         "self",
         "peer",
         "self",
+    ]
+    await runtime.close()
+
+
+async def test_shared_queue_preserves_per_utterance_language_hints() -> None:
+    client = FakeGpuWorkerClient()
+    runtime = SharedGpuASRRuntime(
+        process_factory=FakeGpuWorkerFactory([client]),
+        clock=FakeClock(_now=2.0),
+    )
+    await _activate(runtime)
+    await _activate(runtime, "peer")
+    samples = np.zeros(1600, dtype=np.float32)
+
+    await asyncio.gather(
+        runtime.submit("self", samples, speech_end_at=1.0, language_hint="ko"),
+        runtime.submit("peer", samples, speech_end_at=2.0, language_hint=None),
+    )
+
+    assert [(channel, hint) for _request, channel, hint in client.transcribe_calls] == [
+        ("self", "ko"),
+        ("peer", None),
     ]
     await runtime.close()
 

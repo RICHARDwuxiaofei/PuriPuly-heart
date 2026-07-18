@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 use std::path::Path;
 
-pub const CONTRACT_VERSION: u32 = 1;
+pub const CONTRACT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +76,7 @@ pub enum Request {
         request_id: String,
         channel: String,
         audio_path: String,
+        language_hint: Option<String>,
     },
     Cancel {
         contract_version: u32,
@@ -186,5 +187,26 @@ mod tests {
             request.validate_session("different-session"),
             Err("session_mismatch".to_string())
         );
+    }
+
+    #[test]
+    fn transcribe_request_preserves_optional_language_hint() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "type": "transcribe",
+            "contract_version": CONTRACT_VERSION,
+            "session_id": "expected-session",
+            "request_id": "transcribe-1",
+            "channel": "peer",
+            "audio_path": "sample.wav",
+            "language_hint": "ja"
+        }))
+        .expect("transcribe request");
+
+        match request {
+            Request::Transcribe { language_hint, .. } => {
+                assert_eq!(language_hint.as_deref(), Some("ja"));
+            }
+            _ => panic!("expected transcribe request"),
+        }
     }
 }

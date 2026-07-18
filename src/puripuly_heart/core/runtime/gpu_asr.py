@@ -96,6 +96,7 @@ class _PendingWork:
     request_id: str = field(compare=False)
     channel: GpuASRChannel = field(compare=False)
     samples_f32: np.ndarray = field(compare=False)
+    language_hint: str | None = field(compare=False)
     future: asyncio.Future[GpuWorkerTranscription] = field(compare=False)
     request_sent: asyncio.Event = field(
         compare=False,
@@ -253,6 +254,7 @@ class SharedGpuASRRuntime:
         samples_f32: np.ndarray,
         *,
         speech_end_at: float,
+        language_hint: str | None = None,
     ) -> GpuWorkerTranscription:
         samples = np.asarray(samples_f32, dtype=np.float32)
         if samples.ndim != 1 or samples.size == 0:
@@ -276,6 +278,7 @@ class SharedGpuASRRuntime:
                 request_id=uuid4().hex,
                 channel=channel,
                 samples_f32=samples,
+                language_hint=language_hint,
                 future=future,
             )
             heapq.heappush(self._queue, work)
@@ -542,7 +545,11 @@ class SharedGpuASRRuntime:
         force_required = False
         already_closed = False
         if request_id is not None:
-            cancel_task = asyncio.create_task(client.cancel(request_id))
+            cancel_task = start_lifecycle_task(
+                self._scope,
+                client.cancel(request_id),
+                name=f"shutdown-cancel:{request_id}",
+            )
             pending_tasks.append(cancel_task)
             done, _pending = await asyncio.wait(
                 {cancel_task},
@@ -559,7 +566,11 @@ class SharedGpuASRRuntime:
                     errors.append(exc)
                     force_required = True
         if not force_required and not already_closed:
-            close_task = asyncio.create_task(client.close())
+            close_task = start_lifecycle_task(
+                self._scope,
+                client.close(),
+                name=f"shutdown-close:{id(client)}",
+            )
             pending_tasks.append(close_task)
             done, _pending = await asyncio.wait(
                 {close_task},
@@ -577,7 +588,11 @@ class SharedGpuASRRuntime:
                     force_required = True
         terminal = True
         if force_required and not already_closed:
-            force_task = asyncio.create_task(client.force_close())
+            force_task = start_lifecycle_task(
+                self._scope,
+                client.force_close(),
+                name=f"shutdown-force-close:{id(client)}",
+            )
             done, _pending = await asyncio.wait(
                 {force_task},
                 timeout=self._force_close_seconds,
@@ -669,6 +684,7 @@ class SharedGpuASRRuntime:
                         request_id=work.request_id,
                         channel=work.channel,
                         audio_path=audio_path,
+                        language_hint=work.language_hint,
                         on_request_sent=work.request_sent.set,
                     )
                 except BaseException as exc:
@@ -826,8 +842,16 @@ class SharedGpuASRRuntime:
     ) -> bool:
         if work.settled.is_set():
             return False
-        request_sent = asyncio.create_task(work.request_sent.wait())
-        settled = asyncio.create_task(work.settled.wait())
+        request_sent = start_lifecycle_task(
+            self._scope,
+            work.request_sent.wait(),
+            name=f"cancel-request-sent:{work.request_id}",
+        )
+        settled = start_lifecycle_task(
+            self._scope,
+            work.settled.wait(),
+            name=f"cancel-settled:{work.request_id}",
+        )
         try:
             done, _pending = await asyncio.wait(
                 {request_sent, settled},
@@ -893,7 +917,11 @@ class SharedGpuASRRuntime:
             self._activation_task = None
             self._temporary_directory = None
             self._queue_event.set()
-        close_task = asyncio.create_task(client.close())
+        close_task = start_lifecycle_task(
+            self._scope,
+            client.close(),
+            name=f"channel-escalation-close:{id(client)}",
+        )
         done, _pending = await asyncio.wait(
             {close_task},
             timeout=self._force_close_seconds,

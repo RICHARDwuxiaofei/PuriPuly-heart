@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import puripuly_heart.app.adapters.gpu_worker_process as gpu_worker_process_module
 from puripuly_heart.app.adapters.gpu_worker_process import (
     DefaultGpuWorkerProcessFactory,
 )
@@ -173,6 +174,32 @@ async def test_started_decode_success_has_event_and_finite_exact_timing(
     await client.close()
 
 
+async def test_transcribe_sends_optional_language_hint_in_contract_v2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FAKE_GPU_WORKER_STARTED_SUCCESS", "1")
+    client = await _factory().start(mode="persistent")
+    await client.next_event()
+    await client.activate(model_path=tmp_path / "model.gguf", device_id="vulkan:0")
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"fixture")
+
+    transcribe = asyncio.create_task(
+        client.transcribe(
+            request_id="hinted-decode",
+            channel="peer",
+            audio_path=audio_path,
+            language_hint="ja",
+        )
+    )
+    await client.next_event()
+    result = await transcribe
+
+    assert result.text == "ja"
+    await client.close()
+
+
 async def test_close_forces_process_termination_after_cooperative_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -192,3 +219,18 @@ async def test_invalid_authentication_is_rejected(
 
     with pytest.raises(GpuWorkerClosedError, match="authentication"):
         await _factory(startup_timeout_s=0.25).start(mode="discovery")
+
+
+async def test_process_exit_before_authentication_fails_without_waiting_for_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FAKE_GPU_WORKER_EXIT_BEFORE_AUTH", "1")
+    monkeypatch.setattr(gpu_worker_process_module.tempfile, "tempdir", str(tmp_path))
+    started_at = asyncio.get_running_loop().time()
+
+    with pytest.raises(GpuWorkerClosedError, match="code 23"):
+        await _factory(startup_timeout_s=5.0).start(mode="discovery")
+
+    assert asyncio.get_running_loop().time() - started_at < 2.0
+    assert tuple(tmp_path.iterdir()) == ()

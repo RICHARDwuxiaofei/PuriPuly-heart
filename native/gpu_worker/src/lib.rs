@@ -214,7 +214,7 @@ async fn run_worker(manifest: LaunchManifest) -> Result<(), i32> {
                             manifest.session_id.clone(),
                         ));
                     }
-                    Request::Transcribe { request_id, channel, audio_path, .. } => {
+                    Request::Transcribe { request_id, channel, audio_path, language_hint, .. } => {
                         if manifest.mode != WorkerMode::Persistent || !matches!(channel.as_str(), "self" | "peer") {
                             let _ = outgoing_tx.send(failure(
                                 &manifest.session_id,
@@ -229,6 +229,7 @@ async fn run_worker(manifest: LaunchManifest) -> Result<(), i32> {
                             request_id,
                             channel,
                             PathBuf::from(audio_path),
+                            language_hint,
                             Arc::clone(&engine),
                             outgoing_tx.clone(),
                             manifest.session_id.clone(),
@@ -351,6 +352,7 @@ fn spawn_transcription(
     request_id: String,
     channel: String,
     audio_path: PathBuf,
+    language_hint: Option<String>,
     engine: Arc<Mutex<GpuEngine>>,
     outgoing: mpsc::UnboundedSender<Value>,
     session_id: String,
@@ -362,7 +364,7 @@ fn spawn_transcription(
         let payload = engine
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .transcribe(&audio_path, &task_token, |audio_seconds| {
+            .transcribe(&audio_path, language_hint, &task_token, |audio_seconds| {
                 let _ = outgoing.send(event(
                     &session_id,
                     "transcribe_started",

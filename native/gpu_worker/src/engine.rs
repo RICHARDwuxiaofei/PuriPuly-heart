@@ -230,6 +230,7 @@ impl GpuEngine {
     pub fn transcribe<F>(
         &mut self,
         audio_path: &Path,
+        language_hint: Option<String>,
         cancel_token: &CancelToken,
         on_decode_started: F,
     ) -> Result<TranscriptionResult, TranscriptionFailure>
@@ -260,6 +261,7 @@ impl GpuEngine {
         session.set_cancel_token(cancel_token);
         let mut run_options = RunOptions::default();
         run_options.timestamps = TimestampKind::None;
+        run_options.language = language_hint;
         let decoded = execute_started_decode(audio_seconds, on_decode_started, || {
             session
                 .run(&samples, &run_options)
@@ -420,7 +422,9 @@ mod tests {
         for path in [&invalid, &empty, &valid] {
             let started = Cell::new(false);
             let failure = GpuEngine::default()
-                .transcribe(Path::new(path), &CancelToken::new(), |_| started.set(true))
+                .transcribe(Path::new(path), None, &CancelToken::new(), |_| {
+                    started.set(true)
+                })
                 .expect_err("pre-run input must fail without a loaded session");
             assert!(!started.get());
             assert!(!failure.attempt_started);

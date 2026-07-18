@@ -81,6 +81,7 @@ class GpuWorkerClientPort(Protocol):
         request_id: str,
         channel: Literal["self", "peer"],
         audio_path: Path,
+        language_hint: str | None = None,
         on_request_sent: Callable[[], None] | None = None,
     ) -> GpuWorkerTranscription: ...
 

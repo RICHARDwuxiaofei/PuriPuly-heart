@@ -138,12 +138,12 @@ _QWEN_ASR_LANGUAGE_MAP: dict[str, str] = {
 }
 
 _LOCAL_QWEN_LANGUAGE_HINT_MAP: dict[str, str] = {
-    "en": "English",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "zh": "Chinese",
-    "zh-CN": "Chinese",
-    "zh-TW": "Chinese",
+    "en": "en",
+    "ja": "ja",
+    "ko": "ko",
+    "zh": "zh",
+    "zh-CN": "zh",
+    "zh-TW": "zh",
 }
 
 
@@ -158,7 +158,7 @@ def get_qwen_asr_language(code: str) -> str:
 
 
 def get_local_qwen_language_hint(code: str) -> str | None:
-    """Get a conservative human-readable language hint for local Qwen STT."""
+    """Get a conservative Qwen language code for local GPU STT."""
     normalized = code.strip()
     if normalized in _LOCAL_QWEN_LANGUAGE_HINT_MAP:
         return _LOCAL_QWEN_LANGUAGE_HINT_MAP[normalized]

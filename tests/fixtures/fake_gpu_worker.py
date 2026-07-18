@@ -11,6 +11,9 @@ config_path = sys.argv[sys.argv.index("--config") + 1]
 with open(config_path, encoding="utf-8") as config_file:
     config = json.load(config_file)
 
+if os.environ.get("FAKE_GPU_WORKER_EXIT_BEFORE_AUTH") == "1":
+    raise SystemExit(23)
+
 connection = socket.create_connection((config["connect_host"], config["connect_port"]))
 writer_lock = threading.Lock()
 stopping = threading.Event()
@@ -153,7 +156,7 @@ for raw in reader:
                     "status": "ok",
                     "payload": {
                         "transcription": {
-                            "text": "fixture",
+                            "text": request.get("language_hint") or "fixture",
                             "detected_language": "en",
                             "audio_seconds": 1.0,
                             "decode_seconds": 0.2,

@@ -52,9 +52,9 @@ def test_qwen_asr_language_normalization() -> None:
 def test_local_qwen_language_hint_normalization_is_conservative() -> None:
     assert hasattr(language_module, "get_local_qwen_language_hint")
 
-    assert language_module.get_local_qwen_language_hint("ko-KR") == "Korean"
-    assert language_module.get_local_qwen_language_hint("zh-TW") == "Chinese"
-    assert language_module.get_local_qwen_language_hint("en") == "English"
+    assert language_module.get_local_qwen_language_hint("ko-KR") == "ko"
+    assert language_module.get_local_qwen_language_hint("zh-TW") == "zh"
+    assert language_module.get_local_qwen_language_hint("en") == "en"
     assert language_module.get_local_qwen_language_hint("ar") is None
     assert language_module.get_local_qwen_language_hint("xx") is None
 
