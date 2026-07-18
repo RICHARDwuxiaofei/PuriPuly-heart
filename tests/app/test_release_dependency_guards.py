@@ -782,6 +782,9 @@ def test_release_workflow_prepares_soxr_release_inputs_before_build_and_publishe
     assert SOXR_RELEASE_INPUTS_SCRIPT in job_block
     assert "scripts/ci/build-release-artifacts.ps1" not in job_block
     assert job_block.index(SOXR_RELEASE_INPUTS_SCRIPT) < job_block.index("PyInstaller")
+    assert "native/gpu_worker/Cargo.toml" in job_block
+    assert "PuriPulyHeartGpuWorker.exe" in job_block
+    assert job_block.index("native/gpu_worker/Cargo.toml") < job_block.index("PyInstaller")
     assert SOXR_SOURCE_BUNDLE_NAME in workflow
     assert (
         "release-artifacts/installer_output/"

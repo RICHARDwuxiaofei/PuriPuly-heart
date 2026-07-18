@@ -16,6 +16,7 @@ env:
   PYTHON_VERSION: "3.12.10"
   UV_VERSION: "0.9.17"
   INNOSETUP_VERSION: "6.6.1"
+  VULKAN_SDK_VERSION: "1.4.304.1"
 
 jobs:
   verify-version:
@@ -51,11 +52,16 @@ jobs:
           init_path = root / "src" / "puripuly_heart" / "__init__.py"
           installer_path = root / "installer.iss"
           overlay_cargo_path = root / "native" / "overlay" / "Cargo.toml"
+          gpu_worker_cargo_path = root / "native" / "gpu_worker" / "Cargo.toml"
 
           pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
           pyproject_version = pyproject["project"]["version"]
           overlay_cargo = tomllib.loads(overlay_cargo_path.read_text(encoding="utf-8"))
           overlay_version = overlay_cargo["package"]["version"]
+          gpu_worker_cargo = tomllib.loads(
+              gpu_worker_cargo_path.read_text(encoding="utf-8")
+          )
+          gpu_worker_version = gpu_worker_cargo["package"]["version"]
 
           init_match = re.search(
               r'^__version__\s*=\s*"([^"]+)"',
@@ -83,6 +89,7 @@ jobs:
               "src/puripuly_heart/__init__.py": init_version,
               "installer.iss": installer_version,
               "native/overlay/Cargo.toml": overlay_version,
+              "native/gpu_worker/Cargo.toml": gpu_worker_version,
           }
 
           unique_versions = set(versions.values())
@@ -122,6 +129,13 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Vulkan SDK
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: ${{ env.VULKAN_SDK_VERSION }}
+          vulkan-components: Vulkan-Headers, Vulkan-Loader
+          vulkan-use-cache: true
+
       - name: Build Rust overlay
         shell: pwsh
         run: |
@@ -138,6 +152,24 @@ jobs:
           New-Item -ItemType Directory -Force -Path build/overlay | Out-Null
           Copy-Item target/release/PuriPulyHeartOverlay.exe build/overlay/PuriPulyHeartOverlay.exe -Force
           Copy-Item third_party/openvr/win64/openvr_api.dll build/overlay/openvr_api.dll -Force
+
+      - name: Build Rust GPU worker
+        env:
+          LIBCLANG_PATH: ${{ github.workspace }}\.venv\Lib\site-packages\clang\native
+        shell: pwsh
+        run: |
+          cargo build `
+            --manifest-path native/gpu_worker/Cargo.toml `
+            --locked `
+            --release `
+            --bin PuriPulyHeartGpuWorker `
+            --target-dir target/gpu-worker
+
+      - name: Stage GPU worker runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build/gpu_worker | Out-Null
+          Copy-Item target/gpu-worker/release/PuriPulyHeartGpuWorker.exe build/gpu_worker/PuriPulyHeartGpuWorker.exe -Force
 
       - name: Build Windows executable
         shell: pwsh
