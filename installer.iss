@@ -62,34 +62,25 @@ Name: "chinesetraditional"; MessagesFile: "installer\Languages\ChineseTraditiona
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; OnlyBelowVersion: 6.1; Check: not IsAdminInstallMode
+Name: "redownloadasr"; Description: "{cm:RedownloadAsrTask}"; GroupDescription: "{cm:AsrModelsGroup}"; Flags: unchecked
 
 [CustomMessages]
-english.LocalSttPageTitle=ASR Model
-english.LocalSttChecking=Checking installed ASR models...
 english.LocalSttDownloadSize=ASR models will be downloaded.%nInstallation requires %1 of disk space.
 english.LocalSttNoDownload=All ASR models are installed.
 english.LocalSttDiskSpaceFailed=Not enough free space for the ASR model download. %1 is required, but only %2 is available on %3.
 english.LocalSttDiskSpaceCheckFailed=Setup could not check free space on %1.
-korean.LocalSttPageTitle=ASR 모델
-korean.LocalSttChecking=설치된 ASR 모델을 확인하는 중...
 korean.LocalSttDownloadSize=ASR 모델을 다운로드합니다.%n설치에 필요한 용량은 %1입니다.
 korean.LocalSttNoDownload=ASR 모델이 모두 설치되어있습니다.
 korean.LocalSttDiskSpaceFailed=ASR 모델 다운로드를 위한 여유 공간이 부족합니다. %3에 %1이 필요하지만 %2만 사용할 수 있습니다.
 korean.LocalSttDiskSpaceCheckFailed=%1의 여유 공간을 확인할 수 없습니다.
-japanese.LocalSttPageTitle=ASRモデル
-japanese.LocalSttChecking=インストール済みのASRモデルを確認しています...
 japanese.LocalSttDownloadSize=ASRモデルをダウンロードします。%nインストールには%1の空き容量が必要です。
 japanese.LocalSttNoDownload=ASRモデルはすべてインストール済みです。
 japanese.LocalSttDiskSpaceFailed=ASRモデルのダウンロードに必要な空き容量がありません。%3には%1が必要ですが、利用可能なのは%2です。
 japanese.LocalSttDiskSpaceCheckFailed=%1の空き容量を確認できません。
-chinesesimplified.LocalSttPageTitle=ASR 模型
-chinesesimplified.LocalSttChecking=正在检查已安装的 ASR 模型...
 chinesesimplified.LocalSttDownloadSize=将下载 ASR 模型。%n安装需要 %1 的空间。
 chinesesimplified.LocalSttNoDownload=ASR 模型均已安装。
 chinesesimplified.LocalSttDiskSpaceFailed=ASR 模型下载空间不足。%3 需要 %1，但只有 %2 可用。
 chinesesimplified.LocalSttDiskSpaceCheckFailed=无法检查 %1 的可用空间。
-chinesetraditional.LocalSttPageTitle=ASR 模型
-chinesetraditional.LocalSttChecking=正在檢查已安裝的 ASR 模型...
 chinesetraditional.LocalSttDownloadSize=將下載 ASR 模型。%n安裝需要 %1 的空間。
 chinesetraditional.LocalSttNoDownload=ASR 模型均已安裝。
 chinesetraditional.LocalSttDiskSpaceFailed=ASR 模型下載空間不足。%3 需要 %1，但只有 %2 可用。
@@ -109,6 +100,21 @@ korean.LocalSttDownloadFailed=Hugging Face와 ModelScope 모두에서 ASR 모델
 japanese.LocalSttDownloadFailed=Hugging Face と ModelScope の両方でASRモデルのダウンロードに失敗しました。インストールを完了できません。
 chinesesimplified.LocalSttDownloadFailed=从 Hugging Face 和 ModelScope 下载 ASR 模型均失败。无法完成安装。
 chinesetraditional.LocalSttDownloadFailed=從 Hugging Face 和 ModelScope 下載 ASR 模型均失敗。無法完成安裝。
+english.AsrModelsGroup=ASR Models
+english.RedownloadAsrTask=Re-download all ASR models
+english.LocalSttRedownloadSize=Re-downloading ASR models.%nInstallation requires %1 of disk space.
+korean.AsrModelsGroup=ASR 모델
+korean.RedownloadAsrTask=ASR 모델 전체 재다운로드
+korean.LocalSttRedownloadSize=ASR 모델을 재다운로드합니다.%n설치에 필요한 용량은 %1입니다.
+japanese.AsrModelsGroup=ASRモデル
+japanese.RedownloadAsrTask=ASRモデルをすべて再ダウンロード
+japanese.LocalSttRedownloadSize=ASRモデルを再ダウンロードします。%nインストールには%1の空き容量が必要です。
+chinesesimplified.AsrModelsGroup=ASR 模型
+chinesesimplified.RedownloadAsrTask=重新下载所有 ASR 模型
+chinesesimplified.LocalSttRedownloadSize=重新下载 ASR 模型。%n安装需要 %1 的空间。
+chinesetraditional.AsrModelsGroup=ASR 模型
+chinesetraditional.RedownloadAsrTask=重新下載所有 ASR 模型
+chinesetraditional.LocalSttRedownloadSize=重新下載 ASR 模型。%n安裝需要 %1 的空間。
 
 [Files]
 Source: "{#MyPackagedAppDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -145,8 +151,6 @@ Type: filesandordirs; Name: "{localappdata}\puripuly-heart"
 
 [Code]
 var
-  LocalSttSourcePage: TWizardPage;
-  LocalSttSizeLabel: TNewStaticText;
   DownloadPage: TDownloadWizardPage;
   LocalSttPlanPrepared: Boolean;
   QwenNeedsDownload: Boolean;
@@ -286,28 +290,6 @@ begin
   end;
 end;
 
-procedure ActivateLocalSttPage(Sender: TWizardPage); forward;
-
-procedure InitializeLocalSttWizardPage();
-begin
-  LocalSttSourcePage := CreateCustomPage(
-    wpSelectTasks,
-    ExpandConstant('{cm:LocalSttPageTitle}'),
-    ''
-  );
-  LocalSttSourcePage.OnActivate := @ActivateLocalSttPage;
-
-  LocalSttSizeLabel := TNewStaticText.Create(LocalSttSourcePage);
-  LocalSttSizeLabel.Parent := LocalSttSourcePage.Surface;
-  LocalSttSizeLabel.Left := 0;
-  LocalSttSizeLabel.Top := ScaleY(8);
-  LocalSttSizeLabel.Width := LocalSttSourcePage.SurfaceWidth;
-  LocalSttSizeLabel.Height := ScaleY(80);
-  LocalSttSizeLabel.AutoSize := False;
-  LocalSttSizeLabel.WordWrap := True;
-  LocalSttSizeLabel.Caption := ExpandConstant('{cm:LocalSttChecking}');
-end;
-
 function ResolveLocalSttAppDataRoot(): String;
 var
   OverrideRoot: String;
@@ -441,34 +423,6 @@ end;
 function ValidateLocalSttInstall(BaseDir: String): Boolean;
 begin
   Result := ValidateLocalSttAssets(BaseDir) and ValidateLocalSttInstalledManifest(BaseDir);
-end;
-
-function EnsureExistingLocalSttInstall(BaseDir: String): Boolean;
-var
-  ManifestText: AnsiString;
-  SourceName: String;
-begin
-  Result := False;
-  if not ValidateLocalSttAssets(BaseDir) then begin
-    exit;
-  end;
-  if ValidateLocalSttInstalledManifest(BaseDir) then begin
-    Result := True;
-    exit;
-  end;
-  SourceName := 'huggingface';
-  if LoadStringFromFile(AddBackslash(BaseDir) + 'installed-manifest.json', ManifestText) and
-     (Pos('"selected_source": "modelscope"', ManifestText) > 0) then begin
-    SourceName := 'modelscope';
-  end;
-  Result := SaveStringToFile(
-    AddBackslash(BaseDir) + 'installed-manifest.json',
-    ExpectedLocalSttInstalledManifest(SourceName),
-    False
-  );
-  if Result then begin
-    Log('Repaired local STT installed manifest without redownloading model assets: ' + BaseDir);
-  end;
 end;
 
 function CopyLocalSttAsset(StagingDir: String; BaseName: String; RelativePath: String): Boolean;
@@ -653,26 +607,6 @@ begin
   Result := ValidateParakeetV3Assets(BaseDir) and ValidateParakeetV3InstalledManifest(BaseDir);
 end;
 
-function EnsureExistingParakeetV3Install(BaseDir: String): Boolean;
-begin
-  Result := False;
-  if not ValidateParakeetV3Assets(BaseDir) then begin
-    exit;
-  end;
-  if ValidateParakeetV3InstalledManifest(BaseDir) then begin
-    Result := True;
-    exit;
-  end;
-  Result := SaveStringToFile(
-    AddBackslash(BaseDir) + 'installed-manifest.json',
-    ExpectedParakeetV3InstalledManifest(),
-    False
-  );
-  if Result then begin
-    Log('Repaired Parakeet v3 installed manifest without redownloading model assets: ' + BaseDir);
-  end;
-end;
-
 function DownloadParakeetV3(): Boolean;
 var
   StagingDir: String;
@@ -755,26 +689,6 @@ end;
 function ValidateParakeetJapaneseInstall(BaseDir: String): Boolean;
 begin
   Result := ValidateParakeetJapaneseAssets(BaseDir) and ValidateParakeetJapaneseInstalledManifest(BaseDir);
-end;
-
-function EnsureExistingParakeetJapaneseInstall(BaseDir: String): Boolean;
-begin
-  Result := False;
-  if not ValidateParakeetJapaneseAssets(BaseDir) then begin
-    exit;
-  end;
-  if ValidateParakeetJapaneseInstalledManifest(BaseDir) then begin
-    Result := True;
-    exit;
-  end;
-  Result := SaveStringToFile(
-    AddBackslash(BaseDir) + 'installed-manifest.json',
-    ExpectedParakeetJapaneseInstalledManifest(),
-    False
-  );
-  if Result then begin
-    Log('Repaired Parakeet Japanese installed manifest without redownloading model assets: ' + BaseDir);
-  end;
 end;
 
 function DownloadParakeetJapanese(): Boolean;
@@ -871,18 +785,32 @@ begin
 end;
 
 procedure PrepareLocalSttDownloadPlan();
+var
+  ParakeetV3Dir: String;
+  ParakeetJapaneseDir: String;
+  QwenDir: String;
+  ReDownloadSelected: Boolean;
 begin
   if LocalSttPlanPrepared then begin
     exit;
   end;
+  ReDownloadSelected := WizardIsTaskSelected('redownloadasr');
 #ifdef SkipLocalSttProvisioning
   QwenNeedsDownload := False;
   ParakeetV3NeedsDownload := False;
   ParakeetJapaneseNeedsDownload := False;
 #else
-  ParakeetV3NeedsDownload := not EnsureExistingParakeetV3Install(GetParakeetV3InstallDir());
-  ParakeetJapaneseNeedsDownload := not EnsureExistingParakeetJapaneseInstall(GetParakeetJapaneseInstallDir());
-  QwenNeedsDownload := not EnsureExistingLocalSttInstall(GetLocalSttInstallDir());
+  ParakeetV3Dir := GetParakeetV3InstallDir();
+  ParakeetV3NeedsDownload := ReDownloadSelected or not (ValidateParakeetV3InstalledManifest(ParakeetV3Dir) and
+    FileExists(AddBackslash(ParakeetV3Dir) + 'encoder.int8.onnx'));
+
+  ParakeetJapaneseDir := GetParakeetJapaneseInstallDir();
+  ParakeetJapaneseNeedsDownload := ReDownloadSelected or not (ValidateParakeetJapaneseInstalledManifest(ParakeetJapaneseDir) and
+    FileExists(AddBackslash(ParakeetJapaneseDir) + 'model.int8.onnx'));
+
+  QwenDir := GetLocalSttInstallDir();
+  QwenNeedsDownload := ReDownloadSelected or not (ValidateLocalSttInstalledManifest(QwenDir) and
+    FileExists(AddBackslash(QwenDir) + 'decoder.int8.onnx'));
 #endif
   LocalSttRequiredDownloadBytes := 0;
   if ParakeetV3NeedsDownload then begin
@@ -895,20 +823,6 @@ begin
     LocalSttRequiredDownloadBytes := LocalSttRequiredDownloadBytes + QwenDownloadSize;
   end;
   LocalSttPlanPrepared := True;
-end;
-
-procedure ActivateLocalSttPage(Sender: TWizardPage);
-var
-  DownloadSizeText: String;
-begin
-  LocalSttSizeLabel.Caption := ExpandConstant('{cm:LocalSttChecking}');
-  PrepareLocalSttDownloadPlan();
-  if LocalSttRequiredDownloadBytes = 0 then begin
-    LocalSttSizeLabel.Caption := ExpandConstant('{cm:LocalSttNoDownload}');
-  end else begin
-    DownloadSizeText := FormatByteSize(LocalSttRequiredDownloadBytes);
-    LocalSttSizeLabel.Caption := FmtMessage(CustomMessage('LocalSttDownloadSize'), [DownloadSizeText]);
-  end;
 end;
 
 function LocalSttStorageVolume(Path: String): String;
@@ -1041,10 +955,31 @@ begin
   Result := ParakeetV3Installed and ParakeetJapaneseInstalled and QwenInstalled;
 end;
 
+procedure CurPageChanged(CurPageID: Integer);
+var
+  DownloadSizeText: String;
+begin
+  if CurPageID = wpReady then begin
+    PrepareLocalSttDownloadPlan();
+    if LocalSttRequiredDownloadBytes > 0 then begin
+      DownloadSizeText := FormatByteSize(LocalSttRequiredDownloadBytes);
+      if WizardIsTaskSelected('redownloadasr') then begin
+        WizardForm.ReadyMemo.Text := WizardForm.ReadyMemo.Text + #13#10 +
+          FmtMessage(CustomMessage('LocalSttRedownloadSize'), [DownloadSizeText]);
+      end else begin
+        WizardForm.ReadyMemo.Text := WizardForm.ReadyMemo.Text + #13#10 +
+          FmtMessage(CustomMessage('LocalSttDownloadSize'), [DownloadSizeText]);
+      end;
+    end else begin
+      WizardForm.ReadyMemo.Text := WizardForm.ReadyMemo.Text + #13#10 +
+        ExpandConstant('{cm:LocalSttNoDownload}');
+    end;
+  end;
+end;
+
 procedure InitializeWizard();
 begin
   ResetSuspiciousInstallDir();
-  InitializeLocalSttWizardPage();
   DownloadPage := CreateDownloadPage(
     ExpandConstant('{cm:LocalSttDownloadTitle}'),
     ExpandConstant('{cm:LocalSttDownloadDescription}'),

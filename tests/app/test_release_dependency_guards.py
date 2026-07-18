@@ -1144,7 +1144,14 @@ def test_installer_script_path_prefix_helper_handles_drive_root_boundaries() -> 
 def test_installer_script_uses_inno_managed_local_stt_download() -> None:
     script = (ROOT / "installer.iss").read_text(encoding="utf-8")
 
-    assert "LocalSttSourcePage" in script
+    assert "LocalSttSourcePage" not in script
+    assert "LocalSttSizeLabel" not in script
+    assert "InitializeLocalSttWizardPage" not in script
+    assert "ActivateLocalSttPage" not in script
+    assert "CurPageChanged" in script
+    assert "WizardForm.ReadyMemo.Text" in script
+    assert "LocalSttRedownloadSize" in script
+    assert "WizardIsTaskSelected('redownloadasr')" in script
     assert "LocalSttReinstallCheckBox" not in script
     assert "LocalSttReinstall=" not in script
     assert "CreateDownloadPage" in script
@@ -1176,31 +1183,43 @@ def test_installer_script_uses_concise_local_stt_user_copy_across_locales() -> N
     script = (ROOT / "installer.iss").read_text(encoding="utf-8")
 
     expected_messages = {
-        "english.LocalSttChecking": "Checking installed ASR models...",
         "english.LocalSttDownloadSize": "ASR models will be downloaded.%nInstallation requires %1 of disk space.",
         "english.LocalSttNoDownload": "All ASR models are installed.",
         "english.LocalSttDownloadDescription": "",
-        "korean.LocalSttChecking": "설치된 ASR 모델을 확인하는 중...",
+        "english.AsrModelsGroup": "ASR Models",
+        "english.RedownloadAsrTask": "Re-download all ASR models",
+        "english.LocalSttRedownloadSize": "Re-downloading ASR models.%nInstallation requires %1 of disk space.",
         "korean.LocalSttDownloadSize": "ASR 모델을 다운로드합니다.%n설치에 필요한 용량은 %1입니다.",
         "korean.LocalSttNoDownload": "ASR 모델이 모두 설치되어있습니다.",
         "korean.LocalSttDownloadDescription": "",
-        "japanese.LocalSttChecking": "インストール済みのASRモデルを確認しています...",
+        "korean.AsrModelsGroup": "ASR 모델",
+        "korean.RedownloadAsrTask": "ASR 모델 전체 재다운로드",
+        "korean.LocalSttRedownloadSize": "ASR 모델을 재다운로드합니다.%n설치에 필요한 용량은 %1입니다.",
         "japanese.LocalSttDownloadSize": "ASRモデルをダウンロードします。%nインストールには%1の空き容量が必要です。",
         "japanese.LocalSttNoDownload": "ASRモデルはすべてインストール済みです。",
         "japanese.LocalSttDownloadDescription": "",
-        "chinesesimplified.LocalSttChecking": "正在检查已安装的 ASR 模型...",
+        "japanese.AsrModelsGroup": "ASRモデル",
+        "japanese.RedownloadAsrTask": "ASRモデルをすべて再ダウンロード",
+        "japanese.LocalSttRedownloadSize": "ASRモデルを再ダウンロードします。%nインストールには%1の空き容量が必要です。",
         "chinesesimplified.LocalSttDownloadSize": "将下载 ASR 模型。%n安装需要 %1 的空间。",
         "chinesesimplified.LocalSttNoDownload": "ASR 模型均已安装。",
         "chinesesimplified.LocalSttDownloadDescription": "",
-        "chinesetraditional.LocalSttChecking": "正在檢查已安裝的 ASR 模型...",
+        "chinesesimplified.AsrModelsGroup": "ASR 模型",
+        "chinesesimplified.RedownloadAsrTask": "重新下载所有 ASR 模型",
+        "chinesesimplified.LocalSttRedownloadSize": "重新下载 ASR 模型。%n安装需要 %1 的空间。",
         "chinesetraditional.LocalSttDownloadSize": "將下載 ASR 模型。%n安裝需要 %1 的空間。",
         "chinesetraditional.LocalSttNoDownload": "ASR 模型均已安裝。",
         "chinesetraditional.LocalSttDownloadDescription": "",
+        "chinesetraditional.AsrModelsGroup": "ASR 模型",
+        "chinesetraditional.RedownloadAsrTask": "重新下載所有 ASR 模型",
+        "chinesetraditional.LocalSttRedownloadSize": "重新下載 ASR 模型。%n安裝需要 %1 的空間。",
     }
 
     for key, value in expected_messages.items():
         assert f"{key}={value}\n" in script
 
+    assert "LocalSttPageTitle" not in script
+    assert "LocalSttChecking" not in script
     assert "LocalSttPageDescription" not in script
     assert "Hugging Face is tried first; ModelScope is used automatically if needed." not in script
     assert "먼저 Hugging Face를 시도하고, 필요하면 ModelScope로 자동 전환합니다." not in script
@@ -1220,16 +1239,25 @@ def test_installer_reports_required_model_bytes_and_keeps_one_continuous_progres
     assert "LocalSttDisplayedDownloadBytes" in script
 
 
-def test_installer_skips_only_strongly_valid_models_and_checks_both_storage_locations() -> None:
+def test_installer_uses_manifest_check_for_existing_models_and_checks_both_storage_locations() -> (
+    None
+):
     script = (ROOT / "installer.iss").read_text(encoding="utf-8")
 
-    assert "QwenNeedsDownload := not EnsureExistingLocalSttInstall" in script
-    assert "ParakeetV3NeedsDownload := not EnsureExistingParakeetV3Install" in script
-    assert "ParakeetJapaneseNeedsDownload := not EnsureExistingParakeetJapaneseInstall" in script
+    assert "ValidateParakeetV3InstalledManifest(ParakeetV3Dir)" in script
+    assert "FileExists(AddBackslash(ParakeetV3Dir) + 'encoder.int8.onnx')" in script
+    assert "ValidateParakeetJapaneseInstalledManifest(ParakeetJapaneseDir)" in script
+    assert "FileExists(AddBackslash(ParakeetJapaneseDir) + 'model.int8.onnx')" in script
+    assert "ValidateLocalSttInstalledManifest(QwenDir)" in script
+    assert "FileExists(AddBackslash(QwenDir) + 'decoder.int8.onnx')" in script
+    assert "WizardIsTaskSelected('redownloadasr')" in script
+    assert "ReDownloadSelected" in script
+    assert "EnsureExistingLocalSttInstall" not in script
+    assert "EnsureExistingParakeetV3Install" not in script
+    assert "EnsureExistingParakeetJapaneseInstall" not in script
     assert "GetSHA256OfFile" in script
     assert "FileSize64" in script
     assert "ValidateLocalSttInstalledManifest" in script
-    assert "Repaired local STT installed manifest without redownloading model assets" in script
     assert "GetSpaceOnDisk64(TempPath" in script
     assert "GetSpaceOnDisk64(ModelPath" in script
     assert "LocalSttRequiredDownloadBytes * 2" in script
