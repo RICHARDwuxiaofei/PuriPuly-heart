@@ -378,6 +378,93 @@ async def test_missing_gpu_model_is_exposed_only_when_activation_is_requested(
     assert view.states[-1][0] == "not_installed"
 
 
+@pytest.mark.parametrize(
+    ("status", "activation_allowed"),
+    (("missing", False), ("invalid", False)),
+)
+async def test_selected_gpu_model_auto_install_repairs_missing_or_invalid_install(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    activation_allowed: bool,
+) -> None:
+    controller, _view = _controller()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN_GPU
+    install_origins: list[str] = []
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_gpu_install",
+        lambda **_kwargs: SimpleNamespace(
+            status=status,
+            activation_allowed=activation_allowed,
+        ),
+    )
+
+    async def install(_self: GuiController, *, origin: str = "manual") -> None:
+        install_origins.append(origin)
+
+    monkeypatch.setattr(GuiController, "install_or_repair_gpu_model", install)
+
+    assert await controller.install_selected_gpu_model_if_needed() is True
+    assert install_origins == ["settings_exit"]
+
+
+async def test_selected_peer_gpu_model_auto_install_uses_shared_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _view = _controller()
+    controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN_GPU
+    install_origins: list[str] = []
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_gpu_install",
+        lambda **_kwargs: SimpleNamespace(
+            status="missing",
+            activation_allowed=False,
+        ),
+    )
+
+    async def install(_self: GuiController, *, origin: str = "manual") -> None:
+        install_origins.append(origin)
+
+    monkeypatch.setattr(GuiController, "install_or_repair_gpu_model", install)
+
+    assert await controller.install_selected_gpu_model_if_needed() is True
+    assert install_origins == ["settings_exit"]
+
+
+async def test_selected_gpu_model_auto_install_skips_ready_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _view = _controller()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN_GPU
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_gpu_install",
+        lambda **_kwargs: SimpleNamespace(status="ready", activation_allowed=True),
+    )
+    install_origins: list[str] = []
+
+    async def install(_self: GuiController, *, origin: str = "manual") -> None:
+        install_origins.append(origin)
+
+    monkeypatch.setattr(GuiController, "install_or_repair_gpu_model", install)
+
+    assert await controller.install_selected_gpu_model_if_needed() is False
+    assert install_origins == []
+
+
+async def test_gpu_install_notices_have_no_install_action() -> None:
+    controller, _view = _controller()
+    notices = []
+    controller.app.view_dashboard = SimpleNamespace(set_gpu_notice=notices.append)
+
+    controller._set_gpu_ui_state("not_installed", publish_notice=True)
+    controller._set_gpu_ui_state("invalid", publish_notice=True)
+    controller._set_gpu_ui_state("install_failed", publish_notice=True)
+
+    assert [notice.action for notice in notices] == [None, None, None]
+
+
 async def test_explicit_gpu_install_uses_only_gpu_manifest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -393,6 +480,12 @@ async def test_explicit_gpu_install_uses_only_gpu_manifest(
     monkeypatch.setattr(controller_module, "load_local_gpu_asset_manifest", lambda: manifest)
     monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
     monkeypatch.setattr(controller_module, "inspect_local_gpu_install", lambda **_kwargs: snapshot)
+    retry_calls: list[str] = []
+
+    async def retry(_self: GuiController) -> None:
+        retry_calls.append("retry")
+
+    monkeypatch.setattr(GuiController, "retry_gpu_activation", retry)
 
     await controller.install_or_repair_gpu_model()
 
@@ -402,6 +495,7 @@ async def test_explicit_gpu_install_uses_only_gpu_manifest(
     assert view.states[0] == ("installing", (), 0)
     assert controller._gpu_ui_state == "installed"
     assert [state for state, _devices, _progress in view.states] == ["installing"]
+    assert retry_calls == []
 
 
 async def test_missing_gpu_model_preserves_self_enable_intent_without_downloading(

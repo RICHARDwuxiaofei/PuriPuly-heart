@@ -909,7 +909,11 @@ class TranslatorApp:
                     self.view_settings.has_provider_changes = False
 
                     async def _task():
-                        await self.controller.apply_providers(pending_settings)
+                        applied = await self.controller.apply_providers(pending_settings)
+                        if applied:
+                            self._run_page_task(
+                                self.controller.install_selected_gpu_model_if_needed
+                            )
 
                     self._queue_settings_mutation_task(_task)
             elif getattr(self.view_settings, "has_pending_prompt_changes", False):
@@ -925,6 +929,8 @@ class TranslatorApp:
                         await self.controller.apply_settings(merged_settings)
 
                     self._queue_settings_mutation_task(_task)
+            else:
+                self._run_page_task(self.controller.install_selected_gpu_model_if_needed)
 
         if index == 0:
             self.content_area.content = self.view_dashboard
@@ -1014,9 +1020,6 @@ class TranslatorApp:
             set_devices(devices=devices)
         action_by_state = {
             "discovery_failed": "rediscover",
-            "not_installed": "install",
-            "invalid": "repair",
-            "install_failed": "reinstall",
             "activation_failed": "restart",
         }
         notice = GpuDashboardNotice(

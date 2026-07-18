@@ -4,6 +4,7 @@ import asyncio
 import copy
 from pathlib import Path
 from types import MethodType, SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -262,6 +263,9 @@ class ConstructionDummyController:
 
     def persist_settings(self) -> None:
         return None
+
+    async def install_selected_gpu_model_if_needed(self) -> bool:
+        return False
 
 
 class ConstructionDummyDashboardView(ft.Container):
@@ -1061,7 +1065,7 @@ def test_translator_app_4x3_window_keeps_shell_navigation_usable(
     app._on_nav_change(0)
     assert app.content_area.content is app.view_dashboard
     assert app.content_area.padding == app_module.APP_CONTENT_PADDING
-    assert len(page.tasks) == 1
+    assert len(page.tasks) == 2
 
 
 def test_app_tab_key_reverses_message_input_languages_only_on_dashboard() -> None:
@@ -1225,6 +1229,16 @@ def test_debug_preview_gpu_states_cycle_in_memory() -> None:
         "unsupported",
         "unavailable_device",
         "activation_failed",
+    ]
+    assert [notice.action for notice in app.view_dashboard.notices] == [
+        "rediscover",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "restart",
     ]
     assert len(app.view_settings.devices) == 8
 
@@ -2406,11 +2420,19 @@ async def test_on_nav_change_applies_provider_changes_when_leaving_settings() ->
     )
     app.content_area = DummyContent()
     seen: list[object] = []
+    auto_installs: list[str] = []
 
-    async def fake_apply_providers(settings) -> None:
+    async def fake_apply_providers(settings) -> bool:
         seen.append(settings)
+        return True
 
-    app.controller = SimpleNamespace(apply_providers=fake_apply_providers)
+    async def fake_auto_install() -> None:
+        auto_installs.append("started")
+
+    app.controller = SimpleNamespace(
+        apply_providers=fake_apply_providers,
+        install_selected_gpu_model_if_needed=fake_auto_install,
+    )
 
     app._on_nav_change(0)
     assert app.content_area.content is app.view_dashboard
@@ -2418,6 +2440,63 @@ async def test_on_nav_change_applies_provider_changes_when_leaving_settings() ->
     assert len(app.page.tasks) == 1
     await app.page.tasks[0]()
     assert seen == ["merged-settings"]
+    assert len(app.page.tasks) == 2
+    await app.page.tasks[1]()
+    assert auto_installs == ["started"]
+
+
+@pytest.mark.asyncio
+async def test_on_nav_change_does_not_auto_install_when_provider_apply_fails() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._current_tab = 1
+    app.view_dashboard = object()
+    app.view_logs = SimpleNamespace(scroll_to_bottom=lambda: asyncio.sleep(0))
+    app.view_about = object()
+    app.view_settings = SimpleNamespace(
+        has_provider_changes=True,
+        consume_provider_apply_settings=lambda: "rejected-settings",
+        refresh_prompt_if_empty=lambda: None,
+    )
+    app.content_area = DummyContent()
+    auto_install = AsyncMock()
+
+    async def fake_apply_providers(_settings) -> bool:
+        return False
+
+    app.controller = SimpleNamespace(
+        apply_providers=fake_apply_providers,
+        install_selected_gpu_model_if_needed=auto_install,
+    )
+
+    app._on_nav_change(0)
+    await app.page.tasks[0]()
+
+    assert len(app.page.tasks) == 1
+    auto_install.assert_not_awaited()
+
+
+def test_gpu_provider_selection_alone_does_not_start_install() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._current_tab = 1
+    app.view_dashboard = object()
+    app.view_logs = SimpleNamespace(scroll_to_bottom=lambda: asyncio.sleep(0))
+    app.view_about = object()
+    app.view_settings = SimpleNamespace(
+        has_provider_changes=True,
+        refresh_prompt_if_empty=lambda: None,
+    )
+    app.content_area = DummyContent()
+    app.controller = SimpleNamespace(
+        apply_providers=AsyncMock(),
+        install_selected_gpu_model_if_needed=AsyncMock(),
+    )
+
+    app._on_nav_change(1)
+
+    assert app.page.tasks == []
+    assert app.view_settings.has_provider_changes is True
 
 
 @pytest.mark.asyncio
@@ -2464,7 +2543,15 @@ async def test_on_nav_change_refreshes_prompt_and_schedules_log_scroll() -> None
     app.view_logs = SimpleNamespace(scroll_to_bottom=fake_scroll_to_bottom)
     app.view_about = object()
     app.content_area = DummyContent()
-    app.controller = SimpleNamespace(apply_providers=lambda _settings=None: asyncio.sleep(0))
+    auto_installs = {"count": 0}
+
+    async def fake_auto_install() -> None:
+        auto_installs["count"] += 1
+
+    app.controller = SimpleNamespace(
+        apply_providers=lambda _settings=None: asyncio.sleep(0),
+        install_selected_gpu_model_if_needed=fake_auto_install,
+    )
 
     app._on_nav_change(1)
     assert app.content_area.content is app.view_settings
@@ -2472,8 +2559,10 @@ async def test_on_nav_change_refreshes_prompt_and_schedules_log_scroll() -> None
 
     app._on_nav_change(2)
     assert app.content_area.content is app.view_logs
-    assert len(app.page.tasks) == 1
+    assert len(app.page.tasks) == 2
     await app.page.tasks[0]()
+    await app.page.tasks[1]()
+    assert auto_installs["count"] == 1
     assert scrolled["count"] == 1
 
 
@@ -3240,12 +3329,14 @@ async def test_queue_orders_generic_settings_change_before_provider_apply_on_set
     async def fake_apply_settings(settings) -> None:
         events.append(("settings", settings))
 
-    async def fake_apply_providers(settings) -> None:
+    async def fake_apply_providers(settings) -> bool:
         events.append(("providers", settings))
+        return True
 
     app.controller = SimpleNamespace(
         apply_settings=fake_apply_settings,
         apply_providers=fake_apply_providers,
+        install_selected_gpu_model_if_needed=AsyncMock(),
     )
 
     app._on_settings_changed(raw_settings)

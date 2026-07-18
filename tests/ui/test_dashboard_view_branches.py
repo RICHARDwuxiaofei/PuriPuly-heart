@@ -828,22 +828,22 @@ def test_dashboard_overlay_failure_notice_is_lowest_priority_notice_source(
         (
             "not_installed",
             "dashboard.gpu_notice.not_installed",
-            "install",
-            "dashboard.gpu_action.install",
+            None,
+            None,
             "warning",
         ),
         (
             "invalid",
             "dashboard.gpu_notice.invalid",
-            "repair",
-            "dashboard.gpu_action.repair",
+            None,
+            None,
             "warning",
         ),
         (
             "install_failed",
             "dashboard.gpu_notice.install_failed",
-            "reinstall",
-            "dashboard.gpu_action.reinstall",
+            None,
+            None,
             "error",
         ),
         (

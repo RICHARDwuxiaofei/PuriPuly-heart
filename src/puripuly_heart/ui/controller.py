@@ -1585,9 +1585,6 @@ class GuiController:
             set_devices(devices=devices)
         action_by_state: dict[str, GpuNoticeAction] = {
             "discovery_failed": "rediscover",
-            "not_installed": "install",
-            "invalid": "repair",
-            "install_failed": "reinstall",
             "activation_failed": "restart",
         }
         dashboard = getattr(self.app, "view_dashboard", None)
@@ -1894,7 +1891,40 @@ class GuiController:
         self._set_gpu_ui_state("loading", origin="activation")
         return True
 
-    async def install_or_repair_gpu_model(self) -> None:
+    def _selected_gpu_provider_requires_model(self) -> bool:
+        return bool(
+            self.settings is not None
+            and (
+                self.settings.provider.stt == STTProviderName.LOCAL_QWEN_GPU
+                or self.settings.provider.peer_stt == STTProviderName.LOCAL_QWEN_GPU
+            )
+        )
+
+    async def install_selected_gpu_model_if_needed(self) -> bool:
+        if not self._selected_gpu_provider_requires_model():
+            return False
+        runtime = self._gpu_install_runtime
+        if (
+            runtime is not None
+            and runtime.download_task is not None
+            and not runtime.download_task.done()
+        ):
+            return False
+        snapshot = await run_owned_thread_call(
+            lambda: inspect_local_gpu_install(
+                explicit_opt_in=True,
+                verify_checksums=False,
+            )
+        )
+        if not self._selected_gpu_provider_requires_model():
+            return False
+        self._gpu_install_snapshot = snapshot
+        if snapshot.status == "ready" and snapshot.activation_allowed:
+            return False
+        await self.install_or_repair_gpu_model(origin="settings_exit")
+        return True
+
+    async def install_or_repair_gpu_model(self, *, origin: str = "manual") -> None:
         runtime = self._gpu_install_runtime
         if runtime is None or runtime.is_closed:
             runtime = LocalSTTDownloadRuntime()
@@ -1911,7 +1941,7 @@ class GuiController:
                         "installing",
                         progress_percent=update.percent,
                         publish_notice=True,
-                        origin="explicit_install",
+                        origin=origin,
                     )
 
             return await ensure_local_stt_installed(
@@ -1927,13 +1957,13 @@ class GuiController:
             "installing",
             progress_percent=0,
             publish_notice=True,
-            origin="explicit_install",
+            origin=origin,
         )
         install_started_at = time.monotonic()
         self.log_basic(
-            f"[LocalASR][Install] model={manifest.model_id} origin=manual outcome=started"
+            f"[LocalASR][Install] model={manifest.model_id} origin={origin} outcome=started"
         )
-        task = runtime.start(origin="explicit_gpu_opt_in", run_download=run_install)
+        task = runtime.start(origin=origin, run_download=run_install)
         try:
             await task
             snapshot = await run_owned_thread_call(
@@ -1947,7 +1977,7 @@ class GuiController:
                 self._gpu_install_percent = None
                 self.log_basic(
                     "[LocalASR][Install] "
-                    f"model={manifest.model_id} origin=manual outcome=failed "
+                    f"model={manifest.model_id} origin={origin} outcome=failed "
                     f"elapsed_seconds={time.monotonic() - install_started_at:.3f} "
                     "failure_code=post_install_validation_failed",
                     level=logging.ERROR,
@@ -1955,15 +1985,15 @@ class GuiController:
                 self._set_gpu_ui_state(
                     "invalid",
                     publish_notice=True,
-                    origin="explicit_install",
+                    origin=origin,
                 )
                 return
             pending = self._gpu_pending_enable_channels
             self._gpu_install_percent = None
-            self._set_gpu_ui_state("installed", origin="explicit_install")
+            self._set_gpu_ui_state("installed", origin=origin)
             self.log_basic(
                 "[LocalASR][Install] "
-                f"model={manifest.model_id} origin=manual outcome=ready "
+                f"model={manifest.model_id} origin={origin} outcome=ready "
                 f"elapsed_seconds={time.monotonic() - install_started_at:.3f}"
             )
             if pending:
@@ -1971,7 +2001,7 @@ class GuiController:
         except asyncio.CancelledError:
             self.log_detailed(
                 "[LocalASR][Install] "
-                f"model={manifest.model_id} origin=manual outcome=cancelled "
+                f"model={manifest.model_id} origin={origin} outcome=cancelled "
                 f"elapsed_seconds={time.monotonic() - install_started_at:.3f}"
             )
             raise
@@ -1984,7 +2014,7 @@ class GuiController:
             )
             self.log_basic(
                 "[LocalASR][Install] "
-                f"model={manifest.model_id} origin=manual outcome=failed "
+                f"model={manifest.model_id} origin={origin} outcome=failed "
                 f"elapsed_seconds={time.monotonic() - install_started_at:.3f} "
                 f"failure_type={type(exc).__name__}",
                 level=logging.ERROR,
@@ -1992,7 +2022,7 @@ class GuiController:
             self._set_gpu_ui_state(
                 "install_failed",
                 publish_notice=True,
-                origin="explicit_install",
+                origin=origin,
             )
 
     async def retry_gpu_activation(self) -> None:
@@ -8467,14 +8497,14 @@ class GuiController:
         settings: AppSettings | None = None,
         *,
         force_rebuild_llm: bool = False,
-    ) -> None:
+    ) -> bool:
         next_settings = (
             self.settings
             if settings is None
             else self.merge_settings_tab_apply_with_current_languages(settings)
         )
         if next_settings is None:
-            return
+            return False
 
         await self._preserve_github_star_prompt_observation_before_settings_replace(next_settings)
 
@@ -8484,19 +8514,28 @@ class GuiController:
                     next_settings,
                 )
                 if routed:
-                    return
+                    return bool(
+                        self.last_settings_mutation_result is not None
+                        and _settings_mutation_committed(self.last_settings_mutation_result)
+                    )
                 routed = await self._apply_translation_provider_settings_via_mutation_service(
                     next_settings,
                 )
                 if routed:
-                    return
+                    return bool(
+                        self.last_settings_mutation_result is not None
+                        and _settings_mutation_committed(self.last_settings_mutation_result)
+                    )
                 routed = await self._apply_ui_prompt_clipboard_state_settings_via_mutation_service(
                     next_settings,
                 )
                 if routed:
-                    return
+                    return bool(
+                        self.last_settings_mutation_result is not None
+                        and _settings_mutation_committed(self.last_settings_mutation_result)
+                    )
 
-            await self._apply_providers_direct(
+            return await self._apply_providers_direct(
                 next_settings,
                 force_rebuild_llm=force_rebuild_llm,
             )
@@ -8953,13 +8992,16 @@ class GuiController:
         plan: _ProviderRuntimeApplyPlan | None = None,
         route_order22: bool = True,
         strict_persistence_errors: bool = False,
-    ) -> None:
+    ) -> bool:
         if route_order22 and not force_rebuild_llm and plan is None:
             routed = await self._apply_stt_language_audio_provider_settings_via_mutation_service(
                 next_settings,
             )
             if routed:
-                return
+                return bool(
+                    self.last_settings_mutation_result is not None
+                    and _settings_mutation_committed(self.last_settings_mutation_result)
+                )
         self._begin_canonical_mutation(
             legacy_snapshot=self._canonical_legacy_projection_snapshot or self.settings
         )
@@ -8984,10 +9026,11 @@ class GuiController:
                 self._remember_canonical_legacy_projection(self.settings)
         else:
             if self._save_settings() is False:
-                return
+                return False
         await self._apply_provider_runtime_plan(next_settings, plan)
         self._remember_settings_view_order22_baseline(self.settings)
         self._complete_canonical_mutation()
+        return True
 
     async def _apply_provider_runtime_plan(
         self,

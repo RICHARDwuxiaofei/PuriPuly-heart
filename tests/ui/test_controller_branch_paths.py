@@ -16761,9 +16761,10 @@ async def test_apply_providers_provider_unavailable_default_service_degrades_wit
     )
     monkeypatch.setattr(controller_module, "create_llm_provider", fail_create_llm_provider)
 
-    await controller.apply_providers(pending)
+    applied = await controller.apply_providers(pending)
 
     result = controller.last_settings_mutation_result
+    assert applied is True
     assert result is not None
     assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED
     assert result.message == messages.UserMessageRef(
@@ -18184,9 +18185,10 @@ async def test_order22_provider_mixed_full_draft_save_failure_degrades_and_resto
     monkeypatch.setattr(controller_module, "save_settings", fail_second_save)
     monkeypatch.setattr(GuiController, "_rebuild_stt_provider", record_rebuild_stt_provider)
 
-    await controller.apply_providers(pending)
+    applied = await controller.apply_providers(pending)
 
     result = controller.last_settings_mutation_result
+    assert applied is False
     assert result is not None
     assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_FAILED
     assert result.diagnostics == messages.ErrorDiagnostics(
