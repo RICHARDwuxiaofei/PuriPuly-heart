@@ -57,7 +57,7 @@ fn old_manifest_json_without_quiet_tail_profile_uses_product_default_p05() {
         &path,
         serde_json::to_vec(&json!({
             "contract_version": EXPECTED_CONTRACT_VERSION,
-            "app_version": "2.2.2",
+            "app_version": "2.3.0",
             "overlay_instance_id": "legacy",
             "bridge_url": "ws://127.0.0.1:1",
             "session_token": "token",
@@ -121,7 +121,7 @@ fn cli_reports_invalid_quiet_tail_profile_as_structured_manifest_error() {
         &path,
         serde_json::to_vec(&json!({
             "contract_version": EXPECTED_CONTRACT_VERSION,
-            "app_version": "2.2.2",
+            "app_version": "2.3.0",
             "overlay_instance_id": "invalid-profile",
             "bridge_url": "ws://127.0.0.1:1",
             "session_token": "token",
