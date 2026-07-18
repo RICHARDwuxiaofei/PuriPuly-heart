@@ -309,6 +309,7 @@
   "debug_preview.talk_together_pass_invite_progress": "Invite 1/5",
   "debug_preview.capture_fault_cycle": "Cycle capture fault",
   "debug_preview.stt_fault_cycle": "Cycle STT fault",
+  "debug_preview.stt_loading_button_cycle": "Cycle STT loading button",
   "debug_preview.audio_fault_clear": "Clear audio faults",
   "debug_preview.gpu_state_cycle": "Cycle GPU state",
   "debug_preview.capture_fault_snackbar": "Capture fault: {profile}",

@@ -550,6 +550,7 @@ def test_translator_app_mounts_debug_preview_when_enabled(
         "on_stt_fault_cycle",
         "on_audio_fault_clear",
         "on_gpu_state_cycle",
+        "on_stt_loading_button_cycle",
     }
     discord_callback = seen["callbacks"]["on_discord_auth"]
     assert getattr(discord_callback, "__self__", None) is app

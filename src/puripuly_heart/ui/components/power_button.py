@@ -6,6 +6,7 @@ from puripuly_heart.ui.components.glow import create_glow_stack
 from puripuly_heart.ui.theme import (
     COLOR_PRIMARY,
     COLOR_SECONDARY,
+    COLOR_SURFACE,
     COLOR_TRANS_TONAL,
     COLOR_WARNING,
     get_card_shadow,
@@ -29,9 +30,24 @@ class PowerButton(ft.Container):
         self._on_click = on_click
         self._is_on = False
         self._needs_key = False
+        self._is_starting = False
         self._color_on = color_on if color_on is not None else COLOR_PRIMARY
 
         self._icon_control = ft.Icon(name=icon, size=icon_size, color=COLOR_SECONDARY)
+        self._progress_control = ft.ProgressRing(
+            width=icon_size * 0.7,
+            height=icon_size * 0.7,
+            stroke_width=max(3, icon_size * 0.06),
+            color=COLOR_PRIMARY,
+            visible=False,
+            semantics_label=label,
+        )
+        self._icon_slot = ft.Stack(
+            controls=[self._icon_control, self._progress_control],
+            width=icon_size,
+            height=icon_size,
+            alignment=ft.alignment.center,
+        )
         self._label_control = ft.Text(
             label,
             size=label_size,
@@ -50,7 +66,7 @@ class PowerButton(ft.Container):
             ft.Container(
                 content=ft.Column(
                     [
-                        self._icon_control,
+                        self._icon_slot,
                         self._label_control,
                     ],
                     alignment=ft.MainAxisAlignment.CENTER,
@@ -77,6 +93,7 @@ class PowerButton(ft.Container):
         is_on: bool,
         needs_key: bool = False,
         *,
+        is_starting: bool = False,
         status_text: str | None = None,
         helper_text: str | None = None,
     ):
@@ -84,17 +101,28 @@ class PowerButton(ft.Container):
         _ = (status_text, helper_text)
         self._is_on = is_on
         self._needs_key = needs_key
+        self._is_starting = is_starting
+        self._icon_control.visible = not is_starting
+        self._progress_control.visible = is_starting
 
         if needs_key:
             self.bgcolor = COLOR_WARNING
+            self.border = None
             self._icon_control.color = ft.Colors.WHITE
             self._label_control.color = ft.Colors.WHITE
+        elif is_starting:
+            self.bgcolor = COLOR_SURFACE
+            self.border = None
+            self._icon_control.color = COLOR_SECONDARY
+            self._label_control.color = COLOR_PRIMARY
         elif is_on:
             self.bgcolor = self._color_on
+            self.border = None
             self._icon_control.color = ft.Colors.WHITE
             self._label_control.color = ft.Colors.WHITE
         else:
             self.bgcolor = COLOR_TRANS_TONAL
+            self.border = None
             self._icon_control.color = COLOR_SECONDARY
             self._label_control.color = COLOR_SECONDARY
 

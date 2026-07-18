@@ -1722,6 +1722,7 @@ async def test_local_qwen_reenable_during_runtime_install_rearms_pending_auto_en
 
     async def fake_switch(self):
         switch_calls.append(self._stt_desired)
+        self._mic_task = object() if self._stt_desired else None
 
     monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
     monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild)

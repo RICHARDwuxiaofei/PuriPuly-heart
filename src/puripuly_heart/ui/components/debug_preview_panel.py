@@ -63,8 +63,9 @@ class DebugPreviewPanel(ft.Container):
         on_gpu_state_cycle: Callable[[], None],
         on_github_star_snackbar: Callable[[], None],
         on_telemetry_consent: Callable[[], None],
+        on_stt_loading_button_cycle: Callable[[], None] | None = None,
     ) -> None:
-        self._actions = (
+        actions = [
             _PreviewAction("brake_notice", "debug_preview.brake_notice", on_brake_notice),
             _PreviewAction("revoked_notice", "debug_preview.revoked_notice", on_revoked_notice),
             _PreviewAction(
@@ -131,7 +132,16 @@ class DebugPreviewPanel(ft.Container):
                 "debug_preview.gpu_state_cycle",
                 on_gpu_state_cycle,
             ),
-        )
+        ]
+        if on_stt_loading_button_cycle is not None:
+            actions.append(
+                _PreviewAction(
+                    "stt_loading_button_cycle",
+                    "debug_preview.stt_loading_button_cycle",
+                    on_stt_loading_button_cycle,
+                )
+            )
+        self._actions = tuple(actions)
         self._toggle_button = _make_text_button(
             t("debug_preview.button"),
             tooltip=t("debug_preview.tooltip"),

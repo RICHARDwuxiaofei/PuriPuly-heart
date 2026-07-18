@@ -80,6 +80,7 @@ class DashboardView(ft.Column):
         self.is_power_on = False
         self.is_translation_on = False
         self.is_stt_on = False
+        self._stt_is_starting = False
         self.translation_needs_key = False
         self.stt_needs_key = False
         self.last_sent_text = t("dashboard.ready")
@@ -271,6 +272,7 @@ class DashboardView(ft.Column):
         self.stt_button.set_state(
             self.is_stt_on,
             needs_key=self._stt_showing_warning,
+            is_starting=self._stt_is_starting,
         )
 
     def _sync_translation_button_state(self) -> None:
@@ -290,6 +292,7 @@ class DashboardView(ft.Column):
         self.peer_button.set_state(
             contract.peer.state == "on",
             needs_key=contract.peer.state == "warning",
+            is_starting=contract.peer.state == "starting",
         )
         self.overlay_button.set_state(
             contract.overlay.state == "on",
@@ -319,8 +322,9 @@ class DashboardView(ft.Column):
         self._restore_status_display()
 
     def _toggle_stt(self):
-        if self.is_stt_on:
+        if self._stt_is_starting or self.is_stt_on:
             self.is_stt_on = False
+            self._stt_is_starting = False
             self._stt_showing_warning = False
         elif self._stt_showing_warning:
             self._stt_showing_warning = False
@@ -330,6 +334,7 @@ class DashboardView(ft.Column):
             self.set_display_text(t("dashboard.warn_stt_key"))
         else:
             self.is_stt_on = True
+            self._stt_is_starting = True
             self._stt_showing_warning = False
 
         self._sync_stt_button_state()
@@ -564,8 +569,13 @@ class DashboardView(ft.Column):
 
     def set_stt_enabled(self, enabled: bool) -> None:
         self.is_stt_on = bool(enabled)
+        self._stt_is_starting = False
         if self.is_stt_on:
             self._stt_showing_warning = False
+        self._sync_stt_button_state()
+
+    def set_stt_starting(self, starting: bool) -> None:
+        self._stt_is_starting = bool(starting)
         self._sync_stt_button_state()
 
     def set_overlay_peer_contract(self, contract: OverlayPeerConsumerContract) -> None:

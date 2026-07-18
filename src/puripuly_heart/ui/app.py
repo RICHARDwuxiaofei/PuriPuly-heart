@@ -333,6 +333,7 @@ class TranslatorApp:
             on_gpu_state_cycle=self._cycle_debug_preview_gpu_state,
             on_github_star_snackbar=self._preview_github_star_snackbar,
             on_telemetry_consent=self._preview_telemetry_consent,
+            on_stt_loading_button_cycle=self._cycle_debug_preview_stt_loading_button,
         )
 
     def _mark_launch_high_priority_feedback_shown(
@@ -929,6 +930,17 @@ class TranslatorApp:
         if callable(apply_debug_locale):
             apply_debug_locale()
         self.page.update()
+
+    def _cycle_debug_preview_stt_loading_button(self) -> None:
+        states = ("off", "starting", "on")
+        index = int(getattr(self, "_debug_preview_stt_loading_button_index", -1)) + 1
+        index %= len(states)
+        self._debug_preview_stt_loading_button_index = index
+        state = states[index]
+        self.view_dashboard.stt_button.set_state(
+            state == "on",
+            is_starting=state == "starting",
+        )
 
     def _cycle_debug_preview_gpu_state(self) -> None:
         states = (

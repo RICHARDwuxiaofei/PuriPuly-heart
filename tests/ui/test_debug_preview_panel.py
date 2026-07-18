@@ -35,6 +35,7 @@ DEBUG_PREVIEW_I18N_KEYS = {
     "debug_preview.talk_together_pass_invite_progress",
     "debug_preview.capture_fault_cycle",
     "debug_preview.stt_fault_cycle",
+    "debug_preview.stt_loading_button_cycle",
     "debug_preview.audio_fault_clear",
     "debug_preview.gpu_state_cycle",
     "debug_preview.capture_fault_snackbar",
@@ -64,6 +65,7 @@ ACTION_KEYS = [
     "stt_fault_cycle",
     "audio_fault_clear",
     "gpu_state_cycle",
+    "stt_loading_button_cycle",
 ]
 
 
@@ -89,6 +91,7 @@ def _callbacks(seen: list[str]):
         "on_stt_fault_cycle": lambda: seen.append("stt_fault_cycle"),
         "on_audio_fault_clear": lambda: seen.append("audio_fault_clear"),
         "on_gpu_state_cycle": lambda: seen.append("gpu_state_cycle"),
+        "on_stt_loading_button_cycle": lambda: seen.append("stt_loading_button_cycle"),
     }
 
 
@@ -229,6 +232,7 @@ def test_debug_preview_panel_uses_text_button_label_api_when_available(
         "Cycle STT fault",
         "Clear audio faults",
         "Cycle GPU state",
+        "Cycle STT loading button",
     ]
 
     monkeypatch.setattr(panel_module, "t", lambda key: f"label:{key}")

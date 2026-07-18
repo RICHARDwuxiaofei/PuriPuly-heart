@@ -1323,7 +1323,9 @@ class GuiController:
             peer_intent_enabled=bool(self.settings.ui.peer_translation_enabled),
             peer_effective_enabled=peer_effective,
             peer_warning_reason=self._peer_process_warning_reason,
-            peer_activation_starting=self._peer_activation_starting,
+            peer_activation_starting=(
+                self._peer_activation_starting or self._peer_asr_model_loading
+            ),
         )
 
     def _refresh_overlay_peer_consumers(self) -> None:
@@ -5566,6 +5568,9 @@ class GuiController:
 
     async def set_stt_enabled(self, enabled: bool, *, force_immediate: bool = False) -> None:
         if enabled and not self._persist_current_manual_local_asr_fallback(channel="self"):
+            dash = getattr(self.app, "view_dashboard", None)
+            if dash is not None:
+                dash.set_stt_enabled(False)
             return
         self.log_basic(f"[STT] Toggle request: enabled={enabled}")
         self.log_detailed(
@@ -5649,6 +5654,15 @@ class GuiController:
         await self._ensure_stt_switch()
         if activation_generation == self._stt_activation_generation:
             self._stt_activation_starting = False
+            dash = getattr(self.app, "view_dashboard", None)
+            if dash is not None:
+                dash.set_stt_enabled(
+                    bool(
+                        self._stt_desired
+                        and not self._stt_activation_failed
+                        and self._mic_task is not None
+                    )
+                )
             self._sync_local_stt_notice()
 
     def _show_short_stt_message(self, message_key: str) -> None:
@@ -6122,6 +6136,10 @@ class GuiController:
         dash = getattr(self.app, "view_dashboard", None)
         if dash is None or self.settings is None:
             return
+        set_stt_starting = getattr(dash, "set_stt_starting", None)
+        if callable(set_stt_starting):
+            with contextlib.suppress(Exception):
+                set_stt_starting(self._stt_activation_starting or self._self_asr_model_loading)
         self_provider = self.settings.provider.stt.value
         peer_provider = self.settings.provider.peer_stt.value
         self_local = self_provider in LOCAL_CPU_PROVIDERS
@@ -6297,10 +6315,21 @@ class GuiController:
             if resume_generation != self._stt_activation_generation:
                 return
             self._stt_desired = True
-            dash = getattr(self.app, "view_dashboard", None)
-            if dash is not None:
-                dash.set_stt_enabled(True)
+            self._stt_activation_starting = True
+            self._sync_local_stt_notice()
             await self._ensure_stt_switch()
+            if resume_generation == self._stt_activation_generation:
+                self._stt_activation_starting = False
+                dash = getattr(self.app, "view_dashboard", None)
+                if dash is not None:
+                    dash.set_stt_enabled(
+                        bool(
+                            self._stt_desired
+                            and not self._stt_activation_failed
+                            and self._mic_task is not None
+                        )
+                    )
+                self._sync_local_stt_notice()
 
         if should_resume_peer_local_stt:
             self._reset_local_stt_pending_peer_enable_after_install()
@@ -6827,6 +6856,8 @@ class GuiController:
                             "[STT] Enable requested before hub is ready",
                             level=logging.WARNING,
                         )
+                        self._stt_desired = False
+                        self._stt_activation_failed = True
                         break
                     if restart:
                         await self._stop_mic_loop()
@@ -6870,6 +6901,30 @@ class GuiController:
                     ):
                         with contextlib.suppress(Exception):
                             await self.hub.stt.warmup()
+                    active_gpu_runtime = self._gpu_asr_runtime
+                    if self.hub is not None and self.hub.stt is not None:
+                        backend_runtime = getattr(
+                            getattr(self.hub.stt, "backend", None),
+                            "runtime",
+                            None,
+                        )
+                        if backend_runtime is not None:
+                            active_gpu_runtime = backend_runtime
+                    if (
+                        self.settings is not None
+                        and self.settings.provider.stt == STTProviderName.LOCAL_QWEN_GPU
+                        and (
+                            active_gpu_runtime is None
+                            or active_gpu_runtime.state != GpuASRRuntimeState.READY
+                            or "self" not in active_gpu_runtime.active_channels
+                        )
+                    ):
+                        self._stt_desired = False
+                        self._stt_activation_failed = True
+                        dash = getattr(self.app, "view_dashboard", None)
+                        if dash is not None:
+                            dash.set_stt_enabled(False)
+                        self._sync_local_stt_notice()
 
                 if desired == self._stt_desired and not self._stt_restart_requested:
                     break
@@ -9800,16 +9855,27 @@ class GuiController:
         if desired_active and not await self._ensure_peer_local_stt_ready():
             desired_active = False
         previous_signature = getattr(self._peer_runtime, "current_signature", None)
-        peer_local_transition = bool(
+        peer_local_provider = bool(
             desired_active
             and config.backend.provider
             in {*LOCAL_CPU_PROVIDERS, STTProviderName.LOCAL_QWEN_GPU.value}
+        )
+        peer_local_transition = bool(
+            peer_local_provider
             and previous_signature is not None
             and previous_signature != config.runtime_signature
         )
-        if peer_local_transition:
+        peer_local_loading = bool(
+            peer_local_provider
+            and (
+                getattr(self.hub, "peer_stt", None) is None
+                or previous_signature != config.runtime_signature
+            )
+        )
+        if peer_local_loading:
             self._peer_asr_model_loading = True
             self._sync_local_stt_notice()
+            self._refresh_overlay_peer_consumers()
         transition_settings = self.settings
         try:
             await self._provider_rebuild_runtime.apply_peer_policy(
@@ -9830,9 +9896,10 @@ class GuiController:
             self._superseded_local_asr_settings_ids.add(id(transition_settings))
             raise
         finally:
-            if peer_local_transition:
+            if peer_local_loading:
                 self._peer_asr_model_loading = False
                 self._sync_local_stt_notice()
+                self._refresh_overlay_peer_consumers()
         self._last_peer_stt_runtime_signature = config.runtime_signature
         self._sync_effective_hub_flags(self.settings)
 

@@ -144,6 +144,8 @@ class DummyDashboard:
         self.translation_enabled: bool | None = None
         self.stt_needs_key: bool | None = None
         self.stt_enabled: bool | None = None
+        self.stt_starting: bool | None = None
+        self.stt_starting_calls: list[bool] = []
         self.local_stt_notice_status: str | None = None
         self.local_stt_notice_percent: int | None = None
         self.languages: tuple[str, str] | None = None
@@ -166,6 +168,10 @@ class DummyDashboard:
 
     def set_stt_enabled(self, value: bool) -> None:
         self.stt_enabled = value
+
+    def set_stt_starting(self, value: bool) -> None:
+        self.stt_starting = value
+        self.stt_starting_calls.append(value)
 
     def set_local_stt_notice(self, status: str | None, percent: int | None = None) -> None:
         self.local_stt_notice_status = status
@@ -4597,8 +4603,13 @@ async def test_apply_settings_deactivates_peer_runtime_when_eula_flag_mutates_cu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider",
+    [STTProviderName.LOCAL_QWEN, STTProviderName.LOCAL_QWEN_GPU],
+)
 async def test_set_peer_translation_enabled_routes_through_controller_runtime_rules(
     monkeypatch: pytest.MonkeyPatch,
+    provider: STTProviderName,
 ) -> None:
     refresh_calls: list[str] = []
     controller = _make_controller(
@@ -4606,12 +4617,18 @@ async def test_set_peer_translation_enabled_routes_through_controller_runtime_ru
     )
     controller.settings = AppSettings()
     controller.settings.ui.peer_translation_eula_accepted = True
+    controller.settings.provider.peer_stt = provider
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
 
     async def fake_begin_overlay_start(self: GuiController) -> None:
         self.overlay_state = "starting"
 
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_ensure_peer_local_stt_ready",
+        lambda self, **_kwargs: asyncio.sleep(0, result=True),
+    )
     monkeypatch.setattr(GuiController, "_begin_overlay_start", fake_begin_overlay_start)
     monkeypatch.setattr(
         GuiController, "_refresh_overlay_runtime_dependencies", lambda self: asyncio.sleep(0)
@@ -4628,8 +4645,8 @@ async def test_set_peer_translation_enabled_routes_through_controller_runtime_ru
 
     contract = controller.build_overlay_peer_consumer_contract()
     assert contract is not None
-    assert contract.peer.state == "warning"
-    assert contract.peer.helper_text == t("settings.peer_translation.warning.overlay_starting")
+    assert contract.peer.state == "starting"
+    assert contract.peer.helper_text == ""
 
 
 @pytest.mark.asyncio
@@ -5159,6 +5176,55 @@ async def test_refresh_peer_stt_runtime_does_not_warm_peer_runtime() -> None:
     assert len(controller._peer_runtime.policy_calls) == 1
     assert controller._peer_runtime.policy_calls[0]["desired_active"] is True
     assert controller._peer_runtime.warmup_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_initial_peer_local_activation_publishes_starting_until_provider_attaches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contracts = []
+    app = SimpleNamespace()
+    controller = _make_controller(app=app)
+    app.refresh_overlay_peer_contract = lambda: contracts.append(
+        controller.build_overlay_peer_consumer_contract()
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
+    controller.overlay_state = "connected"
+    _attach_overlay_bridge(controller, object())
+    activation_started = asyncio.Event()
+    finish_activation = asyncio.Event()
+
+    class DelayedPeerRuntime:
+        current_signature = None
+
+        async def apply_policy(self, *, config, desired_active) -> None:
+            _ = config
+            assert desired_active is True
+            activation_started.set()
+            await finish_activation.wait()
+            controller.hub.peer_stt = object()
+
+    async def ready(_self: GuiController, **_kwargs) -> bool:
+        return True
+
+    controller._peer_runtime = DelayedPeerRuntime()
+    monkeypatch.setattr(GuiController, "_ensure_peer_local_stt_ready", ready)
+
+    task = asyncio.create_task(controller._refresh_peer_stt_runtime())
+    await activation_started.wait()
+
+    assert controller._peer_asr_model_loading is True
+    assert contracts[-1].peer.state == "starting"
+
+    finish_activation.set()
+    await task
+
+    assert controller._peer_asr_model_loading is False
+    assert contracts[-1].peer.state == "on"
 
 
 @pytest.mark.asyncio
@@ -14293,6 +14359,47 @@ async def test_set_stt_enabled_marks_promo_and_runs_switch(
             "[STT] Toggle detail: desired_before=False overlay_state=off",
         )
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider",
+    [STTProviderName.LOCAL_QWEN, STTProviderName.LOCAL_QWEN_GPU],
+)
+async def test_local_stt_button_stays_starting_until_activation_completes(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: STTProviderName,
+) -> None:
+    dashboard = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dashboard))
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = provider
+    controller.hub = DummyHub(stt=object())
+    activation_started = asyncio.Event()
+    finish_activation = asyncio.Event()
+
+    async def validate_gpu(_self: GuiController) -> bool:
+        return True
+
+    async def activate(_self: GuiController) -> None:
+        activation_started.set()
+        await finish_activation.wait()
+        controller._mic_task = SimpleNamespace()
+
+    monkeypatch.setattr(GuiController, "_validate_gpu_activation", validate_gpu)
+    monkeypatch.setattr(GuiController, "_ensure_stt_switch", activate)
+
+    task = asyncio.create_task(controller.set_stt_enabled(True))
+    await activation_started.wait()
+
+    assert dashboard.stt_starting is True
+    assert dashboard.stt_enabled is None
+
+    finish_activation.set()
+    await task
+
+    assert dashboard.stt_starting is False
+    assert dashboard.stt_enabled is True
 
 
 @pytest.mark.asyncio

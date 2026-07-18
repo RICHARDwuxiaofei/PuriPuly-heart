@@ -29,17 +29,19 @@ class FakePowerButton:
         is_on: bool,
         needs_key: bool = False,
         *,
+        is_starting: bool = False,
         status_text: str | None = None,
         helper_text: str | None = None,
     ):
-        self.states.append(
-            {
-                "is_on": is_on,
-                "needs_key": needs_key,
-                "status_text": status_text,
-                "helper_text": helper_text,
-            }
-        )
+        state = {
+            "is_on": is_on,
+            "needs_key": needs_key,
+            "status_text": status_text,
+            "helper_text": helper_text,
+        }
+        if is_starting:
+            state["is_starting"] = True
+        self.states.append(state)
 
     def set_label(self, label: str) -> None:
         self.label = label
@@ -194,6 +196,7 @@ def _make_overlay_peer_contract(
     peer_effective_enabled: bool,
     peer_status_text: str,
     peer_helper_text: str = "",
+    peer_state: str | None = None,
 ) -> OverlayPeerConsumerContract:
     return OverlayPeerConsumerContract(
         overlay=OverlayPeerToggleContract(
@@ -213,9 +216,12 @@ def _make_overlay_peer_contract(
             effective_enabled=peer_effective_enabled,
             action_enabled=True,
             state=(
-                "on"
-                if peer_effective_enabled
-                else ("off" if not peer_intent_enabled else "warning")
+                peer_state
+                or (
+                    "on"
+                    if peer_effective_enabled
+                    else ("off" if not peer_intent_enabled else "warning")
+                )
             ),
             status_text=peer_status_text,
             helper_text=peer_helper_text,
@@ -265,6 +271,7 @@ def test_dashboard_stt_toggle_warning_and_enable_flow(monkeypatch: pytest.Monkey
 
     view.stt_needs_key = False
     view._toggle_stt()
+    assert view.stt_button.states[-1]["is_starting"] is True
     view._toggle_stt()
 
     assert seen == [False, False, False, True, False]
@@ -732,6 +739,25 @@ def test_dashboard_overlay_peer_buttons_render_consumer_contract_state_only(
         "status_text": None,
         "helper_text": None,
     }
+
+
+def test_dashboard_peer_button_renders_starting_contract_with_spinner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    contract = _make_overlay_peer_contract(
+        overlay_intent_enabled=True,
+        overlay_state="connected",
+        overlay_status_text="Overlay ready",
+        peer_intent_enabled=True,
+        peer_effective_enabled=False,
+        peer_status_text="Peer starting",
+        peer_state="starting",
+    )
+
+    view.set_overlay_peer_contract(contract)
+
+    assert view.peer_button.states[-1]["is_starting"] is True
 
 
 def test_dashboard_overlay_failure_notice_is_lowest_priority_notice_source(

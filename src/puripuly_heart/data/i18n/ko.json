@@ -309,6 +309,7 @@
   "debug_preview.talk_together_pass_invite_progress": "친구 초대 1/5",
   "debug_preview.capture_fault_cycle": "캡처 오류 순환",
   "debug_preview.stt_fault_cycle": "STT 오류 순환",
+  "debug_preview.stt_loading_button_cycle": "STT 로딩 버튼 순환",
   "debug_preview.audio_fault_clear": "오디오 오류 해제",
   "debug_preview.gpu_state_cycle": "GPU 상태 순환",
   "debug_preview.capture_fault_snackbar": "캡처 오류: {profile}",

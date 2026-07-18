@@ -309,6 +309,7 @@
   "debug_preview.talk_together_pass_invite_progress": "Приглашение 1/5",
   "debug_preview.capture_fault_cycle": "Цикл ошибки захвата",
   "debug_preview.stt_fault_cycle": "Цикл ошибки STT",
+  "debug_preview.stt_loading_button_cycle": "Переключить загрузку STT",
   "debug_preview.audio_fault_clear": "Сброс ошибок аудио",
   "debug_preview.gpu_state_cycle": "Цикл состояния GPU",
   "debug_preview.capture_fault_snackbar": "Ошибка захвата: {profile}",

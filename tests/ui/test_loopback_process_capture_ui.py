@@ -108,6 +108,46 @@ def test_peer_contract_exposes_starting_before_readiness() -> None:
     assert contract.peer.status_text == t("settings.peer_translation.status.starting")
 
 
+def test_peer_contract_keeps_starting_visible_during_effective_model_transition() -> None:
+    contract = build_overlay_peer_consumer_contract(
+        overlay_intent_enabled=True,
+        overlay_state="connected",
+        overlay_failure_reason=None,
+        peer_intent_enabled=True,
+        peer_effective_enabled=True,
+        peer_activation_starting=True,
+    )
+
+    assert contract.peer.state == "starting"
+
+
+def test_peer_contract_treats_overlay_startup_as_peer_starting() -> None:
+    contract = build_overlay_peer_consumer_contract(
+        overlay_intent_enabled=True,
+        overlay_state="starting",
+        overlay_failure_reason=None,
+        peer_intent_enabled=True,
+        peer_effective_enabled=False,
+    )
+
+    assert contract.peer.state == "starting"
+    assert contract.peer.helper_text == ""
+
+
+def test_peer_contract_keeps_process_failure_warning_during_overlay_startup() -> None:
+    contract = build_overlay_peer_consumer_contract(
+        overlay_intent_enabled=True,
+        overlay_state="starting",
+        overlay_failure_reason=None,
+        peer_intent_enabled=True,
+        peer_effective_enabled=False,
+        peer_warning_reason="process_provider_failed",
+    )
+
+    assert contract.peer.state == "warning"
+    assert contract.peer.warning_reason == "process_provider_failed"
+
+
 @pytest.mark.asyncio
 async def test_process_identity_resolution_is_fresh_and_does_not_block_heartbeat(
     monkeypatch: pytest.MonkeyPatch,
@@ -383,7 +423,7 @@ async def test_stale_self_start_failure_cannot_disable_latest_generation(
     assert controller._stt_desired is True
     assert controller._stt_activation_failed is False
     assert controller._stt_activation_starting is False
-    assert dash.enabled == []
+    assert dash.enabled == [True]
 
 
 @pytest.mark.asyncio
