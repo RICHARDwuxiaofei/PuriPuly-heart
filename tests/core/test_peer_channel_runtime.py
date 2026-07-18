@@ -481,11 +481,16 @@ async def test_local_qwen_provider_is_warmed_reused_replaced_and_closed_at_shutd
     await runtime.apply_policy(config=first, desired_active=True)
     assert providers == [hub.peer_stt]
     assert providers[0].warmup_calls == 2
+    active_source = sources[-1]
+    active_loop_task = runtime.loop_task
 
     await runtime.apply_policy(config=replacement, desired_active=True)
     assert len(providers) == 2
     assert hub.peer_stt is providers[1]
     assert providers[0].close_calls == 2
+    assert sources[-1] is active_source
+    assert active_source.close_calls == 0
+    assert runtime.loop_task is active_loop_task
 
     await runtime.close()
     assert providers[1].close_calls == 1

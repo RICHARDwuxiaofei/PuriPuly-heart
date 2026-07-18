@@ -115,7 +115,7 @@ class LocalCPUInstallSnapshot:
             and all(
                 model.state.status == "ready"
                 and model.state.installed_manifest is not None
-                and model.state.installed_manifest.model_id == model.model_id
+                and getattr(model.state.installed_manifest, "model_id", None) == model.model_id
                 for model in self.models
             )
         )

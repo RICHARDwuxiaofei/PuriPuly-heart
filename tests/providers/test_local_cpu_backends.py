@@ -257,10 +257,16 @@ async def test_cpu_auto_strict_gate_resolves_once_and_awaits_delegate_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = _ready_snapshot()
+    verification_modes: list[bool] = []
+
+    def inspect(*_args: object, **kwargs: object) -> LocalCPUInstallSnapshot:
+        verification_modes.append(bool(kwargs.get("verify_checksums")))
+        return snapshot
+
     monkeypatch.setattr(
         local_cpu_module,
         "inspect_required_cpu_model_installs",
-        lambda *_args, **_kwargs: snapshot,
+        inspect,
     )
     factory_calls: list[str] = []
 
@@ -290,6 +296,7 @@ async def test_cpu_auto_strict_gate_resolves_once_and_awaits_delegate_close(
     assert await backend.open_session() is not None
     assert backend.resolved_model_id == PARAKEET_JAPANESE_MODEL_ID
     assert factory_calls == [PARAKEET_JAPANESE_MODEL_ID]
+    assert verification_modes == [False]
 
     await backend.close()
 

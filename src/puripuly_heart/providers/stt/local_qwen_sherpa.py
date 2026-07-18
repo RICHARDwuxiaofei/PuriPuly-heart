@@ -22,11 +22,10 @@ from puripuly_heart.core.local_stt_assets import (
     LOCAL_STT_MODEL_ID,
     LocalQwenSherpaLoadError,
     load_local_stt_asset_manifest,
-)
-from puripuly_heart.core.local_stt_assets import (
-    validate_local_stt_install as validate_local_stt_runtime_ready,
+    validate_local_stt_runtime_ready,
 )
 from puripuly_heart.core.owned_thread import run_owned_thread_call
+from puripuly_heart.core.runtime.local_asr_transition import LocalASRSessionOptions
 from puripuly_heart.core.stt.backend import (
     STTBackend,
     STTBackendSession,
@@ -199,6 +198,9 @@ class LocalQwenSherpaSTTBackend(STTBackend):
         )
         self._session_handoff_tail = session.handoff_complete_event
         return session
+
+    async def reconfigure_session_options(self, options: LocalASRSessionOptions) -> None:
+        self.language_hint = options.language_hint
 
     async def close(self) -> None:
         if self._close_started:

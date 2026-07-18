@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ from puripuly_heart.core.local_stt_catalog import (
     resolve_cpu_auto_model,
 )
 from puripuly_heart.core.owned_thread import run_owned_thread_call
+from puripuly_heart.core.runtime.local_asr_transition import LocalASRSessionOptions
 from puripuly_heart.core.stt.backend import STTBackend, STTBackendSession
 from puripuly_heart.providers.stt.local_parakeet_sherpa import (
     LocalParakeetJapaneseSherpaSTTBackend,
@@ -121,6 +123,18 @@ class LocalCPUAutoSTTBackend(STTBackend):
                 raise RuntimeError("CPU Auto backend is closed")
             return session
 
+    async def reconfigure_session_options(self, options: LocalASRSessionOptions) -> None:
+        async with self._load_lock:
+            self.source_language = options.source_language
+            delegate = self._delegate
+            if delegate is None:
+                return
+            reconfigure = getattr(delegate, "reconfigure_session_options", None)
+            if callable(reconfigure):
+                result = reconfigure(options)
+                if inspect.isawaitable(result):
+                    await result
+
     async def close(self) -> None:
         if self._close_started:
             await asyncio.shield(self._close_complete.wait())
@@ -158,6 +172,7 @@ class LocalCPUAutoSTTBackend(STTBackend):
                 inspect_required_cpu_model_installs,
                 self.model_root,
                 manifests=self.manifests,
+                verify_checksums=False,
             )
         )
         if self._closed:

@@ -20,9 +20,10 @@ class FakeSharedGpuRuntime:
     def __init__(self) -> None:
         self.active_channels: set[str] = set()
         self.activations: list[tuple[str, Path, str, str]] = []
-        self.submissions: list[tuple[str, np.ndarray, float]] = []
+        self.submissions: list[tuple[str, np.ndarray, float, str | None]] = []
         self.deactivations: list[str] = []
         self.deactivation_failures = 0
+        self.detected_language: str | None = "en"
 
     async def activate_channel(
         self,
@@ -54,11 +55,12 @@ class FakeSharedGpuRuntime:
         samples_f32: np.ndarray,
         *,
         speech_end_at: float,
+        language_hint: str | None = None,
     ) -> GpuWorkerTranscription:
-        self.submissions.append((channel, samples_f32.copy(), speech_end_at))
+        self.submissions.append((channel, samples_f32.copy(), speech_end_at, language_hint))
         return GpuWorkerTranscription(
             text="hello",
-            detected_language="en",
+            detected_language=self.detected_language,
             audio_seconds=0.01,
             decode_seconds=0.02,
             rtf=2.0,
@@ -130,11 +132,82 @@ async def test_session_submits_float_audio_at_speech_end_without_blocking() -> N
 
     assert event.text == "hello"
     assert event.is_final is True
+    assert event.final_language_runs == ()
     assert len(runtime.submissions) == 1
-    channel, samples, speech_end_at = runtime.submissions[0]
+    channel, samples, speech_end_at, language_hint = runtime.submissions[0]
     assert channel == "peer"
     assert np.array_equal(samples, np.array([0.25, -0.25], dtype=np.float32))
     assert speech_end_at == 12.5
+    assert language_hint is None
 
+    await session.close()
+    await backend.close()
+
+
+async def test_peer_auto_emits_one_detected_language_run_for_whole_utterance() -> None:
+    runtime = FakeSharedGpuRuntime()
+    backend = LocalGpuSTTBackend(
+        runtime=runtime,
+        channel="peer",
+        model_path=Path("model.gguf"),
+        model_id="gpu-model",
+        device_id="auto",
+        source_mode="auto",
+        language_hint=None,
+    )
+    session = await backend.open_session()
+
+    await session.send_audio_f32(np.array([0.25], dtype=np.float32))
+    await session.on_speech_end()
+    event = await asyncio.wait_for(anext(session.events()), timeout=0.5)
+
+    assert [(run.text, run.language) for run in event.final_language_runs] == [("hello", "en")]
+    assert runtime.submissions[0][3] is None
+    await session.close()
+    await backend.close()
+
+
+async def test_peer_manual_passes_hint_without_exposing_detected_language_run() -> None:
+    runtime = FakeSharedGpuRuntime()
+    backend = LocalGpuSTTBackend(
+        runtime=runtime,
+        channel="peer",
+        model_path=Path("model.gguf"),
+        model_id="gpu-model",
+        device_id="auto",
+        source_mode="manual",
+        language_hint="ja",
+    )
+    session = await backend.open_session()
+
+    await session.send_audio_f32(np.array([0.25], dtype=np.float32))
+    await session.on_speech_end()
+    event = await asyncio.wait_for(anext(session.events()), timeout=0.5)
+
+    assert event.final_language_runs == ()
+    assert runtime.submissions[0][3] == "ja"
+    await session.close()
+    await backend.close()
+
+
+async def test_peer_auto_missing_detected_language_omits_run_for_manual_fallback() -> None:
+    runtime = FakeSharedGpuRuntime()
+    runtime.detected_language = None
+    backend = LocalGpuSTTBackend(
+        runtime=runtime,
+        channel="peer",
+        model_path=Path("model.gguf"),
+        model_id="gpu-model",
+        device_id="auto",
+        source_mode="auto",
+    )
+    session = await backend.open_session()
+
+    await session.send_audio_f32(np.array([0.25], dtype=np.float32))
+    await session.on_speech_end()
+    event = await asyncio.wait_for(anext(session.events()), timeout=0.5)
+
+    assert event.text == "hello"
+    assert event.final_language_runs == ()
     await session.close()
     await backend.close()

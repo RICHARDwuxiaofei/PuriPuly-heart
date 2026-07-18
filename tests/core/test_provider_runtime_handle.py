@@ -332,3 +332,75 @@ async def test_failed_idle_release_detaches_provider_and_retries_on_shutdown() -
 
     assert provider.close_backend_calls == 2
     assert handle.has_resources is False
+
+
+@pytest.mark.asyncio
+async def test_handoff_keeps_retired_event_ingress_until_final_drain() -> None:
+    handled: list[str] = []
+
+    class HandoffProvider:
+        def __init__(self, name: str, *, active: bool) -> None:
+            self.name = name
+            self.active = active
+            self.queue: asyncio.Queue[object] = asyncio.Queue()
+            self.close_calls = 0
+            self.close_backend_calls = 0
+
+        @property
+        def is_at_utterance_boundary(self) -> bool:
+            return not self.active
+
+        async def events(self):
+            while True:
+                item = await self.queue.get()
+                if isinstance(item, asyncio.Event):
+                    item.set()
+                    continue
+                yield item
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            await self.queue.put(f"{self.name}-final")
+
+        async def wait_for_event_ingress_drain(self) -> None:
+            reached = asyncio.Event()
+            await self.queue.put(reached)
+            await reached.wait()
+
+        async def close_backend(self) -> None:
+            self.close_backend_calls += 1
+
+    async def handle_event(event: object) -> None:
+        handled.append(str(event))
+
+    old = HandoffProvider("old", active=True)
+    new = HandoffProvider("new", active=False)
+    handle = ProviderRuntimeHandle(
+        name="self_stt",
+        provider=old,
+        event_handler=handle_event,
+    )
+    await handle.start()
+
+    handoff = asyncio.create_task(handle.handoff_provider_at_boundary(new, start=True))
+    await asyncio.sleep(0)
+    assert handle.provider is old
+    assert handoff.done() is False
+
+    old.active = False
+    retired = await handle.commit_pending_handoff()
+    assert retired is old
+    assert await handoff is old
+    assert handle.provider is new
+    await new.queue.put("new-event")
+
+    for _ in range(20):
+        if old.close_backend_calls and "new-event" in handled:
+            break
+        await asyncio.sleep(0)
+
+    assert "old-final" in handled
+    assert "new-event" in handled
+    assert old.close_calls == 1
+    assert old.close_backend_calls == 1
+    await handle.close()

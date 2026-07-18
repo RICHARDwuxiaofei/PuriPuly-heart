@@ -10,7 +10,9 @@ import numpy as np
 
 from puripuly_heart.core.audio.format import pcm16le_bytes_to_float32
 from puripuly_heart.core.runtime.gpu_asr import GpuASRChannel, SharedGpuASRRuntime
+from puripuly_heart.core.runtime.local_asr_transition import LocalASRSessionOptions
 from puripuly_heart.core.stt.backend import STTBackend, STTBackendSession, STTBackendTranscriptEvent
+from puripuly_heart.domain.models import FinalLanguageRun
 
 
 @dataclass(slots=True)
@@ -21,6 +23,8 @@ class LocalGpuSTTBackend(STTBackend):
     model_id: str
     device_id: str
     sample_rate_hz: int = 16_000
+    source_mode: str = "manual"
+    language_hint: str | None = None
     speech_end_clock: Callable[[], float] = field(default_factory=lambda: time.monotonic)
     _closed: bool = field(init=False, default=False, repr=False)
     _active: bool = field(init=False, default=False, repr=False)
@@ -44,6 +48,10 @@ class LocalGpuSTTBackend(STTBackend):
                 )
                 self._active = True
         return _LocalGpuSTTSession(backend=self)
+
+    async def reconfigure_session_options(self, options: LocalASRSessionOptions) -> None:
+        self.source_mode = options.source_mode
+        self.language_hint = options.language_hint
 
     async def close(self) -> None:
         async with self._lock:
@@ -101,6 +109,7 @@ class _LocalGpuSTTSession(STTBackendSession):
                 self.backend.channel,
                 samples,
                 speech_end_at=speech_end_at,
+                language_hint=self.backend.language_hint,
             )
         except asyncio.CancelledError:
             raise
@@ -108,7 +117,23 @@ class _LocalGpuSTTSession(STTBackendSession):
             await self._events.put(STTBackendTranscriptEvent(text="", is_final=True))
             await self._events.put(exc)
             return
-        await self._events.put(STTBackendTranscriptEvent(text=result.text.strip(), is_final=True))
+        text = result.text.strip()
+        detected_language = (result.detected_language or "").strip()
+        final_language_runs = (
+            (FinalLanguageRun(text=text, language=detected_language),)
+            if self.backend.channel == "peer"
+            and self.backend.source_mode == "auto"
+            and text
+            and detected_language
+            else ()
+        )
+        await self._events.put(
+            STTBackendTranscriptEvent(
+                text=text,
+                is_final=True,
+                final_language_runs=final_language_runs,
+            )
+        )
 
     async def stop(self) -> None:
         self._stopping = True

@@ -992,6 +992,17 @@ class ClientHub:
         await self._self_stt_provider_runtime.replace_provider(stt, start=self._running)
         self._sync_provider_runtime_aliases()
 
+    async def handoff_stt_provider(self, stt: STTProvider) -> STTProvider | None:
+        retired = await self._self_stt_provider_runtime.handoff_provider_at_boundary(
+            stt,
+            start=self._running,
+        )
+        self._sync_provider_runtime_aliases()
+        return retired
+
+    async def cancel_stt_provider_handoff(self, stt: STTProvider) -> bool:
+        return await self._self_stt_provider_runtime.cancel_pending_handoff(stt)
+
     async def replace_peer_stt_provider(
         self,
         stt: STTProvider | None,
@@ -1008,6 +1019,22 @@ class ClientHub:
             start=self._running if start is None else start,
         )
         self._sync_provider_runtime_aliases()
+
+    async def handoff_peer_stt_provider(
+        self,
+        stt: STTProvider,
+        *,
+        start: bool | None = None,
+    ) -> STTProvider | None:
+        retired = await self._peer_stt_provider_runtime.handoff_provider_at_boundary(
+            stt,
+            start=self._running if start is None else start,
+        )
+        self._sync_provider_runtime_aliases()
+        return retired
+
+    async def cancel_peer_stt_provider_handoff(self, stt: STTProvider) -> bool:
+        return await self._peer_stt_provider_runtime.cancel_pending_handoff(stt)
 
     async def start_peer_stt_provider_ingress(self, stt: STTProvider) -> None:
         if not self._running:
@@ -1175,6 +1202,10 @@ class ClientHub:
         if self.stt is not None:
             await self.stt.handle_vad_event(event)
 
+        if isinstance(event, SpeechEnd):
+            await self._self_stt_provider_runtime.commit_pending_handoff()
+            self._sync_provider_runtime_aliases()
+
         if (
             resume_overlay_resync_buffer is not None
             and self._merge_buffer is resume_overlay_resync_buffer
@@ -1206,6 +1237,9 @@ class ClientHub:
                 self._maybe_clear_completed_peer_parent(event.utterance_id)
         if self.peer_stt is not None:
             await self.peer_stt.handle_vad_event(event)
+        if isinstance(event, SpeechEnd):
+            await self._peer_stt_provider_runtime.commit_pending_handoff()
+            self._sync_provider_runtime_aliases()
 
     async def submit_text(self, text: str, *, source: str = "You") -> UUID:
         text = text.strip()

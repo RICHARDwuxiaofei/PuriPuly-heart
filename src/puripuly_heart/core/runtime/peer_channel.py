@@ -14,6 +14,22 @@ from puripuly_heart.core.audio.process_source import (
     ProcessAudioCaptureUnavailableError,
 )
 from puripuly_heart.core.clock import Clock
+from puripuly_heart.core.runtime.local_asr_transition import (
+    LocalASRSessionOptions,
+    LocalASRTransitionCoordinator,
+    LocalASRTransitionRequest,
+    PreparedLocalASRTransition,
+)
+
+_LOCAL_ASR_PROVIDERS = frozenset(
+    {
+        "local_cpu_auto",
+        "local_parakeet_v3",
+        "local_parakeet_ja",
+        "local_qwen",
+        "local_qwen_gpu",
+    }
+)
 
 if TYPE_CHECKING:
     from puripuly_heart.core.orchestrator.hub import ClientHub
@@ -36,6 +52,10 @@ class PeerRuntimeFailureReason(str, Enum):
     PEER_RUNTIME_FAILED = "peer_runtime_failed"
 
 
+class PeerLocalASRTransitionSuperseded(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class PeerRuntimeDiagnostic:
     reason: PeerRuntimeFailureReason
@@ -55,6 +75,9 @@ class PeerRuntimeConfig:
     capture_target: ResolvedDesktopAudioCaptureTarget = ResolvedDesktopAudioCaptureTarget(
         kind="default_output_device"
     )
+    model_id: str | None = None
+    session_options: LocalASRSessionOptions | None = None
+    capture_vad_signature: tuple[object, ...] = ()
 
 
 class SpeechChannelRuntime(Protocol):
@@ -150,6 +173,8 @@ class PeerChannelRuntime:
         self._last_idle_release_error_type: str | None = None
         self._retry_required_capture_target: ResolvedDesktopAudioCaptureTarget | None = None
         self._deferred_loop_diagnostics: dict[asyncio.Task[None], PeerRuntimeDiagnostic] = {}
+        self._transition_coordinator = LocalASRTransitionCoordinator(channel="peer")
+        self._last_local_asr_transition_status = "idle"
 
     @property
     def state(self) -> PeerChannelRuntimeState:
@@ -167,6 +192,10 @@ class PeerChannelRuntime:
     def last_failure(self) -> PeerRuntimeDiagnostic | None:
         return self._last_failure
 
+    @property
+    def last_local_asr_transition_status(self) -> str:
+        return self._last_local_asr_transition_status
+
     def lifecycle_owner_snapshot(self) -> dict[str, object]:
         return {
             "owner": "PeerChannelRuntime",
@@ -175,6 +204,7 @@ class PeerChannelRuntime:
             "shutdown_policy": self.shutdown_policy,
             "late_callback_rule": self.late_callback_rule,
             "idle_release_error_type": self._last_idle_release_error_type,
+            "local_asr_transition": self._transition_coordinator.lifecycle_snapshot(),
         }
 
     async def apply_policy(self, *, config: PeerRuntimeConfig, desired_active: bool) -> None:
@@ -198,6 +228,7 @@ class PeerChannelRuntime:
             elif self._idle_release_seconds is not None and self._idle_release_deadline is None:
                 self._idle_release_deadline = self.clock.now() + self._idle_release_seconds
         await self._cancel_idle_release_task()
+        provider_only_transition = False
         async with self._lock:
             if self._closed:
                 return
@@ -209,23 +240,39 @@ class PeerChannelRuntime:
             ):
                 self._config = config
                 return
-            self._generation += 1
-            generation = self._generation
-            self._config = config
-            self._desired_active = desired_active
-            activation_event = None
-            if not desired_active:
-                self._retry_required_capture_target = None
-                self._state = PeerChannelRuntimeState.STOPPING
-            elif (
-                self._signature == config.runtime_signature
+            current_config = self._config
+            if (
+                desired_active
+                and self._desired_active
                 and self._state == PeerChannelRuntimeState.RUNNING
+                and current_config is not None
+                and current_config.backend.provider in _LOCAL_ASR_PROVIDERS
+                and config.backend.provider in _LOCAL_ASR_PROVIDERS
+                and current_config.capture_vad_signature == config.capture_vad_signature
             ):
-                return
+                self._config = config
+                provider_only_transition = True
+            if provider_only_transition:
+                generation = self._generation
+                activation_event = None
             else:
-                self._state = PeerChannelRuntimeState.STARTING
-                activation_event = asyncio.Event()
-                self._activation_events[generation] = activation_event
+                self._generation += 1
+                generation = self._generation
+                self._config = config
+                self._desired_active = desired_active
+                activation_event = None
+                if not desired_active:
+                    self._retry_required_capture_target = None
+                    self._state = PeerChannelRuntimeState.STOPPING
+                elif (
+                    self._signature == config.runtime_signature
+                    and self._state == PeerChannelRuntimeState.RUNNING
+                ):
+                    return
+                else:
+                    self._state = PeerChannelRuntimeState.STARTING
+                    activation_event = asyncio.Event()
+                    self._activation_events[generation] = activation_event
 
             if (
                 desired_active
@@ -238,6 +285,10 @@ class PeerChannelRuntime:
                     activation_event.set()
                     self._activation_events.pop(generation, None)
                 return
+
+        if provider_only_transition:
+            await self._transition_running_provider(config, generation=generation)
+            return
 
         if not desired_active:
             await self._wait_for_activations_before(generation)
@@ -299,6 +350,7 @@ class PeerChannelRuntime:
     async def close(self) -> None:
         self._idle_release_deadline = None
         await self._cancel_idle_release_task()
+        await self._transition_coordinator.close()
         async with self._lock:
             self._closed = True
             self._generation += 1
@@ -310,6 +362,115 @@ class PeerChannelRuntime:
             target_state=PeerChannelRuntimeState.STOPPED,
             generation=generation,
         )
+
+    async def _transition_running_provider(
+        self,
+        config: PeerRuntimeConfig,
+        *,
+        generation: int,
+    ) -> None:
+        self._last_local_asr_transition_status = "preparing"
+        current = self._stt
+        if current is None:
+            self._last_local_asr_transition_status = "failed"
+            return
+        options = config.session_options
+        current_backend = getattr(current, "backend", None)
+        current_model_id = getattr(current_backend, "resolved_model_id", None) or getattr(
+            current_backend,
+            "model_id",
+            None,
+        )
+        if current_model_id == config.model_id and options is not None:
+            reconfigure = getattr(current, "reconfigure_session_options", None)
+            if callable(reconfigure):
+                result = reconfigure(options)
+                if inspect.isawaitable(result):
+                    await result
+            async with self._lock:
+                if self._config is config and self._generation == generation:
+                    if config.backend.provider == "local_qwen":
+                        self._retained_stt = current
+                    self._provider_signature = config.provider_signature
+                    self._signature = config.runtime_signature
+            self._last_local_asr_transition_status = "applied"
+            return
+        request = LocalASRTransitionRequest(
+            channel="peer",
+            requested_provider=config.backend.provider,
+            actual_provider=config.backend.provider,
+            model_id=config.model_id,
+            session_options=options
+            or LocalASRSessionOptions(source_language=config.backend.source_language),
+            trigger="settings",
+        )
+
+        async def prepare(
+            prepared_request: LocalASRTransitionRequest,
+            transition_generation: int,
+        ) -> PreparedLocalASRTransition:
+            candidate = self._stt_factory(
+                config,
+                lambda exc, *, _generation=generation: self._on_terminal_stt_failure(
+                    exc,
+                    generation=_generation,
+                ),
+            )
+            if inspect.isawaitable(candidate):
+                candidate = await candidate
+            try:
+                warmup = getattr(candidate, "warmup", None)
+                if callable(warmup):
+                    result = warmup()
+                    if inspect.isawaitable(result):
+                        await result
+            except BaseException:
+                await self._close_peer_provider_for_discard(candidate)
+                raise
+            return PreparedLocalASRTransition(
+                request=prepared_request,
+                provider=candidate,
+                generation=transition_generation,
+            )
+
+        async def commit(prepared: PreparedLocalASRTransition) -> None:
+            async with self._lock:
+                if (
+                    self._config is not config
+                    or self._generation != generation
+                    or not self._desired_active
+                ):
+                    raise RuntimeError("peer provider transition superseded")
+            handoff = getattr(self.hub, "handoff_peer_stt_provider", None)
+            if callable(handoff):
+                result = handoff(prepared.provider, start=True)
+                try:
+                    if inspect.isawaitable(result):
+                        await result
+                except asyncio.CancelledError:
+                    cancel_handoff = getattr(self.hub, "cancel_peer_stt_provider_handoff", None)
+                    if callable(cancel_handoff):
+                        cancel_result = cancel_handoff(prepared.provider)
+                        if inspect.isawaitable(cancel_result):
+                            await cancel_result
+                    raise
+            else:
+                await self._replace_peer_stt_provider(prepared.provider, start=True)
+            async with self._lock:
+                if self._config is config and self._generation == generation:
+                    self._stt = prepared.provider
+                    self._retained_stt = (
+                        prepared.provider if config.backend.provider == "local_qwen" else None
+                    )
+                    self._provider_signature = config.provider_signature
+                    self._signature = config.runtime_signature
+
+        outcome = await self._transition_coordinator.request_transition(
+            request,
+            prepare=prepare,
+            commit=commit,
+        )
+        self._last_local_asr_transition_status = outcome.status
 
     async def _wait_for_activations_before(self, generation: int) -> None:
         async with self._lock:
@@ -345,7 +506,11 @@ class PeerChannelRuntime:
                     if inspect.isawaitable(stt):
                         stt = await stt
                     created_candidate = stt
-                warmup = getattr(stt, "warmup", None) if reusable else None
+                warmup = (
+                    getattr(stt, "warmup", None)
+                    if config.backend.provider in _LOCAL_ASR_PROVIDERS
+                    else None
+                )
                 if callable(warmup):
                     result = warmup()
                     if inspect.isawaitable(result):
