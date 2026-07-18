@@ -1646,6 +1646,26 @@ class GuiController:
                 f"failure_code={failure_code}{suffix}",
                 level=logging.ERROR,
             )
+        elif diagnostic.kind == "decode_attempt":
+            audio_seconds = diagnostic.fields.get("audio_seconds")
+            decode_seconds = diagnostic.fields.get("decode_seconds")
+            rtf = diagnostic.fields.get("rtf")
+            queue_wait_seconds = diagnostic.fields.get("queue_wait_seconds")
+            if all(
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+                for value in (audio_seconds, decode_seconds, rtf, queue_wait_seconds)
+            ):
+                self.log_basic(
+                    "[LocalASR][Attempt] "
+                    f"channel={diagnostic.fields.get('channel') or 'unknown'} "
+                    f"model={diagnostic.fields.get('model') or 'unknown'} "
+                    "backend=Vulkan "
+                    f"audio_seconds={audio_seconds:.3f} "
+                    f"decode_seconds={decode_seconds:.3f} "
+                    f"rtf={rtf:.6f} "
+                    f"result={diagnostic.fields.get('result') or 'unknown'} "
+                    f"queue_wait_seconds={queue_wait_seconds:.3f}"
+                )
         if diagnostic.kind == "worker_lifecycle":
             phase = diagnostic.fields.get("phase")
             if phase in {"validating", "loading", "warming", "ready"}:

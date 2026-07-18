@@ -232,3 +232,36 @@ async def test_gpu_ready_and_worker_failure_are_basic_terminal_logs(
             logging.ERROR,
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_gpu_decode_attempt_logs_rtf_in_basic_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, basic, detailed = _controller_with_logs(monkeypatch)
+
+    await controller._on_gpu_asr_diagnostic(
+        GpuASRDiagnostic(
+            kind="decode_attempt",
+            fields={
+                "channel": "self",
+                "model": "qwen-gpu",
+                "backend": "Vulkan",
+                "audio_seconds": 2.0,
+                "decode_seconds": 0.25,
+                "rtf": 0.125,
+                "result": "success",
+                "queue_wait_seconds": 0.031,
+            },
+        )
+    )
+
+    assert len(detailed) == 1
+    assert basic == [
+        (
+            "[LocalASR][Attempt] channel=self model=qwen-gpu backend=Vulkan "
+            "audio_seconds=2.000 decode_seconds=0.250 rtf=0.125000 "
+            "result=success queue_wait_seconds=0.031",
+            logging.INFO,
+        )
+    ]
