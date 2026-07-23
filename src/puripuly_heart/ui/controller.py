@@ -657,7 +657,9 @@ class _ControllerSettingsPatchRepository:
         self.controller._begin_canonical_mutation()
         try:
             self.controller._update_canonical_settings_from_legacy_delta(
-                base_settings or next_settings,
+                self.controller._canonical_legacy_projection_snapshot
+                or base_settings
+                or next_settings,
                 next_settings,
             )
             if self.provider_verification_binding is not None:
