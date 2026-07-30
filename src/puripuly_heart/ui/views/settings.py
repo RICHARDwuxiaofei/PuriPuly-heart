@@ -129,6 +129,8 @@ _STT_SECTION_BY_PROVIDER: dict[STTProviderName, str] = {
     STTProviderName.LOCAL_QWEN: "settings.stt.section.cpu_inference",
 }
 _TRANSLATION_MODEL_LABEL_KEYS = {
+    TranslationModel.GEMMA4_26B_31B: "provider.gemma4_26b_31b",
+    TranslationModel.GEMMA4_31B: "provider.gemma4_31b_openrouter",
     TranslationModel.GEMMA4: "provider.gemma4_26b_a4b_it",
     TranslationModel.DEEPSEEK_V4_FLASH: "provider.deepseek_v4_flash",
     TranslationModel.DEEPSEEK_V4_PRO: "provider.deepseek_v4_pro",
@@ -156,10 +158,12 @@ _TRANSLATION_CONNECTION_ONLY_SUPPORTED_KEY = "settings.translation_connection.on
 _TRANSLATION_MODEL_RECOMMENDED_SECTION_KEY = "settings.translation_model.section.recommended"
 _TRANSLATION_MODEL_OTHERS_SECTION_KEY = "settings.translation_model.section.others"
 _RECOMMENDED_TRANSLATION_MODELS = (
-    TranslationModel.GEMMA4,
+    TranslationModel.GEMMA4_26B_31B,
     TranslationModel.DEEPSEEK_V4_FLASH,
 )
 _OTHER_TRANSLATION_MODELS = (
+    TranslationModel.GEMMA4_31B,
+    TranslationModel.GEMMA4,
     TranslationModel.GEMMA4_31B_CEREBRAS,
     TranslationModel.LOCAL_LLM,
     TranslationModel.DEEPSEEK_V4_PRO,
@@ -192,6 +196,24 @@ _TRANSLATION_FALLBACK_PRESETS: tuple[tuple[str, TranslationFallbackSettings, str
         "settings.fallback.openrouter_deepseek_v4_flash",
     ),
     (
+        "openrouter_gemma4_26b_31b",
+        TranslationFallbackSettings(
+            enabled=True,
+            model=TranslationModel.GEMMA4_26B_31B,
+            connection=TranslationConnection.OPENROUTER,
+        ),
+        "settings.fallback.openrouter_gemma4_26b_31b",
+    ),
+    (
+        "openrouter_gemma4_31b",
+        TranslationFallbackSettings(
+            enabled=True,
+            model=TranslationModel.GEMMA4_31B,
+            connection=TranslationConnection.OPENROUTER,
+        ),
+        "settings.fallback.openrouter_gemma4_31b",
+    ),
+    (
         "openrouter_gemma4_26b_a4b",
         TranslationFallbackSettings(
             enabled=True,
@@ -217,8 +239,33 @@ _TRANSLATION_FALLBACK_LABEL_KEY_BY_VALUE = {
     value: label_key for value, _fallback, label_key in _TRANSLATION_FALLBACK_PRESETS
 }
 _TRANSLATION_FALLBACK_DESCRIPTION_KEY_BY_VALUE = {
+    "openrouter_gemma4_26b_31b": "settings.fallback.openrouter_gemma4_26b_31b.description",
+    "openrouter_gemma4_31b": "settings.fallback.openrouter_gemma4_31b.description",
     "cerebras_gemma4_31b": "settings.fallback.cerebras_gemma4_31b.description",
 }
+
+
+def _default_gemma_fallback(
+    model: TranslationModel,
+    connection: TranslationConnection,
+) -> TranslationFallbackSettings | None:
+    fallback_model = {
+        TranslationModel.GEMMA4_26B_31B: TranslationModel.GEMMA4_26B_31B,
+        TranslationModel.GEMMA4_31B: TranslationModel.GEMMA4_31B,
+        TranslationModel.GEMMA4: TranslationModel.GEMMA4_26B_31B,
+    }.get(model)
+    if fallback_model is None:
+        return None
+    fallback_connection = (
+        TranslationConnection.MANAGED
+        if connection == TranslationConnection.MANAGED
+        else TranslationConnection.OPENROUTER
+    )
+    return TranslationFallbackSettings(
+        enabled=True,
+        model=fallback_model,
+        connection=fallback_connection,
+    )
 
 
 def _make_text_button(label: str, **kwargs) -> ft.TextButton:
@@ -2359,10 +2406,7 @@ class SettingsView(ft.Column):
                 and preset.connection == fallback.connection
             ):
                 return value
-        if fallback.connection in (
-            TranslationConnection.MANAGED,
-            TranslationConnection.MANAGED_CHINA,
-        ):
+        if fallback.connection == TranslationConnection.MANAGED_CHINA:
             return "none"
         return "custom"
 
@@ -3654,6 +3698,14 @@ class SettingsView(ft.Column):
             current_settings.translation.connection_history
         )
         draft.translation.connection_history[model.value] = connection
+        old_default_fallback = _default_gemma_fallback(old_model, old_connection)
+        if (
+            old_default_fallback is not None
+            and current_settings.translation.fallback == old_default_fallback
+        ):
+            new_default_fallback = _default_gemma_fallback(model, connection)
+            if new_default_fallback is not None:
+                draft.translation.fallback = new_default_fallback
         materialize_translation_settings(draft)
         new_provider = draft.provider.llm
 
@@ -3800,10 +3852,28 @@ class SettingsView(ft.Column):
 
         current_settings = self._build_settings_with_provider_draft()
         assert current_settings is not None
-        new_value = _TRANSLATION_FALLBACK_PRESET_BY_VALUE.get(
-            value,
-            _TRANSLATION_FALLBACK_PRESET_BY_VALUE["none"],
+        new_value = copy.deepcopy(
+            _TRANSLATION_FALLBACK_PRESET_BY_VALUE.get(
+                value,
+                _TRANSLATION_FALLBACK_PRESET_BY_VALUE["none"],
+            )
         )
+        if new_value.enabled and new_value.model in (
+            TranslationModel.GEMMA4_26B_31B,
+            TranslationModel.GEMMA4_31B,
+        ):
+            new_value.connection = (
+                TranslationConnection.MANAGED
+                if current_settings.translation.connection == TranslationConnection.MANAGED
+                and current_settings.translation.model
+                in (
+                    TranslationModel.GEMMA4_26B_31B,
+                    TranslationModel.GEMMA4_31B,
+                    TranslationModel.GEMMA4,
+                    TranslationModel.DEEPSEEK_V4_FLASH,
+                )
+                else TranslationConnection.OPENROUTER
+            )
 
         old_value = current_settings.translation.fallback
         if (

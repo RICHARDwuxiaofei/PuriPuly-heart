@@ -7,6 +7,11 @@ from uuid import uuid4
 import pytest
 
 from puripuly_heart.config.settings import OpenRouterProviderRouting, OpenRouterRoutingMode
+from puripuly_heart.core.llm.attempt_metadata import (
+    LLMAttemptMetadataRecorder,
+    attempt_metadata_context,
+)
+from puripuly_heart.core.llm.routing_telemetry import OpenRouterGenerationTelemetry
 from puripuly_heart.providers.llm.openrouter import (
     HttpxOpenRouterClient,
     OpenRouterClient,
@@ -59,8 +64,17 @@ class SpyRuntimeLogging:
 class FakeResponse:
     status_code = 200
 
-    def __init__(self, data: dict | None = None):
+    def __init__(
+        self,
+        data: dict | None = None,
+        *,
+        status_code: int | None = None,
+        headers: dict[str, str] | None = None,
+    ):
         self._data = data or {"choices": [{"message": {"content": "OK"}}]}
+        if status_code is not None:
+            self.status_code = status_code
+        self.headers = headers or {}
 
     def json(self):
         return self._data
@@ -74,11 +88,13 @@ class FakeAsyncClient:
         self,
         *,
         response_data: dict | None = None,
+        generation_response_data: dict | None = None,
     ):
         self.last_request: dict = {}
         self.requests: list[dict] = []
         self.closed = False
         self._response_data = response_data
+        self._generation_response_data = generation_response_data
 
     async def aclose(self):
         self.closed = True
@@ -88,6 +104,201 @@ class FakeAsyncClient:
         self.last_request = request
         self.requests.append(request)
         return FakeResponse(self._response_data)
+
+    async def get(self, url, **kwargs):
+        request = {"url": url, **kwargs}
+        self.last_request = request
+        self.requests.append(request)
+        return FakeResponse(self._generation_response_data)
+
+
+class FakeRoutingTelemetry:
+    active = True
+
+    def __init__(self) -> None:
+        self.registered: list[str] = []
+        self.generations: list[tuple[str, OpenRouterGenerationTelemetry]] = []
+        self.failures: list[tuple[str, str, str]] = []
+
+    def register_openrouter_generation(self, generation_id: str) -> str | None:
+        self.registered.append(generation_id)
+        return "capture-1"
+
+    def record_openrouter_generation(
+        self,
+        capture_id: str,
+        record: OpenRouterGenerationTelemetry,
+    ) -> None:
+        self.generations.append((capture_id, record))
+
+    def record_openrouter_generation_failure(
+        self,
+        capture_id: str,
+        generation_id: str,
+        error_type: str,
+    ) -> None:
+        self.failures.append((capture_id, generation_id, error_type))
+
+
+@pytest.mark.asyncio
+async def test_httpx_openrouter_client_sends_models_for_combined_gemma_profile(
+    monkeypatch,
+) -> None:
+    fake_client = FakeAsyncClient()
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+    client = HttpxOpenRouterClient(
+        api_key="test-key",
+        model="google/gemma-4-26b-a4b-it",
+        models=(
+            "google/gemma-4-26b-a4b-it",
+            "google/gemma-4-31b-it",
+        ),
+        provider_routing=OpenRouterProviderRouting.GEMMA4_26B_31B_LATENCY,
+    )
+
+    await client.translate(
+        text="hello",
+        system_prompt="SYSTEM",
+        source_language="ko",
+        target_language="en",
+    )
+
+    body = fake_client.last_request["json"]
+    assert "model" not in body
+    assert body["models"] == [
+        "google/gemma-4-26b-a4b-it",
+        "google/gemma-4-31b-it",
+    ]
+    assert body["provider"] == {
+        "only": ["cloudflare", "coreweave/bf16", "open-inference/bf16"],
+        "sort": {"by": "latency", "partition": "none"},
+        "allow_fallbacks": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_httpx_openrouter_client_second_fallback_has_single_cerebras_route(
+    monkeypatch,
+) -> None:
+    fake_client = FakeAsyncClient()
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+    client = HttpxOpenRouterClient(
+        api_key="test-key",
+        model="google/gemma-4-31b-it",
+        provider_routing=OpenRouterProviderRouting.SECOND_FALLBACK,
+    )
+
+    await client.translate(
+        text="hello",
+        system_prompt="SYSTEM",
+        source_language="ko",
+        target_language="en",
+    )
+
+    body = fake_client.last_request["json"]
+    assert body["model"] == "google/gemma-4-31b-it"
+    assert "models" not in body
+    assert body["provider"] == {
+        "only": ["cerebras/fp16"],
+        "allow_fallbacks": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_httpx_openrouter_client_records_response_model_and_provider(
+    monkeypatch,
+) -> None:
+    fake_client = FakeAsyncClient(
+        response_data={
+            "id": "gen-123",
+            "model": "google/gemma-4-31b-it",
+            "provider": "CoreWeave",
+            "usage": {
+                "prompt_tokens": 20,
+                "completion_tokens": 8,
+                "total_tokens": 28,
+                "cost": 0.00042,
+            },
+            "choices": [{"message": {"content": "OK"}}],
+        }
+    )
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+    client = HttpxOpenRouterClient(
+        api_key="test-key",
+        model="google/gemma-4-31b-it",
+    )
+    recorder = LLMAttemptMetadataRecorder()
+
+    with attempt_metadata_context(recorder):
+        await client.translate(
+            text="hello",
+            system_prompt="SYSTEM",
+            source_language="ko",
+            target_language="en",
+        )
+
+    assert recorder.response is not None
+    assert recorder.response.model == "google/gemma-4-31b-it"
+    assert recorder.response.provider == "CoreWeave"
+    assert recorder.response.generation_id == "gen-123"
+    assert recorder.response.prompt_tokens == 20
+    assert recorder.response.completion_tokens == 8
+    assert recorder.response.total_tokens == 28
+    assert recorder.response.cost_usd == "0.00042"
+
+
+@pytest.mark.asyncio
+async def test_httpx_openrouter_client_enriches_generation_cost_when_capture_is_active(
+    monkeypatch,
+) -> None:
+    fake_client = FakeAsyncClient(
+        response_data={
+            "id": "gen-456",
+            "choices": [{"message": {"content": "OK"}}],
+        },
+        generation_response_data={
+            "data": {
+                "total_cost": 0.00123,
+                "upstream_inference_cost": 0.0008,
+                "provider_name": "CoreWeave",
+                "model": "google/gemma-4-31b-it",
+                "latency": 184,
+                "generation_time": 90,
+                "tokens_prompt": 31,
+                "tokens_completion": 9,
+                "cancelled": False,
+                "is_byok": False,
+                "finish_reason": "stop",
+            }
+        },
+    )
+    telemetry = FakeRoutingTelemetry()
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+    client = HttpxOpenRouterClient(
+        api_key="test-key",
+        model="google/gemma-4-31b-it",
+        routing_telemetry=telemetry,
+    )
+
+    await client.translate(
+        text="hello",
+        system_prompt="SYSTEM",
+        source_language="ko",
+        target_language="en",
+    )
+    await client.close()
+
+    assert telemetry.registered == ["gen-456"]
+    assert telemetry.failures == []
+    assert len(telemetry.generations) == 1
+    capture_id, generation = telemetry.generations[0]
+    assert capture_id == "capture-1"
+    assert generation.generation_id == "gen-456"
+    assert generation.total_cost_usd == "0.00123"
+    assert generation.upstream_inference_cost_usd == "0.0008"
+    assert generation.provider_name == "CoreWeave"
+    assert generation.prompt_tokens == 31
+    assert generation.completion_tokens == 9
 
 
 @pytest.mark.asyncio
@@ -252,8 +463,8 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_la
     assert body["reasoning"] == {"effort": "none"}
     assert body["user"] == "managed-user-123"
     assert body["provider"] == {
-        "order": ["wafer", "cloudflare", "deepinfra"],
-        "only": ["wafer", "cloudflare", "deepinfra"],
+        "only": ["cloudflare", "parasail/bf16"],
+        "sort": {"by": "latency"},
         "allow_fallbacks": True,
     }
     assert body["messages"][0] == {"role": "system", "content": "SYSTEM"}
@@ -285,8 +496,8 @@ async def test_httpx_openrouter_client_gemma_uses_wafer_cloudflare_deepinfra_rou
 
     body = fake_client.last_request["json"]
     assert body["provider"] == {
-        "order": ["wafer", "cloudflare", "deepinfra"],
-        "only": ["wafer", "cloudflare", "deepinfra"],
+        "only": ["cloudflare", "parasail/bf16"],
+        "sort": {"by": "latency"},
         "allow_fallbacks": True,
     }
 
@@ -343,8 +554,8 @@ async def test_httpx_openrouter_client_deepseek_only_routing_uses_deepseek_baidu
 
     body = fake_client.last_request["json"]
     assert body["provider"] == {
-        "sort": "latency",
-        "only": ["deepseek", "baidu"],
+        "only": ["baidu", "deepseek", "cloudflare"],
+        "sort": {"by": "latency"},
         "allow_fallbacks": True,
     }
 
@@ -370,8 +581,8 @@ async def test_httpx_openrouter_client_deepseek_default_uses_cloudflare_first_ro
 
     body = fake_client.last_request["json"]
     assert body["provider"] == {
-        "sort": "latency",
-        "only": ["deepseek", "parasail", "Fireworks", "Baidu Qianfan"],
+        "only": ["baidu", "deepseek", "cloudflare"],
+        "sort": {"by": "latency"},
         "allow_fallbacks": True,
     }
 
@@ -399,8 +610,8 @@ async def test_httpx_openrouter_client_gemma_order_ignores_explicit_latency_rout
     assert result == "OK"
     body = fake_client.last_request["json"]
     assert body["provider"] == {
-        "order": ["wafer", "cloudflare", "deepinfra"],
-        "only": ["wafer", "cloudflare", "deepinfra"],
+        "only": ["cloudflare", "parasail/bf16"],
+        "sort": {"by": "latency"},
         "allow_fallbacks": True,
     }
 

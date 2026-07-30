@@ -61,7 +61,11 @@ from puripuly_heart.config.settings import (
     QwenRegion,
     TranslationConnection,
 )
-from puripuly_heart.core.llm import FallbackRacingLLMProvider
+from puripuly_heart.core.llm import (
+    FallbackRacingLLMProvider,
+    RoutingTelemetrySink,
+    SingleAttemptRoutingTelemetryProvider,
+)
 from puripuly_heart.core.llm.provider import LLMProvider, SemaphoreLLMProvider
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_BYOK_API_KEY_ENV,
@@ -507,6 +511,7 @@ def _openrouter_provider_from_resolved_config(
     managed_release_service: object | None,
     managed_delegate_ready: Callable[[], object] | None,
     runtime_logging: SessionRuntimeLoggingService | None,
+    routing_telemetry: RoutingTelemetrySink | None,
     compatibility_settings: AppSettings | None,
     force_managed_wrapper: bool = False,
     include_selection_alias: bool = True,
@@ -517,6 +522,7 @@ def _openrouter_provider_from_resolved_config(
         managed_release_service=managed_release_service,
         managed_delegate_ready=managed_delegate_ready,
         runtime_logging=runtime_logging,
+        routing_telemetry=routing_telemetry,
         compatibility_settings=compatibility_settings,
         force_managed_wrapper=force_managed_wrapper,
         include_selection_alias=include_selection_alias,
@@ -530,12 +536,14 @@ def _openrouter_provider_from_resolved_target(
     managed_release_service: object | None,
     managed_delegate_ready: Callable[[], object] | None,
     runtime_logging: SessionRuntimeLoggingService | None,
+    routing_telemetry: RoutingTelemetrySink | None,
     compatibility_settings: AppSettings | None,
     force_managed_wrapper: bool = False,
     include_selection_alias: bool = True,
 ) -> LLMProvider:
     return _openrouter_provider_from_resolved_fields(
         model=target.model,
+        models=target.models,
         credential=target.credential,
         service_endpoint=target.service_endpoint,
         routing_mode_value=target.routing_mode,
@@ -544,6 +552,7 @@ def _openrouter_provider_from_resolved_target(
         managed_release_service=managed_release_service,
         managed_delegate_ready=managed_delegate_ready,
         runtime_logging=runtime_logging,
+        routing_telemetry=routing_telemetry,
         compatibility_settings=compatibility_settings,
         force_managed_wrapper=force_managed_wrapper,
         include_selection_alias=include_selection_alias,
@@ -553,6 +562,7 @@ def _openrouter_provider_from_resolved_target(
 def _openrouter_provider_from_resolved_fields(
     *,
     model: str,
+    models: tuple[str, ...] = (),
     credential: ResolvedCredentialRequirement,
     service_endpoint: str | None,
     routing_mode_value: str | None,
@@ -561,6 +571,7 @@ def _openrouter_provider_from_resolved_fields(
     managed_release_service: object | None,
     managed_delegate_ready: Callable[[], object] | None,
     runtime_logging: SessionRuntimeLoggingService | None,
+    routing_telemetry: RoutingTelemetrySink | None,
     compatibility_settings: AppSettings | None,
     force_managed_wrapper: bool = False,
     include_selection_alias: bool = True,
@@ -612,9 +623,11 @@ def _openrouter_provider_from_resolved_fields(
                         secrets=secrets,
                     ),
                     model=model,
+                    models=models,
                     routing_mode=routing_mode,
                     provider_routing=provider_routing,
                     runtime_logging=runtime_logging,
+                    routing_telemetry=routing_telemetry,
                 ),
                 on_delegate_ready=managed_delegate_ready,
             )
@@ -625,18 +638,22 @@ def _openrouter_provider_from_resolved_fields(
                 secrets=secrets,
             ),
             model=model,
+            models=models,
             routing_mode=routing_mode,
             provider_routing=provider_routing,
             runtime_logging=runtime_logging,
+            routing_telemetry=routing_telemetry,
         )
 
     api_key = _require_openrouter_byok_api_key(secrets)
     return OpenRouterLLMProvider(
         api_key=api_key,
         model=model,
+        models=models,
         routing_mode=routing_mode,
         provider_routing=provider_routing,
         runtime_logging=runtime_logging,
+        routing_telemetry=routing_telemetry,
     )
 
 
@@ -647,6 +664,7 @@ def _provider_from_resolved_target(
     managed_release_service: object | None,
     managed_delegate_ready: Callable[[], object] | None,
     runtime_logging: SessionRuntimeLoggingService | None,
+    routing_telemetry: RoutingTelemetrySink | None,
     compatibility_settings: AppSettings | None,
     qwen_low_latency_mode: bool,
     force_managed_wrapper: bool = False,
@@ -667,6 +685,7 @@ def _provider_from_resolved_target(
             managed_release_service=managed_release_service,
             managed_delegate_ready=managed_delegate_ready,
             runtime_logging=runtime_logging,
+            routing_telemetry=routing_telemetry,
             compatibility_settings=compatibility_settings,
             force_managed_wrapper=force_managed_wrapper,
             include_selection_alias=include_selection_alias,
@@ -728,6 +747,7 @@ def _base_llm_provider_from_resolved_config(
     managed_release_service: object | None,
     managed_delegate_ready: Callable[[], object] | None,
     runtime_logging: SessionRuntimeLoggingService | None,
+    routing_telemetry: RoutingTelemetrySink | None,
     compatibility_settings: AppSettings | None,
     qwen_low_latency_mode: bool,
 ) -> LLMProvider:
@@ -737,6 +757,7 @@ def _base_llm_provider_from_resolved_config(
         managed_release_service=managed_release_service,
         managed_delegate_ready=managed_delegate_ready,
         runtime_logging=runtime_logging,
+        routing_telemetry=routing_telemetry,
         compatibility_settings=compatibility_settings,
         qwen_low_latency_mode=qwen_low_latency_mode,
     )
@@ -749,6 +770,7 @@ def create_llm_provider_from_resolved_config(
     managed_release_service: object | None = None,
     managed_delegate_ready: Callable[[], object] | None = None,
     runtime_logging: SessionRuntimeLoggingService | None = None,
+    routing_telemetry: RoutingTelemetrySink | None = None,
     compatibility_settings: AppSettings | None = None,
     qwen_low_latency_mode: bool = True,
 ) -> LLMProvider:
@@ -758,6 +780,7 @@ def create_llm_provider_from_resolved_config(
         managed_release_service=managed_release_service,
         managed_delegate_ready=managed_delegate_ready,
         runtime_logging=runtime_logging,
+        routing_telemetry=routing_telemetry,
         compatibility_settings=compatibility_settings,
         qwen_low_latency_mode=qwen_low_latency_mode,
     )
@@ -767,6 +790,7 @@ def create_llm_provider_from_resolved_config(
             managed_release_service,
         )
         fallback_plan = config.fallback
+        second_fallback_plan = config.second_fallback
         base = FallbackRacingLLMProvider(
             primary=base,
             fallback=_LazyFactoryLLMProvider(
@@ -776,15 +800,60 @@ def create_llm_provider_from_resolved_config(
                     managed_release_service=fallback_managed_release_service,
                     managed_delegate_ready=managed_delegate_ready,
                     runtime_logging=runtime_logging,
+                    routing_telemetry=routing_telemetry,
                     compatibility_settings=compatibility_settings,
                     qwen_low_latency_mode=qwen_low_latency_mode,
                     force_managed_wrapper=fallback_plan.force_managed_wrapper,
                     include_selection_alias=False,
                 )
             ),
+            second_fallback=(
+                _LazyFactoryLLMProvider(
+                    factory=lambda: _provider_from_resolved_target(
+                        second_fallback_plan.target,
+                        secrets=secrets,
+                        managed_release_service=fallback_managed_release_service,
+                        managed_delegate_ready=managed_delegate_ready,
+                        runtime_logging=runtime_logging,
+                        routing_telemetry=routing_telemetry,
+                        compatibility_settings=compatibility_settings,
+                        qwen_low_latency_mode=qwen_low_latency_mode,
+                        force_managed_wrapper=second_fallback_plan.force_managed_wrapper,
+                        include_selection_alias=False,
+                    )
+                )
+                if second_fallback_plan is not None
+                else None
+            ),
             fallback_timeout_ms=fallback_plan.timeout_ms,
+            second_fallback_timeout_ms=(
+                second_fallback_plan.timeout_ms if second_fallback_plan is not None else 3500
+            ),
             loser_grace_ms=fallback_plan.loser_grace_ms,
+            fallback_start_on_primary_error=fallback_plan.start_on_main_attempt_error,
             runtime_logging=runtime_logging,
+            routing_telemetry=routing_telemetry,
+            primary_requested_provider=config.primary.provider,
+            primary_requested_models=config.primary.models or (config.primary.model,),
+            fallback_requested_provider=fallback_plan.target.provider,
+            fallback_requested_models=fallback_plan.target.models or (fallback_plan.target.model,),
+            second_fallback_requested_provider=(
+                second_fallback_plan.target.provider
+                if second_fallback_plan is not None
+                else "unknown"
+            ),
+            second_fallback_requested_models=(
+                second_fallback_plan.target.models or (second_fallback_plan.target.model,)
+                if second_fallback_plan is not None
+                else ()
+            ),
+        )
+    elif routing_telemetry is not None:
+        base = SingleAttemptRoutingTelemetryProvider(
+            inner=base,
+            requested_provider=config.primary.provider,
+            requested_models=config.primary.models or (config.primary.model,),
+            telemetry=routing_telemetry,
         )
     return SemaphoreLLMProvider(
         inner=base,
@@ -799,6 +868,7 @@ def create_llm_provider(
     managed_release_service: object | None = None,
     managed_delegate_ready: Callable[[], object] | None = None,
     runtime_logging: SessionRuntimeLoggingService | None = None,
+    routing_telemetry: RoutingTelemetrySink | None = None,
 ) -> LLMProvider:
     runtime_input = _runtime_resolution_input_from_compatibility_settings(settings)
     resolved = resolve_llm_config(runtime_input)
@@ -808,6 +878,7 @@ def create_llm_provider(
         managed_release_service=managed_release_service,
         managed_delegate_ready=managed_delegate_ready,
         runtime_logging=runtime_logging,
+        routing_telemetry=routing_telemetry,
         compatibility_settings=settings,
         qwen_low_latency_mode=settings.stt.low_latency_mode,
     )

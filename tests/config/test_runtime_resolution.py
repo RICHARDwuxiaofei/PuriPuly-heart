@@ -724,6 +724,72 @@ def test_openrouter_no_fallback_selected_has_no_fallback_credential() -> None:
     assert config.fallback is None
 
 
+def test_combined_gemma_resolves_identical_first_fallback_and_openrouter_second_fallback() -> None:
+    runtime_resolution = _runtime_resolution_module()
+
+    config = runtime_resolution.resolve_llm_config(
+        _runtime_input(
+            runtime_resolution,
+            model=runtime_resolution.TRANSLATION_MODEL_GEMMA4_26B_31B,
+            connection=runtime_resolution.TRANSLATION_CONNECTION_MANAGED,
+            translation_fallback=runtime_resolution.TranslationFallbackRuntimeIntent(
+                enabled=True,
+                model=runtime_resolution.TRANSLATION_MODEL_GEMMA4_26B_31B,
+                connection=runtime_resolution.TRANSLATION_CONNECTION_MANAGED,
+            ),
+        )
+    )
+
+    assert config.primary.models == (
+        "google/gemma-4-26b-a4b-it",
+        "google/gemma-4-31b-it",
+    )
+    assert config.primary.provider_routing == "gemma4_26b_31b_latency"
+    assert config.fallback is not None
+    assert config.fallback.target == config.primary
+    assert config.fallback.timeout_ms == 1300
+    assert config.fallback.start_on_main_attempt_error is True
+    assert config.second_fallback is not None
+    assert config.second_fallback.timeout_ms == 3500
+    assert config.second_fallback.start_on_main_attempt_error is False
+    assert config.second_fallback.target.model == "google/gemma-4-31b-it"
+    assert config.second_fallback.target.provider_routing == "gemma4_31b_cerebras_only"
+    assert config.second_fallback.target.credential == config.primary.credential
+
+
+def test_combined_gemma_selection_alias_survives_runtime_normalization() -> None:
+    runtime_resolution = _runtime_resolution_module()
+
+    intent = runtime_resolution.normalize_openrouter_runtime_intent(
+        selection_alias="gemma4_26b_31b_managed",
+    )
+
+    assert intent.model == "google/gemma-4-26b-a4b-it"
+    assert intent.selected_source == "managed"
+    assert intent.selection_alias == "gemma4_26b_31b_managed"
+
+
+def test_direct_deepseek_first_fallback_does_not_resolve_second_fallback() -> None:
+    runtime_resolution = _runtime_resolution_module()
+
+    config = runtime_resolution.resolve_llm_config(
+        _runtime_input(
+            runtime_resolution,
+            model=runtime_resolution.TRANSLATION_MODEL_DEEPSEEK_V4_FLASH,
+            connection=runtime_resolution.TRANSLATION_CONNECTION_OFFICIAL_BYOK,
+            translation_fallback=runtime_resolution.TranslationFallbackRuntimeIntent(
+                enabled=True,
+                model=runtime_resolution.TRANSLATION_MODEL_GEMMA4_31B,
+                connection=runtime_resolution.TRANSLATION_CONNECTION_OPENROUTER,
+            ),
+        )
+    )
+
+    assert config.primary.provider == "deepseek"
+    assert config.fallback is not None
+    assert config.second_fallback is None
+
+
 def test_openrouter_china_fallback_resolves_deepseek_only_fallback_routing() -> None:
     runtime_resolution = _runtime_resolution_module()
     resolved = _resolved_module()
@@ -1088,9 +1154,9 @@ def test_old_openrouter_credential_source_keys_normalize_through_settings_to_res
 
     assert settings.openrouter.selected_source.value == "managed"
     assert settings.openrouter.selection_alias is not None
-    assert settings.openrouter.selection_alias.value == "gemma4_managed"
+    assert settings.openrouter.selection_alias.value == "gemma4_26b_31b_managed"
     assert openrouter_intent.selected_source == "managed"
-    assert openrouter_intent.selection_alias == "gemma4_managed"
+    assert openrouter_intent.selection_alias == "gemma4_26b_31b_managed"
     assert config.provider == "openrouter"
     assert config.model == "google/gemma-4-26b-a4b-it"
     assert config.credential == resolved.ResolvedCredentialRequirement(

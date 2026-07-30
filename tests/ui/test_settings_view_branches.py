@@ -2737,10 +2737,10 @@ def test_on_llm_selected_stages_openrouter_byok_alias_without_pkce(
     pending = view.build_provider_apply_settings()
 
     assert pending is not None
-    assert pending.translation.model == TranslationModel.GEMMA4
+    assert pending.translation.model == TranslationModel.GEMMA4_26B_31B
     assert pending.translation.connection == TranslationConnection.OPENROUTER
     assert pending.provider.llm == LLMProviderName.OPENROUTER
-    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
+    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_26B_31B_BYOK
     assert pending.openrouter.selected_source == OpenRouterCredentialSource.BYOK
     assert view.has_provider_changes is True
 
@@ -2989,7 +2989,7 @@ def test_on_llm_selected_preserves_default_openrouter_managed_selection_during_g
     assert pending is not None
     assert pending.provider.llm == LLMProviderName.GEMINI
     assert pending.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
-    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
+    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_26B_31B_MANAGED
 
     view._on_llm_selected(TranslationModel.QWEN_35_PLUS.value)
     pending = view.build_provider_apply_settings()
@@ -2997,7 +2997,7 @@ def test_on_llm_selected_preserves_default_openrouter_managed_selection_during_g
     assert pending is not None
     assert pending.provider.llm == LLMProviderName.QWEN
     assert pending.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
-    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
+    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_26B_31B_MANAGED
 
 
 def test_load_from_settings_shows_translation_connection_label(
@@ -3146,6 +3146,57 @@ def test_on_openrouter_fallback_selected_updates_draft_and_helper_copy(
     view._on_llm_selected(TranslationModel.GEMMA4.value)
 
     assert view._openrouter_fallback_helper_text.value == t("settings.fallback.active_helper")
+
+
+def test_default_gemma_fallback_tracks_main_connection_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMMA4_26B_31B,
+        connection=TranslationConnection.MANAGED,
+        fallback=TranslationFallbackSettings(
+            enabled=True,
+            model=TranslationModel.GEMMA4_26B_31B,
+            connection=TranslationConnection.MANAGED,
+        ),
+    )
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_translation_connection_selected(TranslationConnection.OPENROUTER.value)
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.translation.fallback == TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.GEMMA4_26B_31B,
+        connection=TranslationConnection.OPENROUTER,
+    )
+
+
+def test_custom_fallback_is_preserved_when_gemma_model_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    custom_fallback = TranslationFallbackSettings(
+        enabled=True,
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMMA4_26B_31B,
+        connection=TranslationConnection.MANAGED,
+        fallback=custom_fallback,
+    )
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_llm_selected(TranslationModel.GEMMA4_31B.value)
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.translation.fallback == custom_fallback
 
 
 def test_on_openrouter_fallback_selected_defaults_invalid_value_to_deepseek(
@@ -3425,10 +3476,10 @@ def test_on_llm_selected_stages_byok_even_when_legacy_openrouter_key_exists(
     pending = view.build_provider_apply_settings()
 
     assert pending is not None
-    assert pending.translation.model == TranslationModel.GEMMA4
+    assert pending.translation.model == TranslationModel.GEMMA4_26B_31B
     assert pending.translation.connection == TranslationConnection.OPENROUTER
     assert pending.provider.llm == LLMProviderName.OPENROUTER
-    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
+    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_26B_31B_BYOK
 
 
 def test_openrouter_pkce_button_requests_auth_for_current_byok_selection(
@@ -3447,7 +3498,7 @@ def test_openrouter_pkce_button_requests_auth_for_current_byok_selection(
 
     assert requested[0].provider.llm == LLMProviderName.OPENROUTER
     assert requested[0].openrouter.selected_source == OpenRouterCredentialSource.BYOK
-    assert requested[0].openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
+    assert requested[0].openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_26B_31B_BYOK
     assert requested[0].system_prompt == "G"
 
 
@@ -3519,6 +3570,8 @@ def test_openrouter_fallback_modal_lists_curated_openrouter_fallbacks(
         "none",
         "deepseek_v4_flash_official",
         "openrouter_deepseek_v4_flash",
+        "openrouter_gemma4_26b_31b",
+        "openrouter_gemma4_31b",
         "openrouter_gemma4_26b_a4b",
         "cerebras_gemma4_31b",
     ]
@@ -3526,6 +3579,8 @@ def test_openrouter_fallback_modal_lists_curated_openrouter_fallbacks(
         t("settings.fallback.none"),
         t("settings.fallback.deepseek_v4_flash_official"),
         t("settings.fallback.openrouter_deepseek_v4_flash"),
+        t("settings.fallback.openrouter_gemma4_26b_31b"),
+        t("settings.fallback.openrouter_gemma4_31b"),
         t("settings.fallback.openrouter_gemma4_26b_a4b"),
         t("settings.fallback.cerebras_gemma4_31b"),
     ]
@@ -3533,6 +3588,8 @@ def test_openrouter_fallback_modal_lists_curated_openrouter_fallbacks(
         "",
         "",
         "",
+        t("settings.fallback.openrouter_gemma4_26b_31b.description"),
+        t("settings.fallback.openrouter_gemma4_31b.description"),
         "",
         t("settings.fallback.cerebras_gemma4_31b.description"),
     ]
@@ -3589,8 +3646,10 @@ def test_llm_modal_lists_logical_translation_models_once(
     assert captured["show_description"] is True
     assert captured["two_column"] is True
     assert [option.value for option in options] == [
-        TranslationModel.GEMMA4.value,
+        TranslationModel.GEMMA4_26B_31B.value,
         TranslationModel.DEEPSEEK_V4_FLASH.value,
+        TranslationModel.GEMMA4_31B.value,
+        TranslationModel.GEMMA4.value,
         TranslationModel.GEMMA4_31B_CEREBRAS.value,
         TranslationModel.LOCAL_LLM.value,
         TranslationModel.DEEPSEEK_V4_PRO.value,
@@ -3601,6 +3660,8 @@ def test_llm_modal_lists_logical_translation_models_once(
     assert [option.section for option in options] == [
         t("settings.translation_model.section.recommended"),
         t("settings.translation_model.section.recommended"),
+        t("settings.translation_model.section.others"),
+        t("settings.translation_model.section.others"),
         t("settings.translation_model.section.others"),
         t("settings.translation_model.section.others"),
         t("settings.translation_model.section.others"),
@@ -3618,6 +3679,12 @@ def test_llm_modal_lists_logical_translation_models_once(
     assert deepseek_byok.value not in option_by_value
     assert QwenLLMModel.QWEN_35_FLASH.value not in option_by_value
     assert option_by_value[TranslationModel.GEMMA4.value].label == t("provider.gemma4_26b_a4b_it")
+    assert option_by_value[TranslationModel.GEMMA4_26B_31B.value].label == t(
+        "provider.gemma4_26b_31b"
+    )
+    assert option_by_value[TranslationModel.GEMMA4_31B.value].label == t(
+        "provider.gemma4_31b_openrouter"
+    )
     assert option_by_value[TranslationModel.DEEPSEEK_V4_FLASH.value].label == t(
         "provider.deepseek_v4_flash"
     )

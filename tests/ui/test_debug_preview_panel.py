@@ -23,6 +23,11 @@ DEBUG_PREVIEW_I18N_KEYS = {
     "debug_preview.revoked_notice",
     "debug_preview.github_star_snackbar",
     "debug_preview.telemetry_consent",
+    "debug_preview.routing_capture_start",
+    "debug_preview.routing_capture_stop",
+    "debug_preview.routing_capture_open_folder",
+    "debug_preview.routing_capture_started",
+    "debug_preview.routing_capture_stopped",
     "debug_preview.founder_letter",
     "debug_preview.pkce_failure",
     "debug_preview.discord_auth",
@@ -66,6 +71,9 @@ ACTION_KEYS = [
     "audio_fault_clear",
     "gpu_state_cycle",
     "stt_loading_button_cycle",
+    "routing_capture_start",
+    "routing_capture_stop",
+    "routing_capture_open_folder",
 ]
 
 
@@ -92,6 +100,9 @@ def _callbacks(seen: list[str]):
         "on_audio_fault_clear": lambda: seen.append("audio_fault_clear"),
         "on_gpu_state_cycle": lambda: seen.append("gpu_state_cycle"),
         "on_stt_loading_button_cycle": lambda: seen.append("stt_loading_button_cycle"),
+        "on_routing_capture_start": lambda: seen.append("routing_capture_start"),
+        "on_routing_capture_stop": lambda: seen.append("routing_capture_stop"),
+        "on_routing_capture_open_folder": lambda: seen.append("routing_capture_open_folder"),
     }
 
 
@@ -111,7 +122,18 @@ def test_debug_preview_panel_starts_collapsed_with_dbg_button() -> None:
     assert panel._toggle_button.tooltip == "Debug UI preview"
     assert panel._popover.visible is False
     assert list(panel._action_buttons) == ACTION_KEYS
+    assert panel._action_buttons["routing_capture_start"].disabled is False
+    assert panel._action_buttons["routing_capture_stop"].disabled is True
     assert seen == []
+
+
+def test_debug_preview_panel_updates_routing_capture_buttons() -> None:
+    panel = DebugPreviewPanel(**_callbacks([]))
+
+    panel.set_routing_capture_active(True, update=False)
+
+    assert panel._action_buttons["routing_capture_start"].disabled is True
+    assert panel._action_buttons["routing_capture_stop"].disabled is False
 
 
 def test_debug_preview_panel_toggle_shows_and_hides_popover() -> None:
@@ -233,6 +255,9 @@ def test_debug_preview_panel_uses_text_button_label_api_when_available(
         "Clear audio faults",
         "Cycle GPU state",
         "Cycle STT loading button",
+        "Start routing capture",
+        "Stop routing capture",
+        "Open routing capture folder",
     ]
 
     monkeypatch.setattr(panel_module, "t", lambda key: f"label:{key}")

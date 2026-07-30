@@ -544,7 +544,12 @@ def test_vnext_fallback_selection_alias_is_canonical_product_intent(
         ("openrouter", "qwen35_flash", "byok", "none"),
         ("openrouter", "broken-alias", "byok", "none"),
         ("translation", "deepseek_v4_flash_official", "byok", "deepseek_v4_flash_official"),
-        ("translation", "openrouter_gemma4_26b_a4b", "byok", "openrouter_gemma4_26b_a4b"),
+        (
+            "translation",
+            "openrouter_gemma4_26b_a4b",
+            "byok",
+            "openrouter_gemma4_26b_31b",
+        ),
         ("translation", "cerebras_gemma4_31b", "byok", "cerebras_gemma4_31b"),
     ],
 )
@@ -795,6 +800,62 @@ def test_current_vnext_dict_reads_and_serializes_idempotently() -> None:
 
     assert loaded == original
     assert serialized == raw
+
+
+def test_v31_gemma_defaults_migrate_to_combined_model_and_matching_fallback() -> None:
+    migration = _migration()
+    serialization = _serialization()
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["settings_version"] = 31
+    translation = raw["intent"]["translation"]
+    translation["model"] = "gemma4"
+    translation["connection"] = "managed"
+    translation["connection_history"] = {"gemma4": "managed"}
+    translation["openrouter_selection_alias"] = "gemma4_managed"
+    translation["openrouter_provider_routing"] = "default"
+    translation["fallback"] = {
+        "enabled": True,
+        "model": "deepseek_v4_flash",
+        "connection": "official_byok",
+        "selection_alias": "deepseek_v4_flash_official",
+    }
+
+    serialized = serialization.to_dict(migration.from_dict(raw))
+    migrated = serialized["intent"]["translation"]
+
+    assert serialized["settings_version"] == 32
+    assert migrated["model"] == "gemma4_26b_31b"
+    assert migrated["connection_history"] == {
+        "gemma4": "managed",
+        "gemma4_26b_31b": "managed",
+    }
+    assert migrated["openrouter_model"] == "google/gemma-4-26b-a4b-it"
+    assert migrated["openrouter_selection_alias"] == "gemma4_26b_31b_managed"
+    assert migrated["openrouter_provider_routing"] == "gemma4_26b_31b_latency"
+    assert migrated["fallback"] == {
+        "enabled": True,
+        "model": "gemma4_26b_31b",
+        "connection": "managed",
+        "selection_alias": "managed_gemma4_26b_31b",
+    }
+
+
+def test_v32_explicit_gemma_26b_selection_is_preserved() -> None:
+    migration = _migration()
+    serialization = _serialization()
+    raw = serialization.to_dict(AppSettingsVNext())
+    translation = raw["intent"]["translation"]
+    translation["model"] = "gemma4"
+    translation["connection_history"] = {"gemma4": "openrouter"}
+    translation["connection"] = "openrouter"
+    translation["openrouter_selection_alias"] = "gemma4_byok"
+    translation["openrouter_provider_routing"] = "default"
+
+    serialized = serialization.to_dict(migration.from_dict(raw))
+
+    assert serialized["intent"]["translation"]["model"] == "gemma4"
+    assert serialized["intent"]["translation"]["connection_history"] == {"gemma4": "openrouter"}
+    assert serialized["intent"]["translation"]["openrouter_selection_alias"] == "gemma4_byok"
 
 
 def test_vnext_settings_version_is_loaded_as_metadata_not_input() -> None:

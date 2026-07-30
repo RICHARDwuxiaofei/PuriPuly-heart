@@ -24,6 +24,9 @@ from typing import Any, Protocol, cast
 import flet as ft
 import numpy as np
 
+from puripuly_heart.app.adapters.routing_telemetry_jsonl import (
+    JsonlRoutingTelemetrySession,
+)
 from puripuly_heart.app.language_selection import LanguageSelectionChange
 from puripuly_heart.app.ports._settings_values import freeze_settings_values
 from puripuly_heart.app.ports.canonical_settings_persistence import (
@@ -1243,6 +1246,11 @@ class GuiController:
         repr=False,
     )
     _runtime_logging: RuntimeLoggingService | None = field(init=False, default=None)
+    _routing_telemetry: JsonlRoutingTelemetrySession | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     _local_qwen_hallucination_detection_count: int = field(init=False, default=0)
     _local_qwen_hallucination_modal_shown: bool = field(init=False, default=False)
     _stop_lock: asyncio.Lock | None = field(init=False, default=None, repr=False)
@@ -4980,6 +4988,11 @@ class GuiController:
             self.sender = None
         self.osc = None
         await self._replace_managed_openrouter_release_service(None)
+        if self._routing_telemetry is not None:
+            try:
+                await self._routing_telemetry.close()
+            except Exception as exc:
+                cleanup_failures.append(exc)
         if self._runtime_logging is not None:
             try:
                 self._runtime_logging.close_after_producers_stop(
@@ -9545,6 +9558,7 @@ class GuiController:
                 managed_release_service=self._managed_openrouter_release_service,
                 managed_delegate_ready=self._on_managed_trial_delegate_ready,
                 runtime_logging=self.runtime_logging,
+                routing_telemetry=self._routing_telemetry_for_provider(),
             )
 
         outcome = await self._provider_rebuild_runtime.rebuild_llm_provider(
@@ -10098,6 +10112,31 @@ class GuiController:
     def _debug_audio_fault_allowed(self) -> bool:
         return bool(getattr(self.app, "debug_ui_preview", False))
 
+    def _routing_telemetry_for_provider(self) -> JsonlRoutingTelemetrySession | None:
+        if not self._debug_audio_fault_allowed():
+            return None
+        if self._routing_telemetry is None:
+            self._routing_telemetry = JsonlRoutingTelemetrySession()
+        return self._routing_telemetry
+
+    async def start_routing_telemetry_capture(self) -> Path:
+        telemetry = self._routing_telemetry_for_provider()
+        if telemetry is None:
+            raise RuntimeError("routing telemetry requires debug UI preview")
+        return await telemetry.start()
+
+    async def stop_routing_telemetry_capture(self) -> Path | None:
+        telemetry = self._routing_telemetry
+        if telemetry is None:
+            return None
+        return await telemetry.stop()
+
+    def routing_telemetry_capture_folder(self) -> Path:
+        telemetry = self._routing_telemetry_for_provider()
+        if telemetry is None:
+            raise RuntimeError("routing telemetry requires debug UI preview")
+        return telemetry.capture_folder
+
     def _detailed_audio_diag_enabled(self) -> bool:
         return self.runtime_logging.mode is SessionLoggingMode.DETAILED
 
@@ -10388,6 +10427,7 @@ class GuiController:
                 managed_release_service=self._managed_openrouter_release_service,
                 managed_delegate_ready=self._on_managed_trial_delegate_ready,
                 runtime_logging=self.runtime_logging,
+                routing_telemetry=self._routing_telemetry_for_provider(),
             )
 
         stt = None

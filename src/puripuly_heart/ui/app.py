@@ -3,6 +3,7 @@ import contextlib
 import copy
 import inspect
 import logging
+import os
 import tempfile
 import webbrowser
 from pathlib import Path
@@ -124,6 +125,7 @@ class TranslatorApp:
         vrchat_osc_presence=None,
     ):
         self.page = page
+        self.debug_ui_preview = bool(debug_ui_preview)
         controller_kwargs = {
             "page": page,
             "app": self,
@@ -150,7 +152,6 @@ class TranslatorApp:
         self.overlay_state = "off"
         self.overlay_failure_reason: str | None = None
         self.overlay_peer_contract = None
-        self.debug_ui_preview = bool(debug_ui_preview)
         self.debug_preview_panel: DebugPreviewPanel | None = None
         self._openrouter_pkce_request_active = False
         self._oauth_runtime = OAuthRuntime()
@@ -382,6 +383,9 @@ class TranslatorApp:
             on_gpu_state_cycle=self._cycle_debug_preview_gpu_state,
             on_github_star_snackbar=self._preview_github_star_snackbar,
             on_telemetry_consent=self._preview_telemetry_consent,
+            on_routing_capture_start=self._preview_routing_capture_start,
+            on_routing_capture_stop=self._preview_routing_capture_stop,
+            on_routing_capture_open_folder=self._preview_routing_capture_open_folder,
             on_stt_loading_button_cycle=self._cycle_debug_preview_stt_loading_button,
         )
 
@@ -713,6 +717,44 @@ class TranslatorApp:
         )
         self._telemetry_consent_dialog = dialog
         dialog.open()
+
+    def _preview_routing_capture_start(self) -> None:
+        self._run_page_task(self._start_routing_capture)
+
+    async def _start_routing_capture(self) -> None:
+        path = await self.controller.start_routing_telemetry_capture()
+        panel = self.debug_preview_panel
+        if panel is not None:
+            panel.set_routing_capture_active(True)
+        self._show_snackbar(
+            t("debug_preview.routing_capture_started", filename=path.name),
+            ft.Colors.GREEN_700,
+        )
+
+    def _preview_routing_capture_stop(self) -> None:
+        self._run_page_task(self._stop_routing_capture)
+
+    async def _stop_routing_capture(self) -> None:
+        path = await self.controller.stop_routing_telemetry_capture()
+        panel = self.debug_preview_panel
+        if panel is not None:
+            panel.set_routing_capture_active(False)
+        filename = path.name if path is not None else "-"
+        self._show_snackbar(
+            t("debug_preview.routing_capture_stopped", filename=filename),
+            ft.Colors.GREEN_700,
+        )
+
+    def _preview_routing_capture_open_folder(self) -> None:
+        self._run_page_task(self._open_routing_capture_folder)
+
+    async def _open_routing_capture_folder(self) -> None:
+        folder = self.controller.routing_telemetry_capture_folder()
+        await asyncio.to_thread(folder.mkdir, parents=True, exist_ok=True)
+        if os.name == "nt":
+            await asyncio.to_thread(os.startfile, str(folder))
+            return
+        await asyncio.to_thread(webbrowser.open, folder.as_uri())
 
     def _preview_brake_notice(self) -> None:
         self._show_snackbar(t("managed_release.brake"), ft.Colors.ORANGE_700)

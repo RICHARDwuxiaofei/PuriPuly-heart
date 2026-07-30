@@ -154,6 +154,7 @@ class ResolvedCredentialRequirement:
 class ResolvedLLMTarget:
     provider: str
     model: str
+    models: tuple[str, ...] = ()
     credential: ResolvedCredentialRequirement = field(default_factory=_no_credential)
     base_url: str | None = None
     service_endpoint: str | None = None
@@ -163,15 +164,22 @@ class ResolvedLLMTarget:
     provider_options: Mapping[str, ResolvedOptionValue] = field(default_factory=_empty_options)
 
     def __post_init__(self) -> None:
+        models = tuple(self.models) if self.models else (self.model,)
+        if not models or any(not model for model in models):
+            raise ValueError("models must contain non-empty model identifiers")
+        if models[0] != self.model:
+            raise ValueError("model must match the first models entry")
+        object.__setattr__(self, "models", models)
         object.__setattr__(self, "provider_options", _freeze_option_mapping(self.provider_options))
 
 
 @dataclass(frozen=True, slots=True)
 class ResolvedLLMFallbackPlan:
     target: ResolvedLLMTarget
-    timeout_ms: int = 2000
+    timeout_ms: int = 1300
     loser_grace_ms: int = 50
     force_managed_wrapper: bool = False
+    start_on_main_attempt_error: bool = True
 
     def __post_init__(self) -> None:
         if self.timeout_ms < 0:
@@ -184,6 +192,7 @@ class ResolvedLLMFallbackPlan:
 class ResolvedLLMConfig:
     primary: ResolvedLLMTarget
     fallback: ResolvedLLMFallbackPlan | None = None
+    second_fallback: ResolvedLLMFallbackPlan | None = None
     concurrency_limit: int = 5
 
     def __post_init__(self) -> None:

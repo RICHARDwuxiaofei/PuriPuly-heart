@@ -20,6 +20,7 @@ from puripuly_heart.config.settings import (
 )
 from puripuly_heart.core.llm import FallbackRacingLLMProvider
 from puripuly_heart.core.llm.provider import LLMProvider
+from puripuly_heart.core.llm.routing_telemetry import RoutingRaceTelemetry
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterLLMProvider,
     ManagedOpenRouterReleaseBehavior,
@@ -52,6 +53,29 @@ class _PersistedRuntimeLogging:
 
     def emit_persisted(self, message: str, *, level: int = logging.INFO) -> None:
         self.persisted_messages.append((level, message))
+
+
+@dataclass(slots=True)
+class _RoutingTelemetrySink:
+    active: bool = True
+    races: list[RoutingRaceTelemetry] = field(default_factory=list)
+
+    def record_race(self, record: RoutingRaceTelemetry) -> None:
+        self.races.append(record)
+
+    def register_openrouter_generation(self, generation_id: str) -> str | None:
+        return None
+
+    def record_openrouter_generation(self, capture_id: str, record: object) -> None:
+        return None
+
+    def record_openrouter_generation_failure(
+        self,
+        capture_id: str,
+        generation_id: str,
+        error_type: str,
+    ) -> None:
+        return None
 
 
 def _persisted_payloads(runtime_logging: _PersistedRuntimeLogging) -> list[dict[str, object]]:
@@ -606,6 +630,100 @@ async def test_fallback_racer_returns_fallback_after_timeout_and_emits_persisted
     assert race_finished["fallback_error"] is None
     assert race_finished["fallback_unusable"] is False
     assert runtime_logging.basic_messages == [(logging.INFO, "Fallback triggered after 10 ms")]
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_fallback_racer_starts_second_fallback_on_absolute_deadline() -> None:
+    primary = FakeLLM(gate=asyncio.Event())
+    first_fallback = FakeLLM(gate=asyncio.Event())
+    second_fallback = FakeLLM(translated_text="second")
+    runtime_logging = _PersistedRuntimeLogging()
+    provider = FallbackRacingLLMProvider(
+        primary=primary,
+        fallback=first_fallback,
+        second_fallback=second_fallback,
+        fallback_timeout_ms=5,
+        second_fallback_timeout_ms=20,
+        loser_grace_ms=0,
+        runtime_logging=runtime_logging,
+    )
+
+    result = await asyncio.wait_for(
+        provider.translate(**_translation_kwargs(utterance_id=uuid4())),
+        timeout=0.2,
+    )
+
+    assert result.text == "second"
+    assert first_fallback.translate_started.is_set()
+    assert second_fallback.translate_started.is_set()
+    payload = _payload_for_event(runtime_logging, event="race_finished")
+    assert payload["winner"] == "fallback"
+    assert payload["winner_attempt"] == "second_fallback"
+    assert payload["second_fallback_triggered"] is True
+
+
+@pytest.mark.asyncio
+async def test_fallback_racer_records_routing_capture_attempt_timing_and_winner() -> None:
+    primary_gate = asyncio.Event()
+    primary = FakeLLM(gate=primary_gate)
+    fallback = FakeLLM(translated_text="fallback")
+    telemetry = _RoutingTelemetrySink()
+    provider = FallbackRacingLLMProvider(
+        primary=primary,
+        fallback=fallback,
+        fallback_timeout_ms=5,
+        loser_grace_ms=0,
+        routing_telemetry=telemetry,
+        primary_requested_provider="openrouter",
+        primary_requested_models=("main-model",),
+        fallback_requested_provider="openrouter",
+        fallback_requested_models=("fallback-model",),
+    )
+
+    result = await provider.translate(**_translation_kwargs(utterance_id=uuid4()))
+
+    assert result.text == "fallback"
+    assert len(telemetry.races) == 1
+    race = telemetry.races[0]
+    assert race.winner_attempt == "first_fallback"
+    assert race.first_fallback_triggered is True
+    assert race.first_fallback_trigger_reason == "timeout"
+    main, first, second = race.attempts
+    assert main.outcome == "cancelled"
+    assert main.started_offset_ms == 0
+    assert main.duration_ms is not None
+    assert first.outcome == "success"
+    assert first.started_offset_ms is not None
+    assert first.started_offset_ms >= 5
+    assert first.requested_models == ("fallback-model",)
+    assert second.outcome == "not_started"
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_fallback_racer_does_not_start_second_fallback_early_after_errors() -> None:
+    primary = FakeLLM(error=RuntimeError("primary"))
+    first_fallback = FakeLLM(error=RuntimeError("first"))
+    second_fallback = FakeLLM(translated_text="second")
+    provider = FallbackRacingLLMProvider(
+        primary=primary,
+        fallback=first_fallback,
+        second_fallback=second_fallback,
+        fallback_timeout_ms=5,
+        second_fallback_timeout_ms=40,
+        loser_grace_ms=0,
+    )
+    task = asyncio.create_task(provider.translate(**_translation_kwargs(utterance_id=uuid4())))
+
+    await asyncio.wait_for(first_fallback.translate_started.wait(), timeout=0.1)
+    await asyncio.sleep(0.01)
+    assert not second_fallback.translate_started.is_set()
+    result = await asyncio.wait_for(task, timeout=0.2)
+
+    assert result.text == "second"
 
     await provider.close()
 

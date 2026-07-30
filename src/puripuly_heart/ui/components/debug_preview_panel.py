@@ -64,6 +64,9 @@ class DebugPreviewPanel(ft.Container):
         on_github_star_snackbar: Callable[[], None],
         on_telemetry_consent: Callable[[], None],
         on_stt_loading_button_cycle: Callable[[], None] | None = None,
+        on_routing_capture_start: Callable[[], None] | None = None,
+        on_routing_capture_stop: Callable[[], None] | None = None,
+        on_routing_capture_open_folder: Callable[[], None] | None = None,
     ) -> None:
         actions = [
             _PreviewAction("brake_notice", "debug_preview.brake_notice", on_brake_notice),
@@ -141,6 +144,30 @@ class DebugPreviewPanel(ft.Container):
                     on_stt_loading_button_cycle,
                 )
             )
+        if on_routing_capture_start is not None:
+            actions.append(
+                _PreviewAction(
+                    "routing_capture_start",
+                    "debug_preview.routing_capture_start",
+                    on_routing_capture_start,
+                )
+            )
+        if on_routing_capture_stop is not None:
+            actions.append(
+                _PreviewAction(
+                    "routing_capture_stop",
+                    "debug_preview.routing_capture_stop",
+                    on_routing_capture_stop,
+                )
+            )
+        if on_routing_capture_open_folder is not None:
+            actions.append(
+                _PreviewAction(
+                    "routing_capture_open_folder",
+                    "debug_preview.routing_capture_open_folder",
+                    on_routing_capture_open_folder,
+                )
+            )
         self._actions = tuple(actions)
         self._toggle_button = _make_text_button(
             t("debug_preview.button"),
@@ -151,6 +178,7 @@ class DebugPreviewPanel(ft.Container):
         self._action_buttons = {
             action.key: self._build_action_button(action) for action in self._actions
         }
+        self.set_routing_capture_active(False, update=False)
         self._popover = ft.Container(
             visible=False,
             bgcolor=COLOR_SURFACE,
@@ -225,6 +253,16 @@ class DebugPreviewPanel(ft.Container):
         for action in self._actions:
             _set_text_button_label(self._action_buttons[action.key], t(action.label_key))
         self._update_if_mounted()
+
+    def set_routing_capture_active(self, active: bool, *, update: bool = True) -> None:
+        start = self._action_buttons.get("routing_capture_start")
+        stop = self._action_buttons.get("routing_capture_stop")
+        if start is not None:
+            start.disabled = bool(active)
+        if stop is not None:
+            stop.disabled = not active
+        if update:
+            self._update_if_mounted()
 
     def _is_mounted(self) -> bool:
         try:

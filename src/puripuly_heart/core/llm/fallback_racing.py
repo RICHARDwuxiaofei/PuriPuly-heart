@@ -7,9 +7,19 @@ import logging
 import time
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+from puripuly_heart.core.llm.attempt_metadata import (
+    LLMAttemptMetadataRecorder,
+    attempt_metadata_context,
+)
 from puripuly_heart.core.llm.provider import LLMProvider
+from puripuly_heart.core.llm.routing_telemetry import (
+    RoutingAttemptTelemetry,
+    RoutingRaceTelemetry,
+    RoutingTelemetrySink,
+)
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.models import Translation
 
@@ -21,6 +31,11 @@ class _BranchOutcome:
     result: Translation | None = None
     error: Exception | None = None
     elapsed_ms: int | None = None
+    started_offset_ms: int | None = None
+    completed_offset_ms: int | None = None
+    duration_ms: int | None = None
+    cancelled: bool = False
+    metadata: LLMAttemptMetadataRecorder = field(default_factory=LLMAttemptMetadataRecorder)
 
     @property
     def resolved(self) -> bool:
@@ -31,9 +46,19 @@ class _BranchOutcome:
 class FallbackRacingLLMProvider(LLMProvider):
     primary: LLMProvider
     fallback: LLMProvider
-    fallback_timeout_ms: int = 2000
+    second_fallback: LLMProvider | None = None
+    fallback_timeout_ms: int = 1300
+    second_fallback_timeout_ms: int = 3500
     loser_grace_ms: int = 50
+    fallback_start_on_primary_error: bool = True
     runtime_logging: SessionRuntimeLoggingService | None = None
+    routing_telemetry: RoutingTelemetrySink | None = None
+    primary_requested_provider: str = "unknown"
+    primary_requested_models: tuple[str, ...] = ()
+    fallback_requested_provider: str = "unknown"
+    fallback_requested_models: tuple[str, ...] = ()
+    second_fallback_requested_provider: str = "unknown"
+    second_fallback_requested_models: tuple[str, ...] = ()
     _inflight_tasks: set[asyncio.Task[object]] = field(
         init=False,
         default_factory=set,
@@ -46,6 +71,7 @@ class FallbackRacingLLMProvider(LLMProvider):
 
     def __post_init__(self) -> None:
         self.fallback_timeout_ms = max(0, int(self.fallback_timeout_ms))
+        self.second_fallback_timeout_ms = max(0, int(self.second_fallback_timeout_ms))
         self.loser_grace_ms = max(0, int(self.loser_grace_ms))
 
     async def translate(
@@ -68,200 +94,283 @@ class FallbackRacingLLMProvider(LLMProvider):
         }
         race_id = uuid4().hex
         started_at = time.monotonic()
-        primary_outcome = _BranchOutcome()
-        fallback_outcome = _BranchOutcome()
-        fallback_triggered = False
+        started_at_utc = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        outcomes = {
+            "main_attempt": _BranchOutcome(),
+            "first_fallback": _BranchOutcome(),
+            "second_fallback": _BranchOutcome(),
+        }
+        tasks: dict[str, asyncio.Task[object] | None] = {
+            "main_attempt": None,
+            "first_fallback": None,
+            "second_fallback": None,
+        }
+        first_triggered = False
+        first_trigger_reason: str | None = None
+        second_triggered = False
         dual_bill_candidate = False
         winner: str | None = None
         winner_wait_ms: int | None = None
+        telemetry_recorded = False
 
-        primary_task = await self._create_tracked_task(self.primary.translate(**params))
-        timeout_task = await self._create_tracked_task(
-            asyncio.sleep(self.fallback_timeout_ms / 1000.0)
+        tasks["main_attempt"] = await self._create_tracked_task(
+            self._run_attempt(
+                self.primary,
+                params,
+                outcomes["main_attempt"],
+                race_started_at=started_at,
+            )
         )
-        fallback_task: asyncio.Task[object] | None = None
+        first_timeout_task = await self._create_tracked_task(
+            self._wait_for_deadline(started_at, self.fallback_timeout_ms)
+        )
+        second_timeout_task = (
+            await self._create_tracked_task(
+                self._wait_for_deadline(started_at, self.second_fallback_timeout_ms)
+            )
+            if self.second_fallback is not None
+            else None
+        )
 
         try:
-            while not fallback_triggered:
-                done, _ = await asyncio.wait(
-                    {task for task in (primary_task, timeout_task) if task is not None},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-
-                if primary_task in done:
-                    await self._capture_outcome(
-                        task=primary_task,
-                        outcome=primary_outcome,
-                        started_at=started_at,
-                    )
-                    await self._cancel_task(timeout_task)
-                    timeout_task = None
-
-                    if primary_outcome.result is not None:
-                        self._emit_event(
-                            race_id=race_id,
-                            utterance_id=utterance_id,
-                            event="primary_completed",
-                            primary_elapsed_ms=primary_outcome.elapsed_ms,
-                            fallback_elapsed_ms=None,
-                            fallback_triggered=False,
-                            winner="primary",
-                            returned_source="primary",
-                            total_user_wait_ms=primary_outcome.elapsed_ms,
-                            primary_error=None,
-                            fallback_error=None,
-                            fallback_unusable=False,
-                            dual_bill_candidate=False,
-                        )
-                        return primary_outcome.result
-
-                    fallback_triggered = True
-                    fallback_task = await self._create_tracked_task(
-                        self.fallback.translate(**params)
-                    )
-                    await asyncio.sleep(0)
-                    self._emit_event(
-                        race_id=race_id,
-                        utterance_id=utterance_id,
-                        event="fallback_triggered",
-                        trigger_reason="primary_error",
-                        primary_elapsed_ms=primary_outcome.elapsed_ms,
-                        fallback_elapsed_ms=None,
-                        fallback_triggered=True,
-                        winner=None,
-                        returned_source=None,
-                        total_user_wait_ms=None,
-                        primary_error=self._format_error(primary_outcome.error),
-                        fallback_error=None,
-                        fallback_unusable=False,
-                        dual_bill_candidate=False,
-                    )
-                    break
-
-                if timeout_task in done:
-                    timeout_task = None
-                    fallback_triggered = True
-                    dual_bill_candidate = not primary_outcome.resolved
-                    self._emit_basic_fallback_triggered()
-                    fallback_task = await self._create_tracked_task(
-                        self.fallback.translate(**params)
-                    )
-                    await asyncio.sleep(0)
-                    self._emit_event(
-                        race_id=race_id,
-                        utterance_id=utterance_id,
-                        event="fallback_triggered",
-                        trigger_reason="timeout",
-                        primary_elapsed_ms=self._elapsed_ms(started_at),
-                        fallback_elapsed_ms=None,
-                        fallback_triggered=True,
-                        winner=None,
-                        returned_source=None,
-                        total_user_wait_ms=None,
-                        primary_error=None,
-                        fallback_error=None,
-                        fallback_unusable=False,
-                        dual_bill_candidate=dual_bill_candidate,
-                    )
-                    break
-
-            if fallback_task is None:
-                raise RuntimeError("fallback race ended without starting fallback")
-
-            while winner is None and not (
-                primary_outcome.error is not None and fallback_outcome.error is not None
-            ):
+            while winner is None:
                 waiters = {
                     task
-                    for task, outcome in (
-                        (primary_task, primary_outcome),
-                        (fallback_task, fallback_outcome),
-                    )
-                    if task is not None and not outcome.resolved
+                    for name, task in tasks.items()
+                    if task is not None and not outcomes[name].resolved
                 }
+                if first_timeout_task is not None:
+                    waiters.add(first_timeout_task)
+                if second_timeout_task is not None:
+                    waiters.add(second_timeout_task)
                 if not waiters:
                     break
 
                 done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
 
-                if primary_task in done and not primary_outcome.resolved:
-                    await self._capture_outcome(
-                        task=primary_task,
-                        outcome=primary_outcome,
-                        started_at=started_at,
-                    )
-                    if primary_outcome.result is not None and winner is None:
-                        winner = "primary"
-                        winner_wait_ms = primary_outcome.elapsed_ms
+                for name in ("main_attempt", "first_fallback", "second_fallback"):
+                    task = tasks[name]
+                    outcome = outcomes[name]
+                    if task is not None and task.done() and not outcome.resolved:
+                        await self._capture_outcome(
+                            task=task,
+                            outcome=outcome,
+                            started_at=started_at,
+                        )
+                        if outcome.result is not None and winner is None:
+                            winner = name
+                            winner_wait_ms = outcome.elapsed_ms
 
-                if fallback_task in done and not fallback_outcome.resolved:
-                    await self._capture_outcome(
-                        task=fallback_task,
-                        outcome=fallback_outcome,
-                        started_at=started_at,
+                if winner is not None:
+                    break
+
+                main_outcome = outcomes["main_attempt"]
+                if (
+                    main_outcome.error is not None
+                    and not first_triggered
+                    and self.fallback_start_on_primary_error
+                ):
+                    first_triggered = True
+                    first_trigger_reason = "primary_error"
+                    await self._cancel_task(first_timeout_task)
+                    first_timeout_task = None
+                    tasks["first_fallback"] = await self._create_tracked_task(
+                        self._run_attempt(
+                            self.fallback,
+                            params,
+                            outcomes["first_fallback"],
+                            race_started_at=started_at,
+                        )
                     )
-                    if fallback_outcome.result is not None and winner is None:
-                        winner = "fallback"
-                        winner_wait_ms = fallback_outcome.elapsed_ms
+                    await asyncio.sleep(0)
+                    self._emit_race_event(
+                        race_id=race_id,
+                        utterance_id=utterance_id,
+                        event="fallback_triggered",
+                        trigger_reason="primary_error",
+                        outcomes=outcomes,
+                        first_triggered=first_triggered,
+                        second_triggered=second_triggered,
+                        winner=None,
+                        winner_wait_ms=None,
+                        dual_bill_candidate=dual_bill_candidate,
+                    )
+
+                if first_timeout_task in done:
+                    first_timeout_task = None
+                    if not first_triggered:
+                        first_triggered = True
+                        first_trigger_reason = "timeout"
+                        dual_bill_candidate = not main_outcome.resolved
+                        self._emit_basic_fallback_triggered()
+                        tasks["first_fallback"] = await self._create_tracked_task(
+                            self._run_attempt(
+                                self.fallback,
+                                params,
+                                outcomes["first_fallback"],
+                                race_started_at=started_at,
+                            )
+                        )
+                        await asyncio.sleep(0)
+                        if outcomes["main_attempt"].elapsed_ms is None:
+                            outcomes["main_attempt"].elapsed_ms = self._elapsed_ms(started_at)
+                        self._emit_race_event(
+                            race_id=race_id,
+                            utterance_id=utterance_id,
+                            event="fallback_triggered",
+                            trigger_reason="timeout",
+                            outcomes=outcomes,
+                            first_triggered=first_triggered,
+                            second_triggered=second_triggered,
+                            winner=None,
+                            winner_wait_ms=None,
+                            dual_bill_candidate=dual_bill_candidate,
+                        )
+
+                if second_timeout_task in done:
+                    second_timeout_task = None
+                    if not second_triggered and self.second_fallback is not None:
+                        second_triggered = True
+                        tasks["second_fallback"] = await self._create_tracked_task(
+                            self._run_attempt(
+                                self.second_fallback,
+                                params,
+                                outcomes["second_fallback"],
+                                race_started_at=started_at,
+                            )
+                        )
+                        await asyncio.sleep(0)
+                        self._emit_race_event(
+                            race_id=race_id,
+                            utterance_id=utterance_id,
+                            event="second_fallback_triggered",
+                            trigger_reason="timeout",
+                            outcomes=outcomes,
+                            first_triggered=first_triggered,
+                            second_triggered=second_triggered,
+                            winner=None,
+                            winner_wait_ms=None,
+                            dual_bill_candidate=dual_bill_candidate,
+                        )
 
             if winner is None:
-                if primary_outcome.error is None or fallback_outcome.error is None:
-                    raise RuntimeError("fallback race ended without a successful result")
-                combined_message = (
-                    f"primary failed: {self._format_error(primary_outcome.error)}; "
-                    f"fallback failed: {self._format_error(fallback_outcome.error)}"
-                )
+                error_labels = {
+                    "main_attempt": "primary",
+                    "first_fallback": "fallback",
+                    "second_fallback": "second fallback",
+                }
+                errors = [
+                    f"{error_labels[name]} failed: {self._format_error(outcome.error)}"
+                    for name, outcome in outcomes.items()
+                    if outcome.error is not None
+                ]
+                combined_message = "; ".join(errors) or "fallback race ended without a result"
                 self._emit_event(
                     race_id=race_id,
                     utterance_id=utterance_id,
                     event="race_failed",
-                    primary_elapsed_ms=primary_outcome.elapsed_ms,
-                    fallback_elapsed_ms=fallback_outcome.elapsed_ms,
-                    fallback_triggered=True,
+                    primary_elapsed_ms=outcomes["main_attempt"].elapsed_ms,
+                    fallback_elapsed_ms=outcomes["first_fallback"].elapsed_ms,
+                    second_fallback_elapsed_ms=outcomes["second_fallback"].elapsed_ms,
+                    fallback_triggered=first_triggered,
+                    second_fallback_triggered=second_triggered,
                     winner=None,
+                    winner_attempt=None,
                     returned_source=None,
                     total_user_wait_ms=self._elapsed_ms(started_at),
-                    primary_error=self._format_error(primary_outcome.error),
-                    fallback_error=self._format_error(fallback_outcome.error),
+                    primary_error=self._format_error(outcomes["main_attempt"].error),
+                    fallback_error=self._format_error(outcomes["first_fallback"].error),
+                    second_fallback_error=self._format_error(outcomes["second_fallback"].error),
                     fallback_unusable=False,
                     dual_bill_candidate=dual_bill_candidate,
+                    outcomes=outcomes,
                 )
+                self._record_routing_telemetry(
+                    race_id=race_id,
+                    utterance_id=utterance_id,
+                    started_at_utc=started_at_utc,
+                    total_user_wait_ms=self._elapsed_ms(started_at),
+                    winner=None,
+                    first_triggered=first_triggered,
+                    first_trigger_reason=first_trigger_reason,
+                    second_triggered=second_triggered,
+                    dual_bill_candidate=dual_bill_candidate,
+                    outcomes=outcomes,
+                )
+                telemetry_recorded = True
                 raise RuntimeError(combined_message)
 
-            await self._allow_loser_grace(
+            await self._allow_loser_grace_all(
                 started_at=started_at,
-                primary_task=primary_task,
-                primary_outcome=primary_outcome,
-                fallback_task=fallback_task,
-                fallback_outcome=fallback_outcome,
+                tasks=tasks,
+                outcomes=outcomes,
             )
 
-            returned = primary_outcome.result if winner == "primary" else fallback_outcome.result
+            returned = outcomes[winner].result
             if returned is None:
                 raise RuntimeError("fallback race winner did not produce a translation")
 
-            fallback_unusable = winner == "primary" and fallback_outcome.error is not None
+            legacy_winner = "primary" if winner == "main_attempt" else "fallback"
+            fallback_unusable = (
+                winner == "main_attempt" and outcomes["first_fallback"].error is not None
+            )
             event = "fallback_unusable" if fallback_unusable else "race_finished"
             self._emit_event(
                 race_id=race_id,
                 utterance_id=utterance_id,
-                event=event,
-                primary_elapsed_ms=primary_outcome.elapsed_ms,
-                fallback_elapsed_ms=fallback_outcome.elapsed_ms,
-                fallback_triggered=True,
-                winner=winner,
-                returned_source=winner,
+                event=(
+                    "primary_completed" if not first_triggered and not second_triggered else event
+                ),
+                primary_elapsed_ms=outcomes["main_attempt"].elapsed_ms,
+                fallback_elapsed_ms=outcomes["first_fallback"].elapsed_ms,
+                second_fallback_elapsed_ms=outcomes["second_fallback"].elapsed_ms,
+                fallback_triggered=first_triggered,
+                second_fallback_triggered=second_triggered,
+                winner=legacy_winner,
+                winner_attempt=winner,
+                returned_source=legacy_winner,
                 total_user_wait_ms=winner_wait_ms,
-                primary_error=self._format_error(primary_outcome.error),
-                fallback_error=self._format_error(fallback_outcome.error),
+                primary_error=self._format_error(outcomes["main_attempt"].error),
+                fallback_error=self._format_error(outcomes["first_fallback"].error),
+                second_fallback_error=self._format_error(outcomes["second_fallback"].error),
                 fallback_unusable=fallback_unusable,
                 dual_bill_candidate=dual_bill_candidate,
+                outcomes=outcomes,
             )
+            self._record_routing_telemetry(
+                race_id=race_id,
+                utterance_id=utterance_id,
+                started_at_utc=started_at_utc,
+                total_user_wait_ms=(
+                    winner_wait_ms if winner_wait_ms is not None else self._elapsed_ms(started_at)
+                ),
+                winner=winner,
+                first_triggered=first_triggered,
+                first_trigger_reason=first_trigger_reason,
+                second_triggered=second_triggered,
+                dual_bill_candidate=dual_bill_candidate,
+                outcomes=outcomes,
+            )
+            telemetry_recorded = True
             return returned
         finally:
-            await self._cancel_task(timeout_task)
-            await self._cancel_task(primary_task)
-            await self._cancel_task(fallback_task)
+            await self._cancel_task(first_timeout_task)
+            await self._cancel_task(second_timeout_task)
+            for task in tasks.values():
+                await self._cancel_task(task)
+            if not telemetry_recorded:
+                self._record_routing_telemetry(
+                    race_id=race_id,
+                    utterance_id=utterance_id,
+                    started_at_utc=started_at_utc,
+                    total_user_wait_ms=self._elapsed_ms(started_at),
+                    winner=winner,
+                    first_triggered=first_triggered,
+                    first_trigger_reason=first_trigger_reason,
+                    second_triggered=second_triggered,
+                    dual_bill_candidate=dual_bill_candidate,
+                    outcomes=outcomes,
+                )
 
     async def close(self) -> None:
         async with self._close_lock:
@@ -277,50 +386,69 @@ class FallbackRacingLLMProvider(LLMProvider):
             await self.primary.close()
             if self.fallback is not self.primary:
                 await self.fallback.close()
+            if (
+                self.second_fallback is not None
+                and self.second_fallback is not self.primary
+                and self.second_fallback is not self.fallback
+            ):
+                await self.second_fallback.close()
             self._providers_closed = True
 
-    async def _allow_loser_grace(
+    async def _run_attempt(
+        self,
+        provider: LLMProvider,
+        params: dict[str, object],
+        outcome: _BranchOutcome,
+        *,
+        race_started_at: float,
+    ) -> Translation:
+        outcome.started_offset_ms = self._elapsed_ms(race_started_at)
+        try:
+            with attempt_metadata_context(outcome.metadata):
+                return await provider.translate(**params)
+        except asyncio.CancelledError:
+            outcome.cancelled = True
+            raise
+        finally:
+            outcome.completed_offset_ms = self._elapsed_ms(race_started_at)
+            outcome.duration_ms = max(
+                0,
+                outcome.completed_offset_ms - outcome.started_offset_ms,
+            )
+
+    @staticmethod
+    async def _wait_for_deadline(started_at: float, delay_ms: int) -> None:
+        remaining_s = max(0.0, delay_ms / 1000.0 - (time.monotonic() - started_at))
+        await asyncio.sleep(remaining_s)
+
+    async def _allow_loser_grace_all(
         self,
         *,
         started_at: float,
-        primary_task: asyncio.Task[object] | None,
-        primary_outcome: _BranchOutcome,
-        fallback_task: asyncio.Task[object] | None,
-        fallback_outcome: _BranchOutcome,
+        tasks: dict[str, asyncio.Task[object] | None],
+        outcomes: dict[str, _BranchOutcome],
     ) -> None:
         pending = [
-            task
-            for task, outcome in (
-                (primary_task, primary_outcome),
-                (fallback_task, fallback_outcome),
-            )
-            if task is not None and not outcome.resolved
+            task for name, task in tasks.items() if task is not None and not outcomes[name].resolved
         ]
         if not pending:
             return
 
         if self.loser_grace_ms > 0:
             done, _ = await asyncio.wait(pending, timeout=self.loser_grace_ms / 1000.0)
-            if primary_task in done and not primary_outcome.resolved:
-                await self._capture_outcome(
-                    task=primary_task,
-                    outcome=primary_outcome,
-                    started_at=started_at,
-                )
-            if fallback_task in done and not fallback_outcome.resolved:
-                await self._capture_outcome(
-                    task=fallback_task,
-                    outcome=fallback_outcome,
-                    started_at=started_at,
-                )
+            for name, task in tasks.items():
+                if task in done and not outcomes[name].resolved:
+                    await self._capture_outcome(
+                        task=task,
+                        outcome=outcomes[name],
+                        started_at=started_at,
+                    )
 
-        for task, outcome in (
-            (primary_task, primary_outcome),
-            (fallback_task, fallback_outcome),
-        ):
-            if task is None or outcome.resolved:
+        for name, task in tasks.items():
+            if task is None or outcomes[name].resolved:
                 continue
-            outcome.elapsed_ms = outcome.elapsed_ms or self._elapsed_ms(started_at)
+            outcomes[name].elapsed_ms = outcomes[name].elapsed_ms or self._elapsed_ms(started_at)
+            outcomes[name].cancelled = True
             await self._cancel_task(task)
 
     async def _capture_outcome(
@@ -336,6 +464,7 @@ class FallbackRacingLLMProvider(LLMProvider):
             raise asyncio.CancelledError
         exc = task.exception()
         outcome.elapsed_ms = self._elapsed_ms(started_at)
+        outcome.completed_offset_ms = outcome.completed_offset_ms or outcome.elapsed_ms
         if exc is None:
             outcome.result = task.result()
             return
@@ -372,6 +501,132 @@ class FallbackRacingLLMProvider(LLMProvider):
         with contextlib.suppress(Exception):
             emit(f"Fallback triggered after {self.fallback_timeout_ms} ms", level=logging.INFO)
 
+    def _record_routing_telemetry(
+        self,
+        *,
+        race_id: str,
+        utterance_id: UUID,
+        started_at_utc: str,
+        total_user_wait_ms: int,
+        winner: str | None,
+        first_triggered: bool,
+        first_trigger_reason: str | None,
+        second_triggered: bool,
+        dual_bill_candidate: bool,
+        outcomes: dict[str, _BranchOutcome],
+    ) -> None:
+        telemetry = self.routing_telemetry
+        if telemetry is None or not telemetry.active:
+            return
+        requested = {
+            "main_attempt": (
+                self.primary_requested_provider,
+                self.primary_requested_models,
+            ),
+            "first_fallback": (
+                self.fallback_requested_provider,
+                self.fallback_requested_models,
+            ),
+            "second_fallback": (
+                self.second_fallback_requested_provider,
+                self.second_fallback_requested_models,
+            ),
+        }
+        attempts: list[RoutingAttemptTelemetry] = []
+        for name in ("main_attempt", "first_fallback", "second_fallback"):
+            outcome = outcomes[name]
+            provider_name, models = requested[name]
+            response = outcome.metadata.response
+            if outcome.result is not None:
+                status = "success"
+            elif outcome.error is not None:
+                status = "error"
+            elif outcome.cancelled:
+                status = "cancelled"
+            elif outcome.started_offset_ms is not None:
+                status = "incomplete"
+            else:
+                status = "not_started"
+            attempts.append(
+                RoutingAttemptTelemetry(
+                    name=name,
+                    requested_provider=provider_name,
+                    requested_models=models,
+                    started_offset_ms=outcome.started_offset_ms,
+                    completed_offset_ms=outcome.completed_offset_ms,
+                    duration_ms=outcome.duration_ms,
+                    outcome=status,
+                    response_model=response.model if response is not None else None,
+                    response_provider=response.provider if response is not None else None,
+                    generation_id=response.generation_id if response is not None else None,
+                    prompt_tokens=response.prompt_tokens if response is not None else None,
+                    completion_tokens=(
+                        response.completion_tokens if response is not None else None
+                    ),
+                    total_tokens=response.total_tokens if response is not None else None,
+                    response_cost_usd=response.cost_usd if response is not None else None,
+                    error_type=(
+                        type(outcome.error).__name__ if outcome.error is not None else None
+                    ),
+                )
+            )
+        telemetry.record_race(
+            RoutingRaceTelemetry(
+                race_id=race_id,
+                utterance_id=str(utterance_id),
+                started_at_utc=started_at_utc,
+                total_user_wait_ms=total_user_wait_ms,
+                succeeded=winner is not None,
+                winner_attempt=winner,
+                fallback_enabled=True,
+                first_fallback_triggered=first_triggered,
+                first_fallback_trigger_reason=first_trigger_reason,
+                second_fallback_eligible=self.second_fallback is not None,
+                second_fallback_triggered=second_triggered,
+                dual_bill_candidate=dual_bill_candidate,
+                attempts=tuple(attempts),
+            )
+        )
+
+    def _emit_race_event(
+        self,
+        *,
+        race_id: str,
+        utterance_id: UUID,
+        event: str,
+        trigger_reason: str,
+        outcomes: dict[str, _BranchOutcome],
+        first_triggered: bool,
+        second_triggered: bool,
+        winner: str | None,
+        winner_wait_ms: int | None,
+        dual_bill_candidate: bool,
+    ) -> None:
+        legacy_winner = None
+        if winner is not None:
+            legacy_winner = "primary" if winner == "main_attempt" else "fallback"
+        self._emit_event(
+            race_id=race_id,
+            utterance_id=utterance_id,
+            event=event,
+            primary_elapsed_ms=outcomes["main_attempt"].elapsed_ms,
+            fallback_elapsed_ms=outcomes["first_fallback"].elapsed_ms,
+            second_fallback_elapsed_ms=outcomes["second_fallback"].elapsed_ms,
+            fallback_triggered=first_triggered,
+            second_fallback_triggered=second_triggered,
+            winner=legacy_winner,
+            winner_attempt=winner,
+            returned_source=legacy_winner,
+            total_user_wait_ms=winner_wait_ms,
+            primary_error=self._format_error(outcomes["main_attempt"].error),
+            fallback_error=self._format_error(outcomes["first_fallback"].error),
+            second_fallback_error=self._format_error(outcomes["second_fallback"].error),
+            fallback_unusable=False,
+            dual_bill_candidate=dual_bill_candidate,
+            outcomes=outcomes,
+            trigger_reason=trigger_reason,
+        )
+
     def _emit_event(
         self,
         *,
@@ -380,14 +635,19 @@ class FallbackRacingLLMProvider(LLMProvider):
         event: str,
         primary_elapsed_ms: int | None,
         fallback_elapsed_ms: int | None,
+        second_fallback_elapsed_ms: int | None = None,
         fallback_triggered: bool,
+        second_fallback_triggered: bool = False,
         winner: str | None,
+        winner_attempt: str | None = None,
         returned_source: str | None,
         total_user_wait_ms: int | None,
         primary_error: str | None,
         fallback_error: str | None,
+        second_fallback_error: str | None = None,
         fallback_unusable: bool,
         dual_bill_candidate: bool,
+        outcomes: dict[str, _BranchOutcome] | None = None,
         trigger_reason: str | None = None,
     ) -> None:
         if self.runtime_logging is None:
@@ -396,26 +656,54 @@ class FallbackRacingLLMProvider(LLMProvider):
         if not callable(emit):
             return
 
+        if outcomes is None:
+            outcomes = {
+                "main_attempt": _BranchOutcome(),
+                "first_fallback": _BranchOutcome(),
+                "second_fallback": _BranchOutcome(),
+            }
+        if winner_attempt is None:
+            winner_attempt = {
+                "primary": "main_attempt",
+                "fallback": "first_fallback",
+            }.get(winner)
         primary_model, primary_credential_source = self._provider_identity(self.primary)
         fallback_model, fallback_credential_source = self._provider_identity(self.fallback)
+        second_fallback_model, second_fallback_credential_source = self._provider_identity(
+            self.second_fallback
+        )
         payload = {
             "race_id": race_id,
             "utterance_id": str(utterance_id),
             "event": event,
             "primary_model": primary_model,
             "fallback_model": fallback_model,
+            "second_fallback_model": second_fallback_model,
             "primary_credential_source": primary_credential_source,
             "fallback_credential_source": fallback_credential_source,
+            "second_fallback_credential_source": second_fallback_credential_source,
             "primary_elapsed_ms": primary_elapsed_ms,
             "fallback_elapsed_ms": fallback_elapsed_ms,
+            "second_fallback_elapsed_ms": second_fallback_elapsed_ms,
             "fallback_triggered": fallback_triggered,
+            "second_fallback_triggered": second_fallback_triggered,
             "winner": winner,
+            "winner_attempt": winner_attempt,
             "returned_source": returned_source,
             "total_user_wait_ms": total_user_wait_ms,
             "primary_error": primary_error,
             "fallback_error": fallback_error,
+            "second_fallback_error": second_fallback_error,
             "fallback_unusable": fallback_unusable,
             "dual_bill_candidate": dual_bill_candidate,
+            "main_attempt_response_model": self._response_model(outcomes["main_attempt"]),
+            "main_attempt_response_provider": self._response_provider(outcomes["main_attempt"]),
+            "first_fallback_response_model": self._response_model(outcomes["first_fallback"]),
+            "first_fallback_response_provider": self._response_provider(outcomes["first_fallback"]),
+            "second_fallback_response_model": self._response_model(outcomes["second_fallback"]),
+            "second_fallback_response_provider": self._response_provider(
+                outcomes["second_fallback"]
+            ),
         }
         if trigger_reason is not None:
             payload["trigger_reason"] = trigger_reason
@@ -503,6 +791,16 @@ class FallbackRacingLLMProvider(LLMProvider):
             return None
         raw = getattr(value, "value", value)
         return str(raw)
+
+    @staticmethod
+    def _response_model(outcome: _BranchOutcome) -> str | None:
+        response = outcome.metadata.response
+        return response.model if response is not None else None
+
+    @staticmethod
+    def _response_provider(outcome: _BranchOutcome) -> str | None:
+        response = outcome.metadata.response
+        return response.provider if response is not None else None
 
     @staticmethod
     def _format_error(error: Exception | None) -> str | None:
