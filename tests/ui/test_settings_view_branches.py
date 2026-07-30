@@ -538,7 +538,7 @@ def test_load_secret_value_migrates_legacy_value() -> None:
 def test_setting_action_text_size_shrinks_for_long_values() -> None:
     assert settings_view._setting_action_text_size("영어") == 22
     assert settings_view._setting_action_text_size("Deepgram") == 20
-    assert settings_view._setting_action_text_size("qwen3-asr-flash-realtime") == 16
+    assert settings_view._setting_action_text_size("qwen3-asr-flash-realtime-2026-02-10") == 16
 
 
 def test_peer_language_card_removed_from_general_tab(

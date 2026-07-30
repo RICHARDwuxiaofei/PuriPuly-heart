@@ -205,6 +205,30 @@ def test_high_version_legacy_shape_migrates_by_shape_not_settings_version() -> N
     assert serialized["intent"]["translation"]["connection"] == "ollama"
 
 
+def test_canonical_vnext_migrates_legacy_qwen_asr_model() -> None:
+    migration = _migration()
+    serialization = _serialization()
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["intent"]["stt"]["qwen_asr"]["model"] = "qwen3-asr-flash-realtime"
+
+    settings = migration.from_dict(raw)
+    serialized = serialization.to_dict(settings)
+
+    assert serialized["intent"]["stt"]["qwen_asr"]["model"] == "qwen3-asr-flash-realtime-2026-02-10"
+
+
+def test_canonical_vnext_preserves_pinned_qwen_asr_model() -> None:
+    migration = _migration()
+    serialization = _serialization()
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["intent"]["stt"]["qwen_asr"]["model"] = "qwen3-asr-flash-realtime-2025-10-27"
+
+    settings = migration.from_dict(raw)
+    serialized = serialization.to_dict(settings)
+
+    assert serialized["intent"]["stt"]["qwen_asr"]["model"] == "qwen3-asr-flash-realtime-2025-10-27"
+
+
 def test_final_dev_v30_fixture_migrates_with_semantic_and_verification_continuity(
     tmp_path: Path,
 ) -> None:

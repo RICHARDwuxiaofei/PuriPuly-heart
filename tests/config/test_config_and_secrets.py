@@ -447,6 +447,35 @@ def test_migrate_settings_dict_preserves_custom_soniox_model() -> None:
     assert migrated["soniox_stt"]["model"] == "custom-soniox-model"
 
 
+def test_migrate_settings_dict_upgrades_legacy_qwen_asr_model() -> None:
+    raw = to_dict(AppSettings())
+    raw["qwen_asr_stt"]["model"] = "qwen3-asr-flash-realtime"
+
+    migrated, changed = _migrate_settings_dict(raw)
+
+    assert changed is True
+    assert migrated["qwen_asr_stt"]["model"] == "qwen3-asr-flash-realtime-2026-02-10"
+
+
+def test_migrate_settings_dict_preserves_custom_qwen_asr_model() -> None:
+    raw = to_dict(AppSettings())
+    raw["qwen_asr_stt"]["model"] = "qwen3-asr-flash-realtime-2025-10-27"
+
+    migrated, _changed = _migrate_settings_dict(raw)
+
+    assert migrated["qwen_asr_stt"]["model"] == "qwen3-asr-flash-realtime-2025-10-27"
+
+
+def test_migrate_settings_dict_upgrades_legacy_peer_qwen_asr_model() -> None:
+    raw = to_dict(AppSettings())
+    raw["peer_qwen_asr_stt"] = {"model": "qwen3-asr-flash-realtime", "region": None}
+
+    migrated, changed = _migrate_settings_dict(raw)
+
+    assert changed is True
+    assert migrated["peer_qwen_asr_stt"]["model"] == "qwen3-asr-flash-realtime-2026-02-10"
+
+
 def test_translation_model_public_member_names_and_values_match_plan() -> None:
     assert tuple((member.name, member.value) for member in TranslationModel) == (
         ("GEMMA4_26B_31B", "gemma4_26b_31b"),
@@ -1365,7 +1394,7 @@ def test_load_settings_backfills_v4_peer_blocks_from_schema3_fixture(tmp_path) -
         },
         "deepgram_stt": {"model": "nova-3"},
         "qwen_asr_stt": {
-            "model": "qwen3-asr-flash-realtime",
+            "model": "qwen3-asr-flash-realtime-2026-02-10",
             "endpoint": "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime",
         },
         "soniox_stt": {
@@ -3033,6 +3062,22 @@ def test_load_settings_migration_preserves_custom_soniox_model(tmp_path):
     persisted = legacy_projected_settings_file(path)
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["soniox_stt"]["model"] == "stt-rt-experimental"
+
+
+def test_load_settings_migrates_legacy_qwen_asr_model_and_persists(tmp_path):
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["settings_version"] = 2
+    legacy["qwen_asr_stt"]["model"] = "qwen3-asr-flash-realtime"
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
+    assert loaded.qwen_asr_stt.model == "qwen3-asr-flash-realtime-2026-02-10"
+
+    persisted = legacy_projected_settings_file(path)
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert persisted["qwen_asr_stt"]["model"] == "qwen3-asr-flash-realtime-2026-02-10"
 
 
 def test_mask_secret():

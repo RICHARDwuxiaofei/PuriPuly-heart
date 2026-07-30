@@ -356,7 +356,7 @@ class DeepgramSTTIntent:
 
 @dataclass(frozen=True, slots=True)
 class QwenASRSTTIntent:
-    model: str = "qwen3-asr-flash-realtime"
+    model: str = "qwen3-asr-flash-realtime-2026-02-10"
 
 
 @dataclass(frozen=True, slots=True)

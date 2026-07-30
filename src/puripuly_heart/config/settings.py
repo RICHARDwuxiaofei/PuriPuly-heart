@@ -656,7 +656,7 @@ class DeepgramSTTSettings:
 
 @dataclass(slots=True)
 class QwenASRSTTSettings:
-    model: str = "qwen3-asr-flash-realtime"
+    model: str = "qwen3-asr-flash-realtime-2026-02-10"
     endpoint: str = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
 
     def validate(self) -> None:
@@ -3417,6 +3417,20 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
                 soniox_data["model"] = "stt-rt-v5"
                 changed = True
 
+    qwen_asr_data = data.get("qwen_asr_stt")
+    if isinstance(qwen_asr_data, dict):
+        model = qwen_asr_data.get("model")
+        if isinstance(model, str) and model.strip() == "qwen3-asr-flash-realtime":
+            qwen_asr_data["model"] = "qwen3-asr-flash-realtime-2026-02-10"
+            changed = True
+
+    peer_qwen_asr_data = data.get("peer_qwen_asr_stt")
+    if isinstance(peer_qwen_asr_data, dict):
+        model = peer_qwen_asr_data.get("model")
+        if isinstance(model, str) and model.strip() == "qwen3-asr-flash-realtime":
+            peer_qwen_asr_data["model"] = "qwen3-asr-flash-realtime-2026-02-10"
+            changed = True
+
     gemini_data = data.get("gemini")
     if not isinstance(gemini_data, dict):
         gemini_data = {}
@@ -4068,7 +4082,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             model=str(data.get("deepgram_stt", {}).get("model", "nova-3")),
         ),
         qwen_asr_stt=QwenASRSTTSettings(
-            model=str(data.get("qwen_asr_stt", {}).get("model", "qwen3-asr-flash-realtime")),
+            model=str(
+                data.get("qwen_asr_stt", {}).get("model", "qwen3-asr-flash-realtime-2026-02-10")
+            ),
             endpoint=qwen_settings.get_asr_endpoint(),
         ),
         soniox_stt=SonioxSTTSettings(

@@ -203,6 +203,7 @@ def _prepare_vnext_migration_dict(data: Mapping[str, Any]) -> dict[str, Any]:
                 else ""
             )
         intent["desktop_audio"] = desktop_audio
+        _migrate_canonical_qwen_asr_model(intent)
         prepared["intent"] = intent
     return prepared
 
@@ -291,6 +292,15 @@ def _migrate_canonical_local_qwen_provider(intent: dict[str, Any], key: str) -> 
     if block.get("provider") == _LOCAL_QWEN_PROVIDER:
         block["provider"] = _LOCAL_CPU_AUTO_PROVIDER
         intent[key] = block
+
+
+def _migrate_canonical_qwen_asr_model(intent: dict[str, Any]) -> None:
+    raw = intent.get("stt")
+    block = dict(raw) if isinstance(raw, Mapping) else {}
+    qwen_asr = block.get("qwen_asr")
+    if isinstance(qwen_asr, Mapping) and qwen_asr.get("model") == "qwen3-asr-flash-realtime":
+        block["qwen_asr"] = {**qwen_asr, "model": "qwen3-asr-flash-realtime-2026-02-10"}
+        intent["stt"] = block
 
 
 def _migrate_legacy_local_qwen_providers(data: dict[str, Any]) -> None:

@@ -30,7 +30,7 @@ async def test_qwen_asr_realtime_streaming_smoke():
 
     backend = QwenASRRealtimeSTTBackend(
         api_key=api_key,
-        model=os.getenv("QWEN_ASR_MODEL", "qwen3-asr-flash-realtime"),
+        model=os.getenv("QWEN_ASR_MODEL", "qwen3-asr-flash-realtime-2026-02-10"),
         endpoint=get_qwen_asr_endpoint(),
         language=os.getenv("QWEN_ASR_LANGUAGE", "ko"),
         sample_rate_hz=int(os.getenv("QWEN_ASR_SAMPLE_RATE", "16000")),

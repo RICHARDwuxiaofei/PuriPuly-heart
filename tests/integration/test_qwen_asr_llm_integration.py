@@ -62,7 +62,7 @@ async def test_qwen_asr_llm_pipeline_smoke() -> None:
 
     stt_backend = QwenASRRealtimeSTTBackend(
         api_key=api_key,
-        model=os.getenv("QWEN_ASR_MODEL", "qwen3-asr-flash-realtime"),
+        model=os.getenv("QWEN_ASR_MODEL", "qwen3-asr-flash-realtime-2026-02-10"),
         endpoint=get_qwen_asr_endpoint(),
         language=os.getenv("QWEN_ASR_LANGUAGE", "ko"),
         sample_rate_hz=sample_rate,

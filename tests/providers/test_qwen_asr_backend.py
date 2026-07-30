@@ -10,7 +10,7 @@ from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
 async def test_qwen_asr_backend_requires_api_key() -> None:
     backend = QwenASRRealtimeSTTBackend(
         api_key="",
-        model="qwen3-asr-flash-realtime",
+        model="qwen3-asr-flash-realtime-2026-02-10",
         endpoint="wss://example",
         language="en",
         sample_rate_hz=16000,
@@ -24,7 +24,7 @@ async def test_qwen_asr_backend_requires_api_key() -> None:
 async def test_qwen_asr_backend_requires_valid_sample_rate() -> None:
     backend = QwenASRRealtimeSTTBackend(
         api_key="k",
-        model="qwen3-asr-flash-realtime",
+        model="qwen3-asr-flash-realtime-2026-02-10",
         endpoint="wss://example",
         language="en",
         sample_rate_hz=44100,
@@ -38,7 +38,7 @@ async def test_qwen_asr_backend_requires_valid_sample_rate() -> None:
 async def test_qwen_asr_backend_requires_positive_connect_timeout() -> None:
     backend = QwenASRRealtimeSTTBackend(
         api_key="k",
-        model="qwen3-asr-flash-realtime",
+        model="qwen3-asr-flash-realtime-2026-02-10",
         endpoint="wss://example",
         language="en",
         sample_rate_hz=16000,

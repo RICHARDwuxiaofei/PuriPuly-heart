@@ -436,7 +436,7 @@ def create_stt_backend_from_resolved_config(
         api_key = _qwen_api_key_for_resolved_credential(config.credential, secrets=secrets)
         return QwenASRRealtimeSTTBackend(
             api_key=api_key,
-            model=config.model or "qwen3-asr-flash-realtime",
+            model=config.model or "qwen3-asr-flash-realtime-2026-02-10",
             endpoint=_qwen_asr_endpoint_for_resolved_config(config),
             language=get_qwen_asr_language(config.source_language),
             sample_rate_hz=config.sample_rate_hz,

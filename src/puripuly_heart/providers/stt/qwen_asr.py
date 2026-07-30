@@ -30,7 +30,7 @@ class QwenASRRealtimeSTTBackend(STTBackend):
 
     api_key: str
     language: str  # Required: passed from wiring.py via get_qwen_asr_language()
-    model: str = "qwen3-asr-flash-realtime"
+    model: str = "qwen3-asr-flash-realtime-2026-02-10"
     endpoint: str = "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
     sample_rate_hz: int = 16000
     connect_timeout_s: float = 5.0

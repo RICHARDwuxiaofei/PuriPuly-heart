@@ -2222,7 +2222,7 @@ def test_create_stt_backend_qwen_asr_uses_settings_and_secret() -> None:
     settings = AppSettings(
         provider=ProviderSettings(stt=STTProviderName.QWEN_ASR),
         qwen_asr_stt=QwenASRSTTSettings(
-            model="qwen3-asr-flash-realtime",
+            model="qwen3-asr-flash-realtime-2026-02-10",
         ),
     )
     settings.audio.internal_sample_rate_hz = 8000
@@ -2233,7 +2233,7 @@ def test_create_stt_backend_qwen_asr_uses_settings_and_secret() -> None:
     backend = create_stt_backend(settings, secrets=secrets)
     assert isinstance(backend, QwenASRRealtimeSTTBackend)
     assert backend.api_key == "k4"
-    assert backend.model == "qwen3-asr-flash-realtime"
+    assert backend.model == "qwen3-asr-flash-realtime-2026-02-10"
     # Endpoint is derived from region (Beijing default)
     assert backend.endpoint == "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
     assert backend.sample_rate_hz == 16000
@@ -2247,7 +2247,7 @@ def test_create_stt_backend_qwen_asr_ignores_custom_terms() -> None:
             custom_vocabulary_enabled=True,
             custom_terms={"ko": ["Puripuly", "VRChat"]},
         ),
-        qwen_asr_stt=QwenASRSTTSettings(model="qwen3-asr-flash-realtime"),
+        qwen_asr_stt=QwenASRSTTSettings(model="qwen3-asr-flash-realtime-2026-02-10"),
     )
     secrets = InMemorySecretStore()
     secrets.set("alibaba_api_key_beijing", "k4")
@@ -2256,7 +2256,7 @@ def test_create_stt_backend_qwen_asr_ignores_custom_terms() -> None:
 
     assert isinstance(backend, QwenASRRealtimeSTTBackend)
     assert backend.api_key == "k4"
-    assert backend.model == "qwen3-asr-flash-realtime"
+    assert backend.model == "qwen3-asr-flash-realtime-2026-02-10"
     assert backend.language == get_qwen_asr_language(settings.languages.source_language)
     assert not hasattr(backend, "keyterms")
     assert not hasattr(backend, "context_terms")
@@ -2266,7 +2266,7 @@ def test_create_stt_backend_qwen_asr_uses_singapore_region() -> None:
     settings = AppSettings(
         provider=ProviderSettings(stt=STTProviderName.QWEN_ASR),
         qwen=QwenSettings(region=QwenRegion.SINGAPORE),
-        qwen_asr_stt=QwenASRSTTSettings(model="qwen3-asr-flash-realtime"),
+        qwen_asr_stt=QwenASRSTTSettings(model="qwen3-asr-flash-realtime-2026-02-10"),
     )
     secrets = InMemorySecretStore()
     secrets.set("alibaba_api_key_singapore", "k5")
@@ -2279,7 +2279,7 @@ def test_create_stt_backend_qwen_asr_uses_singapore_region() -> None:
 def test_create_stt_backend_qwen_asr_uses_legacy_alibaba_secret_key() -> None:
     settings = AppSettings(
         provider=ProviderSettings(stt=STTProviderName.QWEN_ASR),
-        qwen_asr_stt=QwenASRSTTSettings(model="qwen3-asr-flash-realtime"),
+        qwen_asr_stt=QwenASRSTTSettings(model="qwen3-asr-flash-realtime-2026-02-10"),
     )
     secrets = InMemorySecretStore()
     secrets.set("alibaba_api_key", "legacy-k4")
