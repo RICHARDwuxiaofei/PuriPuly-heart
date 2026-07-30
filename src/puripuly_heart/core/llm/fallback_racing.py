@@ -48,7 +48,7 @@ class FallbackRacingLLMProvider(LLMProvider):
     fallback: LLMProvider
     second_fallback: LLMProvider | None = None
     fallback_timeout_ms: int = 1300
-    second_fallback_timeout_ms: int = 3500
+    second_fallback_timeout_ms: int = 4500
     loser_grace_ms: int = 50
     fallback_start_on_primary_error: bool = True
     runtime_logging: SessionRuntimeLoggingService | None = None

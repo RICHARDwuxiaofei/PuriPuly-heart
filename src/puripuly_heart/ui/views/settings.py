@@ -245,29 +245,6 @@ _TRANSLATION_FALLBACK_DESCRIPTION_KEY_BY_VALUE = {
 }
 
 
-def _default_gemma_fallback(
-    model: TranslationModel,
-    connection: TranslationConnection,
-) -> TranslationFallbackSettings | None:
-    fallback_model = {
-        TranslationModel.GEMMA4_26B_31B: TranslationModel.GEMMA4_26B_31B,
-        TranslationModel.GEMMA4_31B: TranslationModel.GEMMA4_31B,
-        TranslationModel.GEMMA4: TranslationModel.GEMMA4_26B_31B,
-    }.get(model)
-    if fallback_model is None:
-        return None
-    fallback_connection = (
-        TranslationConnection.MANAGED
-        if connection == TranslationConnection.MANAGED
-        else TranslationConnection.OPENROUTER
-    )
-    return TranslationFallbackSettings(
-        enabled=True,
-        model=fallback_model,
-        connection=fallback_connection,
-    )
-
-
 def _make_text_button(label: str, **kwargs) -> ft.TextButton:
     return ft.TextButton(text=label, **kwargs)
 
@@ -3698,14 +3675,6 @@ class SettingsView(ft.Column):
             current_settings.translation.connection_history
         )
         draft.translation.connection_history[model.value] = connection
-        old_default_fallback = _default_gemma_fallback(old_model, old_connection)
-        if (
-            old_default_fallback is not None
-            and current_settings.translation.fallback == old_default_fallback
-        ):
-            new_default_fallback = _default_gemma_fallback(model, connection)
-            if new_default_fallback is not None:
-                draft.translation.fallback = new_default_fallback
         materialize_translation_settings(draft)
         new_provider = draft.provider.llm
 

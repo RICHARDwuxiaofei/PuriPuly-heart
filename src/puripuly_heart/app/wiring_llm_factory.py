@@ -827,7 +827,7 @@ def create_llm_provider_from_resolved_config(
             ),
             fallback_timeout_ms=fallback_plan.timeout_ms,
             second_fallback_timeout_ms=(
-                second_fallback_plan.timeout_ms if second_fallback_plan is not None else 3500
+                second_fallback_plan.timeout_ms if second_fallback_plan is not None else 4500
             ),
             loser_grace_ms=fallback_plan.loser_grace_ms,
             fallback_start_on_primary_error=fallback_plan.start_on_main_attempt_error,

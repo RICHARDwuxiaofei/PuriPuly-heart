@@ -1677,3 +1677,61 @@ def test_resolved_output_uses_lookup_references_not_raw_secret_values() -> None:
     assert config.fallback.target.credential.reference is not None
     assert "sk-" not in config.fallback.target.credential.reference
     assert "secret" not in config.fallback.target.credential.reference
+
+
+def test_compatibility_26b_with_26b_31b_latency_routing_resolves_to_multi_model() -> None:
+    runtime_resolution = _runtime_resolution_module()
+    profiles = _profiles_module()
+
+    translation_intent = runtime_resolution.derive_translation_runtime_intent_from_compatibility(
+        provider_llm="openrouter",
+        openrouter_model=profiles.OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT,
+        openrouter_selected_source="byok",
+        openrouter_provider_routing="gemma4_26b_31b_latency",
+        concurrency_limit=5,
+    )
+
+    assert translation_intent.model == runtime_resolution.TRANSLATION_MODEL_GEMMA4_26B_31B
+
+    config = runtime_resolution.resolve_llm_config(
+        runtime_resolution.RuntimeResolutionInput(
+            translation=translation_intent,
+            openrouter=runtime_resolution.OpenRouterRuntimeIntent(
+                selected_source=runtime_resolution.OPENROUTER_SOURCE_BYOK,
+            ),
+        )
+    )
+
+    assert config.primary.models == (
+        profiles.OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT,
+        profiles.OPENROUTER_MODEL_GEMMA_4_31B_IT,
+    )
+    assert config.primary.provider_routing == "gemma4_26b_31b_latency"
+
+
+def test_compatibility_26b_with_default_routing_resolves_to_standalone() -> None:
+    runtime_resolution = _runtime_resolution_module()
+    profiles = _profiles_module()
+
+    translation_intent = runtime_resolution.derive_translation_runtime_intent_from_compatibility(
+        provider_llm="openrouter",
+        openrouter_model=profiles.OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT,
+        openrouter_selected_source="byok",
+        openrouter_provider_routing="default",
+        concurrency_limit=5,
+    )
+
+    assert translation_intent.model == runtime_resolution.TRANSLATION_MODEL_GEMMA4
+
+    config = runtime_resolution.resolve_llm_config(
+        runtime_resolution.RuntimeResolutionInput(
+            translation=translation_intent,
+            openrouter=runtime_resolution.OpenRouterRuntimeIntent(
+                selected_source=runtime_resolution.OPENROUTER_SOURCE_BYOK,
+            ),
+        )
+    )
+
+    assert config.primary.models == (profiles.OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT,)
+    assert config.primary.model == profiles.OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT
+    assert config.primary.provider_routing == "default"

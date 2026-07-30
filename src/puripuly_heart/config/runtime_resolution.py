@@ -912,11 +912,26 @@ def derive_translation_runtime_intent_from_compatibility(
 
     if provider == PROVIDER_OPENROUTER:
         if openrouter_model_value == OPENROUTER_MODEL_GEMMA_4_26B_A4B_IT:
+            translation_model = (
+                TRANSLATION_MODEL_GEMMA4_26B_31B
+                if provider_routing == "gemma4_26b_31b_latency"
+                else TRANSLATION_MODEL_GEMMA4
+            )
             return TranslationRuntimeIntent(
-                model=TRANSLATION_MODEL_GEMMA4,
+                model=translation_model,
                 connection=_translation_connection_from_openrouter_source(
                     openrouter_source,
-                    model=TRANSLATION_MODEL_GEMMA4,
+                    model=translation_model,
+                    provider_routing=provider_routing,
+                ),
+                concurrency_limit=concurrency,
+            )
+        if openrouter_model_value == OPENROUTER_MODEL_GEMMA_4_31B_IT:
+            return TranslationRuntimeIntent(
+                model=TRANSLATION_MODEL_GEMMA4_31B,
+                connection=_translation_connection_from_openrouter_source(
+                    openrouter_source,
+                    model=TRANSLATION_MODEL_GEMMA4_31B,
                     provider_routing=provider_routing,
                 ),
                 concurrency_limit=concurrency,
@@ -1417,7 +1432,7 @@ def resolve_llm_config(runtime_input: RuntimeResolutionInput) -> ResolvedLLMConf
             )
             second_fallback_plan = ResolvedLLMFallbackPlan(
                 target=second_target,
-                timeout_ms=3500,
+                timeout_ms=4500,
                 loser_grace_ms=50,
                 force_managed_wrapper=(
                     second_target.credential.source == CREDENTIAL_SOURCE_MANAGED
