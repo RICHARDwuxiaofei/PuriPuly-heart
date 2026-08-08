@@ -43,6 +43,20 @@ ACTIVATION = GpuWorkerActivation(
     model_load_seconds=1.25,
     warmup_seconds=0.5,
 )
+DEVICE_1 = GpuWorkerDevice(
+    device_id="vulkan:1",
+    registry_index=1,
+    name="Test GPU 1",
+    description="Test GPU 1",
+    device_type="integrated",
+    memory_total_bytes=0,
+    memory_free_bytes=0,
+)
+ACTIVATION_1 = GpuWorkerActivation(
+    device=DEVICE_1,
+    model_load_seconds=1.25,
+    warmup_seconds=0.5,
+)
 
 
 class FakeGpuWorkerClient:
@@ -50,6 +64,7 @@ class FakeGpuWorkerClient:
         self,
         *,
         activation_error: GpuWorkerRequestError | None = None,
+        activation: GpuWorkerActivation = ACTIVATION,
         activation_gate: asyncio.Event | None = None,
         discovery_gate: asyncio.Event | None = None,
         transcribe_gate: asyncio.Event | None = None,
@@ -57,6 +72,7 @@ class FakeGpuWorkerClient:
         send_error: BaseException | None = None,
     ) -> None:
         self.activation_error = activation_error
+        self.activation = activation
         self.activation_gate = activation_gate
         self.discovery_gate = discovery_gate
         self.transcribe_gate = transcribe_gate
@@ -93,7 +109,7 @@ class FakeGpuWorkerClient:
             await self.activation_gate.wait()
         if self.activation_error is not None:
             raise self.activation_error
-        return ACTIVATION
+        return self.activation
 
     async def transcribe(
         self,
@@ -219,7 +235,7 @@ async def test_device_change_after_full_quiesce_accepts_both_channel_orders(
     restore_order: tuple[GpuASRChannel, GpuASRChannel],
 ) -> None:
     old_client = FakeGpuWorkerClient()
-    new_client = FakeGpuWorkerClient()
+    new_client = FakeGpuWorkerClient(activation=ACTIVATION_1)
     runtime = SharedGpuASRRuntime(process_factory=FakeGpuWorkerFactory([old_client, new_client]))
     await _activate(runtime, "self")
     await _activate(runtime, "peer")
@@ -238,6 +254,34 @@ async def test_device_change_after_full_quiesce_accepts_both_channel_orders(
     assert new_client.activate_calls == [(Path("model.gguf").resolve(), "vulkan:1")]
     assert runtime.active_channels == frozenset({"self", "peer"})
     assert runtime.configured_device_id == "vulkan:1"
+    await runtime.close()
+
+
+async def test_explicit_device_requires_the_worker_to_activate_that_exact_device() -> None:
+    diagnostics = []
+    client = FakeGpuWorkerClient()
+    runtime = SharedGpuASRRuntime(
+        process_factory=FakeGpuWorkerFactory([client]),
+        diagnostic_sink=diagnostics.append,
+    )
+
+    with pytest.raises(GpuASRManualRetryRequired, match="device_selection_mismatch"):
+        await runtime.activate_channel(
+            "self",
+            model_path=Path("model.gguf"),
+            model_id="qwen-gpu",
+            device_id="vulkan:1",
+        )
+
+    assert client.close_calls == 1
+    assert runtime.state == GpuASRRuntimeState.FAILED
+    failure = [item for item in diagnostics if item.kind == "activation_failed"][-1]
+    assert failure.fields == {
+        "model": "qwen-gpu",
+        "backend": "Vulkan",
+        "requested_device_id": "vulkan:1",
+        "failure": "device_selection_mismatch",
+    }
     await runtime.close()
 
 

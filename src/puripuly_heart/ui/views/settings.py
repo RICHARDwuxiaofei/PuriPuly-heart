@@ -2186,7 +2186,6 @@ class SettingsView(ft.Column):
                 "api": [
                     row1,
                     self._translation_connection_row,
-                    self._gpu_device_row,
                     self._local_llm_connection_card,
                     self._managed_key_card,
                     self._peer_auto_languages_card,
@@ -2194,6 +2193,7 @@ class SettingsView(ft.Column):
                 ],
                 "general": [
                     general_primary_row,
+                    self._gpu_device_row,
                     general_audio_row,
                     general_vad_row,
                     general_clipboard_row,
@@ -2234,7 +2234,7 @@ class SettingsView(ft.Column):
         if selected == "auto":
             label = t("settings.gpu_device.auto")
         elif selected_device is not None:
-            label = selected_device.display_name
+            label = f"{selected_device.display_name} · {self._gpu_device_type_label(selected_device)}"
         else:
             label = t("settings.gpu_device.unavailable", device=selected)
         self._set_unit_card_value_text(self._gpu_device_text, label)
@@ -2250,6 +2250,17 @@ class SettingsView(ft.Column):
     ) -> None:
         self._gpu_devices = devices
         self._sync_gpu_device_card()
+
+    @staticmethod
+    def _gpu_device_type_label(device: GpuDeviceOption) -> str:
+        key_by_type = {
+            "igpu": "settings.gpu_device.type.integrated",
+            "gpu": "settings.gpu_device.type.discrete",
+            "discrete": "settings.gpu_device.type.discrete",
+            "accel": "settings.gpu_device.type.accelerator",
+            "cpu": "settings.gpu_device.type.cpu",
+        }
+        return t(key_by_type.get(device.device_type.strip().lower(), "settings.gpu_device.type.other"))
 
     @staticmethod
     def _gpu_backend_label(name: str) -> str:
@@ -2273,7 +2284,10 @@ class SettingsView(ft.Column):
             OptionItem(
                 value=device.device_id,
                 label=device.display_name,
-                description=self._gpu_backend_label(device.backend_name),
+                description=(
+                    f"{self._gpu_device_type_label(device)} · "
+                    f"{self._gpu_backend_label(device.backend_name)}"
+                ),
             )
             for device in self._gpu_devices
         )

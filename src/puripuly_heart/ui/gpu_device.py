@@ -8,3 +8,4 @@ class GpuDeviceOption:
     device_id: str
     display_name: str
     backend_name: str
+    device_type: str = "unknown"

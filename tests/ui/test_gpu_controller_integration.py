@@ -176,6 +176,7 @@ async def test_gpu_settings_receive_hardware_name_separately_from_vulkan_slot() 
             device_id="0000:01:00.0",
             display_name="NVIDIA GeForce RTX 4070",
             backend_name="Vulkan0",
+            device_type="gpu",
         ),
     )
 
