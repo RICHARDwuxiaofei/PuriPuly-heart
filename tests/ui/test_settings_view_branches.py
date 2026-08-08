@@ -2287,7 +2287,9 @@ def test_gpu_selection_shows_one_shared_device_card_and_retains_unavailable_save
     view, _ = _make_settings_view(monkeypatch)
 
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.set_gpu_devices(devices=(GpuDeviceOption("vk:0", "NVIDIA GeForce RTX 4070", "Vulkan0"),))
+    view.set_gpu_devices(
+        devices=(GpuDeviceOption("vk:0", "NVIDIA GeForce RTX 4070", "Vulkan0", "gpu"),)
+    )
 
     assert view._gpu_device_card.visible is True
     assert view._gpu_device_row.visible is True
@@ -2298,7 +2300,10 @@ def test_gpu_selection_shows_one_shared_device_card_and_retains_unavailable_save
 
     view._on_gpu_device_selected("vk:0")
 
-    assert view._gpu_device_text.content.value == "NVIDIA GeForce RTX 4070"
+    assert view._gpu_device_text.content.value == (
+        "NVIDIA GeForce RTX 4070"
+        f" · {t('settings.gpu_device.type.discrete')}"
+    )
     pending = view.build_provider_apply_settings()
     assert pending is not None
     assert pending.stt.gpu_device_id == "vk:0"
@@ -2361,8 +2366,8 @@ def test_gpu_device_modal_shows_graphics_card_name_and_vulkan_slot(
     view.load_from_settings(settings, config_path=Path("settings.json"))
     view.set_gpu_devices(
         devices=(
-            GpuDeviceOption("vk:0", "NVIDIA GeForce RTX 4070", "Vulkan0"),
-            GpuDeviceOption("vk:1", "AMD Radeon RX 7900 XTX", "Vulkan1"),
+            GpuDeviceOption("vk:0", "NVIDIA GeForce RTX 4070", "Vulkan0", "gpu"),
+            GpuDeviceOption("vk:1", "AMD Radeon RX 7900 XTX", "Vulkan1", "gpu"),
         )
     )
 
@@ -2379,7 +2384,11 @@ def test_gpu_device_modal_shows_graphics_card_name_and_vulkan_slot(
         "NVIDIA GeForce RTX 4070",
         "AMD Radeon RX 7900 XTX",
     ]
-    assert [option.description for option in options] == ["", "Vulkan 0", "Vulkan 1"]
+    assert [option.description for option in options] == [
+        "",
+        f"{t('settings.gpu_device.type.discrete')} · Vulkan 0",
+        f"{t('settings.gpu_device.type.discrete')} · Vulkan 1",
+    ]
 
 
 def test_gpu_row_repaints_and_collapses_immediately_with_provider_selection(

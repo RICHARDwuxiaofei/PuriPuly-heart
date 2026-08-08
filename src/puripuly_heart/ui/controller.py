@@ -1587,6 +1587,7 @@ class GuiController:
                 device_id=device.device_id,
                 display_name=device.description.strip() or device.name,
                 backend_name=device.name,
+                device_type=device.device_type,
             )
             for device in self._gpu_devices
         )

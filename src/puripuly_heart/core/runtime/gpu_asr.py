@@ -421,6 +421,11 @@ class SharedGpuASRRuntime:
                 model_path=config.model_path,
                 device_id=config.device_id,
             )
+            if (
+                config.device_id != "auto"
+                and activation.device.device_id != config.device_id
+            ):
+                raise GpuWorkerRequestError("device_selection_mismatch")
         except BaseException as exc:
             if event_task is not None:
                 event_task.cancel()
@@ -448,6 +453,7 @@ class SharedGpuASRRuntime:
                 {
                     "model": config.model_id,
                     "backend": "Vulkan",
+                    "requested_device_id": config.device_id,
                     **_failure_diagnostic_fields(exc),
                 },
             )
@@ -490,7 +496,15 @@ class SharedGpuASRRuntime:
             {
                 "model": config.model_id,
                 "backend": "Vulkan",
+                "requested_device_id": config.device_id,
                 "device": activation.device.device_id,
+                "device_id": activation.device.device_id,
+                "registry_index": activation.device.registry_index,
+                "device_name": activation.device.name,
+                "device_description": activation.device.description,
+                "device_type": activation.device.device_type,
+                "memory_total_bytes": activation.device.memory_total_bytes,
+                "memory_free_bytes": activation.device.memory_free_bytes,
                 "model_load_seconds": activation.model_load_seconds,
                 "warmup_seconds": activation.warmup_seconds,
             },
