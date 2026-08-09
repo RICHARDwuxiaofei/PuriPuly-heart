@@ -3836,6 +3836,8 @@ class GuiController:
         target.provider.stt = source.provider.stt
         target.provider.peer_stt = source.provider.peer_stt
         target.provider.llm = source.provider.llm
+        target.stt.gpu_device_id = source.stt.gpu_device_id
+        target.stt.gpu_model_id = source.stt.gpu_model_id
         target.translation = copy.deepcopy(source.translation)
         target.gemini.llm_model = source.gemini.llm_model
         target.openrouter.llm_model = source.openrouter.llm_model

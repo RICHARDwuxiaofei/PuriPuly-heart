@@ -29,6 +29,10 @@ from puripuly_heart.config.audio_host_api import (
     WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
     WINDOWS_WASAPI_HOST_API,
 )
+from puripuly_heart.config.gpu_model_catalog import (
+    LOCAL_QWEN_GPU_06_MODEL_ID,
+    LOCAL_QWEN_GPU_17_MODEL_ID,
+)
 from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.resolved import ResolvedDesktopAudioCaptureTarget
 from puripuly_heart.config.settings import (
@@ -3710,6 +3714,22 @@ def test_merge_settings_tab_apply_copies_local_llm_settings_for_provider_apply()
     assert merged.local_llm.base_url == "http://mac-studio.local:11434/v1"
     assert merged.local_llm.model == "gemma3:4b"
     assert merged.local_llm.extra_body == {"think": False}
+
+
+def test_merge_settings_tab_apply_copies_gpu_asr_selection_for_provider_apply() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.stt.gpu_device_id = "auto"
+    controller.settings.stt.gpu_model_id = LOCAL_QWEN_GPU_17_MODEL_ID
+
+    pending = copy.deepcopy(controller.settings)
+    pending.stt.gpu_device_id = "vulkan-index-1"
+    pending.stt.gpu_model_id = LOCAL_QWEN_GPU_06_MODEL_ID
+
+    merged = controller.merge_settings_tab_apply_with_current_languages(pending)
+
+    assert merged.stt.gpu_device_id == "vulkan-index-1"
+    assert merged.stt.gpu_model_id == LOCAL_QWEN_GPU_06_MODEL_ID
 
 
 def test_stt_runtime_signature_includes_custom_vocabulary_state() -> None:
