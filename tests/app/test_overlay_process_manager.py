@@ -180,10 +180,15 @@ class FakeProcessRunner:
     runtime_error_after_ready: str | None = None
     spawn_error: Exception | None = None
     manifest_error: Exception | None = None
+    missing_prepare_attempts: int = 0
+    prepare_calls: int = 0
     last_process: FakeOverlayManagedProcess | None = None
 
     def prepare(self, manifest: OverlayLaunchManifest) -> Path:
         _ = manifest
+        self.prepare_calls += 1
+        if self.prepare_calls <= self.missing_prepare_attempts:
+            raise FileNotFoundError("C:/fake/PuriPulyHeartOverlay.exe")
         if self.manifest_error is not None:
             raise self.manifest_error
         return Path("C:/fake/PuriPulyHeartOverlay.exe")
@@ -208,9 +213,11 @@ class FakeProcessRunner:
 
 @dataclass(slots=True)
 class MissingExecutableRunner:
+    missing_path: Path = Path("missing")
+
     def prepare(self, manifest: OverlayLaunchManifest) -> Path:
         _ = manifest
-        raise FileNotFoundError("missing")
+        raise FileNotFoundError(self.missing_path)
 
     async def spawn(
         self,
@@ -413,13 +420,47 @@ async def test_overlay_process_manager_waits_for_overlay_ready_before_connected(
 
 
 @pytest.mark.asyncio
-async def test_overlay_process_manager_maps_missing_executable_to_failure_reason() -> None:
-    manager = OverlayProcessManager(process_runner=MissingExecutableRunner())
+async def test_overlay_process_manager_maps_missing_executable_to_failure_reason(
+    tmp_path: Path,
+) -> None:
+    missing_path = tmp_path / "PuriPulyHeartOverlay.exe"
+    manager = OverlayProcessManager(
+        process_runner=MissingExecutableRunner(missing_path=missing_path),
+        prepare_retry_attempts=1,
+        prepare_retry_delay_seconds=0,
+        diagnostics_dir=tmp_path,
+    )
 
     await manager.start()
 
     assert manager.state == "failed"
     assert manager.failure_reason == "missing_executable"
+    assert manager._executable_path == missing_path
+    assert manager.diagnostics is not None
+    assert manager.diagnostics.last_dump_path is not None
+    summary = json.loads(manager.diagnostics.last_dump_path.read_text(encoding="utf-8").splitlines()[0])
+    assert summary["executable_path"] == str(missing_path)
+    assert summary["executable_candidates"] == [
+        {"path": str(missing_path), "exists": False}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_overlay_process_manager_retries_a_temporarily_missing_executable() -> None:
+    runner = FakeProcessRunner(ready_event_delay_ms=0, missing_prepare_attempts=1)
+    manager = OverlayProcessManager(
+        process_runner=runner,
+        prepare_retry_attempts=2,
+        prepare_retry_delay_seconds=0,
+    )
+
+    try:
+        await manager.start()
+
+        assert manager.state == "connected"
+        assert runner.prepare_calls == 2
+    finally:
+        await manager.stop()
 
 
 @pytest.mark.asyncio

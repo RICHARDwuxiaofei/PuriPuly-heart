@@ -476,6 +476,8 @@ class OverlayProcessManager:
     diagnostics: OverlayDiagnosticsRecorder | None = None
     task_factory: Any | None = None
     retry_ownership_changed: Callable[[bool], Awaitable[None]] | None = None
+    prepare_retry_attempts: int = 4
+    prepare_retry_delay_seconds: float = 0.25
 
     state: str = field(init=False, default="off")
     failure_reason: str | None = field(init=False, default=None)
@@ -488,6 +490,7 @@ class OverlayProcessManager:
     _last_exit_code: int | None = field(init=False, default=None)
     _executable_path: Path | None = field(init=False, default=None)
     _executable_mtime: float | None = field(init=False, default=None)
+    _executable_candidates: tuple[dict[str, object], ...] = field(init=False, default=())
     _failure_dumped: bool = field(init=False, default=False)
     _shutdown_requested: bool = field(init=False, default=False)
     native_retry_owner_confirmed: bool = field(init=False, default=False)
@@ -516,6 +519,9 @@ class OverlayProcessManager:
         self._current_phase = "startup"
         self._last_transition = "spawn"
         self._last_exit_code = None
+        self._executable_path = None
+        self._executable_mtime = None
+        self._executable_candidates = ()
         self._failure_dumped = False
         self._shutdown_requested = False
         self.restart_scheduled = False
@@ -524,7 +530,7 @@ class OverlayProcessManager:
 
         manifest = self._build_manifest()
         try:
-            executable_path = self.process_runner.prepare(manifest)
+            executable_path = await self._prepare_executable(manifest)
             self._executable_path = executable_path
             self._executable_mtime = (
                 executable_path.stat().st_mtime if executable_path.exists() else None
@@ -553,6 +559,56 @@ class OverlayProcessManager:
             await self._fail("manifest_invalid")
         except OSError:
             await self._fail("spawn_failed")
+
+    async def _prepare_executable(self, manifest: OverlayLaunchManifest) -> Path:
+        attempts = max(1, self.prepare_retry_attempts)
+        for attempt in range(1, attempts + 1):
+            try:
+                return self.process_runner.prepare(manifest)
+            except FileNotFoundError as error:
+                self._executable_path = self._path_from_file_not_found(error)
+                self._executable_candidates = self._resolve_executable_candidates()
+                retrying = attempt < attempts
+                logger.warning(
+                    "[OverlayProcess] Executable unavailable: attempt=%s/%s retrying=%s candidates=%s",
+                    attempt,
+                    attempts,
+                    retrying,
+                    self._executable_candidates,
+                )
+                if not retrying:
+                    raise
+                await asyncio.sleep(max(0.0, self.prepare_retry_delay_seconds))
+        raise RuntimeError("overlay executable preparation exhausted without a result")
+
+    @staticmethod
+    def _path_from_file_not_found(error: FileNotFoundError) -> Path | None:
+        value = error.filename
+        if value is None and error.args:
+            value = error.args[0]
+        if isinstance(value, (str, os.PathLike)):
+            return Path(value)
+        return None
+
+    def _resolve_executable_candidates(self) -> tuple[dict[str, object], ...]:
+        paths: list[Path] = []
+        missing_path = self._executable_path
+        if missing_path is not None:
+            paths.append(missing_path)
+        candidates = getattr(self.process_runner, "default_executable_candidates", None)
+        if callable(candidates):
+            paths.extend(candidates())
+        configured_path = getattr(self.process_runner, "executable_path", None)
+        if isinstance(configured_path, Path):
+            paths.append(configured_path)
+
+        unique_paths: list[Path] = []
+        for path in paths:
+            if path not in unique_paths:
+                unique_paths.append(path)
+        return tuple(
+            {"path": str(path), "exists": path.is_file()} for path in unique_paths
+        )
 
     async def stop(self) -> None:
         self.state = "stopping"
@@ -1046,6 +1102,7 @@ class OverlayProcessManager:
                 manifest_path=self._manifest_path,
                 executable_path=self._executable_path,
                 executable_mtime=self._executable_mtime,
+                executable_candidates=self._executable_candidates,
                 stdout_count=stdout_count,
                 stderr_count=stderr_count,
             )
