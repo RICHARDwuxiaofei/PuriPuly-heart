@@ -418,8 +418,12 @@ class FallbackRacingLLMProvider(LLMProvider):
 
     @staticmethod
     async def _wait_for_deadline(started_at: float, delay_ms: int) -> None:
-        remaining_s = max(0.0, delay_ms / 1000.0 - (time.monotonic() - started_at))
-        await asyncio.sleep(remaining_s)
+        deadline = started_at + delay_ms / 1000.0
+        while True:
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                return
+            await asyncio.sleep(remaining_s)
 
     async def _allow_loser_grace_all(
         self,
