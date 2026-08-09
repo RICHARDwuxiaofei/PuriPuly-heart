@@ -7,6 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from puripuly_heart.config.gpu_model_catalog import (
+    DEFAULT_LOCAL_QWEN_GPU_MODEL_ID,
+    LOCAL_QWEN_GPU_06_MODEL_ID,
+    LOCAL_QWEN_GPU_17_MODEL_ID,
+)
 from puripuly_heart.config.settings import (
     SETTINGS_SCHEMA_VERSION,
     AppSettings,
@@ -18,7 +23,7 @@ from puripuly_heart.config.settings import (
 from puripuly_heart.config.settings import (
     to_dict as legacy_to_dict,
 )
-from puripuly_heart.config.settings_vnext import compat, serialization
+from puripuly_heart.config.settings_vnext import compat, migration, serialization
 from puripuly_heart.config.settings_vnext.schema import (
     VNEXT_SETTINGS_SCHEMA_VERSION,
     AppSettingsVNext,
@@ -32,6 +37,66 @@ LOCAL_PROVIDER_VALUES = (
     STTProviderName.LOCAL_QWEN,
     STTProviderName.LOCAL_QWEN_GPU,
 )
+
+
+def test_gpu_model_selection_defaults_and_roundtrips_through_all_settings_shapes() -> None:
+    legacy = AppSettings()
+
+    assert legacy.stt.gpu_model_id == DEFAULT_LOCAL_QWEN_GPU_MODEL_ID
+    assert legacy.stt.gpu_model_id == LOCAL_QWEN_GPU_17_MODEL_ID
+
+    legacy.stt.gpu_model_id = LOCAL_QWEN_GPU_06_MODEL_ID
+    legacy_roundtrip = legacy_from_dict(legacy_to_dict(legacy))
+    vnext = migration.from_legacy_app_settings(legacy_roundtrip)
+    canonical = serialization.to_dict(vnext)
+    canonical_roundtrip = migration.from_dict(canonical)
+    projected = migration.to_legacy_dict(canonical_roundtrip)
+
+    assert legacy_roundtrip.stt.gpu_model_id == LOCAL_QWEN_GPU_06_MODEL_ID
+    assert canonical["intent"]["stt"]["gpu_model_id"] == LOCAL_QWEN_GPU_06_MODEL_ID
+    assert canonical_roundtrip.intent.stt.gpu_model_id == LOCAL_QWEN_GPU_06_MODEL_ID
+    assert projected["stt"]["gpu_model_id"] == LOCAL_QWEN_GPU_06_MODEL_ID
+
+
+def test_canonical_vnext_without_gpu_model_uses_legacy_default_and_is_normalized() -> None:
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["intent"]["stt"].pop("gpu_model_id")
+
+    settings = migration.from_dict(raw)
+
+    assert settings.intent.stt.gpu_model_id == LOCAL_QWEN_GPU_17_MODEL_ID
+    assert serialization.to_dict(settings)["intent"]["stt"]["gpu_model_id"] == (
+        LOCAL_QWEN_GPU_17_MODEL_ID
+    )
+
+
+def test_v32_without_gpu_model_is_backed_up_and_migrated_once(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    raw = serialization.to_dict(AppSettingsVNext())
+    raw["settings_version"] = 32
+    raw["intent"]["stt"].pop("gpu_model_id")
+    original_bytes = json.dumps(raw, ensure_ascii=False, indent=2).encode("utf-8")
+    path.write_bytes(original_bytes)
+    fixed_now = datetime(2026, 8, 9, 1, 2, 3, tzinfo=timezone.utc)
+
+    first = compat.load_vnext_settings(path, now=fixed_now)
+
+    assert first.ok
+    assert first.migrated is True
+    assert first.backup_path is not None
+    assert first.backup_path.read_bytes() == original_bytes
+    assert first.settings is not None
+    assert first.settings.intent.stt.gpu_model_id == DEFAULT_LOCAL_QWEN_GPU_MODEL_ID
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["settings_version"] == VNEXT_SETTINGS_SCHEMA_VERSION
+    assert persisted["intent"]["stt"]["gpu_model_id"] == DEFAULT_LOCAL_QWEN_GPU_MODEL_ID
+
+    second = compat.load_vnext_settings(path, now=fixed_now)
+
+    assert second.ok
+    assert second.migrated is False
+    assert second.backup_path is None
+    assert len(list(tmp_path.glob("*.bak"))) == 1
 
 
 @pytest.mark.parametrize("provider", LOCAL_PROVIDER_VALUES)

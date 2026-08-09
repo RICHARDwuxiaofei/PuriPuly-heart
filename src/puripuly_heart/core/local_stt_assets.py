@@ -8,15 +8,21 @@ from pathlib import Path
 from typing import Literal
 
 from puripuly_heart.config import paths
+from puripuly_heart.config.gpu_model_catalog import (
+    LOCAL_GPU_MODEL_CATALOG,
+)
+from puripuly_heart.config.gpu_model_catalog import (
+    LOCAL_QWEN_GPU_MODEL_ID as _LOCAL_QWEN_GPU_MODEL_ID,
+)
 
 LOCAL_STT_MODEL_ID = "qwen3-asr-0.6b-int8-sherpa"
+LOCAL_QWEN_GPU_MODEL_ID = _LOCAL_QWEN_GPU_MODEL_ID
 LOCAL_STT_ENGINE = "sherpa-onnx"
 LOCAL_STT_INSTALL_DIRNAME = "qwen3-asr-0.6b-int8-sherpa"
 LOCAL_STT_INSTALLED_MANIFEST_FILENAME = "installed-manifest.json"
 LOCAL_STT_MANIFEST_RELATIVE_PATH = f"data/models/{LOCAL_STT_INSTALL_DIRNAME}.manifest.json"
 PARAKEET_V3_MODEL_ID = "parakeet-tdt-0.6b-v3-int8-sherpa"
 PARAKEET_JAPANESE_MODEL_ID = "parakeet-tdt-ctc-0.6b-ja-int8-sherpa"
-LOCAL_QWEN_GPU_MODEL_ID = "qwen3-asr-1.7b-q6-k-transcribe-vulkan"
 REQUIRED_CPU_LOCAL_STT_MODEL_IDS = (
     PARAKEET_V3_MODEL_ID,
     PARAKEET_JAPANESE_MODEL_ID,
@@ -26,7 +32,7 @@ LOCAL_STT_MANIFEST_RELATIVE_PATHS = {
     LOCAL_STT_MODEL_ID: LOCAL_STT_MANIFEST_RELATIVE_PATH,
     PARAKEET_V3_MODEL_ID: f"data/models/{PARAKEET_V3_MODEL_ID}.manifest.json",
     PARAKEET_JAPANESE_MODEL_ID: f"data/models/{PARAKEET_JAPANESE_MODEL_ID}.manifest.json",
-    LOCAL_QWEN_GPU_MODEL_ID: f"data/models/{LOCAL_QWEN_GPU_MODEL_ID}.manifest.json",
+    **{entry.model_id: entry.manifest_relative_path for entry in LOCAL_GPU_MODEL_CATALOG.values()},
 }
 
 

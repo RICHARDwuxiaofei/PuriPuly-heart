@@ -1,0 +1,24 @@
+{
+  "manifest_version": 1,
+  "installed_manifest_version": 1,
+  "model_id": "qwen3-asr-0.6b-q6-k-transcribe-vulkan",
+  "engine": "transcribe.cpp-vulkan",
+  "upstream_repo": "Qwen/Qwen3-ASR-0.6B@5eb144179a02acc5e5ba31e748d22b0cf3e303b0",
+  "install_dirname": "qwen3-asr-0.6b-q6-k-transcribe-vulkan",
+  "installed_manifest_filename": "installed-manifest.json",
+  "sources": {
+    "huggingface": {
+      "name": "huggingface",
+      "revision": "e4e16599b900eb0cb36e524514756bb92eb092b7",
+      "repo_id": "handy-computer/Qwen3-ASR-0.6B-gguf",
+      "download_url_template": "https://huggingface.co/handy-computer/Qwen3-ASR-0.6B-gguf/resolve/e4e16599b900eb0cb36e524514756bb92eb092b7/{path}"
+    }
+  },
+  "files": [
+    {
+      "relative_path": "Qwen3-ASR-0.6B-Q6_K.gguf",
+      "sha256": "3b051f108f03c0c91bbe1a3b2c1ee15e3ed51e4caec2a48751b01f2a21441cc3",
+      "size_bytes": 690417824
+    }
+  ]
+}

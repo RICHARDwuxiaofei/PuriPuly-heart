@@ -138,6 +138,31 @@ def format_detailed_latency_breakdown(
     return f"[Detailed][LatencyBreakdown] {' '.join(parts)}"
 
 
+def format_detailed_pipeline_latency(
+    *,
+    channel: str,
+    utterance_id: str,
+    stage_durations_ms: Mapping[str, int | None],
+    speech_end_to_final_output_ms: int,
+) -> str:
+    dominant_stage = compute_latency_dominant_stage(stage_durations_ms) or "unavailable"
+    parts = [
+        f"channel={channel}",
+        f"utterance_id={utterance_id}",
+    ]
+    for name in ("asr", "handoff", "llm", "output"):
+        value = stage_durations_ms.get(name)
+        if value is not None:
+            parts.append(f"{name}_ms={max(0, int(value))}")
+    parts.extend(
+        (
+            f"speech_end_to_final_output_ms={speech_end_to_final_output_ms}",
+            f"dominant_stage={dominant_stage}",
+        )
+    )
+    return f"[Detailed][PipelineLatency] {' '.join(parts)}"
+
+
 def compute_latency_dominant_stage(
     stage_durations_ms: Mapping[str, int | None],
 ) -> str | None:
@@ -214,6 +239,7 @@ __all__ = [
     "compute_latency_dominant_stage",
     "format_basic_latency_summary",
     "format_detailed_latency_breakdown",
+    "format_detailed_pipeline_latency",
     "format_detailed_latency_trace",
     "format_latency_cause_metric",
     "format_translation_ready_for_output",

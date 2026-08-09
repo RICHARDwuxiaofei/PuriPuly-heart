@@ -6,6 +6,9 @@ from pathlib import Path
 
 from puripuly_heart.app.wiring_llm_factory import _qwen_api_key_for_resolved_credential
 from puripuly_heart.app.wiring_secrets_factory import require_secret
+from puripuly_heart.config.gpu_model_catalog import (
+    DEFAULT_LOCAL_QWEN_GPU_MODEL_ID,
+)
 from puripuly_heart.config.resolved import ResolvedCredentialRequirement, ResolvedSTTConfig
 from puripuly_heart.config.runtime_resolution import (
     CREDENTIAL_REF_DEEPGRAM_STT,
@@ -35,7 +38,6 @@ from puripuly_heart.config.settings import (
 )
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.core.local_stt_assets import (
-    LOCAL_QWEN_GPU_MODEL_ID,
     LOCAL_STT_MODEL_ID,
     PARAKEET_JAPANESE_MODEL_ID,
     PARAKEET_V3_MODEL_ID,
@@ -269,6 +271,7 @@ def create_stt_backend(
         gpu_runtime=gpu_runtime,
         gpu_model_path=gpu_model_path,
         gpu_device_id=settings.stt.gpu_device_id,
+        gpu_model_id=settings.stt.gpu_model_id,
     )
 
 
@@ -361,6 +364,7 @@ def create_stt_backend_from_resolved_config(
     gpu_runtime: SharedGpuASRRuntime | None = None,
     gpu_model_path: Path | None = None,
     gpu_device_id: str = "auto",
+    gpu_model_id: str = DEFAULT_LOCAL_QWEN_GPU_MODEL_ID,
 ) -> STTBackend:
     stream_label = config.channel
     keyterms = _resolved_stt_keyterms(config)
@@ -403,8 +407,8 @@ def create_stt_backend_from_resolved_config(
         return LocalGpuSTTBackend(
             runtime=gpu_runtime,
             channel=config.channel,
-            model_path=gpu_model_path or local_gpu_model_path(),
-            model_id=LOCAL_QWEN_GPU_MODEL_ID,
+            model_path=gpu_model_path or local_gpu_model_path(model_id=gpu_model_id),
+            model_id=gpu_model_id,
             device_id=gpu_device_id,
             sample_rate_hz=config.sample_rate_hz,
             source_mode=config.source_mode,
@@ -587,6 +591,11 @@ def build_peer_stt_provider_signature_from_vnext(settings: AppSettingsVNext) -> 
             if resolved.provider == STT_PROVIDER_LOCAL_QWEN_GPU
             else None
         ),
+        (
+            settings.intent.stt.gpu_model_id
+            if resolved.provider == STT_PROVIDER_LOCAL_QWEN_GPU
+            else None
+        ),
         resolved.provider_options.get("language_hints_strict", False),
         resolved.source_mode,
     )
@@ -608,6 +617,7 @@ def create_peer_stt_backend(
         gpu_runtime=gpu_runtime,
         gpu_model_path=gpu_model_path,
         gpu_device_id=settings.stt.gpu_device_id,
+        gpu_model_id=settings.stt.gpu_model_id,
     )
 
 
@@ -619,6 +629,7 @@ def create_peer_stt_backend_from_resolved_config(
     gpu_runtime: SharedGpuASRRuntime | None = None,
     gpu_model_path: Path | None = None,
     gpu_device_id: str = "auto",
+    gpu_model_id: str = DEFAULT_LOCAL_QWEN_GPU_MODEL_ID,
 ) -> STTBackend:
     return create_stt_backend_from_resolved_config(
         config,
@@ -627,4 +638,5 @@ def create_peer_stt_backend_from_resolved_config(
         gpu_runtime=gpu_runtime,
         gpu_model_path=gpu_model_path,
         gpu_device_id=gpu_device_id,
+        gpu_model_id=gpu_model_id,
     )

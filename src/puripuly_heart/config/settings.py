@@ -14,6 +14,10 @@ from puripuly_heart.config.audio_host_api import (
     WINDOWS_DIRECTSOUND_HOST_API,
     WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
 )
+from puripuly_heart.config.gpu_model_catalog import (
+    DEFAULT_LOCAL_QWEN_GPU_MODEL_ID,
+    is_local_gpu_model_id,
+)
 from puripuly_heart.config.llm_profiles import (
     OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH,
     OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_CHINA,
@@ -617,6 +621,7 @@ class STTSettings:
     custom_vocabulary_enabled: bool = True
     custom_terms: dict[str, list[str]] = field(default_factory=_default_custom_terms)
     gpu_device_id: str = "auto"
+    gpu_model_id: str = DEFAULT_LOCAL_QWEN_GPU_MODEL_ID
 
     def validate(self) -> None:
         if self.drain_timeout_s <= 0:
@@ -635,6 +640,8 @@ class STTSettings:
             raise ValueError("custom_terms must be a dict[str, list[str]]")
         if not isinstance(self.gpu_device_id, str) or not self.gpu_device_id.strip():
             raise ValueError("gpu_device_id must be a non-empty string")
+        if not is_local_gpu_model_id(self.gpu_model_id):
+            raise ValueError("gpu_model_id must be a supported local GPU ASR model")
         for language, terms in self.custom_terms.items():
             if not isinstance(language, str):
                 raise ValueError("custom_terms keys must be strings")
@@ -1609,6 +1616,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "custom_vocabulary_enabled": settings.stt.custom_vocabulary_enabled,
             "custom_terms": _parse_custom_terms(settings.stt.custom_terms),
             "gpu_device_id": settings.stt.gpu_device_id.strip(),
+            "gpu_model_id": settings.stt.gpu_model_id,
         },
         "deepgram_stt": {
             "model": settings.deepgram_stt.model,
@@ -4077,6 +4085,8 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             custom_vocabulary_enabled=custom_vocabulary_enabled,
             custom_terms=parsed_custom_terms,
             gpu_device_id=str(stt_data.get("gpu_device_id", "auto")).strip() or "auto",
+            gpu_model_id=str(stt_data.get("gpu_model_id", DEFAULT_LOCAL_QWEN_GPU_MODEL_ID)).strip()
+            or DEFAULT_LOCAL_QWEN_GPU_MODEL_ID,
         ),
         deepgram_stt=DeepgramSTTSettings(
             model=str(data.get("deepgram_stt", {}).get("model", "nova-3")),

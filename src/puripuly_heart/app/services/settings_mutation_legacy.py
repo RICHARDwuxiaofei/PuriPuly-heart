@@ -74,6 +74,7 @@ ORDER22_STT_LANGUAGE_AUDIO_SETTINGS_PATHS: Final[tuple[str, ...]] = (
     "stt.custom_vocabulary_enabled",
     "stt.custom_terms",
     "stt.gpu_device_id",
+    "stt.gpu_model_id",
     "deepgram_stt.model",
     "qwen_asr_stt.model",
     "soniox_stt.model",

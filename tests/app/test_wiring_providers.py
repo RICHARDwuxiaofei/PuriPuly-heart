@@ -24,6 +24,10 @@ from puripuly_heart.app.wiring_stt_factory import (
     _self_stt_runtime_intent_from_compatibility_settings,
     resolve_peer_stt_runtime_config,
 )
+from puripuly_heart.config.gpu_model_catalog import (
+    LOCAL_QWEN_GPU_06_MODEL_ID,
+    LOCAL_QWEN_GPU_17_MODEL_ID,
+)
 from puripuly_heart.config.resolved import (
     CREDENTIAL_SOURCE_NONE,
     CREDENTIAL_SOURCE_SECRET_STORE,
@@ -1639,6 +1643,36 @@ def test_create_stt_backend_from_resolved_gpu_provider_fails_without_cpu_fallbac
             resolved,
             secrets=InMemorySecretStore(),
         )
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    (LOCAL_QWEN_GPU_06_MODEL_ID, LOCAL_QWEN_GPU_17_MODEL_ID),
+)
+def test_create_stt_backend_from_resolved_gpu_preserves_selected_model_and_device(
+    model_id: str,
+    tmp_path: Path,
+) -> None:
+    resolved = _resolved_stt_config(
+        provider="local_qwen_gpu",
+        source_language="ja",
+        model=None,
+        credential_reference=None,
+    )
+    model_path = tmp_path / f"{model_id}.gguf"
+
+    backend = wiring_module.create_stt_backend_from_resolved_config(
+        resolved,
+        secrets=InMemorySecretStore(),
+        gpu_runtime=object(),
+        gpu_model_path=model_path,
+        gpu_model_id=model_id,
+        gpu_device_id="vk:device-alpha",
+    )
+
+    assert backend.model_id == model_id
+    assert backend.model_path == model_path
+    assert backend.device_id == "vk:device-alpha"
 
 
 def test_peer_qwen_gpu_auto_omits_hint_while_manual_uses_qwen_code(tmp_path: Path) -> None:

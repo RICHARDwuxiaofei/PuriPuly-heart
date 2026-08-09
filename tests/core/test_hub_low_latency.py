@@ -10,7 +10,10 @@ import numpy as np
 import pytest
 
 from puripuly_heart.core.orchestrator.hub import ClientHub, _MergeBuffer
-from puripuly_heart.core.orchestrator.ports import compute_latency_dominant_stage
+from puripuly_heart.core.orchestrator.ports import (
+    compute_latency_dominant_stage,
+    format_detailed_pipeline_latency,
+)
 from puripuly_heart.core.overlay.state import ActiveSelfOverlayMetadata
 from puripuly_heart.core.runtime_logging import SessionLoggingMode
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
@@ -650,6 +653,38 @@ class TestRuntimeLatencyLogging:
             == "llm_request_to_llm_done"
         )
 
+    def test_pipeline_latency_formats_exclusive_stages(self):
+        message = format_detailed_pipeline_latency(
+            channel="self",
+            utterance_id="01234567",
+            stage_durations_ms={
+                "asr": 20,
+                "handoff": 10,
+                "llm": 30,
+                "output": 120,
+            },
+            speech_end_to_final_output_ms=180,
+        )
+
+        assert "asr_ms=20" in message
+        assert "handoff_ms=10" in message
+        assert "llm_ms=30" in message
+        assert "output_ms=120" in message
+        assert "speech_end_to_final_output_ms=180" in message
+        assert "dominant_stage=output" in message
+
+    def test_pipeline_latency_excludes_speculative_llm_overlap(self):
+        stages = ClientHub._exclusive_pipeline_stage_durations_ms(
+            speech_end_at=10.0,
+            stt_final_at=10.4,
+            llm_request_start_at=10.1,
+            llm_done_at=10.5,
+            final_output_at=10.55,
+        )
+
+        assert stages == {"asr": 400, "handoff": 0, "llm": 100, "output": 50}
+        assert sum(value for value in stages.values() if value is not None) == 550
+
     @pytest.mark.asyncio
     async def test_low_latency_self_and_peer_success_paths_both_use_translate(
         self,
@@ -790,6 +825,7 @@ class TestRuntimeLatencyLogging:
 
             assert not any("[Detailed][Latency]" in message for message in basic_messages)
             assert not any("[Detailed][LatencyBreakdown]" in message for message in basic_messages)
+            assert not any("[Detailed][PipelineLatency]" in message for message in basic_messages)
             assert any(
                 "[Detailed][Latency]" in message and "stage=speech_end" in message
                 for message in detailed_messages
@@ -811,6 +847,14 @@ class TestRuntimeLatencyLogging:
                 and "final_output_stage=" not in message
                 for message in detailed_messages
             )
+            pipeline_latency = next(
+                message for message in detailed_messages if "[Detailed][PipelineLatency]" in message
+            )
+            assert "channel=self" in pipeline_latency
+            assert "asr_ms=50" in pipeline_latency
+            assert "output_ms=0" in pipeline_latency
+            assert "dominant_stage=asr" in pipeline_latency
+            assert "detailed trace" not in pipeline_latency
         finally:
             basic_runtime_logging.close()
             detailed_runtime_logging.close()
@@ -931,6 +975,14 @@ class TestRuntimeLatencyLogging:
             assert "llm_request_to_llm_done_ms=300" in latency_cause
             assert "source secret-token" not in latency_cause
             assert "translated secret-token" not in latency_cause
+            pipeline_latency = next(
+                message for message in messages if "[Detailed][PipelineLatency]" in message
+            )
+            assert "asr_ms=50" in pipeline_latency
+            assert "llm_ms=300" in pipeline_latency
+            assert "dominant_stage=llm" in pipeline_latency
+            assert "source secret-token" not in pipeline_latency
+            assert "translated secret-token" not in pipeline_latency
         finally:
             runtime_logging.close()
             await hub.stop()

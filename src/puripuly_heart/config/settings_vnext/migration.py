@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
+from puripuly_heart.config.gpu_model_catalog import DEFAULT_LOCAL_QWEN_GPU_MODEL_ID
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
 from puripuly_heart.config.settings_vnext import serialization
 from puripuly_heart.config.settings_vnext.schema import (
@@ -180,6 +181,9 @@ def _prepare_vnext_migration_dict(data: Mapping[str, Any]) -> dict[str, Any]:
         intent["translation"] = translation
         prepared["intent"] = intent
     if isinstance(intent, dict):
+        stt = dict(intent.get("stt", {})) if isinstance(intent.get("stt"), Mapping) else {}
+        stt.setdefault("gpu_model_id", DEFAULT_LOCAL_QWEN_GPU_MODEL_ID)
+        intent["stt"] = stt
         if migrate_peer_source_auto:
             _migrate_peer_source_auto_mode(intent)
         if migrate_local_qwen:
@@ -560,6 +564,7 @@ def from_legacy_app_settings(
                 custom_vocabulary_enabled=bool(data["stt"]["custom_vocabulary_enabled"]),
                 custom_terms=copy.deepcopy(data["stt"]["custom_terms"]),
                 gpu_device_id=data["stt"]["gpu_device_id"],
+                gpu_model_id=data["stt"]["gpu_model_id"],
                 deepgram=DeepgramSTTIntent(model=data["deepgram_stt"]["model"]),
                 qwen_asr=QwenASRSTTIntent(model=data["qwen_asr_stt"]["model"]),
                 soniox=SonioxSTTIntent(
@@ -859,6 +864,7 @@ def to_legacy_dict(settings: AppSettingsVNext) -> dict[str, Any]:
         "custom_vocabulary_enabled": intent.stt.custom_vocabulary_enabled,
         "custom_terms": copy.deepcopy(intent.stt.custom_terms),
         "gpu_device_id": intent.stt.gpu_device_id,
+        "gpu_model_id": intent.stt.gpu_model_id,
     }
     data["deepgram_stt"] = {"model": intent.stt.deepgram.model}
     data["qwen_asr_stt"]["model"] = intent.stt.qwen_asr.model

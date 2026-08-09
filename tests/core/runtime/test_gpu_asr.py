@@ -257,6 +257,36 @@ async def test_device_change_after_full_quiesce_accepts_both_channel_orders(
     await runtime.close()
 
 
+async def test_model_change_after_full_quiesce_rebuilds_one_shared_worker() -> None:
+    old_client = FakeGpuWorkerClient()
+    new_client = FakeGpuWorkerClient()
+    runtime = SharedGpuASRRuntime(process_factory=FakeGpuWorkerFactory([old_client, new_client]))
+
+    for channel in ("self", "peer"):
+        await runtime.activate_channel(
+            channel,
+            model_path=Path("qwen3-asr-1.7b.gguf"),
+            model_id="qwen3-asr-1.7b-q6-k-transcribe-vulkan",
+            device_id="vulkan:0",
+        )
+    for channel in ("self", "peer"):
+        await runtime.deactivate_channel(channel)
+    for channel in ("peer", "self"):
+        await runtime.activate_channel(
+            channel,
+            model_path=Path("qwen3-asr-0.6b.gguf"),
+            model_id="qwen3-asr-0.6b-q6-k-transcribe-vulkan",
+            device_id="vulkan:0",
+        )
+
+    assert old_client.close_calls == 1
+    assert new_client.activate_calls == [(Path("qwen3-asr-0.6b.gguf").resolve(), "vulkan:0")]
+    assert runtime.active_channels == frozenset({"self", "peer"})
+    assert runtime.configured_model_id == "qwen3-asr-0.6b-q6-k-transcribe-vulkan"
+    assert runtime.configured_device_id == "vulkan:0"
+    await runtime.close()
+
+
 async def test_explicit_device_requires_the_worker_to_activate_that_exact_device() -> None:
     diagnostics = []
     client = FakeGpuWorkerClient()

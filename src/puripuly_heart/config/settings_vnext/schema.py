@@ -10,6 +10,10 @@ from datetime import date
 from typing import Final, Literal
 
 from puripuly_heart.config.audio_host_api import WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+from puripuly_heart.config.gpu_model_catalog import (
+    DEFAULT_LOCAL_QWEN_GPU_MODEL_ID,
+    is_local_gpu_model_id,
+)
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
 
 VNEXT_SETTINGS_SCHEMA_VERSION: Final = 32
@@ -379,6 +383,7 @@ class STTIntent:
     custom_vocabulary_enabled: bool = True
     custom_terms: dict[str, list[str]] = field(default_factory=_default_custom_terms)
     gpu_device_id: str = "auto"
+    gpu_model_id: str = DEFAULT_LOCAL_QWEN_GPU_MODEL_ID
     deepgram: DeepgramSTTIntent = field(default_factory=DeepgramSTTIntent)
     qwen_asr: QwenASRSTTIntent = field(default_factory=QwenASRSTTIntent)
     soniox: SonioxSTTIntent = field(default_factory=SonioxSTTIntent)
@@ -386,6 +391,18 @@ class STTIntent:
     def __post_init__(self) -> None:
         device_id = self.gpu_device_id if isinstance(self.gpu_device_id, str) else "auto"
         object.__setattr__(self, "gpu_device_id", device_id.strip() or "auto")
+        model_id = (
+            self.gpu_model_id
+            if isinstance(self.gpu_model_id, str)
+            else DEFAULT_LOCAL_QWEN_GPU_MODEL_ID
+        )
+        object.__setattr__(
+            self,
+            "gpu_model_id",
+            model_id.strip() or DEFAULT_LOCAL_QWEN_GPU_MODEL_ID,
+        )
+        if not is_local_gpu_model_id(self.gpu_model_id):
+            raise ValueError("gpu_model_id must be a supported local GPU ASR model")
 
 
 @dataclass(frozen=True, slots=True)

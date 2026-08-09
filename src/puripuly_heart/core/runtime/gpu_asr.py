@@ -188,6 +188,10 @@ class SharedGpuASRRuntime:
     def configured_device_id(self) -> str | None:
         return self._config.device_id if self._config is not None else None
 
+    @property
+    def configured_model_id(self) -> str | None:
+        return self._config.model_id if self._config is not None else None
+
     async def discover_devices(self) -> tuple[GpuWorkerDevice, ...]:
         async with self._discovery_lock:
             self._ensure_open()

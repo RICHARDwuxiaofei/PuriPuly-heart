@@ -2287,9 +2287,7 @@ def test_gpu_selection_shows_one_shared_device_card_and_retains_unavailable_save
     view, _ = _make_settings_view(monkeypatch)
 
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.set_gpu_devices(
-        devices=(GpuDeviceOption("vk:0", "NVIDIA GeForce RTX 4070", "Vulkan0", "gpu"),)
-    )
+    view.set_gpu_devices(devices=(GpuDeviceOption("vk:0", "Device Alpha", "Backend Alpha", "gpu"),))
 
     assert view._gpu_device_card.visible is True
     assert view._gpu_device_row.visible is True
@@ -2301,15 +2299,14 @@ def test_gpu_selection_shows_one_shared_device_card_and_retains_unavailable_save
     view._on_gpu_device_selected("vk:0")
 
     assert view._gpu_device_text.content.value == (
-        "NVIDIA GeForce RTX 4070"
-        f" · {t('settings.gpu_device.type.discrete')}"
+        "Device Alpha" f" · {t('settings.gpu_device.type.discrete')}"
     )
     pending = view.build_provider_apply_settings()
     assert pending is not None
     assert pending.stt.gpu_device_id == "vk:0"
 
 
-def test_gpu_card_is_standard_one_by_one_and_contains_only_device_selection(
+def test_gpu_card_is_standard_one_by_one_and_contains_model_and_device_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -2327,11 +2324,12 @@ def test_gpu_card_is_standard_one_by_one_and_contains_only_device_selection(
     assert view._gpu_device_text.content.color == view._stt_text.content.color
     assert view._gpu_device_text.content.text_align == view._stt_text.content.text_align
     assert len(view._gpu_device_row.content.controls) == 3
+    assert view._gpu_device_row.content.controls[0] is view._gpu_model_card
     assert view._gpu_device_row.content.controls[1].opacity == 1.0
     assert view._gpu_device_row.content.controls[2].opacity == 1.0
 
 
-def test_gpu_device_modal_shows_graphics_card_name_and_vulkan_slot(
+def test_gpu_device_modal_lists_all_runtime_devices_without_vendor_filtering(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -2366,8 +2364,9 @@ def test_gpu_device_modal_shows_graphics_card_name_and_vulkan_slot(
     view.load_from_settings(settings, config_path=Path("settings.json"))
     view.set_gpu_devices(
         devices=(
-            GpuDeviceOption("vk:0", "NVIDIA GeForce RTX 4070", "Vulkan0", "gpu"),
-            GpuDeviceOption("vk:1", "AMD Radeon RX 7900 XTX", "Vulkan1", "gpu"),
+            GpuDeviceOption("vk:0", "Device Alpha", "Backend Alpha", "igpu"),
+            GpuDeviceOption("vk:1", "Device Beta", "Backend Beta", "gpu"),
+            GpuDeviceOption("vk:2", "Device Gamma", "Backend Gamma", "accel"),
         )
     )
 
@@ -2378,17 +2377,72 @@ def test_gpu_device_modal_shows_graphics_card_name_and_vulkan_slot(
     assert captured["title"] == t("settings.gpu_device.title")
     assert captured["show_description"] is True
     assert captured["current"] == "vk:1"
-    assert [option.value for option in options] == ["auto", "vk:0", "vk:1"]
+    assert [option.value for option in options] == ["auto", "vk:0", "vk:1", "vk:2"]
     assert [option.label for option in options] == [
         t("settings.gpu_device.auto"),
-        "NVIDIA GeForce RTX 4070",
-        "AMD Radeon RX 7900 XTX",
+        "Device Alpha",
+        "Device Beta",
+        "Device Gamma",
     ]
     assert [option.description for option in options] == [
         "",
-        f"{t('settings.gpu_device.type.discrete')} · Vulkan 0",
-        f"{t('settings.gpu_device.type.discrete')} · Vulkan 1",
+        f"{t('settings.gpu_device.type.integrated')} · Backend Alpha",
+        f"{t('settings.gpu_device.type.discrete')} · Backend Beta",
+        f"{t('settings.gpu_device.type.accelerator')} · Backend Gamma",
     ]
+
+
+def test_gpu_model_modal_selects_one_shared_catalog_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN_GPU
+    view, _ = _make_settings_view(monkeypatch)
+    page = attach_dummy_page(monkeypatch, view)
+    captured: dict[str, object] = {}
+
+    class CapturingModal:
+        def __init__(
+            self,
+            page_arg,
+            title,
+            options,
+            on_select,
+            *,
+            show_description=False,
+        ) -> None:
+            captured.update(
+                page=page_arg,
+                title=title,
+                options=options,
+                on_select=on_select,
+                show_description=show_description,
+            )
+
+        def open(self, current: str) -> None:
+            captured["current"] = current
+
+    monkeypatch.setattr(settings_view, "SettingsModal", CapturingModal)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_gpu_model_click(None)
+    options = captured["options"]
+
+    assert captured["page"] is page
+    assert captured["title"] == t("settings.gpu_model.title")
+    assert captured["show_description"] is True
+    assert captured["current"] == "qwen3-asr-1.7b-q6-k-transcribe-vulkan"
+    assert [option.value for option in options] == [
+        "qwen3-asr-0.6b-q6-k-transcribe-vulkan",
+        "qwen3-asr-1.7b-q6-k-transcribe-vulkan",
+    ]
+    assert [option.label for option in options] == ["Qwen3 ASR 0.6B", "Qwen3 ASR 1.7B"]
+
+    view._on_gpu_model_selected("qwen3-asr-0.6b-q6-k-transcribe-vulkan")
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.stt.gpu_model_id == "qwen3-asr-0.6b-q6-k-transcribe-vulkan"
 
 
 def test_gpu_row_repaints_and_collapses_immediately_with_provider_selection(

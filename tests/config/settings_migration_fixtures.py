@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from puripuly_heart.config.audio_host_api import WINDOWS_DIRECTSOUND_HOST_API
+from puripuly_heart.config.gpu_model_catalog import LOCAL_QWEN_GPU_06_MODEL_ID
 from puripuly_heart.config.settings import (
     DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS,
     DEFAULT_OPENROUTER_BROKER_BASE_URL,
@@ -151,6 +152,7 @@ CURRENT_USER_INTENT_DESTINATIONS = {
     "stt.custom_vocabulary_enabled": "intent.stt.custom_vocabulary_enabled",
     "stt.drain_timeout_s": "intent.stt.drain_timeout_s",
     "stt.gpu_device_id": "intent.stt.gpu_device_id",
+    "stt.gpu_model_id": "intent.stt.gpu_model_id",
     "stt.low_latency_merge_gap_ms": "intent.stt.low_latency_merge_gap_ms",
     "stt.low_latency_mode": "intent.stt.low_latency_mode",
     "stt.low_latency_spec_retry_max": "intent.stt.low_latency_spec_retry_max",
@@ -367,6 +369,7 @@ def maximal_v24_settings_fixture() -> dict[str, Any]:
     settings.stt.custom_vocabulary_enabled = False
     settings.stt.custom_terms = {"en": ["fixture-term"], "ja": ["フィクスチャ"]}
     settings.stt.gpu_device_id = "vulkan-device-fixture"
+    settings.stt.gpu_model_id = LOCAL_QWEN_GPU_06_MODEL_ID
     settings.deepgram_stt.model = "nova-2"
     settings.qwen_asr_stt.model = "qwen-asr-fixture"
     settings.soniox_stt.model = "stt-rt-fixture"

@@ -13,8 +13,8 @@ from uuid import uuid4
 
 import httpx
 
+from puripuly_heart.config.gpu_model_catalog import is_local_gpu_model_id
 from puripuly_heart.core.local_stt_assets import (
-    LOCAL_QWEN_GPU_MODEL_ID,
     LOCAL_STT_MODEL_ID,
     InstalledLocalSTTManifest,
     LocalSTTAssetError,
@@ -177,7 +177,7 @@ def _uses_huggingface_xet(
 ) -> bool:
     source = manifest.sources[source_name]
     return (
-        manifest.model_id == LOCAL_QWEN_GPU_MODEL_ID
+        is_local_gpu_model_id(manifest.model_id)
         and source_name == "huggingface"
         and bool(source.repo_id)
     )

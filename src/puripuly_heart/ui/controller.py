@@ -131,6 +131,7 @@ from puripuly_heart.app.wiring import (
 )
 from puripuly_heart.config.audio_host_api import normalize_input_host_api
 from puripuly_heart.config.capture_target_resolution import resolve_desktop_audio_capture_target
+from puripuly_heart.config.gpu_model_catalog import DEFAULT_LOCAL_QWEN_GPU_MODEL_ID
 from puripuly_heart.config.llm_profiles import (
     get_openrouter_selection_alias_for_model_and_source,
     profile_for_alias,
@@ -203,7 +204,6 @@ from puripuly_heart.core.local_gpu_assets import (
     local_gpu_model_path,
 )
 from puripuly_heart.core.local_stt_assets import (
-    LOCAL_QWEN_GPU_MODEL_ID,
     LOCAL_STT_MODEL_ID,
     REQUIRED_CPU_LOCAL_STT_MODEL_IDS,
     LocalParakeetSherpaLoadError,
@@ -1170,6 +1170,7 @@ class GuiController:
         default=None,
         repr=False,
     )
+    _gpu_install_failure_model_id: str | None = field(init=False, default=None, repr=False)
     _gpu_install_percent: int | None = field(init=False, default=None, repr=False)
     _peer_local_stt_probe_task: asyncio.Task[LocalCPUInstallSnapshot] | None = field(
         init=False,
@@ -1533,13 +1534,7 @@ class GuiController:
         await self.preload_saved_gpu_device_discovery()
 
     async def preload_saved_gpu_device_discovery(self) -> tuple[GpuWorkerDevice, ...]:
-        if self.settings is None:
-            return ()
-        if self.settings.provider.stt != STTProviderName.LOCAL_QWEN_GPU and (
-            self.settings.provider.peer_stt != STTProviderName.LOCAL_QWEN_GPU
-        ):
-            return ()
-        return await self.ensure_gpu_device_discovery(origin="startup")
+        return await self.ensure_gpu_device_discovery(force=True, origin="startup")
 
     def _schedule_process_discovery_idle_preparation(self) -> None:
         if self._process_idle_preparation_scheduled:
@@ -1568,6 +1563,15 @@ class GuiController:
             self._get_gpu_asr_runtime() if value == STTProviderName.LOCAL_QWEN_GPU.value else None
         )
 
+    def _selected_gpu_model_id(self, settings: AppSettings | None = None) -> str:
+        selected_settings = settings or self.settings
+        if selected_settings is None:
+            return DEFAULT_LOCAL_QWEN_GPU_MODEL_ID
+        return selected_settings.stt.gpu_model_id
+
+    def _selected_gpu_model_path(self, settings: AppSettings | None = None) -> Path:
+        return local_gpu_model_path(model_id=self._selected_gpu_model_id(settings))
+
     def _set_gpu_ui_state(
         self,
         state: str,
@@ -1588,6 +1592,8 @@ class GuiController:
                 display_name=device.description.strip() or device.name,
                 backend_name=device.name,
                 device_type=device.device_type,
+                registry_index=device.registry_index,
+                memory_total_bytes=device.memory_total_bytes,
             )
             for device in self._gpu_devices
         )
@@ -1811,10 +1817,15 @@ class GuiController:
             return self._gpu_devices
 
     def _gpu_idle_ui_state(self) -> str:
-        model_path = local_gpu_model_path()
+        model_id = self._selected_gpu_model_id()
+        model_path = self._selected_gpu_model_path()
         if not model_path.is_file():
             return "not_installed"
-        snapshot = inspect_local_gpu_install(explicit_opt_in=True, verify_checksums=False)
+        snapshot = inspect_local_gpu_install(
+            explicit_opt_in=True,
+            model_id=model_id,
+            verify_checksums=False,
+        )
         self._gpu_install_snapshot = snapshot
         return "installed" if snapshot.activation_allowed else "invalid"
 
@@ -1825,6 +1836,7 @@ class GuiController:
             self._gpu_asr_runtime is not None
             and self._gpu_asr_runtime.state == GpuASRRuntimeState.READY
             and self._gpu_asr_runtime.configured_device_id == self.settings.stt.gpu_device_id
+            and self._gpu_asr_runtime.configured_model_id == self.settings.stt.gpu_model_id
         ):
             self._set_gpu_ui_state("ready", origin="activation")
             return True
@@ -1870,17 +1882,23 @@ class GuiController:
                 origin="explicit_install",
             )
             return False
-        if self._gpu_ui_state == "install_failed":
+        selected_model_id = self._selected_gpu_model_id()
+        if (
+            self._gpu_ui_state == "install_failed"
+            and self._gpu_install_failure_model_id == selected_model_id
+        ):
             self._set_gpu_ui_state(
                 "install_failed",
                 publish_notice=True,
                 origin="explicit_install",
             )
             return False
+        self._gpu_install_failure_model_id = None
         self._set_gpu_ui_state("validating", origin="activation")
         snapshot = await run_owned_thread_call(
             lambda: inspect_local_gpu_install(
                 explicit_opt_in=True,
+                model_id=selected_model_id,
                 verify_checksums=False,
             )
         )
@@ -1911,6 +1929,12 @@ class GuiController:
             )
         )
 
+    def _gpu_install_target_is_selected(self, model_id: str) -> bool:
+        return bool(
+            self._selected_gpu_provider_requires_model()
+            and self._selected_gpu_model_id() == model_id
+        )
+
     async def install_selected_gpu_model_if_needed(self) -> bool:
         if not self._selected_gpu_provider_requires_model():
             return False
@@ -1920,10 +1944,21 @@ class GuiController:
             and runtime.download_task is not None
             and not runtime.download_task.done()
         ):
-            return False
+            try:
+                await asyncio.shield(runtime.download_task)
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+                return False
+            except Exception:
+                return False
+            if not self._selected_gpu_provider_requires_model():
+                return False
         snapshot = await run_owned_thread_call(
             lambda: inspect_local_gpu_install(
                 explicit_opt_in=True,
+                model_id=self._selected_gpu_model_id(),
                 verify_checksums=False,
             )
         )
@@ -1942,11 +1977,14 @@ class GuiController:
             self._gpu_install_runtime = runtime
         if runtime.download_task is not None and not runtime.download_task.done():
             return
-        manifest = load_local_gpu_asset_manifest()
+        manifest = load_local_gpu_asset_manifest(self._selected_gpu_model_id())
+        self._gpu_install_failure_model_id = None
 
         async def run_install(cancel_event: threading.Event, generation: int) -> object:
             async def on_status(update: RuntimeLocalSTTStatusUpdate) -> None:
-                if runtime.is_current_generation(generation):
+                if runtime.is_current_generation(
+                    generation
+                ) and self._gpu_install_target_is_selected(manifest.model_id):
                     self._gpu_install_percent = update.percent
                     self._set_gpu_ui_state(
                         "installing",
@@ -1980,12 +2018,11 @@ class GuiController:
             snapshot = await run_owned_thread_call(
                 lambda: inspect_local_gpu_install(
                     explicit_opt_in=True,
+                    model_id=manifest.model_id,
                     verify_checksums=True,
                 )
             )
-            self._gpu_install_snapshot = snapshot
             if not snapshot.activation_allowed:
-                self._gpu_install_percent = None
                 self.log_basic(
                     "[LocalASR][Install] "
                     f"model={manifest.model_id} origin={origin} outcome=failed "
@@ -1993,20 +2030,27 @@ class GuiController:
                     "failure_code=post_install_validation_failed",
                     level=logging.ERROR,
                 )
-                self._set_gpu_ui_state(
-                    "invalid",
-                    publish_notice=True,
-                    origin=origin,
-                )
+                if self._gpu_install_target_is_selected(manifest.model_id):
+                    self._gpu_install_snapshot = snapshot
+                    self._gpu_install_percent = None
+                    self._set_gpu_ui_state(
+                        "invalid",
+                        publish_notice=True,
+                        origin=origin,
+                    )
                 return
-            pending = self._gpu_pending_enable_channels
-            self._gpu_install_percent = None
-            self._set_gpu_ui_state("installed", origin=origin)
             self.log_basic(
                 "[LocalASR][Install] "
                 f"model={manifest.model_id} origin={origin} outcome=ready "
                 f"elapsed_seconds={time.monotonic() - install_started_at:.3f}"
             )
+            if not self._gpu_install_target_is_selected(manifest.model_id):
+                return
+            self._gpu_install_snapshot = snapshot
+            self._gpu_install_failure_model_id = None
+            pending = self._gpu_pending_enable_channels | self._gpu_manual_retry_channels
+            self._gpu_install_percent = None
+            self._set_gpu_ui_state("installed", origin=origin)
             if pending:
                 await self.retry_gpu_activation()
         except asyncio.CancelledError:
@@ -2017,7 +2061,6 @@ class GuiController:
             )
             raise
         except Exception as exc:
-            self._gpu_install_percent = None
             self.log_detailed(
                 "[GPU ASR] model_install failure=unexpected",
                 level=logging.WARNING,
@@ -2030,11 +2073,14 @@ class GuiController:
                 f"failure_type={type(exc).__name__}",
                 level=logging.ERROR,
             )
-            self._set_gpu_ui_state(
-                "install_failed",
-                publish_notice=True,
-                origin=origin,
-            )
+            if self._gpu_install_target_is_selected(manifest.model_id):
+                self._gpu_install_failure_model_id = manifest.model_id
+                self._gpu_install_percent = None
+                self._set_gpu_ui_state(
+                    "install_failed",
+                    publish_notice=True,
+                    origin=origin,
+                )
 
     async def retry_gpu_activation(self) -> None:
         if self.settings is None:
@@ -2339,6 +2385,11 @@ class GuiController:
             local_qwen_identity,
             (
                 settings.stt.gpu_device_id
+                if settings.provider.stt == STTProviderName.LOCAL_QWEN_GPU
+                else None
+            ),
+            (
+                settings.stt.gpu_model_id
                 if settings.provider.stt == STTProviderName.LOCAL_QWEN_GPU
                 else None
             ),
@@ -4799,7 +4850,7 @@ class GuiController:
         capture_target = resolve_desktop_audio_capture_target(desktop_audio.capture_target)
         model_id = None
         if backend.provider == STTProviderName.LOCAL_QWEN_GPU.value:
-            model_id = LOCAL_QWEN_GPU_MODEL_ID
+            model_id = self._selected_gpu_model_id(settings)
         elif backend.provider in LOCAL_CPU_PROVIDERS:
             decision = resolve_local_asr_selection(
                 backend.provider,
@@ -8598,7 +8649,10 @@ class GuiController:
             ),
             coordinated_gpu_restart=(
                 prev_settings is not None
-                and prev_settings.stt.gpu_device_id != next_settings.stt.gpu_device_id
+                and (
+                    prev_settings.stt.gpu_device_id != next_settings.stt.gpu_device_id
+                    or prev_settings.stt.gpu_model_id != next_settings.stt.gpu_model_id
+                )
                 and (
                     prev_settings.provider.stt == STTProviderName.LOCAL_QWEN_GPU
                     or prev_settings.provider.peer_stt == STTProviderName.LOCAL_QWEN_GPU
@@ -9592,7 +9646,7 @@ class GuiController:
             secrets=secrets,
             diagnostics_enabled=self._detailed_audio_diag_enabled,
             gpu_runtime=self._gpu_runtime_for_provider(settings.provider.stt),
-            gpu_model_path=local_gpu_model_path(),
+            gpu_model_path=self._selected_gpu_model_path(settings),
         )
         return ManagedSTTProvider(
             backend=backend,
@@ -9670,7 +9724,7 @@ class GuiController:
     ) -> LocalASRTransitionRequest | None:
         provider = settings.provider.stt.value
         if provider == STTProviderName.LOCAL_QWEN_GPU.value:
-            model_id = LOCAL_QWEN_GPU_MODEL_ID
+            model_id = self._selected_gpu_model_id(settings)
             actual_provider = provider
         elif provider in LOCAL_CPU_PROVIDERS:
             decision = resolve_local_asr_selection(
@@ -9758,8 +9812,9 @@ class GuiController:
             secrets=secrets,
             diagnostics_enabled=self._detailed_audio_diag_enabled,
             gpu_runtime=self._gpu_runtime_for_provider(config.backend.provider),
-            gpu_model_path=local_gpu_model_path(),
+            gpu_model_path=self._selected_gpu_model_path(self.settings),
             gpu_device_id=self.settings.stt.gpu_device_id,
+            gpu_model_id=self.settings.stt.gpu_model_id,
         )
         return ManagedSTTProvider(
             backend=peer_backend,
@@ -10438,7 +10493,7 @@ class GuiController:
                 secrets=secrets,
                 diagnostics_enabled=self._detailed_audio_diag_enabled,
                 gpu_runtime=self._gpu_runtime_for_provider(self.settings.provider.stt),
-                gpu_model_path=local_gpu_model_path(),
+                gpu_model_path=self._selected_gpu_model_path(self.settings),
             )
             stt = ManagedSTTProvider(
                 backend=backend,

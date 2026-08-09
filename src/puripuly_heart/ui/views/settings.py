@@ -16,6 +16,11 @@ import flet as ft
 
 from puripuly_heart.app.services.local_asr_selection import resolve_local_asr_selection
 from puripuly_heart.app.wiring import create_secret_store
+from puripuly_heart.config.gpu_model_catalog import (
+    DEFAULT_LOCAL_QWEN_GPU_MODEL_ID,
+    local_gpu_model_catalog_entries,
+    require_local_gpu_model,
+)
 from puripuly_heart.config.llm_profiles import (
     profile_for_alias,
 )
@@ -1494,6 +1499,23 @@ class SettingsView(ft.Column):
             content=ft.Row([stt_card, peer_stt_card, trans_card], spacing=16, expand=True),
         )
 
+        self._gpu_model_title = ft.Text(
+            t("settings.gpu_model.title"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._gpu_model_text = self._build_clickable_text(
+            require_local_gpu_model(DEFAULT_LOCAL_QWEN_GPU_MODEL_ID).display_label,
+            self._on_gpu_model_click,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+        self._gpu_model_card = self._wrap_unit_card(
+            title=self._gpu_model_title,
+            value=self._gpu_model_text,
+        )
+        self._gpu_model_card.visible = False
         self._gpu_device_title = ft.Text(
             t("settings.gpu_device.title"),
             size=24,
@@ -1511,14 +1533,13 @@ class SettingsView(ft.Column):
             value=self._gpu_device_text,
         )
         self._gpu_device_card.visible = False
-        gpu_placeholder_1 = self._wrap_empty_unit_card()
-        gpu_placeholder_2 = self._wrap_empty_unit_card()
+        gpu_placeholder = self._wrap_empty_unit_card()
         self._gpu_device_row = ft.Container(
             content=ft.Row(
                 [
+                    self._gpu_model_card,
                     self._gpu_device_card,
-                    gpu_placeholder_1,
-                    gpu_placeholder_2,
+                    gpu_placeholder,
                 ],
                 spacing=16,
                 expand=True,
@@ -2222,10 +2243,11 @@ class SettingsView(ft.Column):
         )
 
     def _sync_gpu_device_card(self) -> None:
-        if not hasattr(self, "_gpu_device_text"):
+        if not hasattr(self, "_gpu_device_text") or not hasattr(self, "_gpu_model_text"):
             return
         settings = self._build_settings_with_provider_draft()
         selected = settings.stt.gpu_device_id if settings is not None else "auto"
+        model_id = settings.stt.gpu_model_id if settings is not None else None
         devices = getattr(self, "_gpu_devices", ())
         selected_device = next(
             (device for device in devices if device.device_id == selected),
@@ -2234,11 +2256,19 @@ class SettingsView(ft.Column):
         if selected == "auto":
             label = t("settings.gpu_device.auto")
         elif selected_device is not None:
-            label = f"{selected_device.display_name} · {self._gpu_device_type_label(selected_device)}"
+            label = (
+                f"{selected_device.display_name} · {self._gpu_device_type_label(selected_device)}"
+            )
         else:
             label = t("settings.gpu_device.unavailable", device=selected)
         self._set_unit_card_value_text(self._gpu_device_text, label)
+        if model_id is not None:
+            self._set_unit_card_value_text(
+                self._gpu_model_text,
+                require_local_gpu_model(model_id).display_label,
+            )
         visible = self._gpu_selected(settings)
+        self._gpu_model_card.visible = visible
         self._gpu_device_card.visible = visible
         self._gpu_device_row.visible = visible
         _update_control_if_mounted(self._gpu_device_row)
@@ -2260,7 +2290,9 @@ class SettingsView(ft.Column):
             "accel": "settings.gpu_device.type.accelerator",
             "cpu": "settings.gpu_device.type.cpu",
         }
-        return t(key_by_type.get(device.device_type.strip().lower(), "settings.gpu_device.type.other"))
+        return t(
+            key_by_type.get(device.device_type.strip().lower(), "settings.gpu_device.type.other")
+        )
 
     @staticmethod
     def _gpu_backend_label(name: str) -> str:
@@ -2268,6 +2300,61 @@ class SettingsView(ft.Column):
         if match is not None:
             return f"Vulkan {match.group(1)}"
         return name.strip()
+
+    @staticmethod
+    def _gpu_reported_memory_label(device: GpuDeviceOption) -> str | None:
+        total_bytes = device.memory_total_bytes
+        if not isinstance(total_bytes, int) or total_bytes <= 0:
+            return None
+        gib = total_bytes / (1024**3)
+        return t("settings.gpu_device.reported_memory", memory=f"{gib:.1f} GiB")
+
+    def _gpu_device_description(self, device: GpuDeviceOption) -> str:
+        parts = [
+            self._gpu_device_type_label(device),
+            self._gpu_backend_label(device.backend_name),
+        ]
+        if device.registry_index is not None:
+            parts.append(t("settings.gpu_device.registry_index", index=device.registry_index))
+        reported_memory = self._gpu_reported_memory_label(device)
+        if reported_memory is not None:
+            parts.append(reported_memory)
+        return " · ".join(parts)
+
+    def _on_gpu_model_click(self, _event) -> None:
+        if not self.page:
+            return
+        settings = self._build_settings_with_provider_draft()
+        selected = (
+            settings.stt.gpu_model_id if settings is not None else DEFAULT_LOCAL_QWEN_GPU_MODEL_ID
+        )
+        options = [
+            OptionItem(
+                value=entry.model_id,
+                label=entry.display_label,
+                description=t(
+                    "settings.gpu_model.description",
+                    quantization=entry.quantization,
+                ),
+            )
+            for entry in local_gpu_model_catalog_entries()
+        ]
+        SettingsModal(
+            self.page,
+            t("settings.gpu_model.title"),
+            options,
+            self._on_gpu_model_selected,
+            show_description=True,
+        ).open(selected)
+
+    def _on_gpu_model_selected(self, value: str) -> None:
+        if self._settings is None:
+            return
+        require_local_gpu_model(value)
+        draft = self._ensure_provider_settings_draft()
+        draft.stt.gpu_model_id = value
+        self.has_provider_changes = True
+        self._sync_gpu_device_card()
 
     def _on_gpu_device_click(self, _event) -> None:
         if not self.page:
@@ -2284,10 +2371,7 @@ class SettingsView(ft.Column):
             OptionItem(
                 value=device.device_id,
                 label=device.display_name,
-                description=(
-                    f"{self._gpu_device_type_label(device)} · "
-                    f"{self._gpu_backend_label(device.backend_name)}"
-                ),
+                description=self._gpu_device_description(device),
             )
             for device in self._gpu_devices
         )
@@ -2795,6 +2879,7 @@ class SettingsView(ft.Column):
         target.provider.stt = source.provider.stt
         target.provider.peer_stt = source.provider.peer_stt
         target.stt.gpu_device_id = source.stt.gpu_device_id
+        target.stt.gpu_model_id = source.stt.gpu_model_id
         target.provider.llm = source.provider.llm
         target.translation = copy.deepcopy(source.translation)
         target.gemini.llm_model = source.gemini.llm_model
@@ -5331,6 +5416,7 @@ class SettingsView(ft.Column):
         self._peer_provider_title.value = t("settings.section.peer_stt")
         self._dashboard_language_redirect_text.value = t("settings.dashboard_language_redirect")
         self._peer_stt_label.value = t("settings.peer_stt_provider")
+        self._gpu_model_title.value = t("settings.gpu_model.title")
         self._gpu_device_title.value = t("settings.gpu_device.title")
         self._overlay_target_title.value = t("settings.overlay.caption_location")
         self._overlay_translation_title.value = t("settings.overlay.show_translation")

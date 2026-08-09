@@ -52,6 +52,7 @@ from puripuly_heart.core.orchestrator.ports import (
     format_basic_latency_summary,
     format_detailed_latency_breakdown,
     format_detailed_latency_trace,
+    format_detailed_pipeline_latency,
     format_latency_cause_metric,
     format_translation_ready_for_output,
     runtime_logging_mode_is_detailed,
@@ -128,6 +129,7 @@ class _LatencyTimeline:
     emitted_trace_points: set[str] = field(default_factory=set)
     basic_summary_emitted: bool = False
     latency_cause_emitted: bool = False
+    pipeline_latency_emitted: bool = False
 
 
 class _StaleProviderCompletion(Exception):
@@ -460,6 +462,44 @@ class ClientHub:
             return None
         return max(0, int(round((end_at - start_at) * 1000)))
 
+    @classmethod
+    def _exclusive_pipeline_stage_durations_ms(
+        cls,
+        *,
+        speech_end_at: float | None,
+        stt_final_at: float | None,
+        llm_request_start_at: float | None,
+        llm_done_at: float | None,
+        final_output_at: float | None,
+    ) -> dict[str, int | None] | None:
+        total_ms = cls._elapsed_latency_ms(speech_end_at, final_output_at)
+        if total_ms is None or speech_end_at is None or stt_final_at is None:
+            return None
+
+        def boundary_ms(timestamp: float, minimum_ms: int) -> int:
+            elapsed_ms = cls._elapsed_latency_ms(speech_end_at, timestamp)
+            assert elapsed_ms is not None
+            return min(total_ms, max(minimum_ms, elapsed_ms))
+
+        asr_end_ms = boundary_ms(stt_final_at, 0)
+        if llm_request_start_at is None:
+            return {
+                "asr": asr_end_ms,
+                "handoff": None,
+                "llm": None,
+                "output": total_ms - asr_end_ms,
+            }
+        if llm_done_at is None:
+            return None
+        handoff_end_ms = boundary_ms(llm_request_start_at, asr_end_ms)
+        llm_end_ms = boundary_ms(llm_done_at, handoff_end_ms)
+        return {
+            "asr": asr_end_ms,
+            "handoff": handoff_end_ms - asr_end_ms,
+            "llm": llm_end_ms - handoff_end_ms,
+            "output": total_ms - llm_end_ms,
+        }
+
     def _latency_hangover_ms(self, channel: ChannelId) -> int:
         hangover_s = self.peer_hangover_s if channel == "peer" else self.hangover_s
         return max(0, int(round(hangover_s * 1000)))
@@ -530,12 +570,53 @@ class ClientHub:
                 stt_final_to_final_output_ms=stt_final_to_final_output_ms,
             )
         )
+        self._emit_pipeline_latency_if_ready(
+            channel=channel,
+            utterance_id=utterance_id,
+            final_output_stage=final_output_stage,
+        )
         self._emit_latency_cause_if_ready(
             channel=channel,
             utterance_id=utterance_id,
             final_output_stage=final_output_stage,
         )
         timeline.basic_summary_emitted = True
+
+    def _emit_pipeline_latency_if_ready(
+        self,
+        *,
+        channel: ChannelId,
+        utterance_id: UUID,
+        final_output_stage: str,
+    ) -> None:
+        timeline = self._get_latency_timeline(channel=channel, utterance_id=utterance_id)
+        if timeline is None or timeline.pipeline_latency_emitted:
+            return
+        speech_end_at = timeline.stage_times.get("speech_end")
+        stt_final_at = timeline.stage_times.get("stt_final")
+        llm_request_start_at = timeline.stage_times.get("llm_request_start")
+        llm_done_at = timeline.stage_times.get("llm_done")
+        final_output_at = timeline.stage_times.get(final_output_stage)
+        total_ms = self._elapsed_latency_ms(speech_end_at, final_output_at)
+        if total_ms is None:
+            return
+        stage_durations_ms = self._exclusive_pipeline_stage_durations_ms(
+            speech_end_at=speech_end_at,
+            stt_final_at=stt_final_at,
+            llm_request_start_at=llm_request_start_at,
+            llm_done_at=llm_done_at,
+            final_output_at=final_output_at,
+        )
+        if stage_durations_ms is None:
+            return
+        message = format_detailed_pipeline_latency(
+            channel=channel,
+            utterance_id=str(utterance_id)[:8],
+            stage_durations_ms=stage_durations_ms,
+            speech_end_to_final_output_ms=total_ms,
+        )
+        if self._emit_detailed(message, fallback_level=logging.DEBUG):
+            timeline.pipeline_latency_emitted = True
 
     def _emit_latency_cause_if_ready(
         self,
