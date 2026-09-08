@@ -11,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use transcribe_cpp::{disable_logging, CancelToken};
+use transcribe_cpp::CancelToken;
 
 const WORKER_NAME: &str = "PuriPulyHeartGpuWorker";
 
@@ -54,6 +54,11 @@ pub async fn run_cli(args: &[String]) -> i32 {
         );
         return 0;
     }
+    if args.len() == 2 && args[1] == "--diagnose-vulkan" {
+        let report = GpuEngine::diagnose_vulkan();
+        println!("{}", serde_json::to_string(&report).unwrap());
+        return if report.error.is_some() { 3 } else { 0 };
+    }
     if args.len() != 3 || args[1] != "--config" {
         return 2;
     }
@@ -68,7 +73,6 @@ pub async fn run_cli(args: &[String]) -> i32 {
 }
 
 async fn run_worker(manifest: LaunchManifest) -> Result<(), i32> {
-    disable_logging();
     let stream = TcpStream::connect((manifest.connect_host.as_str(), manifest.connect_port))
         .await
         .map_err(|_| 11)?;
@@ -299,9 +303,10 @@ fn spawn_discovery(request_id: String, engine: Arc<Mutex<GpuEngine>>) -> ActiveO
         let _ = engine;
         OperationResult {
             request_id: task_request_id,
-            payload: GpuEngine::discover()
-                .map(|devices| json!({"devices": devices}))
-                .map_err(Into::into),
+            payload: {
+                let report = GpuEngine::diagnose_vulkan();
+                Ok(json!({"devices": report.vulkan_devices, "diagnostic": report}))
+            },
         }
     });
     ActiveOperation {

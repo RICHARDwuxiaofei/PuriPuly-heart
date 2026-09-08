@@ -1,4 +1,5 @@
 use serde::Serialize;
+use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Instant;
 use transcribe_cpp::{
@@ -20,6 +21,7 @@ pub struct VulkanDevice {
 #[derive(Debug, Clone, Serialize)]
 pub struct ActivationResult {
     pub device: VulkanDevice,
+    pub actual_backend: String,
     pub model_load_seconds: f64,
     pub warmup_seconds: f64,
 }
@@ -68,6 +70,10 @@ struct StartedDecode<T> {
 pub enum EngineError {
     #[error("unsupported_capability")]
     UnsupportedCapability,
+    #[error("backend_initialization_failed")]
+    BackendInitializationFailed,
+    #[error("device_index_missing")]
+    DeviceIndexMissing,
     #[error("device_unavailable")]
     DeviceUnavailable,
     #[error("model_missing")]
@@ -94,6 +100,8 @@ impl EngineError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::UnsupportedCapability => "unsupported_capability",
+            Self::BackendInitializationFailed => "backend_initialization_failed",
+            Self::DeviceIndexMissing => "device_index_missing",
             Self::DeviceUnavailable => "device_unavailable",
             Self::ModelMissing => "model_missing",
             Self::ModelInvalid => "model_invalid",
@@ -108,6 +116,91 @@ impl EngineError {
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct DiagnosticError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VulkanDiagnostic {
+    pub schema_version: u32,
+    pub vulkan_loader: Value,
+    pub backend_initialized: bool,
+    pub backend_available: bool,
+    pub all_devices: Vec<Value>,
+    pub vulkan_devices: Vec<VulkanDevice>,
+    pub error: Option<DiagnosticError>,
+}
+
+fn diagnostic_from_devices(
+    initialization: Result<(), String>,
+    available: bool,
+    raw: Vec<transcribe_cpp::Device>,
+) -> VulkanDiagnostic {
+    let mut report = VulkanDiagnostic {
+        schema_version: 1,
+        vulkan_loader: json!({"status": if cfg!(windows) { "loaded_at_process_start" } else { "see_backend_status" }}),
+        backend_initialized: initialization.is_ok(),
+        backend_available: available,
+        all_devices: raw
+            .iter()
+            .map(|d| {
+                json!({
+                    "kind": d.kind, "index": d.index, "device_id": d.device_id,
+                    "name": d.name, "description": d.description,
+                    "device_type": format!("{:?}", d.device_type),
+                    "memory_total": d.memory_total, "memory_free": d.memory_free,
+                })
+            })
+            .collect(),
+        vulkan_devices: Vec::new(),
+        error: initialization.err().map(|message| DiagnosticError {
+            code: "backend_initialization_failed".into(),
+            message,
+        }),
+    };
+    for device in raw {
+        if !device.kind.eq_ignore_ascii_case("vulkan") {
+            continue;
+        }
+        let Some(registry_index) = device.index else {
+            report.error.get_or_insert(DiagnosticError {
+                code: "device_index_missing".into(),
+                message: format!("Vulkan device {} has no registry index", device.name),
+            });
+            continue;
+        };
+        report.vulkan_devices.push(VulkanDevice {
+            device_id: device
+                .device_id
+                .unwrap_or_else(|| format!("vulkan-index-{registry_index}")),
+            registry_index,
+            name: device.name,
+            description: device.description,
+            device_type: match device.device_type {
+                DeviceType::Gpu => "gpu",
+                DeviceType::Igpu => "igpu",
+                DeviceType::Cpu => "cpu",
+                DeviceType::Accel => "accel",
+                DeviceType::Unknown => "unknown",
+            }
+            .into(),
+            memory_total_bytes: device.memory_total,
+            memory_free_bytes: device.memory_free,
+        });
+    }
+    if !available && report.error.is_none() {
+        report.error = Some(DiagnosticError {
+            code: "backend_unavailable".into(),
+            message:
+                "No registered Vulkan backend device; inspect the system driver and native stderr"
+                    .into(),
+        });
+    }
+    report
+}
+
 #[derive(Default)]
 pub struct GpuEngine {
     model: Option<Model>,
@@ -117,39 +210,28 @@ pub struct GpuEngine {
 
 impl GpuEngine {
     pub fn discover() -> Result<Vec<VulkanDevice>, EngineError> {
-        init_backends_default().map_err(map_backend_error)?;
-        if !backend_available(Backend::Vulkan) {
-            return Err(EngineError::UnsupportedCapability);
+        let report = Self::diagnose_vulkan();
+        if let Some(error) = report.error {
+            return Err(match error.code.as_str() {
+                "backend_initialization_failed" => EngineError::BackendInitializationFailed,
+                "device_index_missing" => EngineError::DeviceIndexMissing,
+                _ => EngineError::UnsupportedCapability,
+            });
         }
-        let devices = devices()
-            .into_iter()
-            .filter(|device| device.kind.eq_ignore_ascii_case("vulkan"))
-            .filter_map(|device| {
-                let registry_index = device.index?;
-                Some(VulkanDevice {
-                    device_id: device
-                        .device_id
-                        .unwrap_or_else(|| format!("vulkan-index-{registry_index}")),
-                    registry_index,
-                    name: device.name,
-                    description: device.description,
-                    device_type: match device.device_type {
-                        DeviceType::Gpu => "gpu",
-                        DeviceType::Igpu => "igpu",
-                        DeviceType::Cpu => "cpu",
-                        DeviceType::Accel => "accel",
-                        DeviceType::Unknown => "unknown",
-                    }
-                    .to_string(),
-                    memory_total_bytes: device.memory_total,
-                    memory_free_bytes: device.memory_free,
-                })
-            })
-            .collect::<Vec<_>>();
-        if devices.is_empty() {
-            return Err(EngineError::UnsupportedCapability);
-        }
-        Ok(devices)
+        Ok(report.vulkan_devices)
+    }
+
+    pub fn diagnose_vulkan() -> VulkanDiagnostic {
+        let initialization = init_backends_default();
+        let available = backend_available(Backend::Vulkan);
+        let raw = devices();
+        let report =
+            diagnostic_from_devices(initialization.map_err(|e| format!("{e:?}")), available, raw);
+        eprintln!(
+            "vulkan_discovery={}",
+            serde_json::to_string(&report).unwrap()
+        );
+        report
     }
 
     pub fn activate<F>(
@@ -201,6 +283,16 @@ impl GpuEngine {
         if !model.backend().to_ascii_lowercase().starts_with("vulkan") {
             return Err(EngineError::StrictVulkanRejected);
         }
+        let actual = model.device().map_err(map_backend_error)?;
+        if !actual.kind.eq_ignore_ascii_case("vulkan")
+            || actual.name != selected_device.name
+            || actual
+                .device_id
+                .as_ref()
+                .is_some_and(|id| id != &selected_device.device_id)
+        {
+            return Err(EngineError::StrictVulkanRejected);
+        }
         if !model.supports(Feature::Cancellation) {
             return Err(EngineError::StrictVulkanRejected);
         }
@@ -210,18 +302,22 @@ impl GpuEngine {
 
         progress("warming", 0.75);
         let warmup_started = Instant::now();
-        let mut run_options = RunOptions::default();
-        run_options.timestamps = TimestampKind::None;
+        let run_options = RunOptions {
+            timestamps: TimestampKind::None,
+            ..RunOptions::default()
+        };
         session
             .run(&vec![0.0_f32; 16_000], &run_options)
             .map_err(map_warmup_error)?;
         let warmup_seconds = warmup_started.elapsed().as_secs_f64();
         progress("ready", 1.0);
         self.selected_device = Some(selected_device.clone());
+        let actual_backend = model.backend().to_string();
         self.model = Some(model);
         self.session = Some(session);
         Ok(ActivationResult {
             device: selected_device,
+            actual_backend,
             model_load_seconds,
             warmup_seconds,
         })
@@ -259,9 +355,11 @@ impl GpuEngine {
             attempt_started: false,
         })?;
         session.set_cancel_token(cancel_token);
-        let mut run_options = RunOptions::default();
-        run_options.timestamps = TimestampKind::None;
-        run_options.language = language_hint;
+        let run_options = RunOptions {
+            timestamps: TimestampKind::None,
+            language: language_hint,
+            ..RunOptions::default()
+        };
         let decoded = execute_started_decode(audio_seconds, on_decode_started, || {
             session
                 .run(&samples, &run_options)
@@ -444,5 +542,59 @@ mod tests {
 
         assert_started_failure(EngineError::DecodeFailure);
         assert_started_failure(EngineError::Cancelled);
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    fn device(index: Option<usize>, kind: &str, device_type: DeviceType) -> transcribe_cpp::Device {
+        transcribe_cpp::Device {
+            name: "Reported0".into(),
+            description: "Reported adapter".into(),
+            kind: kind.into(),
+            device_type,
+            device_id: None,
+            memory_total: 1024,
+            memory_free: 512,
+            index,
+        }
+    }
+
+    #[test]
+    fn raw_devices_preserved_and_unknown_type_not_filtered() {
+        let report = diagnostic_from_devices(
+            Ok(()),
+            true,
+            vec![
+                device(Some(0), "cpu", DeviceType::Cpu),
+                device(Some(1), "VULKAN", DeviceType::Unknown),
+            ],
+        );
+        assert_eq!(report.all_devices.len(), 2);
+        assert_eq!(report.vulkan_devices.len(), 1);
+        assert_eq!(report.vulkan_devices[0].device_type, "unknown");
+        assert!(report.error.is_none());
+    }
+
+    #[test]
+    fn missing_index_is_an_explicit_error_with_raw_device() {
+        let report =
+            diagnostic_from_devices(Ok(()), true, vec![device(None, "vulkan", DeviceType::Igpu)]);
+        assert_eq!(report.all_devices.len(), 1);
+        assert_eq!(report.error.unwrap().code, "device_index_missing");
+    }
+
+    #[test]
+    fn distinguishes_init_failure_unavailable_and_empty() {
+        let failed = diagnostic_from_devices(Err("native failure".into()), false, vec![]);
+        assert!(!failed.backend_initialized);
+        assert_eq!(failed.error.unwrap().message, "native failure");
+        let unavailable = diagnostic_from_devices(Ok(()), false, vec![]);
+        assert_eq!(unavailable.error.unwrap().code, "backend_unavailable");
+        let empty = diagnostic_from_devices(Ok(()), true, vec![]);
+        assert!(empty.error.is_none());
+        assert!(empty.vulkan_devices.is_empty());
     }
 }
