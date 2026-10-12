@@ -33,6 +33,7 @@ from puripuly_heart.app.services.application_shutdown import (
     ApplicationShutdownCoordinator,
     application_shutdown_callback,
 )
+from puripuly_heart.app.services.quick_translate import QuickTranslateOwner
 from puripuly_heart.app.services.telemetry_reporting import TelemetryReportingOwner
 from puripuly_heart.config.provider_values import QwenRegion
 from puripuly_heart.core.language import get_stt_compatibility_warning
@@ -76,6 +77,7 @@ from puripuly_heart.ui.i18n import (
     t,
 )
 from puripuly_heart.ui.presentation_adapter import FletUiPresentationAdapter
+from puripuly_heart.ui.quick_translate_window import spawn_quick_window, stop_quick_window
 from puripuly_heart.ui.settings.contract import (
     SettingsChatGptIntents,
     SettingsGeneralIntents,
@@ -219,6 +221,7 @@ class TranslatorApp:
         self._launch_high_priority_snackbar = None
         self._github_star_prompt_shown_this_launch = False
         self._microphone_test_dialog: MicrophoneTestDialog | None = None
+        self._quick_translate_owner = None
         self._foundation_preview_dialog: ft.AlertDialog | None = None
         self._foundation_adapter = FletFoundationAdapter(
             self.application,
@@ -396,6 +399,12 @@ class TranslatorApp:
         foundation_runtime = self._ensure_foundation_runtime()
         return (
             application_shutdown_callback(
+                phase=SHUTDOWN_PHASE_STOP_EXTERNAL_PRODUCERS,
+                owner_name="QuickTranslateOwner",
+                callback_name="close_quick_window",
+                callback=self._close_quick_window,
+            ),
+            application_shutdown_callback(
                 phase=SHUTDOWN_PHASE_FREEZE_INGRESS,
                 owner_name="TranslatorApp",
                 callback_name="freeze_ui_ingress",
@@ -420,10 +429,18 @@ class TranslatorApp:
         self._shutting_down = True
         self._settings_mutation_queue = []
 
+    async def _close_quick_window(self) -> None:
+        quick = getattr(self, "_quick_translate_owner", None)
+        if quick is not None:
+            await quick.close()
+
     async def _on_page_lifecycle_end(self, _event=None) -> None:
         await self.shutdown()
 
     async def close_presentation(self) -> None:
+        quick = getattr(self, "_quick_translate_owner", None)
+        if quick is not None:
+            await quick.close()
         self._window_close_requested = True
         result = self.page.window.destroy()
         if inspect.isawaitable(result):
@@ -497,7 +514,10 @@ class TranslatorApp:
 
         # Custom title bar
         self.title_bar = TitleBar(
-            self.page, on_close=self._request_window_close, on_model_assets=self._open_model_assets
+            self.page,
+            on_close=self._request_window_close,
+            on_model_assets=self._open_model_assets,
+            on_quick_translate=self._open_quick_translate,
         )
         self._model_assets_dialog = None
 
@@ -526,6 +546,24 @@ class TranslatorApp:
                 self.page, self.application, self._run_page_task
             )
         self._model_assets_dialog.open()
+
+    def _open_quick_translate(self) -> None:
+        if self._quick_translate_owner is None:
+            self._quick_translate_owner = QuickTranslateOwner(
+                spawn=lambda: spawn_quick_window(get_locale()),
+                submit=self.application.submit_quick_text,
+                preferences=self.application.quick_window_preferences,
+                save_preferences=self.application.configure_quick_window,
+                stop=stop_quick_window,
+            )
+
+        async def open_window():
+            try:
+                await self._quick_translate_owner.open()
+            except Exception:
+                self._show_snackbar(t("quick.error.window_start_failed"), COLOR_WARNING)
+
+        self._run_page_task(open_window)
 
     def _build_debug_preview_panel(self) -> DebugPreviewPanel:
         return DebugPreviewPanel(

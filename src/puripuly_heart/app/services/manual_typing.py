@@ -29,7 +29,9 @@ class ManualTypingOwner:
     def submit_generation(self) -> int:
         return self._submit_generation
 
-    async def submit(self, submit: Callable[[], Awaitable[object]] | None) -> None:
+    async def submit(
+        self, submit: Callable[[], Awaitable[object]] | None, *, strict: bool = False
+    ) -> object | None:
         self.clear_input()
         if submit is None:
             return
@@ -37,8 +39,11 @@ class ManualTypingOwner:
         try:
             utterance_id = await submit()
             await self._wait_for_completion(utterance_id)
+            return utterance_id
         except Exception as exc:
             self.log_error(_format_manual_typing_error("submit", exc))
+            if strict:
+                raise
         finally:
             self.clear_submit(reason)
 

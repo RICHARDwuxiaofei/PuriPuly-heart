@@ -135,6 +135,10 @@ UI_APPLICATION_USER_INTENT_METHODS = frozenset(
         "start_qq_managed_auth_from_dialog",
         "stop_microphone_test",
         "submit_text",
+        "submit_quick_text",
+        "configure_quick_window",
+        "configure_gemma_source",
+        "provision_gemma_assets",
         "verify_alibaba_connection_draft",
         "verify_api_key",
     }
@@ -422,6 +426,15 @@ class UiApplicationBoundary:
 
     async def submit_text(self, text: str) -> None:
         await self._input_runtime.submit_text(text)
+
+    async def submit_quick_text(self, text: str) -> tuple[str, str]:
+        return await self._input_runtime.submit_quick_text(text)
+
+    def quick_window_preferences(self) -> dict:
+        return self._provider.quick_window_preferences()
+
+    async def configure_quick_window(self, values: dict) -> None:
+        await self._provider.configure_quick_window(values)
 
     def set_manual_input_activity(self, has_text: bool) -> None:
         self._input_runtime.set_manual_input_activity(has_text)
