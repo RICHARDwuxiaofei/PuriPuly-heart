@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import hashlib
 import inspect
 import json
 import shutil
@@ -11,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from puripuly_heart.core.feature_diagnostics import log_feature
 from puripuly_heart.core.local_asr.local_stt_download_port import (
     HuggingFaceDownloadPort,
     HuggingFaceDownloadRequest,
@@ -23,6 +26,7 @@ from puripuly_heart.core.local_asr.local_stt_runtime_installer import (
 from puripuly_heart.core.local_translation.assets import (
     GEMMA_INSTALLED_MANIFEST_FILENAME,
     GemmaAsset,
+    GemmaInstallInvalidError,
     GemmaModelSpec,
     InstalledGemmaManifest,
     default_gemma_install_dir,
@@ -33,7 +37,9 @@ from puripuly_heart.core.local_translation.assets import (
 
 
 class GemmaProvisioningError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, failure_code: str = "install_failed") -> None:
+        super().__init__(message)
+        self.failure_code = failure_code
 
 
 class GemmaProvisioningCancelled(GemmaProvisioningError):
@@ -141,6 +147,7 @@ async def _download_asset(
     total_bytes: int,
     cancel_event: threading.Event | None,
     on_status: GemmaProvisioningCallback | None,
+    endpoint: str | None = None,
 ) -> int:
     loop = asyncio.get_running_loop()
     progress_futures: list[Future[None]] = []
@@ -198,6 +205,7 @@ async def _download_asset(
                     remote_path=asset.filename,
                     local_dir=staging_dir,
                     expected_size_bytes=asset.size_bytes,
+                    endpoint=endpoint,
                 ),
                 cancel_event=cancel_event,
                 on_progress=on_progress,
@@ -249,6 +257,7 @@ async def ensure_gemma_installed(
     cancel_event: threading.Event | None = None,
     on_status: GemmaProvisioningCallback | None = None,
     spec: GemmaModelSpec | None = None,
+    source: str = "official",
 ) -> InstalledGemmaManifest:
     resolved_spec = spec or e4b_gemma_spec()
     resolved = (install_dir or default_gemma_install_dir(resolved_spec)).resolve()
@@ -271,6 +280,7 @@ async def ensure_gemma_installed(
             cancel_event=cancel_event,
             on_status=on_status,
             spec=resolved_spec,
+            source=source,
         )
     finally:
         await asyncio.to_thread(lease.close)
@@ -283,8 +293,11 @@ async def _ensure_gemma_installed_with_lease(
     cancel_event: threading.Event | None,
     on_status: GemmaProvisioningCallback | None,
     spec: GemmaModelSpec,
+    source: str = "official",
 ) -> InstalledGemmaManifest:
     resolved = install_dir
+    if source not in {"official", "mirror", "local"}:
+        raise ValueError("Unsupported model source")
     total_bytes = sum(asset.size_bytes for asset in spec.assets)
     _raise_if_cancelled(cancel_event)
     state = inspect_gemma_install(resolved, spec=spec)
@@ -298,6 +311,11 @@ async def _ensure_gemma_installed_with_lease(
         return state.manifest
 
     if downloader is None:
+        if source == "local":
+            log_feature("ModelDownload", "preflight", "missing_file")
+            raise GemmaProvisioningError(
+                "Import the pinned files first", failure_code="missing_file"
+            )
         from puripuly_heart.core.local_asr.local_stt_huggingface_xet_adapter import (
             HuggingFaceXetDownloadAdapter,
         )
@@ -308,6 +326,8 @@ async def _ensure_gemma_installed_with_lease(
     staging_dir.mkdir(parents=True, exist_ok=False)
     completed_bytes = 0
     try:
+        if shutil.disk_usage(staging_dir).free < total_bytes + 64 * 1024 * 1024:
+            raise OSError(errno.ENOSPC, "Not enough space for verified model installation")
         await _emit(
             on_status,
             state="downloading",
@@ -325,6 +345,11 @@ async def _ensure_gemma_installed_with_lease(
                 total_bytes=total_bytes,
                 cancel_event=cancel_event,
                 on_status=on_status,
+                endpoint=(
+                    "https://hf-mirror.com"
+                    if source == "mirror"
+                    else "https://huggingface.co" if source == "official" else None
+                ),
             )
             await _emit(
                 on_status,
@@ -334,12 +359,18 @@ async def _ensure_gemma_installed_with_lease(
             )
         _raise_if_cancelled(cancel_event)
         manifest = InstalledGemmaManifest.expected(spec)
+        await _emit(
+            on_status, state="verifying", downloaded_bytes=completed_bytes, total_bytes=total_bytes
+        )
         (staging_dir / GEMMA_INSTALLED_MANIFEST_FILENAME).write_text(
             json.dumps(manifest.to_dict(), indent=2),
             encoding="utf-8",
         )
         await asyncio.to_thread(validate_gemma_install, staging_dir, spec=spec)
         _raise_if_cancelled(cancel_event)
+        await _emit(
+            on_status, state="installing", downloaded_bytes=completed_bytes, total_bytes=total_bytes
+        )
         await asyncio.to_thread(_promote, staging_dir, resolved)
         await _emit(
             on_status,
@@ -360,10 +391,33 @@ async def _ensure_gemma_installed_with_lease(
         _remove_owned_staging(staging_dir, primary_failure=exc)
         raise
     except Exception as exc:
+        code = (
+            "checksum_failed"
+            if isinstance(exc, GemmaInstallInvalidError)
+            else (
+                "disk_full"
+                if isinstance(exc, OSError) and exc.errno == errno.ENOSPC
+                else getattr(exc, "failure_code", "install_failed")
+            )
+        )
+        log_feature(
+            "ModelDownload",
+            "verifying" if code == "checksum_failed" else "installation",
+            code,
+            error=exc,
+            http_status=getattr(exc, "status_code", None),
+        )
         failure = (
             exc
             if isinstance(exc, GemmaProvisioningError)
-            else GemmaProvisioningError(f"Gemma model provisioning failed: {exc}")
+            else GemmaProvisioningError(
+                (
+                    "Gemma model provisioning failed: size mismatch"
+                    if isinstance(exc, GemmaInstallInvalidError) and "size mismatch" in str(exc)
+                    else f"Gemma model provisioning failed ({code})"
+                ),
+                failure_code=code,
+            )
         )
         if failure is not exc:
             failure.__cause__ = exc
@@ -387,3 +441,48 @@ __all__ = [
     "GemmaProvisioningUpdate",
     "ensure_gemma_installed",
 ]
+
+
+class LocalGemmaDownloadAdapter:
+    def __init__(self, files: tuple[Path, ...], spec: GemmaModelSpec) -> None:
+        self.files = {path.name: path for path in files}
+        self.spec = spec
+
+    async def download(self, request, *, cancel_event, on_progress):
+        asset = next(asset for asset in self.spec.assets if asset.filename == request.remote_path)
+        source = self.files.get(asset.filename)
+        if source is None or not source.is_file():
+            raise GemmaProvisioningError("Missing pinned model file", failure_code="missing_file")
+        if source.stat().st_size != asset.size_bytes:
+            raise GemmaProvisioningError("Wrong file size", failure_code="file_size_mismatch")
+        destination = request.local_dir / asset.filename
+
+        def copy_verified():
+            from puripuly_heart.core.local_asr.local_stt_download_port import (
+                HuggingFaceDownloadProgress,
+            )
+
+            digest = hashlib.sha256()
+            copied = 0
+            with source.open("rb") as reader, destination.open("wb") as writer:
+                while chunk := reader.read(4 * 1024 * 1024):
+                    _raise_if_cancelled(cancel_event)
+                    writer.write(chunk)
+                    digest.update(chunk)
+                    copied += len(chunk)
+                    if on_progress is not None:
+                        on_progress(HuggingFaceDownloadProgress(copied, asset.size_bytes))
+            if copied != asset.size_bytes or digest.hexdigest() != asset.sha256:
+                from puripuly_heart.core.local_translation.assets import GemmaInstallInvalidError
+
+                raise GemmaInstallInvalidError("Imported file does not match the pinned model")
+
+        task = asyncio.create_task(asyncio.to_thread(copy_verified))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if cancel_event is not None:
+                cancel_event.set()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        return destination
