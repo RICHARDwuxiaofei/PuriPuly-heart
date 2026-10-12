@@ -243,7 +243,8 @@ class MicrophoneTestSessionOwner:
                 self._failure_type = None
                 self._meter_level = 0.0
                 self._readiness = asyncio.get_running_loop().create_future()
-            except RuntimeError:
+            except RuntimeError as error:
+                log_feature("AudioTest", "preflight", "session_start_failed", error=error)
                 return False
             return True
 
@@ -301,6 +302,7 @@ class MicrophoneTestSessionOwner:
             raise RuntimeError("Playback adapter unavailable")
         task = asyncio.create_task(selected(samples, rate, cancellation))
         self._playback_task = task
+        self._failure_reason = None
         log_feature("AudioTest", "playback", "playback_started", level=logging.INFO)
         try:
             await task
@@ -308,6 +310,7 @@ class MicrophoneTestSessionOwner:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            self._failure_reason = "playback_failed"
             log_feature("AudioTest", "playback", "playback_failed", error=error)
             raise
         finally:

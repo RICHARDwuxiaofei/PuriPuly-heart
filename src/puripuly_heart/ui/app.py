@@ -1508,10 +1508,20 @@ class TranslatorApp:
                 return
             dialog.reset()
             dialog.open()
-            started = await self.application.start_microphone_test(
-                meter_callback=dialog.set_level, recording_seconds=10
-            )
+            try:
+                started = await self.application.start_microphone_test(
+                    meter_callback=dialog.set_level, recording_seconds=10
+                )
+            except Exception as error:
+                from puripuly_heart.core.feature_diagnostics import log_feature
+
+                log_feature("AudioTest", "preflight", "capture_start_failed", error=error)
+                dialog.show_failure()
+                return
             if not started:
+                from puripuly_heart.core.feature_diagnostics import log_feature
+
+                log_feature("AudioTest", "preflight", "capture_not_started")
                 dialog.show_failure()
                 return
             if "has_recording" in self.application.microphone_test_snapshot():
@@ -1560,7 +1570,7 @@ class TranslatorApp:
                 snapshot = self.application.microphone_test_snapshot()
                 dialog.set_snapshot(snapshot)
                 if snapshot.get("failure_reason"):
-                    dialog.show_failure()
+                    dialog.show_failure(snapshot["failure_reason"])
                 await asyncio.sleep(0.3)
 
         self._audio_test_watch = self._run_page_task(watch)
@@ -1576,7 +1586,7 @@ class TranslatorApp:
                 from puripuly_heart.core.feature_diagnostics import log_feature
 
                 log_feature("AudioTest", "playback", "playback_failed", error=error)
-                self._get_microphone_test_dialog().show_failure()
+                self._get_microphone_test_dialog().show_failure("playback_failed")
 
         self._run_page_task(play)
 
