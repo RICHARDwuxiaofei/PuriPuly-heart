@@ -65,6 +65,7 @@ class MicrophoneTestDialog:
         self._hint_text: ft.Text | None = None
         self._level = 0.0
         self._failed = False
+        self._failure_message = None
         self._is_open = False
         self._close_notified = False
 
@@ -101,6 +102,7 @@ class MicrophoneTestDialog:
     def reset(self) -> None:
         self._level = 0.0
         self._failed = False
+        self._failure_message = None
         self._sync_text()
 
     def set_level(self, value: float) -> None:
@@ -108,9 +110,14 @@ class MicrophoneTestDialog:
         self._failed = False
         self._sync_text()
 
-    def show_failure(self) -> None:
+    def show_failure(self, code: str | None = None) -> None:
         self._level = 0.0
         self._failed = True
+        self._failure_message = (
+            t("audio_test.error." + code, default=t("audio_test.error.capture_failed"))
+            if code
+            else None
+        )
         self._sync_text()
 
     def set_snapshot(self, snapshot: dict) -> None:
@@ -124,6 +131,10 @@ class MicrophoneTestDialog:
         )
         self._record_status.value = f"{t('audio_test.state.' + state)} · {snapshot.get('recorded_seconds', 0):.1f}s\n{name} · {api}\n{snapshot.get('sample_rate') or '?'} Hz · {snapshot.get('channels') or '?'} ch\n{t('audio_test.hint')}"
         failure = snapshot.get("failure_reason")
+        if not failure and (snapshot.get("playing") or snapshot.get("recording_complete")):
+            self._failed = False
+            self._failure_message = None
+            self._sync_text()
         if failure:
             self._record_status.value += "\n" + t(
                 "audio_test.error." + failure, default=t("audio_test.error.capture_failed")
@@ -227,7 +238,7 @@ class MicrophoneTestDialog:
 
     def _text_value(self) -> str:
         if self._failed:
-            return t("settings.microphone_test.start_failed")
+            return self._failure_message or t("settings.microphone_test.start_failed")
         return f"{_level_percent(self._level)}%"
 
     def _text_size(self) -> int:

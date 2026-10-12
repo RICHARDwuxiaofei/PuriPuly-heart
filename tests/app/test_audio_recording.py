@@ -64,8 +64,21 @@ async def test_playback_failure_logged_and_close_releases_pcm(caplog):
         await owner.play_recording(playback=fail)
     assert "stage=playback code=playback_failed" in caplog.text
     assert "secret-input" not in caplog.text
+    assert owner.snapshot["failure_reason"] == "playback_failed"
     await owner.close()
     assert owner._recording is None and owner._playback_task is None
+
+
+def test_playback_failure_is_not_reported_as_capture_start_failure():
+    from puripuly_heart.ui.components.microphone_test_dialog import MicrophoneTestDialog
+    from puripuly_heart.ui.i18n import t
+
+    dialog = MicrophoneTestDialog(SimpleNamespace(), on_close=lambda: None)
+    dialog.show_failure("playback_failed")
+    assert dialog._text_value() == t("audio_test.error.playback_failed")
+    assert dialog._text_value() != t("settings.microphone_test.start_failed")
+    dialog.set_snapshot(dict(playing=True, recording_complete=True))
+    assert dialog._text_value() == "0%"
 
 
 async def test_stop_playback_waits_for_worker_cleanup():
