@@ -262,3 +262,11 @@ Exact handoff and teardown ordering belongs to owner implementations and lifecyc
 - Callbacks must delegate to the receiving owner; they must not mutate another owner's private runtime state.
 - Ordering is local to the owning channel or queue. Do not assume global ordering across self, peer, UI, and provider events.
 - Blocking model, device, or native work must not block the application event loop; use the established worker, executor, or child-process boundary.
+
+## Desktop diagnostic surfaces
+
+- Gemma source selection belongs to translation settings. The managed Gemma owner retains provisioning lifecycle ownership; mirror endpoint and anonymous authentication policy are applied only to its downloader child before SDK import. Local import uses the same pinned asset contract, staging lease, checksum validation, and atomic promotion. A rejected import cannot replace a working installation.
+- Quick translation is an independent opaque Flet presentation child owned by `QuickTranslateOwner`, using inherited private pipes and request IDs. It submits through `ManualTypingOwner` and the existing SELF translation owner, without opening another provider, loading secrets, or forcing external outputs. Hiding retains admitted work; application shutdown closes the child.
+- Microphone recordings belong to `MicrophoneTestSessionOwner`. The existing capture adapter taps actual opened PCM and shares mono/resampling primitives with formal SELF capture. In-memory playback pauses capture through the application boundary; generation and user-intent checks prevent restoring switches the user has since changed.
+- These surfaces emit bounded, static diagnostics through existing normal and rotating file logs. They never log conversation content, audio, credentials, signed URLs, or proxy authentication.
+- Preview distributions opt into an explicit isolated profile before bootstrap. Configuration, model cache, log paths, and the secret-store namespace are isolated; environment-key fallback is disabled. Production path and keyring defaults are unchanged.

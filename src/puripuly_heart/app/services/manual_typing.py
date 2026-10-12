@@ -54,6 +54,16 @@ class ManualTypingOwner:
             return
         self.clear_input()
 
+    async def submit_for_result(self, submit, *, completion, result) -> tuple[str, str]:
+        utterance_id = await self.submit(submit, strict=True)
+        pending = completion(utterance_id)
+        if pending is not None and not pending.done():
+            await asyncio.shield(pending)
+        translation = result(utterance_id)
+        if translation is None:
+            raise RuntimeError("translation_failed")
+        return str(utterance_id), translation.translated_text
+
     async def release(self) -> None:
         task = self._cancel_idle_task()
         if task is not None:

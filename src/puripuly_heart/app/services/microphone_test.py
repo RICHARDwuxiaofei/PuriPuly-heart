@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -300,8 +301,10 @@ class MicrophoneTestSessionOwner:
             raise RuntimeError("Playback adapter unavailable")
         task = asyncio.create_task(selected(samples, rate, cancellation))
         self._playback_task = task
+        log_feature("AudioTest", "playback", "playback_started", level=logging.INFO)
         try:
             await task
+            log_feature("AudioTest", "playback", "playback_completed", level=logging.INFO)
         except asyncio.CancelledError:
             raise
         except Exception as error:

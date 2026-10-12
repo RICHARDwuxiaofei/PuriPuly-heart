@@ -128,16 +128,16 @@ class UiInputRuntimeAdapter:
             or not owner.config_snapshot().value.translation_enabled
         ):
             raise RuntimeError("backend_not_ready")
-        utterance_id = await self.manual_typing.submit(
-            lambda: owner.submit_text(text, source="You"), strict=True
+
+        def result(utterance_id):
+            bundle = owner.runtime.utterances.get(utterance_id)
+            return None if bundle is None else bundle.translation
+
+        return await self.manual_typing.submit_for_result(
+            lambda: owner.submit_text(text, source="You"),
+            completion=lambda identity: owner.runtime.translation_tasks.get(identity),
+            result=result,
         )
-        task = owner.runtime.translation_tasks.get(utterance_id)
-        if task is not None and not task.done():
-            await asyncio.shield(task)
-        bundle = owner.runtime.utterances.get(utterance_id)
-        if bundle is None or bundle.translation is None:
-            raise RuntimeError("translation_failed")
-        return str(utterance_id), bundle.translation.translated_text
 
     def set_manual_input_activity(self, has_text: bool) -> None:
         self.manual_typing.set_input_activity(has_text)

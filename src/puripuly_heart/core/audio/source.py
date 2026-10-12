@@ -663,7 +663,13 @@ class SoundDeviceAudioSource(AudioSource):
             actual_device = actual_device[0]
         metadata = sd.query_devices(actual_device, "input")
         api = sd.query_hostapis(metadata["hostapi"])
-        return dict(device_index=actual_device, name=metadata["name"], host_api=api["name"], sample_rate=self.actual_sample_rate_hz, channels=self.opened_channels)
+        return dict(
+            device_index=actual_device,
+            name=metadata["name"],
+            host_api=api["name"],
+            sample_rate=self.actual_sample_rate_hz,
+            channels=self.opened_channels,
+        )
 
     @property
     def actual_sample_rate_hz(self) -> int:

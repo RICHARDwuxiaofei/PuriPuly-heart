@@ -51,7 +51,9 @@ class MicrophoneTestDialog:
         self._on_stop = on_stop
         self._on_play = on_play
         self._on_stop_playback = on_stop_playback
-        self._record_status = ft.Text(t("audio_test.hint"), selectable=True, size=14)
+        self._record_status = ft.Text(
+            t("audio_test.hint"), selectable=True, size=14, color=COLOR_NEUTRAL_DARK
+        )
         self._play_raw = ft.Button(
             t("audio_test.play_raw"), on_click=lambda _: on_play(False), disabled=True
         )
