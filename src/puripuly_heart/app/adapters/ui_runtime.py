@@ -107,6 +107,14 @@ class UiInputRuntimeAdapter:
     self_capture: SelfCaptureApplicationOwner
     connection_readiness: LlmConnectionReadinessOwner | None = None
 
+    def self_capture_test_state(self) -> tuple[bool, object]:
+        owner = self.self_capture.capture_owner_if_created()
+        snapshot = None if owner is None else owner.snapshot
+        return bool(snapshot and snapshot.desired_active), (
+            id(owner),
+            snapshot.generation if snapshot else None,
+        )
+
     async def submit_text(self, text: str) -> None:
         owner = self.pipeline.self_translation_channel
         submit = None if owner is None else lambda: owner.submit_text(text, source="You")
@@ -159,6 +167,10 @@ class UiPeerCaptureRuntimeAdapter:
     overlay: OverlayApplicationOwner
     connection_readiness: LlmConnectionReadinessOwner | None = None
 
+    def peer_capture_test_state(self) -> tuple[bool, object]:
+        snapshot = self.peer.owner.snapshot()
+        return snapshot.intent_enabled, (id(self.peer.owner), snapshot.activation_generation)
+
     async def set_peer_translation_enabled(self, enabled: bool) -> object:
         result = await self.peer.owner.set_enabled(enabled)
         if self.connection_readiness is not None:
@@ -199,10 +211,12 @@ class UiMicrophoneRuntimeAdapter:
         self,
         *,
         meter_callback=None,
+        recording_seconds=None,
     ) -> bool:
         return await self.microphone.start(
             meter_callback=meter_callback,
             level_log_interval_s=self.level_log_interval_seconds,
+            recording_seconds=recording_seconds,
         )
 
     def microphone_test_snapshot(self) -> dict[str, object]:
@@ -213,6 +227,15 @@ class UiMicrophoneRuntimeAdapter:
 
     async def stop_microphone_test(self) -> None:
         await self.microphone.stop()
+
+    async def play_microphone_recording(self, *, processed=False) -> None:
+        await self.microphone.play_recording(processed=processed)
+
+    async def stop_microphone_playback(self) -> None:
+        await self.microphone.stop_playback()
+
+    async def clear_microphone_recording(self) -> None:
+        await self.microphone.clear_recording()
 
 
 @dataclass(slots=True)
