@@ -6,7 +6,7 @@ import logging
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Final
+from typing import Any, Final, Literal
 from uuid import UUID
 
 from websockets.exceptions import InvalidStatus
@@ -201,11 +201,22 @@ class ChatGptPlanLLMProvider(LLMProvider):
     _condition: asyncio.Condition | None = field(init=False, default=None, repr=False)
     _closed: bool = field(init=False, default=False, repr=False)
     _pool_epoch: int = field(init=False, default=0, repr=False)
+    _connection_mode: Literal["inactive", "standby", "active"] | None = field(
+        init=False, default=None, repr=False
+    )
+    _preparation_failed: bool = field(init=False, default=False, repr=False)
     _requests: set[asyncio.Task[str]] = field(init=False, default_factory=set, repr=False)
     _auth_tasks: set[asyncio.Task[str]] = field(init=False, default_factory=set, repr=False)
     _openings: dict[asyncio.Task[_PooledConnection], asyncio.Future[None]] = field(
         init=False, default_factory=dict, repr=False
     )
+    _proactive_openings: set[asyncio.Task[_PooledConnection]] = field(
+        init=False, default_factory=set, repr=False
+    )
+    _cancelled_openings: set[asyncio.Task[_PooledConnection]] = field(
+        init=False, default_factory=set, repr=False
+    )
+    _retiring: set[_PooledConnection] = field(init=False, default_factory=set, repr=False)
     _maintenance: set[asyncio.Task[None]] = field(init=False, default_factory=set, repr=False)
     _dispatch_handle: asyncio.Handle | None = field(init=False, default=None, repr=False)
     _close_task: asyncio.Task[None] | None = field(init=False, default=None, repr=False)
@@ -240,10 +251,7 @@ class ChatGptPlanLLMProvider(LLMProvider):
             if self._closed:
                 return
             self._waiters = deque(ticket for ticket in self._waiters if not ticket.future.done())
-            stale = [connection for connection in self._idle if not self._valid(connection)]
-            if stale:
-                self._idle = [connection for connection in self._idle if connection not in stale]
-                self._retire(stale)
+            self._trim_idle()
             grants: list[tuple[_AdmissionTicket, list[_PooledConnection]]] = []
             while self._waiters and self._idle:
                 ticket = self._waiters.popleft()
@@ -255,12 +263,52 @@ class ChatGptPlanLLMProvider(LLMProvider):
             for ticket, connections in grants:
                 self._reserved.update(connections)
                 ticket.future.set_result(_RequestExecution(self, ticket, connections))
-            missing = min(
-                max(0, len(self._waiters) - len(self._openings)),
-                max(0, self.max_connections - self._open_count),
-            )
-            for _ in range(missing):
-                self._start_opening()
+            self._reconcile_resources()
+
+    def _resource_target(self) -> int:
+        if self._connection_mode == "standby":
+            return min(1, self.max_connections)
+        if self._connection_mode == "active":
+            return max(0, min(self.prepared_connections, self.max_connections))
+        return 0
+
+    def _trim_idle(self) -> asyncio.Task[None] | None:
+        stale = [connection for connection in self._idle if not self._valid(connection)]
+        if stale:
+            self._idle = [connection for connection in self._idle if connection not in stale]
+        if self._connection_mode is None:
+            return self._retire(stale)
+        keep = max(self._resource_target(), len(self._waiters))
+        excess = self._idle[keep:]
+        del self._idle[keep:]
+        return self._retire(stale + excess)
+
+    def _reconcile_resources(self) -> None:
+        self._trim_idle()
+        waiting = max(0, len(self._waiters) - len(self._idle))
+        openings = [task for task in self._openings if task not in self._cancelled_openings]
+        connected = self._open_count - len(self._retiring) - len(self._openings)
+        if self._connection_mode is not None:
+            keep = max(self._resource_target() - connected, waiting, 0)
+            for task in reversed(openings[keep:]):
+                self._cancelled_openings.add(task)
+                task.cancel()
+            openings = openings[:keep]
+        missing = min(
+            max(0, waiting - len(openings)),
+            max(0, self.max_connections - self._open_count),
+        )
+        for _ in range(missing):
+            self._start_opening()
+        if self._preparation_failed:
+            return
+        available = self._open_count - len(self._retiring) - len(self._cancelled_openings)
+        missing = min(
+            max(0, self._resource_target() - available),
+            max(0, self.max_connections - self._open_count),
+        )
+        for _ in range(missing):
+            self._proactive_openings.add(self._start_opening())
 
     def _valid(self, connection: _PooledConnection) -> bool:
         return (
@@ -300,56 +348,43 @@ class ChatGptPlanLLMProvider(LLMProvider):
         try:
             async with self._cond():
                 self._openings.pop(task)
+                proactive = task in self._proactive_openings
+                cancelled = task in self._cancelled_openings
+                self._proactive_openings.discard(task)
+                self._cancelled_openings.discard(task)
                 if connection is None:
                     self._open_count -= 1
-                    retirement = None
+                    if proactive and not cancelled:
+                        self._preparation_failed = True
                     if failure is not None and not isinstance(failure, asyncio.CancelledError):
                         while self._waiters and self._waiters[0].future.done():
                             self._waiters.popleft()
-                        if self._waiters and pool_epoch == self._pool_epoch:
+                        if self._waiters and pool_epoch == self._pool_epoch and not cancelled:
                             self._waiters.popleft().future.set_exception(failure)
-                        else:
-                            self._log_failure("prepare_connections", failure)
-                elif self._valid(connection):
+                        elif not cancelled and pool_epoch == self._pool_epoch and not self._closed:
+                            self._log_failure("set_connection_mode", failure)
+                elif not cancelled and self._valid(connection):
                     self._idle.append(connection)
-                    retirement = None
                 else:
-                    retirement = self._retire([connection])
+                    self._retire([connection])
                 self._schedule_dispatch()
-            if retirement is not None:
-                await asyncio.shield(retirement)
         finally:
             finished.set_result(None)
 
-    async def prepare_connections(self) -> None:
+    async def set_connection_mode(self, mode: Literal["inactive", "standby", "active"]) -> None:
+        if mode not in ("inactive", "standby", "active"):
+            raise ValueError("Unsupported ChatGPT plan connection mode")
         async with self._cond():
             if self._closed:
                 return
-            missing = max(
-                0, min(self.prepared_connections, self.max_connections) - self._open_count
-            )
-            tasks = [self._start_opening() for _ in range(missing)]
-            completion = asyncio.gather(*(self._openings[task] for task in tasks))
-        try:
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await asyncio.shield(completion)
-        except asyncio.CancelledError:
-            for task in tasks:
-                task.cancel()
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            await completion
-            async with self._cond():
-                created = [
-                    item
-                    for item in results
-                    if isinstance(item, _PooledConnection) and item in self._idle
-                ]
-                for connection in created:
-                    self._idle.remove(connection)
-                retirement = self._retire(created)
-            if retirement is not None:
-                await asyncio.shield(retirement)
-            raise
+            if mode != self._connection_mode:
+                self._connection_mode = mode
+                self._preparation_failed = False
+                if mode == "inactive":
+                    self._invalidate_pool()
+            self._waiters = deque(ticket for ticket in self._waiters if not ticket.future.done())
+            self._reconcile_resources()
+            self._schedule_dispatch()
 
     async def admit_request(
         self,
@@ -489,37 +524,20 @@ class ChatGptPlanLLMProvider(LLMProvider):
         finally:
             await execution.close()
 
-    async def release_connections(self) -> None:
-        task = self._maintain(self._release_pool())
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
-
-    async def _release_pool(self) -> None:
-        async with self._cond():
-            self._pool_epoch += 1
-            for ticket in self._waiters:
-                ticket.future.cancel()
-            self._waiters.clear()
-            available = list(self._idle) + list(self._reserved)
-            self._idle.clear()
-            self._reserved.clear()
-            openings = tuple(self._openings.items())
-            for task, _ in openings:
-                task.cancel()
-            auth_tasks = tuple(self._auth_tasks)
-            for task in auth_tasks:
-                task.cancel()
-            retirement = self._retire(available)
-        await asyncio.gather(
-            *(task for task, _ in openings),
-            *(finished for _, finished in openings),
-            *auth_tasks,
-            *([retirement] if retirement is not None else []),
-            return_exceptions=True,
-        )
+    def _invalidate_pool(self) -> None:
+        self._pool_epoch += 1
+        for ticket in self._waiters:
+            ticket.future.cancel()
+        self._waiters.clear()
+        available = list(self._idle) + list(self._reserved)
+        self._idle.clear()
+        self._reserved.clear()
+        for task in self._openings:
+            self._cancelled_openings.add(task)
+            task.cancel()
+        for task in self._auth_tasks:
+            task.cancel()
+        self._retire(available)
 
     async def close(self) -> None:
         if self._close_task is None:
@@ -535,12 +553,25 @@ class ChatGptPlanLLMProvider(LLMProvider):
             raise
 
     async def _close_pool(self) -> None:
-        requests = tuple(self._requests)
-        for task in requests:
-            task.cancel()
-        await asyncio.gather(self._release_pool(), *requests, return_exceptions=True)
+        async with self._cond():
+            self._connection_mode = "inactive"
+            self._invalidate_pool()
+            requests = tuple(self._requests)
+            openings = tuple(self._openings.items())
+            auth_tasks = tuple(self._auth_tasks)
+            for task in requests:
+                task.cancel()
+        await asyncio.gather(
+            *requests,
+            *(task for task, _ in openings),
+            *(finished for _, finished in openings),
+            *auth_tasks,
+            return_exceptions=True,
+        )
         while self._maintenance:
-            await asyncio.gather(*tuple(self._maintenance), return_exceptions=True)
+            tasks = tuple(self._maintenance)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._maintenance.difference_update(tasks)
 
     async def _run_reserved(
         self,
@@ -682,9 +713,16 @@ class ChatGptPlanLLMProvider(LLMProvider):
                 else:
                     stale.append(connection)
             retirement = self._retire(stale)
+            trimmed = self._trim_idle()
             self._schedule_dispatch()
-        if retirement is not None:
-            await asyncio.shield(retirement)
+        retirements = [task for task in (retirement, trimmed) if task is not None]
+        if retirements:
+            completion = asyncio.gather(*retirements)
+            try:
+                await asyncio.shield(completion)
+            except asyncio.CancelledError:
+                await completion
+                raise
 
     async def _release(self, connection: _PooledConnection, *, reusable: bool) -> None:
         async with self._cond():
@@ -693,17 +731,22 @@ class ChatGptPlanLLMProvider(LLMProvider):
                 retirement = None
             else:
                 retirement = self._retire([connection])
+            trimmed = self._trim_idle()
             self._schedule_dispatch()
-        if retirement is not None:
+        retirements = [task for task in (retirement, trimmed) if task is not None]
+        if retirements:
+            completion = asyncio.gather(*retirements)
             try:
-                await asyncio.shield(retirement)
+                await asyncio.shield(completion)
             except asyncio.CancelledError:
-                await retirement
+                await completion
                 raise
 
     def _retire(self, connections: list[_PooledConnection]) -> asyncio.Task[None] | None:
+        connections = [connection for connection in connections if connection not in self._retiring]
         if not connections:
             return None
+        self._retiring.update(connections)
         return self._maintain(self._retire_connections(connections))
 
     async def _retire_connections(self, connections: list[_PooledConnection]) -> None:
@@ -714,6 +757,7 @@ class ChatGptPlanLLMProvider(LLMProvider):
             )
         finally:
             async with self._cond():
+                self._retiring.difference_update(connections)
                 self._open_count -= len(connections)
                 self._schedule_dispatch()
 

@@ -400,6 +400,7 @@ class UiProviderRuntimeAdapter:
     managed_gemma: ManagedGemmaTranslationOwner | None = None
     llm_devices_sink: Callable[[tuple[GpuDeviceOption, ...]], None] | None = None
     chatgpt: ChatGptAccountOwner | None = None
+    connection_readiness: LlmConnectionReadinessOwner | None = None
     _alibaba_workspace: AlibabaWorkspaceOwner | None = field(default=None, init=False)
 
     def alibaba_workspace(self) -> AlibabaWorkspaceOwner:
@@ -541,10 +542,17 @@ class UiProviderRuntimeAdapter:
     async def sign_out_chatgpt(self) -> ChatGptSignOutResult:
         if self.chatgpt is None:
             return ChatGptSignOutResult(remote_revoked=False)
-        result = await self.chatgpt.sign_out()
-        if self.chatgpt_route_active():
-            await self.apply_providers(force_rebuild_llm=True, persist_settings=False)
-        return result
+        readiness = self.connection_readiness if self.chatgpt_route_active() else None
+        if readiness is not None:
+            await readiness.suspend()
+        try:
+            result = await self.chatgpt.sign_out()
+            if self.chatgpt_route_active():
+                await self.apply_providers(force_rebuild_llm=True, persist_settings=False)
+            return result
+        finally:
+            if readiness is not None:
+                readiness.resume()
 
     def cancel_chatgpt_sign_in(self) -> None:
         if self.chatgpt is not None:

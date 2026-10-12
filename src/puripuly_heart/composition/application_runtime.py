@@ -209,6 +209,9 @@ from puripuly_heart.app.wiring_runtime_pipeline import (
     RuntimePipelineHandle,
     RuntimePipelineLauncher,
 )
+from puripuly_heart.app.wiring_translation_runtime_configuration import (
+    replace_translation_runtime_enabled,
+)
 from puripuly_heart.app.wiring_vrc_mic_sync import compose_vrc_mic_sync
 from puripuly_heart.composition.application_settings import load_application_settings
 from puripuly_heart.composition.application_startup import (
@@ -1995,6 +1998,7 @@ def compose_application_runtime(
     )
 
     def install_pipeline(components: RuntimePipelineComponents) -> None:
+        replace_translation_runtime_enabled(components.translation_runtime_configuration, False)
         pipeline.install(components)
         llm_connection_readiness.sync()
 
@@ -2121,10 +2125,12 @@ def compose_application_runtime(
 
     async def close_openrouter_oauth() -> None:
         try:
-            await managed_account.pkce_flow.close()
-        finally:
             await llm_connection_readiness.close()
-            await chatgpt_account.close()
+        finally:
+            try:
+                await managed_account.pkce_flow.close()
+            finally:
+                await chatgpt_account.close()
 
     def clear_event_runtime() -> None:
         nonlocal event_bridge, bridge_task
@@ -2194,6 +2200,7 @@ def compose_application_runtime(
             build_byok_target_settings=settings.build_managed_openrouter_byok_target,
             managed_gemma=managed_gemma,
             chatgpt=chatgpt_account,
+            connection_readiness=llm_connection_readiness,
             llm_devices_sink=lambda devices: presentation.set_dashboard_llm_gpu_devices(
                 devices=devices
             ),

@@ -10,6 +10,7 @@ Download `{{INSTALLER_EXE}}` from the Assets section below, then run it.
 
 
 ## Change logs
+- Luna on the ChatGPT connection preconnects one standby socket while translation is off and reuses it when translation is enabled.
 
 ---
 **If PuriPuly has made your world a bit wider,

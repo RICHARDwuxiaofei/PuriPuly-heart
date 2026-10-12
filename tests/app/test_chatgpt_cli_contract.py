@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 
 import pytest
 
 from puripuly_heart.app.ports.chatgpt_account import ChatGptConnectResult, ChatGptSignOutResult
+from puripuly_heart.app.wiring import create_secret_store, wiring_llm_factory
 from puripuly_heart.composition.headless_application import compose_headless_application
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext, SecretsIntent
 from puripuly_heart.config.settings_vnext.serialization import to_dict
+from puripuly_heart.core.chatgpt.session import ChatGptSession
+from puripuly_heart.providers.llm.chatgpt_plan import ChatGptPlanLLMProvider
 
 
 def _isolated_settings(path) -> None:
@@ -157,3 +161,75 @@ async def test_selecting_chatgpt_translation_switches_to_luna_on_chatgpt(tmp_pat
         assert (await control.query("auth.status", {}))["chatgpt"]["sign_in_required"] is True
     finally:
         await app.stop()
+
+
+@pytest.mark.asyncio
+async def test_signed_in_luna_startup_only_prepares_one_standby_socket(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("PURIPULY_HEART_SECRETS_PASSPHRASE", "isolated-test-passphrase")
+    path = tmp_path / "settings.json"
+    settings = AppSettingsVNext()
+    settings = replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            translation=replace(
+                settings.intent.translation, model="gpt_6_luna", connection="chatgpt"
+            ),
+            secrets=SecretsIntent(backend="encrypted_file", encrypted_file_path="secrets.json"),
+            osc=replace(settings.intent.osc, connection_mode="off"),
+            overlay=replace(settings.intent.overlay, target="none"),
+            telemetry=replace(settings.intent.telemetry, enabled=False),
+        ),
+    )
+    path.write_text(json.dumps(to_dict(settings)), encoding="utf-8")
+    store = create_secret_store(settings.intent.secrets, config_path=path)
+    store.set("chatgpt_refresh_token", "test-refresh-token")
+    store.set("chatgpt_client_id", "test-client")
+    sockets = []
+    requests = []
+    connected = asyncio.Event()
+
+    class Socket:
+        close_code = None
+
+        async def send(self, request):
+            requests.append(json.loads(request))
+
+        async def recv(self):
+            return json.dumps({"type": "response.completed"})
+
+        async def close(self):
+            self.close_code = 1000
+
+    async def connect(_url, _headers):
+        socket = Socket()
+        sockets.append(socket)
+        connected.set()
+        return socket
+
+    class LocalProvider(ChatGptPlanLLMProvider):
+        def __init__(self, *args, **kwargs):
+            kwargs["connector"] = connect
+            super().__init__(*args, **kwargs)
+
+    async def access_token(_session):
+        return "test-token"
+
+    monkeypatch.setattr(wiring_llm_factory, "ChatGptPlanLLMProvider", LocalProvider)
+    monkeypatch.setattr(ChatGptSession, "access_token", access_token)
+    app = compose_headless_application(path)
+    try:
+        await app.start()
+        await asyncio.wait_for(connected.wait(), timeout=1)
+        status = await app.control().query("app.status", {})
+        assert status["translation_enabled"] is False
+        assert status["channels"]["self"]["effective_active"] is False
+        assert status["channels"]["peer"]["effective_active"] is False
+        assert len(sockets) == 1
+        assert sockets[0].close_code is None
+        assert requests == []
+    finally:
+        await app.stop()
+    assert all(socket.close_code == 1000 for socket in sockets)
