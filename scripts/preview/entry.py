@@ -17,6 +17,9 @@ os.environ["PYTHONPATH"] = str(root / "src")
 os.environ["PURIPULY_HEART_TEST_PROFILE"] = "desktop-preview"
 os.environ["PURIPULY_HEART_TEST_DATA_DIR"] = str(root.parent / "preview-data")
 os.environ["FLET_VIEW_PATH"] = str(root.parent / "flet" / "flet")
+os.environ["FLET_SERVER_IP"] = "127.0.0.1"
+os.environ.pop("FLET_FORCE_WEB_SERVER", None)
+os.environ.pop("FLET_SERVER_PORT", None)
 os.environ["PYTHONIOENCODING"] = "utf-8"
 os.environ["PYTHONNOUSERSITE"] = "1"
 os.chdir(root)

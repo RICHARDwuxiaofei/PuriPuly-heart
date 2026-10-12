@@ -3,7 +3,37 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from puripuly_heart.app.services.quick_translate import QuickTranslateOwner
-from puripuly_heart.ui.quick_translate_window import QuickWindow, clamp_window_bounds
+from puripuly_heart.ui.quick_translate_window import (
+    QuickWindow,
+    clamp_window_bounds,
+    quick_child_environment,
+)
+
+
+def test_quick_child_is_loopback_only_and_does_not_inherit_credentials():
+    parent = {
+        "FLET_SERVER_IP": "0.0.0.0",
+        "FLET_SERVER_PORT": "12345",
+        "FLET_FORCE_WEB_SERVER": "true",
+        "FLET_DART_BRIDGE_PORT": "54321",
+        "OPENROUTER_API_KEY": "never-inherit",
+        "HF_TOKEN": "never-inherit",
+        "PYTHONPATH": "required-source-path",
+    }
+    child = quick_child_environment(parent)
+    assert child["FLET_SERVER_IP"] == "127.0.0.1"
+    assert child["PYTHONPATH"] == "required-source-path"
+    assert all(
+        key not in child
+        for key in (
+            "FLET_SERVER_PORT",
+            "FLET_FORCE_WEB_SERVER",
+            "FLET_DART_BRIDGE_PORT",
+            "OPENROUTER_API_KEY",
+            "HF_TOKEN",
+        )
+    )
+    assert parent["FLET_SERVER_IP"] == "0.0.0.0" and parent["HF_TOKEN"] == "never-inherit"
 
 
 class Page:

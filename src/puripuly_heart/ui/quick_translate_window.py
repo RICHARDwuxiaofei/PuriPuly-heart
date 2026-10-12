@@ -22,6 +22,20 @@ from puripuly_heart.ui.theme import (
 )
 
 
+def quick_child_environment(base):
+    environment = dict(base)
+    for name in tuple(environment):
+        if (
+            name.startswith("FLET_DART_BRIDGE")
+            or name in {"FLET_FORCE_WEB_SERVER", "FLET_DISPLAY_URL_PREFIX", "FLET_SERVER_PORT"}
+            or name.endswith(("_API_KEY", "_TOKEN", "_PSK"))
+        ):
+            environment.pop(name, None)
+    environment["FLET_SERVER_IP"] = "127.0.0.1"
+    environment["PYTHONIOENCODING"] = "utf-8"
+    return environment
+
+
 async def spawn_quick_window(locale: str):
     layout = current_runtime_layout()
     executable = layout.host_executable
@@ -39,7 +53,7 @@ async def spawn_quick_window(locale: str):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        env=quick_child_environment(os.environ),
         limit=MAX_FRAME_BYTES,
     )
 
@@ -268,4 +282,4 @@ class QuickWindow:
 
 def run_quick_window(locale):
     set_locale(locale)
-    ft.run(lambda page: QuickWindow(page))
+    ft.run(lambda page: QuickWindow(page), host="127.0.0.1")
