@@ -104,6 +104,7 @@ def main():
     )
     app = output / "app"
     app.mkdir()
+    shutil.copytree(repo / "prompts", app / "prompts", copy_function=copy_payload_file)
     shutil.copytree(
         repo / "src",
         app / "src",
@@ -121,8 +122,15 @@ def main():
         app / "third_party" / "llama.cpp",
         copy_function=copy_payload_file,
     )
+    for name in ("openvr", "noto-sans-cjk", "soxr"):
+        source = repo / "third_party" / name
+        if source.is_dir():
+            shutil.copytree(source, app / "third_party" / name, copy_function=copy_payload_file)
     shutil.unpack_archive(flet_archive, output / "flet")
     compiler = Path(r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
+    smoke_environment = dict(os.environ)
+    smoke_environment["PYTHONPATH"] = str(app / "src")
+    smoke_environment.pop("PURIPULY_HEART_PROMPTS_DIR", None)
     subprocess.run(
         [
             str(compiler),
@@ -138,9 +146,10 @@ def main():
         [
             str(runtime / "python.exe"),
             "-c",
-            "from flet.app import run; import numpy, sounddevice, soxr, huggingface_hub; print('Bundled runtime GUI dependency smoke: PASS')",
+            "from flet.app import run; import numpy, sounddevice, soxr, huggingface_hub; from puripuly_heart.config.prompts import load_prompt; assert load_prompt('translation_prompt'); from puripuly_heart.ui.i18n import available_locales; assert 'zh-CN' in available_locales(); print('Bundled runtime GUI dependency/resources smoke: PASS')",
         ],
         cwd=app,
+        env=smoke_environment,
         check=True,
     )
     (output / "BUILD.json").write_text(
