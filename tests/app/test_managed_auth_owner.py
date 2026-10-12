@@ -147,14 +147,29 @@ async def test_qq_failure_maps_service_message_at_owner_boundary() -> None:
             message_kwargs={"retry_after_ms": 10},
         ),
     )
-
     assert await owner.start_qq(
         qq_identity="qq",
         credential="credential",
-    ) == (
-        "qq_auth.error.credential_mismatch",
-        {"retry_after_ms": 10},
+    ) == ("qq_auth.error.credential_mismatch", {"retry_after_ms": 10})
+
+
+@pytest.mark.asyncio
+async def test_committed_qq_auth_remains_successful_after_runtime_rebuild_error(caplog):
+    owner = _owner(
+        [_state(managed_china=True)],
+        qq_result=ManagedAuthExecutionResult(
+            succeeded=True,
+            runtime_rebuild="if_missing",
+        ),
     )
+
+    async def fail(mode):
+        raise RuntimeError("sensitive-rebuild-error")
+
+    owner.runtime_ensurer = fail
+    assert await owner.start_qq(qq_identity="mock", credential="mock") is True
+    assert "stage=translation_start code=translation_init_failed" in caplog.text
+    assert "sensitive-rebuild-error" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -292,7 +307,7 @@ async def test_discord_runtime_failure_does_not_publish_usage_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_close_rejects_new_auth_and_clears_callback_and_pending() -> None:
+async def test_close_rejects_new_auth_and_clears_callback_and_pending(caplog) -> None:
     pending: list[bool] = []
     messages: list[tuple[str, dict[str, object]]] = []
     owner = _owner([_state(managed_china=True)], pending=pending, messages=messages)
@@ -309,7 +324,8 @@ async def test_close_rejects_new_auth_and_clears_callback_and_pending() -> None:
     assert await owner.start_qq(
         qq_identity="qq",
         credential="credential",
-    ) == ("qq_auth.error.retry", {})
+    ) == ("qq_auth.error.configuration_unavailable", {})
+    assert "stage=preflight code=flow_not_ready" in caplog.text
     assert messages == [("discord_auth.error.retry", {})]
 
 

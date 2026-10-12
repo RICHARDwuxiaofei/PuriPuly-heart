@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 import flet as ft
 
+from puripuly_heart.core.qq_auth_diagnostics import log_qq_auth
 from puripuly_heart.ui.components.warm_document_dialog import (
     WarmDocumentDialogAction,
     WarmDocumentDialogResult,
@@ -187,6 +188,7 @@ class QqManagedAuthDialog:
 
     def _submit(self) -> None:
         if not self._validate_inputs():
+            log_qq_auth("preflight", "invalid_input")
             self._set_error_key("qq_auth.error.invalid_input")
             self._update_page_if_possible()
             return

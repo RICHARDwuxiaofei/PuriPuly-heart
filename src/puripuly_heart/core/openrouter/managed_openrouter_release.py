@@ -267,6 +267,7 @@ class ManagedOpenRouterReleaseError(Exception):
     subcode: str | None = None
     retry_after_ms: int | None = None
     managed_lifecycle: str | None = None
+    http_status: int | None = field(default=None, compare=False)
 
     def __str__(self) -> str:
         return self.message or self.code

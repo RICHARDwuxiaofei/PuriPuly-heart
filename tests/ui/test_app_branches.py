@@ -2519,6 +2519,51 @@ async def test_qq_managed_auth_success_enables_translation_and_closes_dialog() -
     assert dashboard_translation_calls == [True]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raises", [False, True])
+async def test_qq_success_translation_failure_reports_activation_only(raises, caplog) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    closed, errors, notices = [], [], []
+    app._qq_managed_auth_dialog = SimpleNamespace(
+        qq_identity="mock-user",
+        credential="secret-must-not-leak",
+        set_waiting=lambda: None,
+        close=lambda: closed.append(True),
+        set_error=lambda *args: errors.append(args),
+    )
+    app._qq_managed_auth_generation = 0
+    app._qq_managed_auth_cancelled = False
+    app._show_snackbar = lambda message, *args: notices.append(message)
+    app.view_dashboard = SimpleNamespace(set_translation_enabled=lambda value: None)
+
+    async def authenticate(**kwargs):
+        return True
+
+    async def enable(*args, **kwargs):
+        if raises:
+            raise RuntimeError("secret-must-not-leak")
+        return False
+
+    app._ui_application = compose_test_ui_application_boundary(
+        SimpleNamespace(
+            start_qq_managed_auth_from_dialog=authenticate,
+            set_translation_enabled=enable,
+        )
+    )
+    with caplog.at_level(app_module.logging.INFO):
+        app._start_qq_managed_auth()
+        await app.page.tasks[0]()
+    assert closed == [True]
+    assert errors == []
+    assert notices == [app_module.t("qq_auth.error.translation_start_failed")]
+    assert "success stage=authentication code=authentication_succeeded" in caplog.text
+    assert "failure stage=translation_start code=translation_init_failed" in caplog.text
+    assert "failure stage=authentication" not in caplog.text
+    assert "secret-must-not-leak" not in caplog.text
+    assert app._qq_managed_auth_task_handle is None
+
+
 def test_managed_china_dashboard_prompt_opens_qq_auth_not_discord() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()

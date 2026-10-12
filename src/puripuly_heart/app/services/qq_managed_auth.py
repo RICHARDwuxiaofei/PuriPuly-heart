@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 
 from puripuly_heart.app.ports.broker_client import (
@@ -87,6 +88,12 @@ from puripuly_heart.core.openrouter.openrouter_credentials import (
     OPENROUTER_MANAGED_QQ_API_KEY_SECRET,
     OPENROUTER_MANAGED_QQ_STATUS_AUTH_SECRET,
 )
+from puripuly_heart.core.qq_auth_diagnostics import (
+    exception_fields,
+    log_qq_auth,
+    log_qq_diagnostics,
+    safe_fields,
+)
 
 QQ_MANAGED_AUTH_FAILURE_MESSAGE_KEYS = (
     "qq_managed_auth.invalid_credential",
@@ -137,6 +144,23 @@ class QqManagedAuthService:
     )
 
     async def authenticate(self, request: QqManagedAuthRequest) -> TransactionResult:
+        try:
+            result = await self._authenticate(request)
+        except Exception as exc:
+            log_qq_auth("authentication", "unknown_error", fields=exception_fields(exc))
+            raise
+        if result.message is not None and result.message.key == "qq_managed_auth.success":
+            log_qq_auth("authentication", "authentication_succeeded", level=logging.INFO)
+        else:
+            log_qq_diagnostics(
+                result.diagnostics,
+                level=logging.WARNING
+                if result.status == TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
+                else logging.ERROR,
+            )
+        return result
+
+    async def _authenticate(self, request: QqManagedAuthRequest) -> TransactionResult:
         other_source_refusal = _refuse_other_source_pending(self.managed_state)
         if other_source_refusal is not None:
             return other_source_refusal
@@ -376,20 +400,31 @@ class QqManagedAuthService:
                     resume_token=resume_token,
                 )
             )
-        except Exception:
-            return _broker_failure_result(
+        except Exception as exc:
+            result = _broker_failure_result(
                 failure_subcode="broker_unavailable",
                 code="qq_assertion_exception",
                 retry_after_ms=None,
+                diagnostic_fields=exception_fields(exc),
             )
+            log_qq_diagnostics(result.diagnostics, stage="broker_request")
+            return result
 
         if not result.succeeded:
-            return _broker_failure_result(
+            failure = _broker_failure_result(
                 failure_subcode=result.failure_subcode or "broker_unavailable",
                 code="qq_assertion_failed",
                 retry_after_ms=result.retry_after_ms,
                 diagnostics_present=result.diagnostics is not None,
+                diagnostic_fields=result.diagnostics.fields
+                if result.diagnostics is not None
+                else {},
+                status_code=result.diagnostics.status_code
+                if result.diagnostics is not None
+                else None,
             )
+            log_qq_diagnostics(failure.diagnostics)
+            return failure
 
         return result
 
@@ -528,7 +563,7 @@ class QqManagedAuthService:
         ):
             if unknown:
                 emit_progress(request.progress_sink, "recovering")
-                return await self._drive_qq_operation_recovery(
+                recovering = await self._drive_qq_operation_recovery(
                     request,
                     operation=operation,
                     resume_token=resume_token,
@@ -537,6 +572,7 @@ class QqManagedAuthService:
                     original_failure=None,
                     initial_probe_failures=1,
                 )
+                return _with_network_context(recovering, assertion)
             return assertion
         if (
             not unknown
@@ -554,7 +590,7 @@ class QqManagedAuthService:
             unknown_outcome=unknown,
             original_failure=None if unknown else assertion,
         )
-        return recovered if recovered is not None else assertion
+        return _with_network_context(recovered, assertion) if recovered is not None else assertion
 
     async def _fetch_operation_status(
         self,
@@ -563,7 +599,7 @@ class QqManagedAuthService:
         installation_id: str,
     ) -> ManagedOperationStatusResult | None:
         try:
-            return await self.broker_client.get_managed_operation_status(
+            result = await self.broker_client.get_managed_operation_status(
                 ManagedOperationStatusRequest(
                     operation_id=operation_id,
                     installation_id=installation_id,
@@ -571,7 +607,13 @@ class QqManagedAuthService:
                     source=MANAGED_OPERATION_SOURCE_QQ,
                 )
             )
-        except Exception:
+            if not result.succeeded and result.diagnostics is not None:
+                log_qq_diagnostics(
+                    result.diagnostics, stage="recovery", fallback_code="operation_status_failed"
+                )
+            return result
+        except Exception as exc:
+            log_qq_auth("recovery", "operation_status_failed", fields=exception_fields(exc))
             return None
 
     async def _call_resume(
@@ -580,7 +622,7 @@ class QqManagedAuthService:
         resume_token: str,
     ) -> ManagedOperationStatusResult | None:
         try:
-            return await self.broker_client.resume_managed_operation(
+            result = await self.broker_client.resume_managed_operation(
                 ManagedOperationResumeRequest(
                     operation_id=operation.operation_id,
                     installation_id=operation.installation_id,
@@ -588,7 +630,13 @@ class QqManagedAuthService:
                     source=MANAGED_OPERATION_SOURCE_QQ,
                 )
             )
-        except Exception:
+            if not result.succeeded and result.diagnostics is not None:
+                log_qq_diagnostics(
+                    result.diagnostics, stage="recovery", fallback_code="operation_resume_failed"
+                )
+            return result
+        except Exception as exc:
+            log_qq_auth("recovery", "operation_resume_failed", fields=exception_fields(exc))
             return None
 
     async def _drive_qq_operation_recovery(
@@ -885,11 +933,12 @@ class QqManagedAuthService:
     async def _snapshot_secret(self) -> SecretSnapshot | TransactionResult:
         try:
             return await self.secret_store.snapshot_secret(OPENROUTER_MANAGED_QQ_API_KEY_SECRET)
-        except Exception:
+        except Exception as exc:
             return _secret_failure_result(
                 operation="snapshot_qq_managed_secret",
                 code="qq_secret_snapshot_failed",
                 phase="secret_snapshot",
+                diagnostic_fields=exception_fields(exc),
             )
 
     async def _write_managed_secret(self, managed_secret_key: str) -> TransactionResult | None:
@@ -898,11 +947,12 @@ class QqManagedAuthService:
                 OPENROUTER_MANAGED_QQ_API_KEY_SECRET,
                 managed_secret_key,
             )
-        except Exception:
+        except Exception as exc:
             return _secret_failure_result(
                 operation="set_qq_managed_secret",
                 code="qq_secret_write_exception",
                 phase="secret_write",
+                diagnostic_fields=exception_fields(exc),
             )
 
         if not result.succeeded:
@@ -934,8 +984,15 @@ class QqManagedAuthService:
             )
             if result.succeeded:
                 return
-        except Exception:
-            pass
+        except Exception as exc:
+            log_qq_auth(
+                "secret_storage",
+                "status_auth_storage_failed",
+                fields=exception_fields(exc),
+                level=logging.WARNING,
+            )
+        else:
+            log_qq_auth("secret_storage", "status_auth_storage_failed", level=logging.WARNING)
         try:
             await self.secret_store.clear_secret(
                 OPENROUTER_MANAGED_QQ_STATUS_AUTH_SECRET,
@@ -954,6 +1011,13 @@ class QqManagedAuthService:
     def _consume_ack_result(self, result: ManagedKeyDeliveryAckResult | None) -> None:
         if result is None:
             return
+        if not result.succeeded:
+            log_qq_diagnostics(
+                result.diagnostics,
+                stage="delivery_ack",
+                fallback_code="qq_delivery_ack_pending",
+                level=logging.WARNING,
+            )
         if result.succeeded:
             changed = self._apply_qq_referral_result(result.referral_id)
             if changed:
@@ -1151,7 +1215,12 @@ def _local_failure_result(
 ) -> TransactionResult:
     return TransactionResult(
         status=TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED,
-        message=_message("qq_managed_auth.error.retry", severity=SEVERITY_ERROR),
+        message=_message(
+            "qq_managed_auth.configuration_unavailable"
+            if code == "qq_managed_operation_installation_unavailable"
+            else "qq_managed_auth.local_storage_unavailable",
+            severity=SEVERITY_ERROR,
+        ),
         diagnostics=_diagnostics(
             operation=operation,
             code=code,
@@ -1313,21 +1382,37 @@ def _broker_failure_result(
     code: str,
     retry_after_ms: int | None,
     diagnostics_present: bool = False,
+    diagnostic_fields: Mapping[str, object] | None = None,
+    status_code: int | None = None,
 ) -> TransactionResult:
     category = _category_for_failure_subcode(failure_subcode)
+    detail = safe_fields(diagnostic_fields or {})
+    if type(status_code) is int:
+        detail["http_status"] = status_code
+    network_kind = detail.get("network_error_kind")
+    message_key = (
+        f"qq_managed_auth.network_{network_kind}"
+        if network_kind in {"timeout", "proxy", "tls", "dns", "network"}
+        else f"qq_managed_auth.{failure_subcode}"
+    )
+    if detail.get("broker_code") == "internal_error":
+        message_key = "qq_managed_auth.broker_unavailable"
     return TransactionResult(
         status=TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED,
         message=_message(
-            f"qq_managed_auth.{failure_subcode}",
+            message_key,
             severity=SEVERITY_WARNING if failure_subcode == "rate_limited" else SEVERITY_ERROR,
             params={"retry_after_ms": retry_after_ms} if retry_after_ms is not None else {},
         ),
         diagnostics=_diagnostics(
             operation="assert_qq_managed_identity",
-            code=code,
+            code=f"broker_{network_kind}"
+            if network_kind in {"timeout", "proxy", "tls", "dns", "network"}
+            else code,
             category=category,
             retry_after_ms=retry_after_ms,
             fields={
+                **detail,
                 "phase": "broker_assertion",
                 "qq_failure_subcode": failure_subcode,
                 "diagnostics_present": diagnostics_present,
@@ -1338,6 +1423,23 @@ def _broker_failure_result(
     )
 
 
+def _with_network_context(
+    result: TransactionResult, assertion: TransactionResult
+) -> TransactionResult:
+    if (
+        result.status != TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
+        or assertion.diagnostics is None
+    ):
+        return result
+    detail = safe_fields(assertion.diagnostics.fields)
+    if detail.get("network_error_kind") in {"timeout", "proxy", "tls", "dns", "network"}:
+        diagnostics = result.diagnostics
+        if diagnostics is not None:
+            diagnostics = replace(diagnostics, fields={**diagnostics.fields, **detail})
+        return replace(result, message=assertion.message, diagnostics=diagnostics)
+    return result
+
+
 def _secret_failure_result(
     *,
     operation: str,
@@ -1345,6 +1447,7 @@ def _secret_failure_result(
     phase: str,
     diagnostics_present: bool = False,
     message: UserMessageRef | None = None,
+    diagnostic_fields: Mapping[str, object] | None = None,
 ) -> TransactionResult:
     return TransactionResult(
         status=TRANSACTION_STATUS_SECRET_WRITE_FAILED,
@@ -1354,6 +1457,7 @@ def _secret_failure_result(
             code=code,
             category=DIAGNOSTIC_CATEGORY_TRANSACTION,
             fields={
+                **safe_fields(diagnostic_fields or {}),
                 "phase": phase,
                 "secret_key": OPENROUTER_MANAGED_QQ_API_KEY_SECRET,
                 "diagnostics_present": diagnostics_present,
@@ -1408,7 +1512,7 @@ def _delivery_ack_pending_result(
 ) -> TransactionResult:
     return TransactionResult(
         status=TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING,
-        message=_message("qq_managed_auth.key_unavailable", severity=SEVERITY_WARNING),
+        message=_message("qq_managed_auth.delivery_ack_pending", severity=SEVERITY_WARNING),
         diagnostics=_diagnostics(
             operation="acknowledge_qq_managed_key_delivery",
             code="qq_delivery_ack_pending",
@@ -1452,7 +1556,7 @@ def _diagnostics(
         category=category,
         visibility=DIAGNOSTIC_VISIBILITY_BASIC,
         content_policy=CONTENT_POLICY_METADATA_ONLY,
-        status_code=None,
+        status_code=fields.get("http_status") if type(fields.get("http_status")) is int else None,
         retry_after_ms=retry_after_ms,
         fields=fields,
     )
