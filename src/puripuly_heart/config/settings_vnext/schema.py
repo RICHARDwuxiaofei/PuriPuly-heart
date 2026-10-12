@@ -729,6 +729,11 @@ class SecretsIntent:
 @dataclass(frozen=True, slots=True)
 class UiIntent:
     locale: str = "en"
+    quick_translate_always_on_top: bool = True
+    quick_translate_width: int = 480
+    quick_translate_height: int = 520
+    quick_translate_left: int = 100
+    quick_translate_top: int = 100
 
 
 @dataclass(frozen=True, slots=True)

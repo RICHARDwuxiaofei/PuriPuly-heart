@@ -112,6 +112,25 @@ class UiInputRuntimeAdapter:
         submit = None if owner is None else lambda: owner.submit_text(text, source="You")
         await self.manual_typing.submit(submit)
 
+    async def submit_quick_text(self, text: str) -> tuple[str, str]:
+        owner = self.pipeline.self_translation_channel
+        if (
+            owner is None
+            or not owner.translation_requests.provider_available
+            or not owner.config_snapshot().value.translation_enabled
+        ):
+            raise RuntimeError("backend_not_ready")
+        utterance_id = await self.manual_typing.submit(
+            lambda: owner.submit_text(text, source="You"), strict=True
+        )
+        task = owner.runtime.translation_tasks.get(utterance_id)
+        if task is not None and not task.done():
+            await asyncio.shield(task)
+        bundle = owner.runtime.utterances.get(utterance_id)
+        if bundle is None or bundle.translation is None:
+            raise RuntimeError("translation_failed")
+        return str(utterance_id), bundle.translation.translated_text
+
     def set_manual_input_activity(self, has_text: bool) -> None:
         self.manual_typing.set_input_activity(has_text)
 
@@ -665,6 +684,40 @@ class UiProviderRuntimeAdapter:
                     translation=replace(current.intent.translation, download_source=source),
                 ),
             )
+            await self.settings.persist_async()
+        except BaseException:
+            self.settings.rollback()
+            raise
+
+    def quick_window_preferences(self) -> dict:
+        ui = self.settings.require_canonical().intent.ui
+        return dict(
+            always_on_top=ui.quick_translate_always_on_top,
+            width=ui.quick_translate_width,
+            height=ui.quick_translate_height,
+            left=ui.quick_translate_left,
+            top=ui.quick_translate_top,
+        )
+
+    async def configure_quick_window(self, values: dict) -> None:
+        current = self.settings.require_canonical()
+        updated = replace(
+            current.intent.ui,
+            quick_translate_always_on_top=bool(
+                values.get("always_on_top", current.intent.ui.quick_translate_always_on_top)
+            ),
+            quick_translate_width=max(
+                360, min(1000, int(values.get("width", current.intent.ui.quick_translate_width)))
+            ),
+            quick_translate_height=max(
+                300, min(1000, int(values.get("height", current.intent.ui.quick_translate_height)))
+            ),
+            quick_translate_left=int(values.get("left", current.intent.ui.quick_translate_left)),
+            quick_translate_top=int(values.get("top", current.intent.ui.quick_translate_top)),
+        )
+        self.settings.begin()
+        try:
+            self.settings.canonical = replace(current, intent=replace(current.intent, ui=updated))
             await self.settings.persist_async()
         except BaseException:
             self.settings.rollback()

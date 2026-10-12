@@ -47,6 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub = parser.add_subparsers(dest="command")
+    quick_translate = sub.add_parser("run-quick-translate", help=argparse.SUPPRESS)
+    quick_translate.add_argument("--locale", default="en")
 
     desktop_overlay = sub.add_parser(
         "run-desktop-overlay",
@@ -387,6 +389,11 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "run-quick-translate":
+        from puripuly_heart.ui.quick_translate_window import run_quick_window
+
+        run_quick_window(args.locale)
+        return 0
     if args.command == "hf-xet-download-worker":
         from puripuly_heart.core.local_stt_huggingface_xet_adapter import (
             run_huggingface_xet_worker,
