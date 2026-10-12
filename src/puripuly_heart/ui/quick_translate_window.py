@@ -12,8 +12,14 @@ import flet as ft
 
 from puripuly_heart.app.services.quick_translate import FRAME_PREFIX, MAX_FRAME_BYTES
 from puripuly_heart.runtime_layout import current_runtime_layout
-from puripuly_heart.ui.i18n import set_locale, t
-from puripuly_heart.ui.theme import COLOR_BACKGROUND, COLOR_DIVIDER
+from puripuly_heart.ui.fonts import font_for_language, register_ui_fonts
+from puripuly_heart.ui.i18n import get_locale, set_locale, t
+from puripuly_heart.ui.theme import (
+    COLOR_BACKGROUND,
+    COLOR_DIVIDER,
+    COLOR_NEUTRAL_DARK,
+    get_app_theme,
+)
 
 
 async def spawn_quick_window(locale: str):
@@ -89,6 +95,8 @@ class QuickWindow:
         self.history = {}
         self.order = []
         self.input = ft.TextField(
+            color=COLOR_NEUTRAL_DARK,
+            expand=True,
             label=t("quick.input"),
             multiline=True,
             shift_enter=True,
@@ -97,11 +105,14 @@ class QuickWindow:
             max_length=8000,
             on_submit=self.send,
         )
-        self.status = ft.Text(t("quick.hint"))
+        self.status = ft.Text(t("quick.hint"), color=COLOR_NEUTRAL_DARK, expand=True)
         self.results = ft.ListView(expand=True, spacing=12, auto_scroll=False)
         self.pin = ft.Switch(label=t("quick.pin"), value=True, on_change=self.set_pin)
         self.button = ft.Button(t("quick.send"), on_click=self.send)
         page.title = t("quick.title")
+        page.theme_mode = ft.ThemeMode.LIGHT
+        page.theme = get_app_theme(font_family=font_for_language(get_locale()))
+        register_ui_fonts(page)
         page.bgcolor = COLOR_BACKGROUND
         page.window.bgcolor = COLOR_BACKGROUND
         page.window.opacity = 1
@@ -118,7 +129,7 @@ class QuickWindow:
                     [
                         ft.Row([self.pin, ft.TextButton(t("quick.hide"), on_click=self.hide)]),
                         self.results,
-                        self.input,
+                        ft.Row([self.input]),
                         ft.Row([self.button, self.status]),
                     ],
                     expand=True,
@@ -140,7 +151,7 @@ class QuickWindow:
         self.pending = (identity, text)
         self.button.disabled = True
         self.status.value = t("quick.pending")
-        row = ft.Text(text + "\n" + t("quick.pending"), selectable=True)
+        row = ft.Text(text + "\n" + t("quick.pending"), selectable=True, color=COLOR_NEUTRAL_DARK)
         self.history[identity] = (text, row)
         self.order.append(identity)
         self.results.controls.append(row)

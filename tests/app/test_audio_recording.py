@@ -124,3 +124,33 @@ async def test_playback_pauses_capture_and_respects_latest_user_off(user_changes
     boundary = compose_test_ui_application_boundary(backend)
     await UiApplicationBoundary.play_microphone_recording(boundary)
     assert flags == {"self": not user_changes, "peer": not user_changes}
+
+
+async def test_rapid_playback_requests_do_not_drop_capture_guard():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def stop():
+        await asyncio.sleep(0)
+
+    async def play(*, processed):
+        calls.append(processed)
+        started.set()
+        await release.wait()
+
+    backend = SimpleNamespace(
+        stop_microphone_test=stop,
+        self_capture_test_state=lambda: (False, 0),
+        peer_capture_test_state=lambda: (False, 0),
+        play_microphone_recording=play,
+    )
+    boundary = compose_test_ui_application_boundary(backend)
+    first = asyncio.create_task(boundary.play_microphone_recording())
+    await started.wait()
+    await boundary.play_microphone_recording(processed=True)
+    assert boundary._audio_playback_active
+    assert calls == [False]
+    release.set()
+    await first
+    assert not boundary._audio_playback_active

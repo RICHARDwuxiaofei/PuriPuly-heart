@@ -9,6 +9,7 @@ from puripuly_heart.core.feature_diagnostics import log_feature
 from puripuly_heart.core.local_translation.assets import e4b_gemma_spec
 from puripuly_heart.core.local_translation.provisioning import GemmaProvisioningCancelled
 from puripuly_heart.ui.i18n import t
+from puripuly_heart.ui.theme import COLOR_NEUTRAL_DARK, COLOR_SURFACE
 
 
 class ModelAssetsDialog:
@@ -29,7 +30,7 @@ class ModelAssetsDialog:
             ],
             label=t("model_assets.source"),
         )
-        self.status = ft.Text(t("model_assets.hint"), selectable=True)
+        self.status = ft.Text(t("model_assets.hint"), selectable=True, color=COLOR_NEUTRAL_DARK)
         self.progress = ft.ProgressBar(value=0)
         self.start_button = ft.Button(
             t("model_assets.start"), on_click=lambda _: self.run_task(self.install)
@@ -37,11 +38,14 @@ class ModelAssetsDialog:
         self.picker = ft.FilePicker()
         self.dialog = ft.AlertDialog(
             title=ft.Text(t("model_assets.title")),
+            bgcolor=COLOR_SURFACE,
             content=ft.Column(
                 [
                     self.source,
                     ft.Text(
-                        "\n".join(a.filename for a in e4b_gemma_spec().assets), selectable=True
+                        "\n".join(a.filename for a in e4b_gemma_spec().assets),
+                        selectable=True,
+                        color=COLOR_NEUTRAL_DARK,
                     ),
                     ft.Button(
                         t("model_assets.choose"), on_click=lambda _: self.run_task(self.choose)
@@ -139,6 +143,8 @@ class ModelAssetsDialog:
                 status.downloaded_bytes / status.total_bytes if status.total_bytes else 0
             )
             self.status.value = f"{t('model_assets.phase.' + status.state)} · {source}\n{status.downloaded_bytes / 1024**2:.1f} / {status.total_bytes / 1024**2:.1f} MiB ({status.percent}%)"
+            if getattr(status, "filename", None):
+                self.status.value += "\n" + status.filename
             self.page.update()
 
         try:

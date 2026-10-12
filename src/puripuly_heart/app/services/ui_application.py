@@ -150,6 +150,8 @@ UI_APPLICATION_USER_INTENT_METHODS = frozenset(
 
 _ORDERED_INTENTS = frozenset(
     {
+        "configure_gemma_source",
+        "configure_quick_window",
         "apply_loopback_capture_option",
         "apply_providers",
         "apply_settings",
@@ -621,14 +623,17 @@ class UiApplicationBoundary:
     async def play_microphone_recording(self, *, processed=False) -> None:
         from puripuly_heart.core.feature_diagnostics import log_feature
 
-        await self.stop_microphone_test()
-        self_before = self._input_runtime.self_capture_test_state()
-        peer_before = self._peer_capture.peer_capture_test_state()
+        if getattr(self, "_audio_playback_active", False):
+            return
+        self._audio_playback_active = True
+        self_before = peer_before = (False, None)
         self_revision = getattr(self, "_audio_self_intent", 0)
         peer_revision = getattr(self, "_audio_peer_intent", 0)
-        self._audio_playback_active = True
         self_token = peer_token = None
         try:
+            await self.stop_microphone_test()
+            self_before = self._input_runtime.self_capture_test_state()
+            peer_before = self._peer_capture.peer_capture_test_state()
             if self_before[0]:
                 await self._input_runtime.set_stt_enabled(False)
             if peer_before[0]:

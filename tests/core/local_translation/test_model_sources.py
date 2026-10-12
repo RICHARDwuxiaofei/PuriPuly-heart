@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import threading
 from dataclasses import replace
@@ -144,3 +145,63 @@ def test_bad_range_is_not_appended(tmp_path):
         download_public_file(payload(tmp_path), on_progress=lambda _: None, client_factory=factory)
     assert error.value.failure_code == "range_invalid"
     assert (tmp_path / "a.gguf.partial").read_bytes() == b"aa"
+
+
+async def test_wrong_import_is_rejected_even_when_valid_model_is_installed(tmp_path):
+    spec = small_spec()
+    files = tuple(tmp_path / a.filename for a in spec.assets)
+    for path, data in zip(files, (b"aaaa", b"bbbb")):
+        path.write_bytes(data)
+    install = tmp_path / "installed"
+    await ensure_gemma_installed(
+        source="local",
+        spec=spec,
+        downloader=LocalGemmaDownloadAdapter(files, spec),
+        install_dir=install,
+    )
+    files[0].write_bytes(b"xxxx")
+    with pytest.raises(GemmaProvisioningError) as error:
+        await ensure_gemma_installed(
+            source="local",
+            spec=spec,
+            downloader=LocalGemmaDownloadAdapter(files, spec),
+            install_dir=install,
+        )
+    assert error.value.failure_code == "checksum_failed"
+    validate_gemma_install(install, spec=spec)
+
+
+async def test_insufficient_disk_does_not_replace_existing_install(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    import puripuly_heart.core.local_translation.provisioning as provisioning
+
+    monkeypatch.setattr(provisioning.shutil, "disk_usage", lambda _: SimpleNamespace(free=0))
+    install = tmp_path / "installed"
+    install.mkdir()
+    (install / "keep").write_bytes(b"old")
+    with pytest.raises(GemmaProvisioningError) as error:
+        await ensure_gemma_installed(source="mirror", spec=small_spec(), install_dir=install)
+    assert error.value.failure_code == "disk_full"
+    assert error.value.__cause__.errno == errno.ENOSPC
+    assert (install / "keep").read_bytes() == b"old"
+
+
+def test_timeout_retries_are_bounded_and_safe(monkeypatch, tmp_path):
+    import puripuly_heart.core.local_translation.public_download as public_download
+
+    requests = []
+    monkeypatch.setattr(public_download.time, "sleep", lambda _: None)
+
+    def respond(request):
+        requests.append(request)
+        raise httpx.ReadTimeout("secret signed url must not appear")
+
+    def factory(**kw):
+        return httpx.Client(transport=httpx.MockTransport(respond), **kw)
+
+    with pytest.raises(LocalSTTDownloadPortError) as error:
+        download_public_file(payload(tmp_path), on_progress=lambda _: None, client_factory=factory)
+    assert error.value.failure_code == "download_timeout"
+    assert len(requests) == 3
+    assert "secret signed url" not in str(error.value)

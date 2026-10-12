@@ -3,6 +3,7 @@ from collections.abc import Callable
 import flet as ft
 
 from puripuly_heart.ui.flet_runtime import is_hover_active
+from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.theme import (
     COLOR_BACKGROUND,
     COLOR_DIVIDER,
@@ -54,7 +55,7 @@ class TitleBar(ft.Container):
                 0,
                 ft.IconButton(
                     icon=ft.Icons.TRANSLATE,
-                    tooltip="Quick translation",
+                    tooltip=t("quick.title"),
                     on_click=lambda _: on_quick_translate(),
                 ),
             )
@@ -62,7 +63,9 @@ class TitleBar(ft.Container):
             window_controls.controls.insert(
                 0,
                 ft.IconButton(
-                    icon=ft.Icons.DOWNLOAD, tooltip="Gemma", on_click=lambda _: on_model_assets()
+                    icon=ft.Icons.DOWNLOAD,
+                    tooltip=t("model_assets.title"),
+                    on_click=lambda _: on_model_assets(),
                 ),
             )
 

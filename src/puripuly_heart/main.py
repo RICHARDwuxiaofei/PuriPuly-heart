@@ -416,6 +416,14 @@ def main(argv: list[str] | None = None) -> int:
         return _run_installer_telemetry_preference(settings_config_path, args.action)
 
     settings_config_path, explicit_settings_config = _settings_config_path(args)
+    from puripuly_heart.config.paths import test_profile_name, user_config_dir
+
+    if test_profile_name() is not None and not settings_config_path.resolve().is_relative_to(
+        user_config_dir().resolve()
+    ):
+        parser.error(
+            "Test profiles cannot load or modify settings outside their isolated data directory"
+        )
     debug_ui_preview = bool(getattr(args, "debug_ui_preview", False))
     logging_sinks = configure_main_logging(
         log_dir=(
