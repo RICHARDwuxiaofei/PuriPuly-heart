@@ -2,6 +2,8 @@
 
 Base: upstream `dev` eac4fb465665f15edcaa7d794f467411185ca947 plus QQ diagnostics branch 677a9ee837b7e19abfa758998e86f8bce6a28b3a (PR #226). Feature branch: `feat/desktop-cn-download-audio-test`. These drafts are not submitted PRs.
 
+Acceptance details and PASS / FAIL / NOT_TESTED boundaries: [desktop-feature-test-results.md](desktop-feature-test-results.md). Module PRs need the QQ baseline and shared diagnostics/settings groundwork; separate feature commits are not assumed to be dependency-free cherry-picks.
+
 ## A — feat(models): add scoped Gemma download sources and verified offline import
 
 ### Problem / root cause
