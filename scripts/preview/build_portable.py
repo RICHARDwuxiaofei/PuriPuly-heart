@@ -3,10 +3,24 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+
+def extended_path(path):
+    absolute = os.path.abspath(path)
+    if os.name != "nt" or absolute.startswith("\\\\?\\"):
+        return absolute
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + absolute[2:]
+    return "\\\\?\\" + absolute
+
+
+def copy_payload_file(source, destination):
+    return shutil.copy2(extended_path(source), extended_path(destination))
 
 
 def main():
@@ -39,6 +53,7 @@ def main():
     shutil.copytree(
         Path(sys.base_prefix),
         runtime,
+        copy_function=copy_payload_file,
         ignore=shutil.ignore_patterns(
             "__pycache__",
             "*.pyc",
@@ -57,6 +72,7 @@ def main():
         source_packages,
         runtime / "Lib" / "site-packages",
         dirs_exist_ok=True,
+        copy_function=copy_payload_file,
         ignore=shutil.ignore_patterns(
             "__pycache__",
             "*.pyc",
@@ -80,13 +96,20 @@ def main():
     shutil.copytree(
         repo / "src",
         app / "src",
+        copy_function=copy_payload_file,
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.egg-info"),
     )
     for name in ("pyproject.toml", "LICENSE", "uv.lock"):
         shutil.copy2(repo / name, app / name)
     shutil.copy2(repo / "scripts" / "preview" / "entry.py", app / "preview_entry.py")
-    shutil.copytree(repo / "build" / "llama.cpp", app / "build" / "llama.cpp")
-    shutil.copytree(repo / "third_party" / "llama.cpp", app / "third_party" / "llama.cpp")
+    shutil.copytree(
+        repo / "build" / "llama.cpp", app / "build" / "llama.cpp", copy_function=copy_payload_file
+    )
+    shutil.copytree(
+        repo / "third_party" / "llama.cpp",
+        app / "third_party" / "llama.cpp",
+        copy_function=copy_payload_file,
+    )
     shutil.unpack_archive(flet_archive, output / "flet")
     compiler = Path(r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
     subprocess.run(
