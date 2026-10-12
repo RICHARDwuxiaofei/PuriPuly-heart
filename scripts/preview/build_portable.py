@@ -23,6 +23,33 @@ def copy_payload_file(source, destination):
     return shutil.copy2(extended_path(source), extended_path(destination))
 
 
+def package_copy_ignore(source_packages):
+    cache_filter = shutil.ignore_patterns("__pycache__", "*.pyc")
+    root_filter = shutil.ignore_patterns(
+        "*.pth",
+        "*.egg-link",
+        "cmake",
+        "clang",
+        "ruff",
+        "pytest*",
+        "_pytest",
+        "black*",
+        "blib2to3",
+        "coverage*",
+        "virtualenv*",
+        "libclang*",
+        "pip*",
+    )
+
+    def ignore(directory, names):
+        ignored = cache_filter(directory, names)
+        if Path(directory) == source_packages:
+            ignored.update(root_filter(directory, names))
+        return ignored
+
+    return ignore
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
@@ -73,23 +100,7 @@ def main():
         runtime / "Lib" / "site-packages",
         dirs_exist_ok=True,
         copy_function=copy_payload_file,
-        ignore=shutil.ignore_patterns(
-            "__pycache__",
-            "*.pyc",
-            "*.pth",
-            "*.egg-link",
-            "cmake",
-            "clang",
-            "ruff",
-            "pytest*",
-            "_pytest",
-            "black*",
-            "blib2to3",
-            "coverage*",
-            "virtualenv*",
-            "libclang*",
-            "pip*",
-        ),
+        ignore=package_copy_ignore(source_packages),
     )
     app = output / "app"
     app.mkdir()
@@ -121,6 +132,15 @@ def main():
             f"/out:{output / 'PuriPulyHeartPreview.exe'}",
             str(repo / "scripts" / "preview" / "Launcher.cs"),
         ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            str(runtime / "python.exe"),
+            "-c",
+            "from flet.app import run; import numpy, sounddevice, soxr, huggingface_hub; print('Bundled runtime GUI dependency smoke: PASS')",
+        ],
+        cwd=app,
         check=True,
     )
     (output / "BUILD.json").write_text(
