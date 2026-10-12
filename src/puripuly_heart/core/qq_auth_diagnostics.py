@@ -167,9 +167,11 @@ def exception_fields(exc: BaseException) -> dict[str, object]:
     kind = (
         "dns"
         if any(isinstance(item, socket.gaierror) for item in chain)
-        else None
-        if isinstance(exc, (PermissionError, FileNotFoundError))
-        else classify_transport_error(exc)
+        else (
+            None
+            if isinstance(exc, (PermissionError, FileNotFoundError))
+            else classify_transport_error(exc)
+        )
     )
     fields["network_error_kind"] = kind or "unknown"
     kinds = {
@@ -219,24 +221,28 @@ def log_qq_auth(
         "network"
         if metadata.get("network_error_kind") not in {None, "unknown"}
         or code.startswith("network_")
-        else "auth"
-        if code
-        in {
-            "qq_credential_invalid",
-            "invalid_credential",
-            "credential_mismatch",
-            "mismatch",
-            "invalid_input",
-        }
-        or metadata.get("qq_failure_subcode") in {"invalid_credential", "mismatch"}
-        else "rate_limit"
-        if code == "rate_limited" or metadata.get("qq_failure_subcode") == "rate_limited"
-        else "quota"
-        if code in {"lifetime_used", "qq_lifetime_used"}
-        or metadata.get("qq_failure_subcode") == "lifetime_used"
-        else "storage"
-        if stage in {"secret_storage", "settings_storage"}
-        else stage
+        else (
+            "auth"
+            if code
+            in {
+                "qq_credential_invalid",
+                "invalid_credential",
+                "credential_mismatch",
+                "mismatch",
+                "invalid_input",
+            }
+            or metadata.get("qq_failure_subcode") in {"invalid_credential", "mismatch"}
+            else (
+                "rate_limit"
+                if code == "rate_limited" or metadata.get("qq_failure_subcode") == "rate_limited"
+                else (
+                    "quota"
+                    if code in {"lifetime_used", "qq_lifetime_used"}
+                    or metadata.get("qq_failure_subcode") == "lifetime_used"
+                    else "storage" if stage in {"secret_storage", "settings_storage"} else stage
+                )
+            )
+        )
     )
     text = f"[QQAuth] {event} stage={stage} code={code} category={category}"
     text += "".join(f" {key}={value}" for key, value in sorted(metadata.items()))

@@ -1823,9 +1823,11 @@ class TranslatorApp:
             if callable(set_error):
                 log_qq_auth(
                     "authentication",
-                    "unknown_error"
-                    if message_key == "qq_auth.error.retry"
-                    else message_key.rsplit(".", 1)[-1],
+                    (
+                        "unknown_error"
+                        if message_key == "qq_auth.error.retry"
+                        else message_key.rsplit(".", 1)[-1]
+                    ),
                 )
                 set_error(message_key, **message_kwargs)
             if self._is_current_qq_managed_auth_generation(generation):

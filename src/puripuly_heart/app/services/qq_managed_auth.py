@@ -154,9 +154,11 @@ class QqManagedAuthService:
         else:
             log_qq_diagnostics(
                 result.diagnostics,
-                level=logging.WARNING
-                if result.status == TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
-                else logging.ERROR,
+                level=(
+                    logging.WARNING
+                    if result.status == TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
+                    else logging.ERROR
+                ),
             )
         return result
 
@@ -416,12 +418,12 @@ class QqManagedAuthService:
                 code="qq_assertion_failed",
                 retry_after_ms=result.retry_after_ms,
                 diagnostics_present=result.diagnostics is not None,
-                diagnostic_fields=result.diagnostics.fields
-                if result.diagnostics is not None
-                else {},
-                status_code=result.diagnostics.status_code
-                if result.diagnostics is not None
-                else None,
+                diagnostic_fields=(
+                    result.diagnostics.fields if result.diagnostics is not None else {}
+                ),
+                status_code=(
+                    result.diagnostics.status_code if result.diagnostics is not None else None
+                ),
             )
             log_qq_diagnostics(failure.diagnostics)
             return failure
@@ -1216,9 +1218,11 @@ def _local_failure_result(
     return TransactionResult(
         status=TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED,
         message=_message(
-            "qq_managed_auth.configuration_unavailable"
-            if code == "qq_managed_operation_installation_unavailable"
-            else "qq_managed_auth.local_storage_unavailable",
+            (
+                "qq_managed_auth.configuration_unavailable"
+                if code == "qq_managed_operation_installation_unavailable"
+                else "qq_managed_auth.local_storage_unavailable"
+            ),
             severity=SEVERITY_ERROR,
         ),
         diagnostics=_diagnostics(
@@ -1406,9 +1410,11 @@ def _broker_failure_result(
         ),
         diagnostics=_diagnostics(
             operation="assert_qq_managed_identity",
-            code=f"broker_{network_kind}"
-            if network_kind in {"timeout", "proxy", "tls", "dns", "network"}
-            else code,
+            code=(
+                f"broker_{network_kind}"
+                if network_kind in {"timeout", "proxy", "tls", "dns", "network"}
+                else code
+            ),
             category=category,
             retry_after_ms=retry_after_ms,
             fields={
