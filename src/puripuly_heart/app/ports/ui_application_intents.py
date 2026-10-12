@@ -99,6 +99,11 @@ class UiSettingsRuntimePort(Protocol):
 
 
 class UiProviderRuntimePort(Protocol):
+    def gemma_download_source(self) -> str: ...
+
+    async def configure_gemma_source(self, source: str) -> None: ...
+
+    async def provision_gemma_assets(self, *, source: str, files=(), on_status=None): ...
     async def apply_providers(
         self,
         settings: AppSettingsVNext | None = None,

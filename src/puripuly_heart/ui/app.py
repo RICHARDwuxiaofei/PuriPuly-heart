@@ -50,6 +50,7 @@ from puripuly_heart.ui.components.local_qwen_hallucination_dialog import (
     LocalQwenHallucinationDialog,
 )
 from puripuly_heart.ui.components.microphone_test_dialog import MicrophoneTestDialog
+from puripuly_heart.ui.components.model_assets_dialog import ModelAssetsDialog
 from puripuly_heart.ui.components.peer_translation_eula_dialog import PeerTranslationEulaDialog
 from puripuly_heart.ui.components.qq_managed_auth_dialog import QqManagedAuthDialog
 from puripuly_heart.ui.components.title_bar import TitleBar
@@ -495,7 +496,10 @@ class TranslatorApp:
         self.view_settings.set_overlay_runtime_state(self.overlay_state)
 
         # Custom title bar
-        self.title_bar = TitleBar(self.page, on_close=self._request_window_close)
+        self.title_bar = TitleBar(
+            self.page, on_close=self._request_window_close, on_model_assets=self._open_model_assets
+        )
+        self._model_assets_dialog = None
 
         # Bottom navigation (order: Home, Settings, Logs, About)
         self.bottom_nav = BottomNavBar(on_change=self._on_nav_change)
@@ -515,6 +519,13 @@ class TranslatorApp:
         self.content_area = shell.content_area
         self.layout = shell.layout
         self.page.add(shell.root)
+
+    def _open_model_assets(self) -> None:
+        if self._model_assets_dialog is None:
+            self._model_assets_dialog = ModelAssetsDialog(
+                self.page, self.application, self._run_page_task
+            )
+        self._model_assets_dialog.open()
 
     def _build_debug_preview_panel(self) -> DebugPreviewPanel:
         return DebugPreviewPanel(

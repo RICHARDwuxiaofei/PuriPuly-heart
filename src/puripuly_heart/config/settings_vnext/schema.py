@@ -330,8 +330,11 @@ class TranslationIntent:
     deepseek: DeepSeekTranslationIntent = field(default_factory=DeepSeekTranslationIntent)
     qwen: QwenTranslationIntent = field(default_factory=QwenTranslationIntent)
     gpu_device_id: str = "auto"
+    download_source: str = "official"
 
     def __post_init__(self) -> None:
+        if self.download_source not in {"official", "mirror", "local"}:
+            object.__setattr__(self, "download_source", "official")
         device_id = self.gpu_device_id if isinstance(self.gpu_device_id, str) else "auto"
         object.__setattr__(self, "gpu_device_id", device_id.strip() or "auto")
 

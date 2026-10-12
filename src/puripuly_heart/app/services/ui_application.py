@@ -972,6 +972,17 @@ class UiApplicationBoundary:
     ) -> object:
         return await self._provider.handle_managed_gemma_notice_action(action)
 
+    def gemma_download_source(self) -> str:
+        return self._provider.gemma_download_source()
+
+    async def configure_gemma_source(self, source: str) -> None:
+        await self._provider.configure_gemma_source(source)
+
+    async def provision_gemma_assets(self, *, source: str, files=(), on_status=None):
+        return await self._provider.provision_gemma_assets(
+            source=source, files=files, on_status=on_status
+        )
+
 
 for _intent_method_name in UI_APPLICATION_USER_INTENT_METHODS:
     setattr(

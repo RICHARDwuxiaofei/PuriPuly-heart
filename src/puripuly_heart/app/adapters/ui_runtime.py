@@ -641,6 +641,34 @@ class UiProviderRuntimeAdapter:
             return False if self.managed_gemma is None else self.managed_gemma.cancel()
         raise ValueError(f"unsupported managed Gemma notice action: {action}")
 
+    def gemma_download_source(self) -> str:
+        return self.settings.require_canonical().intent.translation.download_source
+
+    async def configure_gemma_source(self, source: str) -> None:
+        if source not in {"official", "mirror", "local"}:
+            raise ValueError("Unsupported model source")
+        current = self.settings.require_canonical()
+        self.settings.begin()
+        try:
+            self.settings.canonical = replace(
+                current,
+                intent=replace(
+                    current.intent,
+                    translation=replace(current.intent.translation, download_source=source),
+                ),
+            )
+            await self.settings.persist_async()
+        except BaseException:
+            self.settings.rollback()
+            raise
+
+    async def provision_gemma_assets(self, *, source: str, files=(), on_status=None):
+        if self.managed_gemma is None:
+            raise RuntimeError("Managed model owner unavailable")
+        return await self.managed_gemma.install_assets(
+            source=source, files=files, on_status=on_status
+        )
+
 
 @dataclass(slots=True)
 class UiEngagementRuntimeAdapter:
