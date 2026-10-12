@@ -139,6 +139,9 @@ UI_APPLICATION_USER_INTENT_METHODS = frozenset(
         "configure_quick_window",
         "configure_gemma_source",
         "provision_gemma_assets",
+        "play_microphone_recording",
+        "stop_microphone_playback",
+        "clear_microphone_recording",
         "verify_alibaba_connection_draft",
         "verify_api_key",
     }
@@ -450,11 +453,17 @@ class UiApplicationBoundary:
         return result
 
     async def set_stt_enabled(self, enabled: bool) -> object:
+        self._audio_self_intent = getattr(self, "_audio_self_intent", 0) + 1
+        if enabled and getattr(self, "_audio_playback_active", False):
+            await self._microphone.stop_microphone_playback()
         result = await self._input_runtime.set_stt_enabled(enabled)
         await self._publish_osc_state()
         return result
 
     async def set_peer_translation_enabled(self, enabled: bool) -> object:
+        self._audio_peer_intent = getattr(self, "_audio_peer_intent", 0) + 1
+        if enabled and getattr(self, "_audio_playback_active", False):
+            await self._microphone.stop_microphone_playback()
         result = await self._peer_capture.set_peer_translation_enabled(enabled)
         await self._publish_osc_state()
         return result
@@ -580,13 +589,23 @@ class UiApplicationBoundary:
         self,
         *,
         meter_callback: Callable[[float], None] | None = None,
+        recording_seconds: float | None = None,
     ) -> bool:
         start = self._microphone.start_microphone_test
+        kwargs = {}
         if meter_callback is not None and _accepts_keyword(start, "meter_callback"):
-            result = start(meter_callback=meter_callback)
-        else:
-            result = start()
-        return bool(await result if inspect.isawaitable(result) else result)
+            kwargs["meter_callback"] = meter_callback
+        initial = None
+        if recording_seconds is not None and _accepts_keyword(start, "recording_seconds"):
+            kwargs["recording_seconds"] = recording_seconds
+            initial = self._input_runtime.self_capture_test_state()
+        result = start(**kwargs)
+        succeeded = bool(await result if inspect.isawaitable(result) else result)
+        if initial and initial[0] and getattr(self, "_audio_record_restore", None) is None:
+            self._audio_record_restore = self._input_runtime.self_capture_test_state()[1], getattr(
+                self, "_audio_self_intent", 0
+            )
+        return succeeded
 
     def microphone_test_snapshot(self) -> dict[str, object]:
         return self._microphone.microphone_test_snapshot()
@@ -598,6 +617,82 @@ class UiApplicationBoundary:
         result = self._microphone.stop_microphone_test()
         if inspect.isawaitable(result):
             await result
+
+    async def play_microphone_recording(self, *, processed=False) -> None:
+        from puripuly_heart.core.feature_diagnostics import log_feature
+
+        await self.stop_microphone_test()
+        self_before = self._input_runtime.self_capture_test_state()
+        peer_before = self._peer_capture.peer_capture_test_state()
+        self_revision = getattr(self, "_audio_self_intent", 0)
+        peer_revision = getattr(self, "_audio_peer_intent", 0)
+        self._audio_playback_active = True
+        self_token = peer_token = None
+        try:
+            if self_before[0]:
+                await self._input_runtime.set_stt_enabled(False)
+            if peer_before[0]:
+                await self._peer_capture.set_peer_translation_enabled(False)
+            self_token = self._input_runtime.self_capture_test_state()[1]
+            peer_token = self._peer_capture.peer_capture_test_state()[1]
+            if (
+                self._input_runtime.self_capture_test_state()[0]
+                or self._peer_capture.peer_capture_test_state()[0]
+            ):
+                raise RuntimeError("capture_pause_failed")
+            await self._microphone.play_microphone_recording(processed=processed)
+        except Exception as error:
+            log_feature("AudioTest", "playback", "playback_failed", error=error)
+            raise
+        finally:
+            self._audio_playback_active = False
+            if not self._shutdown_started():
+                try:
+                    if (
+                        self_before[0]
+                        and self_token is not None
+                        and self_revision == getattr(self, "_audio_self_intent", 0)
+                        and self_token == self._input_runtime.self_capture_test_state()[1]
+                    ):
+                        await self._input_runtime.set_stt_enabled(True)
+                    if (
+                        peer_before[0]
+                        and peer_token is not None
+                        and peer_revision == getattr(self, "_audio_peer_intent", 0)
+                        and peer_token == self._peer_capture.peer_capture_test_state()[1]
+                    ):
+                        await self._peer_capture.set_peer_translation_enabled(True)
+                except Exception as error:
+                    log_feature("AudioTest", "restore", "capture_restore_failed", error=error)
+
+    async def stop_microphone_playback(self) -> None:
+        await self._microphone.stop_microphone_playback()
+
+    def _shutdown_started(self) -> bool:
+        lifecycle = self._application_lifecycle
+        return lifecycle is not None and not lifecycle.accepting_intents
+
+    async def clear_microphone_recording(self) -> None:
+        from puripuly_heart.core.feature_diagnostics import log_feature
+
+        await self._microphone.stop_microphone_playback()
+        await self.stop_microphone_test()
+        await self._microphone.clear_microphone_recording()
+        restore = getattr(self, "_audio_record_restore", None)
+        self._audio_record_restore = None
+        if (
+            restore
+            and not self._shutdown_started()
+            and restore
+            == (
+                self._input_runtime.self_capture_test_state()[1],
+                getattr(self, "_audio_self_intent", 0),
+            )
+        ):
+            try:
+                await self._input_runtime.set_stt_enabled(True)
+            except Exception as error:
+                log_feature("AudioTest", "restore", "capture_restore_failed", error=error)
 
     async def set_desktop_overlay_captions_locked(self, locked: bool) -> dict[str, str]:
         return await self._overlay.set_desktop_overlay_captions_locked(locked)

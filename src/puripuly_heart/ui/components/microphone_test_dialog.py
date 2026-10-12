@@ -40,9 +40,24 @@ class MicrophoneTestDialog:
         page: ft.Page,
         *,
         on_close: Callable[[], None],
+        on_record: Callable[[], None] | None = None,
+        on_stop: Callable[[], None] | None = None,
+        on_play: Callable[[bool], None] | None = None,
+        on_stop_playback: Callable[[], None] | None = None,
     ) -> None:
         self._page = page
         self._on_close = on_close
+        self._on_record = on_record
+        self._on_stop = on_stop
+        self._on_play = on_play
+        self._on_stop_playback = on_stop_playback
+        self._record_status = ft.Text(t("audio_test.hint"), selectable=True, size=14)
+        self._play_raw = ft.Button(
+            t("audio_test.play_raw"), on_click=lambda _: on_play(False), disabled=True
+        )
+        self._play_processed = ft.Button(
+            t("audio_test.play_processed"), on_click=lambda _: on_play(True), disabled=True
+        )
         self._dialog: ft.AlertDialog | None = None
         self._level_text: ft.Text | None = None
         self._hint_text: ft.Text | None = None
@@ -96,6 +111,36 @@ class MicrophoneTestDialog:
         self._failed = True
         self._sync_text()
 
+    def set_snapshot(self, snapshot: dict) -> None:
+        device = snapshot.get("actual_device", {})
+        name = device.get("name") or t("audio_test.unknown_device")
+        api = device.get("host_api") or "?"
+        state = (
+            "playing"
+            if snapshot.get("playing")
+            else "recorded" if snapshot.get("recording_complete") else "recording"
+        )
+        self._record_status.value = f"{t('audio_test.state.' + state)} · {snapshot.get('recorded_seconds', 0):.1f}s\n{name} · {api}\n{snapshot.get('sample_rate') or '?'} Hz · {snapshot.get('channels') or '?'} ch\n{t('audio_test.hint')}"
+        failure = snapshot.get("failure_reason")
+        if failure:
+            self._record_status.value += "\n" + t(
+                "audio_test.error." + failure, default=t("audio_test.error.capture_failed")
+            )
+        if (
+            snapshot.get("recording_complete")
+            and snapshot.get("has_recording")
+            and snapshot.get("peak", 0) <= 1e-6
+        ):
+            self._record_status.value += "\n" + t("audio_test.silence")
+        can_play = bool(
+            snapshot.get("has_recording")
+            and snapshot.get("recording_complete")
+            and not snapshot.get("playing")
+        )
+        self._play_raw.disabled = self._play_processed.disabled = not can_play
+        if self.is_open and is_control_mounted(self._record_status):
+            self._page.update()
+
     def _build_dialog(self) -> ft.AlertDialog:
         self._level_text = ft.Text(
             self._text_value(),
@@ -138,6 +183,36 @@ class MicrophoneTestDialog:
                 tight=False,
             ),
         )
+        if self._on_record is not None:
+            self._hint_text.size = 14
+            modal_content.content.controls.extend(
+                [
+                    self._record_status,
+                    ft.Row(
+                        [
+                            ft.Button(t("audio_test.record"), on_click=lambda _: self._on_record()),
+                            ft.Button(t("audio_test.stop"), on_click=lambda _: self._on_stop()),
+                        ],
+                        wrap=True,
+                    ),
+                    ft.Row([self._play_raw, self._play_processed], wrap=True),
+                    ft.Row(
+                        [
+                            ft.Button(
+                                t("audio_test.stop_playback"),
+                                on_click=lambda _: self._on_stop_playback(),
+                            ),
+                            ft.TextButton(
+                                t("audio_test.close"), on_click=lambda _: self.close(notify=True)
+                            ),
+                        ],
+                        wrap=True,
+                    ),
+                ]
+            )
+            modal_content.content.controls[0].expand = False
+            modal_content.content.controls[0].height = 110
+            modal_content.height = 640
 
         return ft.AlertDialog(
             modal=False,
