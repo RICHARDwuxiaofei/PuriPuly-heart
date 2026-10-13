@@ -6,6 +6,7 @@ PuriPuly Heart 2.8.2 Beta — RICHARDwuxiaofei Fork
 
 本包包含本分支的 GPU 语音组件、Vulkan/CPU DLL、VR Overlay、
 Gemma 翻译运行库和锁定版本的 Python/Flet 运行环境。
+包含各独立进程所需的 app-local Visual C++ 运行库，不改系统运行库。
 源码与版本标识在 SOURCE.zip 和 BUILD.json。
 不包含数 GB 的识别/翻译模型，首次使用请在下载页勾选需要的模型。
 千问 0.6B 可选 ModelScope；Gemma 的社区镜像可能跳回境外。

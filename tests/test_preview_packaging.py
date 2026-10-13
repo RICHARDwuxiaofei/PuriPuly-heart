@@ -47,3 +47,34 @@ def test_build_exclusions_do_not_remove_runtime_utilities(tmp_path):
     assert "pip" in ignore(tmp_path, ["pip", "flet", "__pycache__"])
     assert "pip.py" not in ignore(tmp_path / "flet" / "utils", ["pip.py", "__pycache__"])
     assert "__pycache__" in ignore(tmp_path / "flet" / "utils", ["pip.py", "__pycache__"])
+
+
+def test_beta_rejects_missing_vc_runtime(tmp_path):
+    import pytest
+
+    from scripts.preview.build_portable import stage_beta_vc_runtime
+
+    with pytest.raises(SystemExit, match="Visual C"):
+        stage_beta_vc_runtime(tmp_path, None)
+
+
+def test_beta_stages_crt_beside_each_independent_process(tmp_path):
+    from scripts.preview.build_portable import stage_beta_vc_runtime
+
+    source = tmp_path / "crt"
+    source.mkdir()
+    for name in ("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"):
+        (source / name).write_bytes(b"fake-test-crt")
+    for relative in (
+        "runtime",
+        "flet/flet",
+        "app/build/gpu_worker",
+        "app/build/overlay",
+        "app/build/llama.cpp/test/cpu",
+        "app/build/llama.cpp/test/vulkan",
+    ):
+        (tmp_path / "payload" / relative).mkdir(parents=True)
+    hashes = stage_beta_vc_runtime(tmp_path / "payload", source)
+    assert len(hashes) == 3
+    assert (tmp_path / "payload/app/build/gpu_worker/msvcp140.dll").read_bytes() == b"fake-test-crt"
+    assert (tmp_path / "payload/flet/flet/vcruntime140.dll").is_file()
