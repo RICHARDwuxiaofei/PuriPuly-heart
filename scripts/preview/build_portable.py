@@ -50,9 +50,19 @@ def package_copy_ignore(source_packages):
     return ignore
 
 
+def validate_beta_inputs(repo):
+    from puripuly_heart.release_evidence.gpu_worker_distribution import validate_gpu_worker_runtime
+
+    inventory = validate_gpu_worker_runtime(repo / "build" / "gpu_worker")
+    if not (repo / "build" / "overlay" / "PuriPulyHeartOverlay.exe").is_file():
+        raise SystemExit("Beta requires a compiled overlay")
+    return inventory
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--beta", action="store_true")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
@@ -73,8 +83,14 @@ def main():
     branch = subprocess.check_output(
         ["git", "branch", "--show-current"], cwd=repo, text=True
     ).strip()
+    gpu_inventory = None
+    if args.beta:
+        gpu_inventory = validate_beta_inputs(repo)
     output.mkdir(parents=True)
-    shutil.copy2(repo / "scripts" / "preview" / "README.md", output / "README.md")
+    shutil.copy2(
+        repo / "scripts" / "preview" / ("README-BETA.txt" if args.beta else "README.md"),
+        output / ("README-BETA.txt" if args.beta else "README.md"),
+    )
     shutil.copy2(repo / "docs" / "desktop-feature-pr-notes.md", output / "FEATURES.md")
     runtime = output / "runtime"
     shutil.copytree(
@@ -122,6 +138,18 @@ def main():
         app / "third_party" / "llama.cpp",
         copy_function=copy_payload_file,
     )
+    if args.beta:
+        for component in ("gpu_worker", "overlay"):
+            shutil.copytree(
+                repo / "build" / component,
+                app / "build" / component,
+                copy_function=copy_payload_file,
+            )
+        subprocess.run(
+            ["git", "archive", "--format=zip", f"--output={output / 'SOURCE.zip'}", revision],
+            cwd=repo,
+            check=True,
+        )
     for name in ("openvr", "noto-sans-cjk", "soxr"):
         source = repo / "third_party" / name
         if source.is_dir():
@@ -137,6 +165,7 @@ def main():
             "/nologo",
             "/target:winexe",
             "/reference:System.Windows.Forms.dll",
+            *(["/define:BETA_DISTRIBUTION"] if args.beta else []),
             f"/out:{output / 'PuriPulyHeartPreview.exe'}",
             str(repo / "scripts" / "preview" / "Launcher.cs"),
         ],
@@ -159,11 +188,16 @@ def main():
                 commit=revision,
                 qq_baseline="677a9ee837b7e19abfa758998e86f8bce6a28b3a",
                 upstream_baseline="eac4fb465665f15edcaa7d794f467411185ca947",
-                version="2.8.2-preview",
+                version="2.8.2-beta" if args.beta else "2.8.2-preview",
                 packaging="portable bundled CPython + locked Flet desktop (not native release)",
                 python=sys.version,
-                isolated_keyring="puripuly-heart.test.desktop-preview",
-                data_directory="preview-data",
+                isolated_keyring=(
+                    "puripuly-heart.test.desktop-beta"
+                    if args.beta
+                    else "puripuly-heart.test.desktop-preview"
+                ),
+                data_directory="%LOCALAPPDATA%/PuriPulyHeartBeta" if args.beta else "preview-data",
+                gpu_worker=gpu_inventory,
             ),
             indent=2,
         ),

@@ -25,6 +25,18 @@ def test_default_secret_namespace_unchanged(monkeypatch, tmp_path):
     assert store.service_name == "puripuly-heart"
 
 
+def test_beta_profile_is_separate_from_production_and_developer_preview(monkeypatch, tmp_path):
+    monkeypatch.setenv("PURIPULY_HEART_TEST_PROFILE", "desktop-beta")
+    monkeypatch.setenv("PURIPULY_HEART_TEST_DATA_DIR", str(tmp_path / "PuriPulyHeartBeta"))
+    store = create_secret_store(SecretsIntent(), config_path=paths.default_settings_path())
+    assert store.service_name == "puripuly-heart.test.desktop-beta"
+    assert paths.default_models_dir() == tmp_path / "PuriPulyHeartBeta" / "models"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "production-secret")
+    assert (
+        _get_secret(InMemorySecretStore(), key="openrouter", env_var="OPENROUTER_API_KEY") is None
+    )
+
+
 import pytest
 
 

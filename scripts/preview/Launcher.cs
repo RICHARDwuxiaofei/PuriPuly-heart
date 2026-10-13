@@ -16,6 +16,11 @@ internal static class Launcher
             start.WorkingDirectory = Path.Combine(root, "app");
             start.UseShellExecute = false;
             start.CreateNoWindow = true;
+#if BETA_DISTRIBUTION
+            start.EnvironmentVariables["PURIPULY_HEART_BETA_DISTRIBUTION"] = "1";
+#else
+            start.EnvironmentVariables.Remove("PURIPULY_HEART_BETA_DISTRIBUTION");
+#endif
             foreach (string name in Environment.GetEnvironmentVariables().Keys)
             {
                 if (name == "PYTHONHOME" || name == "VIRTUAL_ENV" || name == "PYTHONPATH" ||
