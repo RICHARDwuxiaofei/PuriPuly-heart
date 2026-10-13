@@ -1159,3 +1159,174 @@ async def test_managed_logout_preserves_other_account_metadata_and_compensates_f
         owner.canonical.state.managed_connection.active_managed_credential_ref
         == "discord-reference"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["timeout", "proxy", "tls", "dns", "network"])
+async def test_qq_network_recovery_login_remains_action_required_without_reassert(offline, kind):
+    import socket
+    import ssl
+
+    import httpx
+    from puripuly_heart.app.services.managed_auth import (
+        ManagedAuthExecutionResult,
+        ManagedAuthOwner,
+        ManagedAuthState,
+    )
+
+    from puripuly_heart.core import messages
+    from tests.app.test_qq_managed_auth import (
+        RAW_QQ_CREDENTIAL,
+        RAW_QQ_IDENTITY,
+        _request,
+        _service,
+    )
+
+    cause = {
+        "timeout": httpx.ReadTimeout("private-timeout"),
+        "proxy": httpx.ProxyError("http://private:password@proxy"),
+        "tls": ssl.SSLCertVerificationError("private-certificate"),
+        "dns": socket.gaierror(-2, "private-host"),
+        "network": httpx.ConnectError("private-network"),
+    }[kind]
+    service, broker, store, state = _service(cause)
+    app = compose_headless_application(offline)
+    control = app.control()
+
+    async def execute_qq(_identity, _credential, _referral_id):
+        transaction = await service.authenticate(_request())
+        return ManagedAuthExecutionResult(
+            succeeded=False,
+            transaction_result=transaction,
+            delivery_ack_pending=(
+                transaction.status == messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
+            ),
+            message_key=transaction.message.key,
+        )
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("QQ recovery must not start another auth flow or rebuild")
+
+    owner = ManagedAuthOwner(
+        state_provider=lambda: ManagedAuthState(
+            settings_available=True,
+            managed_selected=True,
+            managed_china=True,
+            local_key_available=False,
+            release_service_available=True,
+            runtime_available=False,
+            ingress_frozen=False,
+        ),
+        pending_sink=lambda _pending: None,
+        qq_executor=execute_qq,
+        discord_executor=unexpected,
+        runtime_ensurer=unexpected,
+        usage_view_sink=lambda *_args: None,
+        usage_refresh_sink=lambda: None,
+        message_sink=lambda *_args: None,
+        result_sink=control.results.set,
+        log_sink=lambda _message: None,
+    )
+    control.application = SimpleNamespace(start_qq_managed_auth_from_dialog=owner.start_qq)
+
+    result = await control._login(
+        {"provider": "qq", "qq_identity": RAW_QQ_IDENTITY, "credential": RAW_QQ_CREDENTIAL},
+        "network-recovery-login",
+    )
+
+    assert result["status"] == "action_required"
+    assert result["reason"] == "resolve_pending_authorization"
+    assert result["provider"] == "qq"
+    assert (
+        result["transaction"]["status"] == messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
+    )
+    assert result["transaction"]["message"] == f"qq_managed_auth.network_{kind}"
+    assert state.pending_managed_operation_id is not None
+    assert store.values["openrouter_managed_operation_resume_token"]
+    assert len(broker.requests) == 1
+    assert broker.resume_requests == []
+    assert broker.ack_requests == []
+    for private in (RAW_QQ_IDENTITY, RAW_QQ_CREDENTIAL, "private", "password"):
+        assert private not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "returned", "failure_kind", "pending", "expected_status", "expected_reason"),
+    [
+        (
+            "qq",
+            ("qq_auth.error.credential_mismatch", {}),
+            None,
+            False,
+            "rejected",
+            "authorization_failed",
+        ),
+        ("discord", True, None, False, "applied", None),
+        ("discord", False, "recovering", True, "action_required", "authorization_failed"),
+        ("discord", False, "failed", True, "failed", "authorization_failed"),
+        (
+            "discord",
+            ("discord_auth.error.network_timeout", {}),
+            None,
+            True,
+            "rejected",
+            "authorization_failed",
+        ),
+        ("openrouter", True, None, False, "applied", None),
+        (
+            "openrouter",
+            ("openrouter.error.recovery_pending", {}),
+            None,
+            True,
+            "action_required",
+            "resolve_pending_authorization",
+        ),
+        (
+            "openrouter",
+            ("openrouter.error.retry", {}),
+            None,
+            True,
+            "rejected",
+            "authorization_failed",
+        ),
+    ],
+)
+async def test_auth_login_keeps_other_existing_outcomes(
+    offline, provider, returned, failure_kind, pending, expected_status, expected_reason
+):
+    from puripuly_heart.core import messages
+
+    app = compose_headless_application(offline)
+    control = app.control()
+
+    async def login(**_kwargs):
+        if pending:
+            control.results.set(
+                messages.TransactionResult(
+                    status=messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING,
+                    message=None,
+                    diagnostics=None,
+                )
+            )
+        return returned
+
+    control.application = SimpleNamespace(
+        start_qq_managed_auth_from_dialog=login,
+        start_discord_managed_auth_from_dialog=login,
+        build_managed_openrouter_byok_target=lambda: "selected-target",
+        connect_openrouter_via_pkce=login,
+        managed_auth_last_failure_kind=lambda: failure_kind,
+    )
+    result = await control._login(
+        {
+            "provider": provider,
+            "qq_identity": "synthetic-identity",
+            "credential": "synthetic-credential",
+        },
+        "existing-login-outcome",
+    )
+
+    assert result["status"] == expected_status
+    assert result.get("reason") == expected_reason
+    assert result["provider"] == provider

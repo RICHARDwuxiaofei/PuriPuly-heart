@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
+import httpx
 import pytest
 from puripuly_heart.app.services.managed_auth_claims import (
     MANAGED_AUTH_CLAIM_SOURCE_DISCORD,
@@ -18,6 +20,9 @@ from puripuly_heart.app.services.qq_managed_auth import (
     QqManagedAuthService,
 )
 from puripuly_heart.core import messages
+from puripuly_heart.core.openrouter.managed_openrouter_broker_client import (
+    HttpManagedOpenRouterBrokerClient,
+)
 
 RAW_QQ_IDENTITY = "raw-qq-identity-123"
 RAW_QQ_CREDENTIAL = "a" * 64
@@ -444,12 +449,15 @@ def _request(
 
 
 @pytest.mark.asyncio
-async def test_qq_managed_auth_success_stores_qq_key_and_persists_entitlement_state() -> None:
+async def test_qq_managed_auth_success_stores_qq_key_and_persists_entitlement_state(caplog) -> None:
+    caplog.set_level(logging.INFO)
     service, broker, store, state = _service(_success_result())
 
     result = await service.authenticate(_request())
 
     assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    assert "success stage=settings_storage code=qq_managed_auth_succeeded" in caplog.text
+    assert "[QQAuth] failure" not in caplog.text
     assert store.snapshots == [OPENROUTER_MANAGED_QQ_API_KEY_SECRET]
     status_auth = (
         '{"qq_identity":"raw-qq-identity-123",'
@@ -556,7 +564,7 @@ async def test_qq_managed_auth_ack_success_stores_pending_then_clears_token_and_
 
 
 @pytest.mark.asyncio
-async def test_qq_managed_auth_ack_failure_leaves_pending_metadata_and_token() -> None:
+async def test_qq_managed_auth_ack_failure_leaves_pending_metadata_and_token(caplog) -> None:
     metadata = _delivery_ack_metadata()
     service, broker, store, state = _service(
         _success_result(delivery_ack=metadata),
@@ -569,6 +577,9 @@ async def test_qq_managed_auth_ack_failure_leaves_pending_metadata_and_token() -
     result = await service.authenticate(_request())
 
     assert result.status == messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
+    assert result.message.key == "qq_managed_auth.delivery_ack_pending"
+    assert "stage=delivery_ack code=qq_delivery_ack_pending" in caplog.text
+    assert "ack_status=retryable" in caplog.text
     assert broker.ack_requests[0].delivery_id == metadata.delivery_id
     assert state.pending_delivery_ack_source == "qq"
     assert state.pending_delivery_ack_delivery_id == metadata.delivery_id
@@ -576,6 +587,119 @@ async def test_qq_managed_auth_ack_failure_leaves_pending_metadata_and_token() -
     assert store.values["openrouter_managed_qq_delivery_ack_token"] == metadata.delivery_ack_token
     assert state.persist_calls == 2
     _assert_no_raw_values(result)
+
+
+@pytest.mark.asyncio
+async def test_network_timeout_logs_cause_and_recovers_without_reassert(caplog):
+    service, broker, store, state = _service(httpx.ReadTimeout(RAW_QQ_CREDENTIAL))
+    result = await service.authenticate(_request())
+    assert result.message.key == "qq_managed_auth.network_timeout"
+    assert result.status == messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
+    assert len(broker.requests) == 1
+    assert "stage=broker_request code=broker_timeout" in caplog.text
+    assert "network_error_kind=timeout" in caplog.text
+    assert RAW_QQ_CREDENTIAL not in caplog.text
+    assert RAW_QQ_IDENTITY not in caplog.text
+    assert RAW_MANAGED_KEY not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_assert_timeout_then_status_timeout_and_404_preserves_network_failure(caplog) -> None:
+    paths = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if len(paths) <= 2:
+            raise httpx.ReadTimeout(RAW_QQ_CREDENTIAL)
+        return httpx.Response(404, json={"ok": False})
+
+    broker = HttpManagedOpenRouterBrokerClient(
+        base_url="https://mock.invalid",
+        transport=httpx.MockTransport(respond),
+    )
+    store = RecordingSecretStore()
+    state = RecordingManagedState()
+    try:
+        result = await QqManagedAuthService(broker, store, state).authenticate(_request())
+    finally:
+        await broker.close()
+
+    assert result.status == messages.TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED
+    assert result.message.key == "qq_managed_auth.network_timeout"
+    assert result.diagnostics.code == "broker_timeout"
+    assert result.diagnostics.fields["network_error_kind"] == "timeout"
+    assert paths == [
+        "/v1/auth/qq/assert",
+        "/v1/providers/openrouter/managed-operation/status",
+        "/v1/providers/openrouter/managed-operation/status",
+    ]
+    assert state.pending_managed_operation_id is None
+    assert state.pending_managed_operation_source is None
+    assert "openrouter_managed_operation_resume_token" not in store.values
+    assert OPENROUTER_MANAGED_QQ_API_KEY_SECRET not in store.values
+    assert "code=broker_timeout" in caplog.text
+    assert "code=unknown_error" not in caplog.text
+    _assert_no_raw_values(result)
+    _assert_no_raw_values(caplog.text)
+
+
+@pytest.mark.asyncio
+async def test_key_write_failure_then_retry_reports_local_key_missing_without_ack(caplog) -> None:
+    store = RecordingSecretStore()
+    store.fail_set_keys.add(OPENROUTER_MANAGED_QQ_API_KEY_SECRET)
+    metadata = _delivery_ack_metadata()
+    service, broker, store, state = _service(
+        _success_result(delivery_ack=metadata),
+        store=store,
+    )
+
+    first = await service.authenticate(_request())
+    assert first.status == messages.TRANSACTION_STATUS_SECRET_WRITE_FAILED
+    assert first.message.key == "qq_managed_auth.secret_write_failed"
+    store.fail_set_keys.clear()
+    caplog.clear()
+
+    retried = await service.authenticate(_request())
+
+    assert retried.status == messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
+    assert retried.message.key == "qq_managed_auth.managed_secret_missing"
+    assert retried.diagnostics.code == "qq_delivery_ack_managed_secret_missing"
+    assert retried.diagnostics.fields["ack_status"] == "managed_secret_missing"
+    assert retried.diagnostics.fields["secret_write_succeeded"] is False
+    assert retried.diagnostics.fields["settings_commit_succeeded"] is False
+    assert OPENROUTER_MANAGED_QQ_API_KEY_SECRET not in store.values
+    assert state.pending_delivery_ack_source == "qq"
+    assert state.pending_delivery_ack_delivery_id == metadata.delivery_id
+    assert store.values["openrouter_managed_qq_delivery_ack_token"] == metadata.delivery_ack_token
+    assert len(broker.requests) == 1
+    assert broker.ack_requests == []
+    assert broker.status_requests == []
+    assert broker.resume_requests == []
+    assert "stage=secret_storage code=qq_delivery_ack_managed_secret_missing" in caplog.text
+    assert "category=storage" in caplog.text
+    assert "ack_status=managed_secret_missing" in caplog.text
+    assert "code=qq_delivery_ack_pending" not in caplog.text
+    _assert_no_raw_values(retried)
+    _assert_no_raw_values(caplog.text)
+
+
+@pytest.mark.asyncio
+async def test_credential_failure_and_secret_failure_log_their_stages(caplog):
+    service, broker, store, state = _service(_failure_result("invalid_credential"))
+    result = await service.authenticate(_request())
+    assert result.message.key == "qq_managed_auth.invalid_credential"
+    assert "stage=broker_request" in caplog.text
+    assert "qq_failure_subcode=invalid_credential" in caplog.text
+    caplog.clear()
+    store = RecordingSecretStore()
+    store.raise_set_keys.add(OPENROUTER_MANAGED_QQ_API_KEY_SECRET)
+    service, broker, store, state = _service(_success_result(), store=store)
+    result = await service.authenticate(_request())
+    assert result.message.key == "qq_managed_auth.secret_write_failed"
+    assert "stage=secret_storage code=qq_secret_write_exception" in caplog.text
+    assert state.active_managed_credential_ref == "previous-ref"
+    for value in (RAW_QQ_IDENTITY, RAW_QQ_CREDENTIAL, RAW_MANAGED_KEY):
+        assert value not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -635,7 +759,7 @@ async def test_qq_managed_auth_does_not_ack_or_reassert_without_local_managed_ke
 
     assert result.status == messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
     assert result.diagnostics is not None
-    assert result.diagnostics.fields["delivery_ack_status"] == "managed_secret_missing"
+    assert result.diagnostics.fields["ack_status"] == "managed_secret_missing"
     assert broker.requests == []
     assert broker.ack_requests == []
     _assert_no_raw_values(result)
@@ -972,7 +1096,10 @@ def _render(value: object) -> str:
 
 
 @pytest.mark.asyncio
-async def test_qq_managed_auth_restart_resumes_active_operation_without_fresh_assert() -> None:
+async def test_qq_managed_auth_restart_resumes_active_operation_without_fresh_assert(
+    caplog,
+) -> None:
+    caplog.set_level(logging.INFO)
     state = _seeded_operation_state()
     store = _seeded_operation_store(local_key=True)
     probe = _operation_status_result(
@@ -991,6 +1118,11 @@ async def test_qq_managed_auth_restart_resumes_active_operation_without_fresh_as
     result = await service.authenticate(_request())
 
     assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    assert result.message is None
+    assert "success stage=recovery code=qq_managed_operation_active_recovered" in caplog.text
+    assert "category=recovery" in caplog.text
+    assert "[QQAuth] failure" not in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
     assert broker.requests == []
     assert broker.resume_requests == []
     assert len(broker.status_requests) == 1
@@ -1003,6 +1135,9 @@ async def test_qq_managed_auth_restart_resumes_active_operation_without_fresh_as
     assert state.referral_source == "qq"
     assert state.referral_id == "8H3J4N"
     _assert_no_raw_values(result)
+    _assert_no_raw_values(caplog.text)
+    assert SEEDED_RESUME_TOKEN not in caplog.text
+    assert SEEDED_OPERATION_ID not in caplog.text
 
 
 @pytest.mark.asyncio

@@ -71,6 +71,7 @@ from puripuly_heart.config.translation_values import (
     supported_translation_connections,
 )
 from puripuly_heart.core.messages import (
+    TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_DEGRADED,
     TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_INTERRUPTED,
@@ -1904,8 +1905,13 @@ class ApplicationControlOwner:
                 return {"status": status, "provider": provider, **transaction_data}
         if isinstance(result, tuple) and result:
             reason = result[0]
-            action = isinstance(reason, str) and reason.endswith(
-                (".action_required", ".recovery_pending")
+            action = (
+                provider == "qq"
+                and bool(transaction_data)
+                and transaction.status == TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
+            ) or (
+                isinstance(reason, str)
+                and reason.endswith((".action_required", ".recovery_pending"))
             )
             return {
                 "status": "action_required" if action else "rejected",

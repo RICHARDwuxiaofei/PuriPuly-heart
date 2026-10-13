@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from urllib.parse import urlsplit
 
 import httpx
@@ -26,6 +26,7 @@ from puripuly_heart.app.ports.broker_client import (
 )
 from puripuly_heart.config.provider_values import normalize_owned_referral_id
 from puripuly_heart.core import messages, network_clients
+from puripuly_heart.core.qq_auth_diagnostics import exception_fields, safe_fields
 
 from .managed_openrouter_release import (
     ManagedOpenRouterChallengeSuccess,
@@ -224,6 +225,15 @@ class HttpManagedOpenRouterBrokerClient:
             )
         except ManagedOpenRouterReleaseError as exc:
             return _qq_assertion_failure_from_error(exc)
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            return _qq_assertion_failure(
+                failure_subcode="broker_unavailable",
+                code="broker_exception",
+                operation="qq_assert",
+                category=messages.DIAGNOSTIC_CATEGORY_NETWORK,
+                retry_after_ms=None,
+                fields=safe_fields(exception_fields(exc)),
+            )
 
         status = payload.get("status")
         if status not in {"issued", "delivery_pending"}:
@@ -438,7 +448,11 @@ class HttpManagedOpenRouterBrokerClient:
             except ManagedOpenRouterReleaseError:
                 return {}, response.status_code
         if response.is_error:
-            raise _parse_error_response(response, operation=operation)
+            try:
+                error = _parse_error_response(response, operation=operation)
+            except ManagedOpenRouterReleaseError as exc:
+                error = exc
+            raise replace(error, http_status=response.status_code) from error
         return _parse_json_mapping(response, operation=operation), response.status_code
 
     async def get_trial_status(
@@ -487,9 +501,16 @@ class HttpManagedOpenRouterBrokerClient:
             raise _retryable_error(operation, f"broker request failed: {exc}") from exc
 
         if response.is_error:
-            raise _parse_error_response(response, operation=operation)
+            try:
+                error = _parse_error_response(response, operation=operation)
+            except ManagedOpenRouterReleaseError as exc:
+                error = exc
+            raise replace(error, http_status=response.status_code) from error
 
-        return _parse_json_mapping(response, operation=operation)
+        try:
+            return _parse_json_mapping(response, operation=operation)
+        except ManagedOpenRouterReleaseError as exc:
+            raise replace(exc, http_status=response.status_code) from exc
 
     async def _get_json(
         self,
@@ -630,6 +651,8 @@ def _ack_failure_from_error(error: ManagedOpenRouterReleaseError) -> ManagedKeyD
             status=status,
             retry_after_ms=error.retry_after_ms,
             fields={
+                **safe_fields(exception_fields(error)),
+                "http_status": error.http_status,
                 "broker_code": error.code,
                 "broker_class": error.error_class,
                 "broker_subcode": error.subcode,
@@ -737,9 +760,10 @@ def _managed_operation_failure_from_error(
             category=messages.DIAGNOSTIC_CATEGORY_SERVICE_UNAVAILABLE,
             visibility=messages.DIAGNOSTIC_VISIBILITY_DIAGNOSTIC_ONLY,
             content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
-            status_code=None,
+            status_code=error.http_status,
             retry_after_ms=error.retry_after_ms,
             fields={
+                **safe_fields(exception_fields(error)),
                 "broker_code": error.code,
                 "broker_class": error.error_class,
                 "broker_subcode": subcode,
@@ -1005,7 +1029,12 @@ def _parse_managed_operation_delivery_ack(
 def _qq_assertion_failure_from_error(
     error: ManagedOpenRouterReleaseError,
 ) -> QqManagedAssertionResult:
-    failure_subcode = _qq_safe_failure_subcode(error)
+    transport_fields = safe_fields(exception_fields(error))
+    failure_subcode = (
+        "broker_unavailable"
+        if transport_fields.get("network_error_kind") != "unknown"
+        else _qq_safe_failure_subcode(error)
+    )
     return _qq_assertion_failure(
         failure_subcode=failure_subcode,
         code=error.code,
@@ -1013,6 +1042,8 @@ def _qq_assertion_failure_from_error(
         category=_qq_failure_category(failure_subcode),
         retry_after_ms=error.retry_after_ms,
         fields={
+            **transport_fields,
+            "http_status": getattr(error, "http_status", None),
             "broker_code": error.code,
             "broker_class": error.error_class,
             "broker_subcode": error.subcode,
@@ -1036,7 +1067,7 @@ def _qq_assertion_failure(
         category=category,
         visibility=messages.DIAGNOSTIC_VISIBILITY_DIAGNOSTIC_ONLY,
         content_policy=messages.CONTENT_POLICY_METADATA_ONLY,
-        status_code=None,
+        status_code=fields.get("http_status") if type(fields.get("http_status")) is int else None,
         retry_after_ms=retry_after_ms,
         fields={
             "qq_failure_subcode": failure_subcode,

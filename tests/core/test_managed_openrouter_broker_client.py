@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 import json
+import socket
+import ssl
 from collections.abc import Callable
 
 import httpx
@@ -32,6 +34,45 @@ class TrackingTransport(httpx.AsyncBaseTransport):
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["timeout", "proxy", "tls", "dns"])
+async def test_qq_transport_failure_keeps_safe_network_classification(kind):
+    cause = {
+        "timeout": httpx.ReadTimeout("secret-response"),
+        "proxy": httpx.ProxyError("http://secret:password@proxy"),
+        "tls": ssl.SSLCertVerificationError("secret-certificate"),
+        "dns": socket.gaierror(-2, "secret-host"),
+    }[kind]
+
+    def fail(request):
+        error = httpx.ConnectError("raw-credential")
+        error.__cause__ = cause
+        error.connection_diagnostics = {
+            "proxy_source": "system",
+            "tls_source": "windows",
+            "tls_backend": "native",
+        }
+        raise error
+
+    from puripuly_heart.app.ports.broker_client import QqManagedAssertionRequest
+
+    client, transport = _build_client(fail)
+    result = await client.assert_qq_managed_identity(
+        QqManagedAssertionRequest(
+            qq_identity="secret-qq-identity",
+            credential="a" * 64,
+            asserted_at="2026-10-12T00:00:00.000Z",
+            metadata={},
+        )
+    )
+    assert result.failure_subcode == "broker_unavailable"
+    assert result.diagnostics.fields["network_error_kind"] == kind
+    assert result.diagnostics.fields["proxy_source"] == "system"
+    for secret in ("secret-response", "password", "raw-credential", "secret-qq-identity"):
+        assert secret not in repr(result)
+    await client.close()
 
 
 def _build_client(
