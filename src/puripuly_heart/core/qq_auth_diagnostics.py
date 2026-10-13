@@ -88,6 +88,7 @@ CODES = frozenset(
         "local_storage_unavailable",
         "configuration_unavailable",
         "delivery_ack_pending",
+        "managed_secret_missing",
         "invalid_credential",
         "credential_mismatch",
         "mismatch",

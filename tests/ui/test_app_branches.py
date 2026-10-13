@@ -2564,6 +2564,58 @@ async def test_qq_success_translation_failure_reports_activation_only(raises, ca
     assert app._qq_managed_auth_task_handle is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", ["en", "ja", "ko", "ru", "zh-CN"])
+async def test_qq_missing_local_key_feedback_is_displayed_and_logs_known_outcome(locale, caplog):
+    previous_locale = i18n_module.get_locale()
+    i18n_module.set_locale(locale)
+    try:
+        app = TranslatorApp.__new__(TranslatorApp)
+        app.page = DummyPage()
+        dialog = app_module.QqManagedAuthDialog(
+            app.page,
+            on_continue=lambda: None,
+            on_close=lambda: None,
+        )
+        dialog.open()
+        dialog._qq_identity_field.value = "private-qq-identity"
+        dialog._credential_field.value = "a" * 64
+        app._qq_managed_auth_dialog = dialog
+        app._qq_managed_auth_generation = 0
+        app._qq_managed_auth_cancelled = False
+
+        async def authenticate(**_kwargs):
+            return "qq_auth.error.managed_secret_missing", {}
+
+        async def enable(*_args, **_kwargs):
+            pytest.fail("missing local key must not enable translation")
+
+        app._ui_application = compose_test_ui_application_boundary(
+            SimpleNamespace(
+                start_qq_managed_auth_from_dialog=authenticate,
+                set_translation_enabled=enable,
+            )
+        )
+        app._start_qq_managed_auth()
+        assert dialog.is_waiting is True
+        await app.page.tasks[0]()
+
+        assert dialog.is_open is True
+        assert dialog.is_waiting is False
+        assert dialog._qq_identity_field.disabled is False
+        assert dialog._credential_field.disabled is False
+        assert dialog._error_text.visible is True
+        assert dialog._error_text.value == app_module.t("qq_auth.error.managed_secret_missing")
+        assert dialog._error_text.value != app_module.t("qq_auth.error.delivery_ack_pending")
+        assert "failure stage=authentication code=managed_secret_missing" in caplog.text
+        assert "code=unknown_error" not in caplog.text
+        for sensitive in ("private-qq-identity", "a" * 64):
+            assert sensitive not in caplog.text
+        assert app._qq_managed_auth_task_handle is None
+    finally:
+        i18n_module.set_locale(previous_locale)
+
+
 def test_managed_china_dashboard_prompt_opens_qq_auth_not_discord() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
