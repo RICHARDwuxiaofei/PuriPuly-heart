@@ -6,6 +6,8 @@ from enum import Enum
 from typing import Literal, Protocol
 from uuid import UUID
 
+from puripuly_heart.core.messages import ErrorDiagnostics
+
 
 class SelfCaptureSessionState(str, Enum):
     STOPPED = "stopped"
@@ -91,6 +93,7 @@ class SelfCaptureProviderMutation:
     failure_code: str | None = None
     failure_type: str | None = None
     failure_stage: str | None = None
+    failure_diagnostics: ErrorDiagnostics | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +116,7 @@ class SelfCaptureDiagnostic:
     failure_code: str | None = None
     failure_type: str | None = None
     failure_stage: str | None = None
+    failure_diagnostics: ErrorDiagnostics | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +135,7 @@ class SelfCaptureSessionSnapshot:
     has_loop_task: bool
     cleanup_debt: int
     closed: bool
+    failure_diagnostics: ErrorDiagnostics | None = None
 
 
 class SelfCaptureIngressError(RuntimeError):
@@ -142,7 +147,7 @@ class SelfCaptureIngressError(RuntimeError):
         super().__init__(code)
 
 
-SelfCaptureTerminalFailureHandler = Callable[[Exception], Awaitable[None]]
+SelfCaptureTerminalFailureHandler = Callable[[Exception | ErrorDiagnostics], Awaitable[None]]
 
 
 class SelfCaptureAdmissionPort(Protocol):
@@ -172,7 +177,12 @@ class SelfCaptureProviderPort(Protocol):
 
     async def start_ingress(self) -> None: ...
 
-    async def warmup(self) -> None: ...
+    async def warmup(
+        self,
+        *,
+        operation_id: str | None = None,
+        request_id: str | None = None,
+    ) -> None: ...
 
     async def release(
         self,
