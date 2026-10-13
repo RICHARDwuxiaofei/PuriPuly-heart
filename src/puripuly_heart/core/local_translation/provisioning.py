@@ -141,6 +141,25 @@ async def _await_download_cleanup(
     return task.result()
 
 
+async def _owned_io(function, *args, cancel_event=None, **kwargs):
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        if cancel_event is not None:
+            cancel_event.set()
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled():
+            task.exception()
+        raise
+
+
 async def _download_asset(
     *,
     downloader: HuggingFaceDownloadPort,
@@ -264,6 +283,8 @@ async def ensure_gemma_installed(
     spec: GemmaModelSpec | None = None,
     source: str = "official",
 ) -> InstalledGemmaManifest:
+    if cancel_event is None:
+        cancel_event = threading.Event()
     resolved_spec = spec or e4b_gemma_spec()
     resolved = (install_dir or default_gemma_install_dir(resolved_spec)).resolve()
     _raise_if_cancelled(cancel_event)
@@ -321,7 +342,14 @@ async def _ensure_gemma_installed_with_lease(
             raise GemmaProvisioningError(
                 "Imported files do not match the pinned model", failure_code=code
             ) from error
-    state = inspect_gemma_install(resolved, spec=spec, verify_checksums=source == "local")
+    state = await _owned_io(
+        inspect_gemma_install,
+        resolved,
+        spec=spec,
+        verify_checksums=source == "local",
+        check_cancelled=lambda: _raise_if_cancelled(cancel_event),
+        cancel_event=cancel_event,
+    )
     if state.status == "ready" and state.manifest is not None:
         await _emit(
             on_status,
@@ -390,13 +418,19 @@ async def _ensure_gemma_installed_with_lease(
             json.dumps(manifest.to_dict(), indent=2),
             encoding="utf-8",
         )
-        await asyncio.to_thread(validate_gemma_install, staging_dir, spec=spec)
+        await _owned_io(
+            validate_gemma_install,
+            staging_dir,
+            spec=spec,
+            check_cancelled=lambda: _raise_if_cancelled(cancel_event),
+            cancel_event=cancel_event,
+        )
         _raise_if_cancelled(cancel_event)
         stage = "installation"
         await _emit(
             on_status, state="installing", downloaded_bytes=completed_bytes, total_bytes=total_bytes
         )
-        await asyncio.to_thread(_promote, staging_dir, resolved)
+        await _owned_io(_promote, staging_dir, resolved, cancel_event=cancel_event)
         await _emit(
             on_status,
             state="ready",

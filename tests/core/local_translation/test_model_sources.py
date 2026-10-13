@@ -1,3 +1,4 @@
+import asyncio
 import errno
 import hashlib
 import threading
@@ -147,6 +148,24 @@ def test_bad_range_is_not_appended(tmp_path):
     assert (tmp_path / "a.gguf.partial").read_bytes() == b"aa"
 
 
+def test_complete_partial_is_reused_without_invalid_range(tmp_path):
+    (tmp_path / "a.gguf.partial").write_bytes(b"aaaa")
+    requests = []
+
+    def factory(**kw):
+        return httpx.Client(
+            transport=httpx.MockTransport(lambda request: requests.append(request)), **kw
+        )
+
+    assert (
+        download_public_file(
+            payload(tmp_path), on_progress=lambda _: None, client_factory=factory
+        ).read_bytes()
+        == b"aaaa"
+    )
+    assert not requests
+
+
 async def test_wrong_import_is_rejected_even_when_valid_model_is_installed(tmp_path):
     spec = small_spec()
     files = tuple(tmp_path / a.filename for a in spec.assets)
@@ -205,3 +224,49 @@ def test_timeout_retries_are_bounded_and_safe(monkeypatch, tmp_path):
     assert error.value.failure_code == "download_timeout"
     assert len(requests) == 3
     assert "secret signed url" not in str(error.value)
+
+
+async def test_cancel_verification_joins_worker_before_staging_cleanup(monkeypatch, tmp_path):
+    import puripuly_heart.core.local_translation.provisioning as provisioning
+
+    spec = small_spec()
+    files = tuple(tmp_path / a.filename for a in spec.assets)
+    for path, data in zip(files, (b"aaaa", b"bbbb")):
+        path.write_bytes(data)
+    install = tmp_path / "installed"
+    install.mkdir()
+    (install / "keep").write_bytes(b"old")
+    entered, release, exited = threading.Event(), threading.Event(), threading.Event()
+
+    def verify(path, **kwargs):
+        entered.set()
+        try:
+            assert release.wait(5)
+            assert path.is_dir()
+            kwargs["check_cancelled"]()
+        finally:
+            exited.set()
+
+    monkeypatch.setattr(provisioning, "validate_gemma_install", verify)
+    cancellation = threading.Event()
+    task = asyncio.create_task(
+        ensure_gemma_installed(
+            source="local",
+            spec=spec,
+            downloader=LocalGemmaDownloadAdapter(files, spec),
+            install_dir=install,
+            cancel_event=cancellation,
+        )
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done() and list(tmp_path.glob("*.staging-*"))
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert exited.is_set() and cancellation.is_set()
+    assert (install / "keep").read_bytes() == b"old"
+    assert not list(tmp_path.glob("*.staging-*"))

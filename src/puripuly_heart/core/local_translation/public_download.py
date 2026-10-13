@@ -25,6 +25,12 @@ def download_public_file(payload: dict, *, on_progress, client_factory=external_
             if offset > expected:
                 partial.unlink()
                 offset = 0
+            if offset == expected:
+                partial.replace(target)
+                on_progress(
+                    {"type": "progress", "downloaded_bytes": offset, "total_bytes": expected}
+                )
+                return target
             next_url = url
             try:
                 for hop in range(6):
