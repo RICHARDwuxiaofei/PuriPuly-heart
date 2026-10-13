@@ -15,6 +15,7 @@ QQ_AUTH_DIALOG_MESSAGE_KEY_BY_SERVICE_KEY = {
             "configuration_unavailable",
             "local_storage_unavailable",
             "delivery_ack_pending",
+            "managed_secret_missing",
             "network_timeout",
             "network_proxy",
             "network_tls",

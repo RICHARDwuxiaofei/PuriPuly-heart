@@ -349,6 +349,10 @@ async def test_close_rejects_new_auth_and_clears_callback_and_pending(caplog) ->
             "qq_managed_auth.error.other_source_pending",
             "qq_auth.error.other_source_pending",
         ),
+        (
+            "qq_managed_auth.managed_secret_missing",
+            "qq_auth.error.managed_secret_missing",
+        ),
     ],
 )
 async def test_qq_recovery_messages_map_to_finite_dialog_copy(

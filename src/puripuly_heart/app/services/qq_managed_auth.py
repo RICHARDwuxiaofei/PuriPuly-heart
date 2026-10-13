@@ -149,8 +149,12 @@ class QqManagedAuthService:
         except Exception as exc:
             log_qq_auth("authentication", "unknown_error", fields=exception_fields(exc))
             raise
-        if result.message is not None and result.message.key == "qq_managed_auth.success":
-            log_qq_auth("authentication", "authentication_succeeded", level=logging.INFO)
+        if result.status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED:
+            log_qq_diagnostics(
+                result.diagnostics,
+                fallback_code="authentication_succeeded",
+                level=logging.INFO,
+            )
         else:
             log_qq_diagnostics(
                 result.diagnostics,
@@ -375,7 +379,7 @@ class QqManagedAuthService:
                 category=DIAGNOSTIC_CATEGORY_TRANSACTION,
                 fields={
                     "phase": "remote_delivery_ack_recovery",
-                    "delivery_ack_status": result.status,
+                    "ack_status": result.status,
                     "secret_write_succeeded": True,
                     "settings_commit_succeeded": True,
                 },
@@ -574,7 +578,11 @@ class QqManagedAuthService:
                     original_failure=None,
                     initial_probe_failures=1,
                 )
-                return _with_network_context(recovering, assertion)
+                return (
+                    _with_network_context(recovering, assertion)
+                    if recovering is not None
+                    else assertion
+                )
             return assertion
         if (
             not unknown
@@ -1516,19 +1524,31 @@ def _delivery_ack_pending_result(
     ack_status: str,
     diagnostics_present: bool,
 ) -> TransactionResult:
+    managed_secret_missing = ack_status == "managed_secret_missing"
     return TransactionResult(
         status=TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING,
-        message=_message("qq_managed_auth.delivery_ack_pending", severity=SEVERITY_WARNING),
+        message=_message(
+            (
+                "qq_managed_auth.managed_secret_missing"
+                if managed_secret_missing
+                else "qq_managed_auth.delivery_ack_pending"
+            ),
+            severity=SEVERITY_ERROR if managed_secret_missing else SEVERITY_WARNING,
+        ),
         diagnostics=_diagnostics(
             operation="acknowledge_qq_managed_key_delivery",
-            code="qq_delivery_ack_pending",
+            code=(
+                "qq_delivery_ack_managed_secret_missing"
+                if managed_secret_missing
+                else "qq_delivery_ack_pending"
+            ),
             category=DIAGNOSTIC_CATEGORY_TRANSACTION,
             fields={
-                "phase": "remote_delivery_ack",
+                "phase": "secret_write" if managed_secret_missing else "remote_delivery_ack",
                 "secret_key": OPENROUTER_MANAGED_QQ_API_KEY_SECRET,
-                "secret_write_succeeded": True,
-                "settings_commit_succeeded": True,
-                "delivery_ack_status": ack_status,
+                "secret_write_succeeded": not managed_secret_missing,
+                "settings_commit_succeeded": not managed_secret_missing,
+                "ack_status": ack_status,
                 "diagnostics_present": diagnostics_present,
             },
         ),
