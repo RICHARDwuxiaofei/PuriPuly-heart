@@ -547,6 +547,62 @@ class UiProviderRuntimeAdapter:
     async def install_selected_gpu_model_if_needed(self) -> None:
         await self.gpu.install_selected_model_if_needed()
 
+    def selected_model_asset_ids(self) -> tuple[str, ...]:
+        from puripuly_heart.app.services.local_asr_selection import required_local_asr_model_ids
+        from puripuly_heart.core.local_stt_assets import LOCAL_QWEN_GPU_MODEL_ID
+        from puripuly_heart.core.local_translation.assets import GEMMA_MODEL_ID
+
+        intent = self.settings.require_canonical().intent
+        ids = []
+        for provider in (intent.stt.provider, intent.peer_stt.provider):
+            ids.extend(required_local_asr_model_ids(provider))
+            if provider == "local_qwen_gpu":
+                ids.append(LOCAL_QWEN_GPU_MODEL_ID)
+        if intent.translation.model == "managed_gemma":
+            ids.append(GEMMA_MODEL_ID)
+        return tuple(dict.fromkeys(ids))
+
+    async def provision_asr_assets(self, *, model_id: str, source: str, on_status=None):
+        from puripuly_heart.core.local_asr_provisioning import LocalASRInstallRequest
+        from puripuly_heart.core.local_stt_assets import LOCAL_QWEN_GPU_MODEL_ID
+        from puripuly_heart.core.local_stt_runtime_installer import (
+            LocalSTTRuntimeInstallCancelled,
+            LocalSTTRuntimeInstallError,
+        )
+
+        backend = "gpu" if model_id == LOCAL_QWEN_GPU_MODEL_ID else "cpu"
+        provisioning = self.gpu.provisioning_provider()
+        if provisioning.snapshot.activity_for(backend) is not None:
+            raise LocalSTTRuntimeInstallError(
+                "Another model task is active", failure_code="task_busy"
+            )
+        result = await provisioning.start_install(
+            LocalASRInstallRequest(
+                backend=backend,
+                model_ids=(model_id,),
+                locale=None,
+                origin="model_assets_dialog",
+                explicit_gpu_intent=backend == "gpu",
+                preferred_source=source,
+            ),
+            on_status=on_status,
+        )
+        if result.cancelled:
+            raise LocalSTTRuntimeInstallCancelled("Model task cancelled")
+        if result.failed_model_ids:
+            raise LocalSTTRuntimeInstallError(
+                "Model installation failed",
+                failure_code=result.failure_codes[0] if result.failure_codes else "unknown",
+            )
+        return result
+
+    async def cancel_asr_assets(self, *, model_id: str) -> None:
+        from puripuly_heart.core.local_stt_assets import LOCAL_QWEN_GPU_MODEL_ID
+
+        backend = "gpu" if model_id == LOCAL_QWEN_GPU_MODEL_ID else "cpu"
+        provisioning = self.gpu.provisioning_provider()
+        await provisioning.cancel_install(backend, origin="model_assets_dialog")
+
     async def ensure_gpu_device_discovery(self) -> None:
         await self.gpu.ensure_device_discovery(
             force=False,
