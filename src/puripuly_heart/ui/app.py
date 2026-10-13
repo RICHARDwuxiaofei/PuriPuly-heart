@@ -234,6 +234,9 @@ class TranslatorApp:
         self._application_lifecycle = self._compose_application_lifecycle()
         self._setup_page()
         self._build_layout()
+        bind_quick = getattr(self.view_dashboard, "bind_quick_window_toggle", None)
+        if callable(bind_quick):
+            bind_quick(self._set_quick_visible)
 
         # Link Dashboard callbacks
         self.view_dashboard.bind_dashboard_intents(
@@ -551,7 +554,7 @@ class TranslatorApp:
             )
         self._model_assets_dialog.open()
 
-    def _open_quick_translate(self) -> None:
+    def _quick_owner(self):
         if self._quick_translate_owner is None:
             self._quick_translate_owner = QuickTranslateOwner(
                 spawn=lambda: spawn_quick_window(get_locale()),
@@ -559,12 +562,43 @@ class TranslatorApp:
                 preferences=self.application.quick_window_preferences,
                 save_preferences=self.application.configure_quick_window,
                 stop=stop_quick_window,
+                on_visibility=self._quick_visibility_changed,
             )
+        return self._quick_translate_owner
+
+    def _quick_visibility_changed(self, visible):
+        setter = getattr(self.view_dashboard, "set_quick_window_visible", None)
+        if callable(setter):
+            setter(visible)
+
+    def on_quick_conversation_event(self, event):
+        self._quick_owner().publish_event(event)
+
+    def sync_quick_context(self):
+        if getattr(self, "_quick_translate_owner", None) is None or getattr(
+            self, "_shutting_down", False
+        ):
+            return
+
+        async def sync():
+            await asyncio.sleep(0)
+            owner = getattr(self, "_quick_translate_owner", None)
+            if owner is not None:
+                owner.sync_context()
+
+        self._run_page_task(sync)
+
+    def _set_quick_visible(self, visible):
+        self._open_quick_translate(visible)
+
+    def _open_quick_translate(self, visible=None) -> None:
+        owner = self._quick_owner()
 
         async def open_window():
             try:
-                await self._quick_translate_owner.open()
+                await owner.open(visible)
             except Exception:
+                self._quick_visibility_changed(owner.visible)
                 self._show_snackbar(t("quick.error.window_start_failed"), COLOR_WARNING)
 
         self._run_page_task(open_window)

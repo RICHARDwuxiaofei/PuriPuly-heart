@@ -436,7 +436,10 @@ class UiApplicationBoundary:
         return await self._input_runtime.submit_quick_text(text)
 
     def quick_window_preferences(self) -> dict:
-        return self._provider.quick_window_preferences()
+        return {
+            **self._provider.quick_window_preferences(),
+            **self._input_runtime.quick_window_context(),
+        }
 
     async def configure_quick_window(self, values: dict) -> None:
         await self._provider.configure_quick_window(values)

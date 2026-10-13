@@ -122,11 +122,15 @@ class UiInputRuntimeAdapter:
 
     async def submit_quick_text(self, text: str) -> tuple[str, str]:
         owner = self.pipeline.self_translation_channel
-        if (
-            owner is None
-            or not owner.translation_requests.provider_available
-            or not owner.config_snapshot().value.translation_enabled
-        ):
+        if owner is None:
+            raise RuntimeError("backend_not_ready")
+        enabled = owner.config_snapshot().value.translation_enabled
+        if not enabled:
+            identity = await self.manual_typing.submit(
+                lambda: owner.submit_text(text, source="You"), strict=True
+            )
+            return str(identity), ""
+        if not owner.translation_requests.provider_available:
             raise RuntimeError("backend_not_ready")
 
         def result(utterance_id):
@@ -141,6 +145,20 @@ class UiInputRuntimeAdapter:
 
     def set_manual_input_activity(self, has_text: bool) -> None:
         self.manual_typing.set_input_activity(has_text)
+
+    def quick_window_context(self) -> dict:
+        owner = self.pipeline.self_translation_channel
+        if owner is None:
+            return dict(translation_enabled=False, peer_translation_enabled=False)
+        config = owner.config_snapshot().value
+        return dict(
+            translation_enabled=config.translation_enabled,
+            peer_translation_enabled=config.translation_enabled and config.peer_translation_enabled,
+            source_language=config.source_language,
+            target_language=config.target_language,
+            peer_source_language=config.peer_source_language or config.target_language,
+            peer_target_language=config.peer_target_language or config.source_language,
+        )
 
     async def set_translation_enabled(
         self, enabled: bool, *, allow_authorization: bool = True
@@ -712,12 +730,29 @@ class UiProviderRuntimeAdapter:
             height=ui.quick_translate_height,
             left=ui.quick_translate_left,
             top=ui.quick_translate_top,
+            peer_display_mode=ui.quick_translate_peer_display_mode,
+            opacity_percent=ui.quick_translate_opacity_percent,
         )
 
     async def configure_quick_window(self, values: dict) -> None:
         current = self.settings.require_canonical()
+        mode = values.get("peer_display_mode", current.intent.ui.quick_translate_peer_display_mode)
+        if mode not in {"both", "translation", "original"}:
+            raise ValueError("Unsupported chat display mode")
         updated = replace(
             current.intent.ui,
+            quick_translate_peer_display_mode=mode,
+            quick_translate_opacity_percent=max(
+                40,
+                min(
+                    100,
+                    int(
+                        values.get(
+                            "opacity_percent", current.intent.ui.quick_translate_opacity_percent
+                        )
+                    ),
+                ),
+            ),
             quick_translate_always_on_top=bool(
                 values.get("always_on_top", current.intent.ui.quick_translate_always_on_top)
             ),

@@ -77,12 +77,18 @@ async def test_blank_duplicate_retry_and_identical_new_text():
 
 def test_out_of_order_results_keep_originals_and_unknown_results_ignored():
     window = QuickWindow(Page())
-    from flet import Text
-
-    window.history = {"a": ("first", Text()), "b": ("second", Text())}
-    window.accept_result(dict(id="b", translation="二"))
-    window.accept_result(dict(id="a", translation="一"))
+    window.accept_chat(dict(id="a", role="self", original="first", translation="", state="pending"))
+    window.accept_chat(
+        dict(id="b", role="peer", original="second", translation="", state="pending")
+    )
+    window.accept_chat(
+        dict(id="b", role="peer", original="second", translation="二", state="complete")
+    )
+    window.accept_chat(
+        dict(id="a", role="self", original="first", translation="一", state="complete")
+    )
     window.accept_result(dict(id="unknown", translation="wrong"))
+    assert window.order == ["a", "b"]
     assert window.history["a"][1].value == "first\n→ 一"
     assert window.history["b"][1].value == "second\n→ 二"
 
