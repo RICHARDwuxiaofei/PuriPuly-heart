@@ -117,6 +117,69 @@ def _adapter(
     )
 
 
+@pytest.mark.parametrize(
+    "model,connection,key",
+    [
+        ("deepseek_v4_flash_41", "official_byok", "deepseek_api_key"),
+        ("gpt_6_luna", "official_byok", "openai_api_key"),
+        ("gemini_flash", "official_byok", "google_api_key"),
+        ("gemma4_26b_31b", "openrouter", "openrouter_api_key"),
+    ],
+)
+async def test_active_llm_secret_save_rebuilds_runtime_without_restart(model, connection, key):
+    settings = AppSettingsVNext()
+    settings = replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            translation=replace(settings.intent.translation, model=model, connection=connection),
+        ),
+    )
+    runtime = SimpleNamespace(llm=None)
+
+    async def rebuild(*args, **kwargs):
+        assert kwargs["force_rebuild_llm"] and not kwargs["persist_settings"]
+        runtime.llm = object()
+        return True
+
+    apply = AsyncMock(side_effect=rebuild)
+    adapter = _adapter(settings, change_secret=AsyncMock(return_value=True), apply=apply)
+    assert await adapter.persist_provider_secret_change(key, "test-only-key")
+    assert runtime.llm is not None
+    apply.assert_awaited_once_with(
+        None, force_rebuild_llm=True, persist_settings=False, refresh_ui=True
+    )
+
+
+@pytest.mark.parametrize(
+    "succeeded,key", [(False, "deepseek_api_key"), (True, "openrouter_api_key")]
+)
+async def test_failed_or_inactive_llm_secret_save_does_not_rebuild(succeeded, key):
+    settings = AppSettingsVNext()
+    settings = replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            translation=replace(
+                settings.intent.translation,
+                model="deepseek_v4_flash_41",
+                connection="official_byok",
+            ),
+        ),
+    )
+    apply = AsyncMock()
+    adapter = _adapter(settings, change_secret=AsyncMock(return_value=succeeded), apply=apply)
+    assert await adapter.persist_provider_secret_change(key, "test-only-key") is succeeded
+    apply.assert_not_awaited()
+
+
+async def test_managed_openrouter_ignores_inactive_byok_key_update():
+    apply = AsyncMock()
+    adapter = _adapter(AppSettingsVNext(), change_secret=AsyncMock(return_value=True), apply=apply)
+    await adapter.persist_provider_secret_change("openrouter_api_key", "test-only-key")
+    apply.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_active_custom_http_secret_change_rebuilds_runtime_backend() -> None:
     settings = _custom_http_settings()

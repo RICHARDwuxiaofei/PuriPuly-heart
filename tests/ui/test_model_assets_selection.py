@@ -32,6 +32,19 @@ def make_dialog(selected=(LOCAL_STT_MODEL_ID,)):
     return dialog, application
 
 
+def test_model_names_and_sources_use_readable_explicit_foreground():
+    from puripuly_heart.ui.theme import COLOR_NEUTRAL_DARK
+
+    dialog, _ = make_dialog()
+    assert all(
+        control.label_style.color == COLOR_NEUTRAL_DARK for control in dialog.checkboxes.values()
+    )
+    assert all(
+        control.text_style.color == COLOR_NEUTRAL_DARK for control in dialog.sources.values()
+    )
+    assert dialog.dialog.title.color == COLOR_NEUTRAL_DARK
+
+
 async def test_qwen_notice_selection_downloads_qwen_not_gemma():
     dialog, application = make_dialog()
     assert dialog.checkboxes[LOCAL_STT_MODEL_ID].value

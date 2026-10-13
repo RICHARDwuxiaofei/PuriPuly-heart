@@ -13,18 +13,37 @@ def test_beta_rejects_missing_gpu_runtime(tmp_path):
 def test_beta_requires_overlay_after_gpu_runtime_validation(tmp_path, monkeypatch):
     import pytest
 
+    from puripuly_heart.core.overlay import openvr_vendor
     from puripuly_heart.release_evidence import gpu_worker_distribution
     from scripts.preview.build_portable import validate_beta_inputs
 
     monkeypatch.setattr(
         gpu_worker_distribution, "validate_gpu_worker_runtime", lambda root: {"validated": True}
     )
+    monkeypatch.setattr(openvr_vendor, "validate_vendored_openvr_bundle", lambda root: None)
     with pytest.raises(SystemExit, match="compiled overlay"):
         validate_beta_inputs(tmp_path)
     overlay = tmp_path / "build" / "overlay"
     overlay.mkdir(parents=True)
     (overlay / "PuriPulyHeartOverlay.exe").write_bytes(b"test-only")
     assert validate_beta_inputs(tmp_path) == {"validated": True}
+
+
+def test_beta_stages_pinned_openvr_beside_overlay_and_passes_packaged_guard(tmp_path):
+    from puripuly_heart.core.overlay.openvr_vendor import OPENVR_VENDOR_DLL_SHA256
+    from puripuly_heart.core.overlay.process_runners import DefaultOverlayProcessRunner
+    from scripts.preview.build_portable import stage_beta_openvr_runtime
+    from tests.helpers.paths import REPO_ROOT
+
+    directory = tmp_path / "app" / "build" / "overlay"
+    directory.mkdir(parents=True)
+    executable = directory / "PuriPulyHeartOverlay.exe"
+    executable.write_bytes(b"mock-executable-only")
+    assert stage_beta_openvr_runtime(REPO_ROOT, tmp_path) == OPENVR_VENDOR_DLL_SHA256
+    assert (
+        DefaultOverlayProcessRunner.ensure_bundled_openvr_runtime_dll(executable)
+        == directory / "openvr_api.dll"
+    )
 
 
 def test_runtime_files_with_windows_long_names_are_copied(tmp_path):

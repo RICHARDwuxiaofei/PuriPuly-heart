@@ -36,6 +36,7 @@ class ModelAssetsDialog:
                 ft.DropdownOption("local", t("model_assets.local")),
             ],
             label=t("model_assets.source"),
+            text_style=ft.TextStyle(color=COLOR_NEUTRAL_DARK),
         )
         self.status = ft.Text(t("model_assets.hint"), selectable=True, color=COLOR_NEUTRAL_DARK)
         self.progress = ft.ProgressBar(value=0)
@@ -59,7 +60,11 @@ class ModelAssetsDialog:
                 )
             )
             for choice in (c for c in self.choices if c.purpose == purpose):
-                checkbox = ft.Checkbox(label=choice.name, value=False)
+                checkbox = ft.Checkbox(
+                    label=choice.name,
+                    value=False,
+                    label_style=ft.TextStyle(color=COLOR_NEUTRAL_DARK),
+                )
                 source = (
                     self.source
                     if choice.model_id == GEMMA_MODEL_ID
@@ -70,6 +75,7 @@ class ModelAssetsDialog:
                             for value in choice.sources
                         ],
                         label=t("model_assets.source"),
+                        text_style=ft.TextStyle(color=COLOR_NEUTRAL_DARK),
                     )
                 )
                 result = ft.Text("", color=COLOR_NEUTRAL_DARK, selectable=True)
@@ -103,7 +109,7 @@ class ModelAssetsDialog:
             ]
         )
         self.dialog = ft.AlertDialog(
-            title=ft.Text(t("model_assets.title")),
+            title=ft.Text(t("model_assets.title"), color=COLOR_NEUTRAL_DARK),
             bgcolor=COLOR_SURFACE,
             content=ft.Column(
                 [

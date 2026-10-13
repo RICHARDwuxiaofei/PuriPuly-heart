@@ -56,7 +56,23 @@ def validate_beta_inputs(repo):
     inventory = validate_gpu_worker_runtime(repo / "build" / "gpu_worker")
     if not (repo / "build" / "overlay" / "PuriPulyHeartOverlay.exe").is_file():
         raise SystemExit("Beta requires a compiled overlay")
+    from puripuly_heart.core.overlay.openvr_vendor import validate_vendored_openvr_bundle
+
+    validate_vendored_openvr_bundle(repo / "third_party" / "openvr")
     return inventory
+
+
+def stage_beta_openvr_runtime(repo, output):
+    from puripuly_heart.core.overlay.openvr_vendor import (
+        validate_openvr_runtime_dll,
+        validate_vendored_openvr_bundle,
+    )
+
+    bundle = validate_vendored_openvr_bundle(repo / "third_party" / "openvr")
+    destination = output / "app" / "build" / "overlay" / "openvr_api.dll"
+    shutil.copy2(bundle.dll_path, destination)
+    validate_openvr_runtime_dll(destination)
+    return bundle.dll_sha256
 
 
 def stage_beta_vc_runtime(output, source):
@@ -171,6 +187,7 @@ def main():
                 app / "build" / component,
                 copy_function=copy_payload_file,
             )
+        openvr_sha256 = stage_beta_openvr_runtime(repo, output)
         subprocess.run(
             ["git", "archive", "--format=zip", f"--output={output / 'SOURCE.zip'}", revision],
             cwd=repo,
@@ -214,7 +231,7 @@ def main():
                 branch=branch,
                 commit=revision,
                 qq_baseline="677a9ee837b7e19abfa758998e86f8bce6a28b3a",
-                upstream_baseline="eac4fb465665f15edcaa7d794f467411185ca947",
+                upstream_baseline="75c4485a6787d504f5335d1602973f63b4d0c234",
                 version="2.8.2-beta" if args.beta else "2.8.2-preview",
                 packaging="portable bundled CPython + locked Flet desktop (not native release)",
                 python=sys.version,
@@ -226,6 +243,7 @@ def main():
                 data_directory="%LOCALAPPDATA%/PuriPulyHeartBeta" if args.beta else "preview-data",
                 gpu_worker=gpu_inventory,
                 vc_runtime=vc_runtime,
+                openvr_sha256=openvr_sha256 if args.beta else None,
             ),
             indent=2,
         ),

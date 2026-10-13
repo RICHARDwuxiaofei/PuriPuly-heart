@@ -734,6 +734,19 @@ class UiProviderRuntimeAdapter:
         if succeeded and key in {"alibaba_api_key_beijing", "alibaba_api_key_singapore"}:
             await self.apply_providers(persist_settings=False)
         current = self.settings.canonical
+        if succeeded and current is not None:
+            translation = current.intent.translation
+            active_provider = provider_llm_for_translation(
+                translation.model, translation.connection
+            )
+            active_llm_key = {
+                "deepseek": "deepseek_api_key",
+                "openai": "openai_api_key",
+                "gemini": "google_api_key",
+                "openrouter": "openrouter_api_key",
+            }.get(active_provider)
+            if translation.connection in {"official_byok", "openrouter"} and key == active_llm_key:
+                await self.apply_providers(force_rebuild_llm=True, persist_settings=False)
         http_extension_id = (
             None if current is None else current.intent.translation.http_extension_id
         )
