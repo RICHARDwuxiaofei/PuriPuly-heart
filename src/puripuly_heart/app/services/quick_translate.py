@@ -22,6 +22,8 @@ class QuickTranslateOwner:
         self.reader_task = None
         self.tasks = set()
         self.closed = False
+        self.visible = False
+        self.visibility_revision = 0
         self.lock = asyncio.Lock()
         self.write_lock = asyncio.Lock()
         self.seen = OrderedDict()
@@ -35,8 +37,18 @@ class QuickTranslateOwner:
                     if self.reader_task is not None:
                         await asyncio.gather(self.reader_task, return_exceptions=True)
                     self.process = await self.spawn()
+                    self.visible = False
                     self.reader_task = asyncio.create_task(self.read_messages(self.process))
-                await self.send(dict(type="show", preferences=self.preferences()))
+                requested_visible = not self.visible
+                self.visibility_revision += 1
+                message = dict(
+                    type="show" if requested_visible else "hide",
+                    visibility_revision=self.visibility_revision,
+                )
+                if requested_visible:
+                    message["preferences"] = self.preferences()
+                await self.send(message)
+                self.visible = requested_visible
             except Exception as error:
                 log_feature("QuickTranslate", "window", "window_start_failed", error=error)
                 raise
@@ -83,6 +95,13 @@ class QuickTranslateOwner:
                     task = asyncio.create_task(self.translate(identity, text, process))
                     self.tasks.add(task)
                     task.add_done_callback(self.tasks.discard)
+                elif message.get("type") == "visibility":
+                    if (
+                        self.process is process
+                        and message.get("visibility_revision") == self.visibility_revision
+                        and isinstance(message.get("visible"), bool)
+                    ):
+                        self.visible = message["visible"]
                 elif message.get("type") == "preferences":
                     try:
                         await self.save_preferences(message["values"])
@@ -97,6 +116,8 @@ class QuickTranslateOwner:
         except Exception as error:
             log_feature("QuickTranslate", "window", "window_connection_failed", error=error)
         finally:
+            if self.process is process:
+                self.visible = False
             if process.returncode is None and not self.closed:
                 log_feature("QuickTranslate", "window", "window_closed_unexpectedly")
                 if self.stop is not None:
@@ -134,12 +155,13 @@ class QuickTranslateOwner:
 
     async def close(self):
         self.closed = True
+        self.visible = False
         process = self.process
         if process is not None and process.returncode is None:
             try:
                 await self.send(dict(type="exit"))
                 await asyncio.wait_for(process.wait(), 5)
-            except TimeoutError, BrokenPipeError, ConnectionError:
+            except (TimeoutError, BrokenPipeError, ConnectionError):
                 if self.stop is not None:
                     await self.stop(process)
                 else:

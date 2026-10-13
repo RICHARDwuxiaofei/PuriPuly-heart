@@ -14,6 +14,11 @@ from puripuly_heart.app.services.quick_translate import FRAME_PREFIX, MAX_FRAME_
 from puripuly_heart.runtime_layout import current_runtime_layout
 from puripuly_heart.ui.fonts import font_for_language, register_ui_fonts
 from puripuly_heart.ui.i18n import get_locale, set_locale, t
+from puripuly_heart.ui.quick_window_layout import (
+    DEFAULT_QUICK_HEIGHT,
+    DEFAULT_QUICK_WIDTH,
+    clamp_window_bounds,
+)
 from puripuly_heart.ui.theme import (
     COLOR_BACKGROUND,
     COLOR_DIVIDER,
@@ -78,18 +83,6 @@ async def stop_quick_window(process):
     await process.wait()
 
 
-def clamp_window_bounds(values: dict, *, work_area=(0, 0, 1920, 1080)) -> dict:
-    left, top, right, bottom = work_area
-    width = max(320, min(int(values.get("width", 480)), max(320, right - left)))
-    height = max(280, min(int(values.get("height", 520)), max(280, bottom - top)))
-    return dict(
-        width=width,
-        height=height,
-        left=max(left, min(int(values.get("left", left + 40)), right - width)),
-        top=max(top, min(int(values.get("top", top + 40)), bottom - height)),
-    )
-
-
 def primary_work_area():
     if os.name != "nt":
         return 0, 0, 1920, 1080
@@ -108,6 +101,7 @@ class QuickWindow:
         self.pending = None
         self.history = {}
         self.order = []
+        self.visibility_revision = 0
         self.input = ft.TextField(
             color=COLOR_NEUTRAL_DARK,
             expand=True,
@@ -130,6 +124,8 @@ class QuickWindow:
         page.bgcolor = COLOR_BACKGROUND
         page.window.bgcolor = COLOR_BACKGROUND
         page.window.opacity = 1
+        page.window.width = DEFAULT_QUICK_WIDTH
+        page.window.height = DEFAULT_QUICK_HEIGHT
         page.window.min_width = 360
         page.window.min_height = 300
         page.window.prevent_close = True
@@ -181,6 +177,7 @@ class QuickWindow:
             self.emit(dict(type="submit", id=identity, text=text))
         except Exception:
             self.status.value = t("quick.error.window_connection_failed")
+            row.value = text + "\n" + self.status.value
             self.button.disabled = False
             self.pending = None
         self.page.update()
@@ -206,6 +203,11 @@ class QuickWindow:
                 if message["type"] == "exit":
                     await self.page.window.destroy()
                     return
+                if message["type"] in {"show", "hide"}:
+                    revision = message.get("visibility_revision", 0)
+                    if not isinstance(revision, int) or revision < self.visibility_revision:
+                        continue
+                    self.visibility_revision = revision
                 if message["type"] == "show":
                     values = message["preferences"]
                     for name, value in clamp_window_bounds(
@@ -216,9 +218,14 @@ class QuickWindow:
                     self.page.window.always_on_top = self.pin.value
                     self.page.window.visible = True
                     self.page.window.minimized = False
+                elif message["type"] == "hide":
+                    await self.hide()
+                    continue
                 elif message["type"] == "result":
                     self.accept_result(message)
                 self.page.update()
+                if message["type"] == "show":
+                    self.emit_visibility(True)
         except Exception:
             self.emit(dict(type="failure"))
             self.status.value = t("quick.error.window_connection_failed")
@@ -238,7 +245,7 @@ class QuickWindow:
             )
             self.status.value = t("quick.retry")
         else:
-            row.value = original + "\n→ " + message["translation"]
+            row.value = original + "\n\u2192 " + message["translation"]
             if (
                 self.pending
                 and self.pending[0] == identity
@@ -262,11 +269,20 @@ class QuickWindow:
                 type="preferences",
                 values=dict(
                     always_on_top=bool(self.pin.value),
-                    width=round(window.width or 480),
-                    height=round(window.height or 520),
+                    width=round(window.width or DEFAULT_QUICK_WIDTH),
+                    height=round(window.height or DEFAULT_QUICK_HEIGHT),
                     left=round(window.left or 0),
                     top=round(window.top or 0),
                 ),
+            )
+        )
+
+    def emit_visibility(self, visible):
+        self.emit(
+            dict(
+                type="visibility",
+                visible=bool(visible),
+                visibility_revision=self.visibility_revision,
             )
         )
 
@@ -274,6 +290,7 @@ class QuickWindow:
         self.save_preferences()
         self.page.window.visible = False
         self.page.update()
+        self.emit_visibility(False)
 
     async def window_event(self, event):
         if event.type == ft.WindowEventType.CLOSE:
