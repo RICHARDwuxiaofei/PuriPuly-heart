@@ -59,10 +59,34 @@ def validate_beta_inputs(repo):
     return inventory
 
 
+def stage_beta_vc_runtime(output, source):
+    required = ("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
+    if source is None or not all((source / name).is_file() for name in required):
+        raise SystemExit("Beta requires the x64 Visual C++ redistributable CRT directory")
+    destinations = [
+        output / "runtime",
+        output / "flet" / "flet",
+        output / "app" / "build" / "gpu_worker",
+        output / "app" / "build" / "overlay",
+    ]
+    destinations.extend((output / "app" / "build" / "llama.cpp").glob("*/cpu"))
+    destinations.extend((output / "app" / "build" / "llama.cpp").glob("*/vulkan"))
+    hashes = {}
+    for dll in source.glob("*.dll"):
+        with dll.open("rb") as stream:
+            hashes[dll.name] = hashlib.file_digest(stream, "sha256").hexdigest()
+        for destination in destinations:
+            if not destination.is_dir():
+                raise SystemExit("Missing Beta runtime directory")
+            shutil.copy2(dll, destination / dll.name)
+    return hashes
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--beta", action="store_true")
+    parser.add_argument("--vc-runtime", type=Path)
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
@@ -86,6 +110,8 @@ def main():
     gpu_inventory = None
     if args.beta:
         gpu_inventory = validate_beta_inputs(repo)
+        if args.vc_runtime is None:
+            raise SystemExit("Beta requires --vc-runtime")
     output.mkdir(parents=True)
     shutil.copy2(
         repo / "scripts" / "preview" / ("README-BETA.txt" if args.beta else "README.md"),
@@ -155,6 +181,7 @@ def main():
         if source.is_dir():
             shutil.copytree(source, app / "third_party" / name, copy_function=copy_payload_file)
     shutil.unpack_archive(flet_archive, output / "flet")
+    vc_runtime = stage_beta_vc_runtime(output, args.vc_runtime) if args.beta else None
     compiler = Path(r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
     smoke_environment = dict(os.environ)
     smoke_environment["PYTHONPATH"] = str(app / "src")
@@ -198,6 +225,7 @@ def main():
                 ),
                 data_directory="%LOCALAPPDATA%/PuriPulyHeartBeta" if args.beta else "preview-data",
                 gpu_worker=gpu_inventory,
+                vc_runtime=vc_runtime,
             ),
             indent=2,
         ),
