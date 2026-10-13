@@ -1292,6 +1292,8 @@ fn frame_content_identity(blocks: &[CaptionBlock], presentation: &CaptionPresent
     blocks.len().hash(&mut hasher);
     for block in blocks {
         block.id.hash(&mut hasher);
+        block.occupant_key.hash(&mut hasher);
+        block.occupant_generation.hash(&mut hasher);
         block.primary_text.hash(&mut hasher);
         block.secondary_text.hash(&mut hasher);
         block.secondary_enabled.hash(&mut hasher);
@@ -2666,6 +2668,7 @@ fn caption_block_for_strip(strip: &OverlaySlot) -> CaptionBlock {
     };
 
     CaptionBlock::new(strip.id.clone(), strip.primary_text.clone())
+        .with_occupant(strip.occupant_key.clone(), strip.slot_entry_order)
         .with_channel(channel)
         .with_speaker_style(SpeakerStyle::from_token(strip.speaker_style.as_deref()))
         .with_variant(variant)

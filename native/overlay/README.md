@@ -70,6 +70,26 @@ receive ordering metadata remain non-reclaimable under this policy. The existing
 64-ID history limit remains: if unreclaimable IDs fill it, additional spatial
 identities are not admitted until capacity is freed or the history is reset.
 
+## Caption Sizing
+
+Desktop and VR captions keep their selected preset or calibration font size for
+ordinary text. Each primary and secondary region independently uses 100%, 90%,
+or 80% of that size when approximate text width exceeds its reserved line budget,
+with 10% overflow tolerance. Explicit newlines consume that same line budget.
+Fitting is intentionally approximate; text that still exceeds the budget at 80%
+keeps the existing clipping or ellipsis behavior. There is no pagination.
+
+For a continuing caption, each region can shrink but does not grow again on
+content updates or active-to-final promotion. A new occupant resets its fitting
+history, and retired occupants are removed. This text-only adjustment does not
+change full caption strings, window size, VR world placement, persisted settings,
+or Python-owned caption lifetime.
+
+The VR texture preserves its normal dimensions when sufficient and grows in
+height when the selected calibration requires more room for two complete slots.
+Slot anchors, reserved regions, and spacing continue to use the unshrunk
+calibration size; a long caption does not move neighboring captions.
+
 Run commands from the repository root. On Windows, use a short `--target-dir`
 path if the checkout is deep enough to exceed MSBuild's tracking-file path limit.
 

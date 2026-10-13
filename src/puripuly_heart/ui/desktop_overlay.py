@@ -268,6 +268,7 @@ from puripuly_heart.ui.desktop_overlay_surface.renderer import (
 from puripuly_heart.ui.desktop_overlay_surface.renderer import (
     _caption_card_width_memory_key as _caption_card_width_memory_key,
 )
+from puripuly_heart.ui.desktop_overlay_surface.renderer import _caption_plan_with_fitted_fonts
 from puripuly_heart.ui.desktop_overlay_surface.renderer import (
     _caption_line as _caption_line,
 )
@@ -882,6 +883,7 @@ class FletDesktopRendererWindow:
         ] = {}
         self._last_reported_bounds: tuple[float, float, float, float] | None = None
         self._caption_card_width_floor_by_block: dict[tuple[str, str, int], float] = {}
+        self._caption_font_scale_ceiling_by_region: dict[tuple[str, int, str], float] = {}
         self._last_render_trace: _DesktopRenderTrace | None = None
         self._retained_caption_surface: _RetainedDesktopCaptionSurface | None = None
         self._preview_stage: Any | None = None
@@ -1087,7 +1089,7 @@ class FletDesktopRendererWindow:
             visual_state=self._visual_state,
             interaction_mode=self._interaction_mode,
         )
-        self._plan_with_grow_only_caption_card_widths(plan)
+        self._plan_with_caption_fitting(plan)
 
     def renderer_visual_state(self) -> dict[str, object]:
         trace = self._last_render_trace
@@ -1443,7 +1445,7 @@ class FletDesktopRendererWindow:
             visual_state=self._visual_state,
             interaction_mode=self._interaction_mode,
         )
-        plan = self._plan_with_grow_only_caption_card_widths(raw_plan)
+        plan = self._plan_with_caption_fitting(raw_plan)
         if self._interaction_mode == _DESKTOP_INTERACTION_MODE_EDIT:
             content_kind = (
                 "drag_area_with_empty_lock_action"
@@ -2075,41 +2077,43 @@ class FletDesktopRendererWindow:
             visual_state=self._preview_visual_state(),
             interaction_mode=self._interaction_mode,
         )
-        return self._plan_with_grow_only_caption_card_widths(plan)
+        return self._plan_with_caption_fitting(plan)
 
-    def _plan_with_grow_only_caption_card_widths(
-        self,
-        plan: DesktopCaptionPlan,
-    ) -> DesktopCaptionPlan:
-        if not plan.slots:
-            self._caption_card_width_floor_by_block.clear()
-            return plan
-        if plan.full_window_background_visible:
-            return plan
-
+    def _plan_with_caption_fitting(self, plan: DesktopCaptionPlan) -> DesktopCaptionPlan:
         active_keys = {_caption_card_width_memory_key(slot) for slot in plan.slots}
         for key in tuple(self._caption_card_width_floor_by_block):
             if key not in active_keys:
                 del self._caption_card_width_floor_by_block[key]
+        active_occupants = {(slot.occupant_key, slot.appearance_seq) for slot in plan.slots}
+        for key in tuple(self._caption_font_scale_ceiling_by_region):
+            if key[:2] not in active_occupants:
+                del self._caption_font_scale_ceiling_by_region[key]
 
-        grown_slots: list[DesktopCaptionSlot] = []
-        for slot in plan.slots:
-            key = _caption_card_width_memory_key(slot)
-            previous_width = self._caption_card_width_floor_by_block.get(key, 0.0)
-            card_width = _clamp(max(slot.card_width, previous_width), 1.0, float(plan.window_width))
-            self._caption_card_width_floor_by_block[key] = card_width
-            grown_slots.append(
-                replace(
-                    slot,
-                    card_width=card_width,
-                    card_text_width=max(1.0, card_width - (plan.padding_horizontal * 2)),
+        if not plan.full_window_background_visible:
+            grown_slots: list[DesktopCaptionSlot] = []
+            for slot in plan.slots:
+                key = _caption_card_width_memory_key(slot)
+                previous_width = self._caption_card_width_floor_by_block.get(key, 0.0)
+                card_width = _clamp(
+                    max(slot.card_width, previous_width), 1.0, float(plan.window_width)
                 )
-            )
-        return replace(
-            plan,
-            slots=tuple(grown_slots),
-            lines=tuple(line for slot in grown_slots for line in slot.lines),
+                self._caption_card_width_floor_by_block[key] = card_width
+                grown_slots.append(
+                    replace(
+                        slot,
+                        card_width=card_width,
+                        card_text_width=max(1.0, card_width - (plan.padding_horizontal * 2)),
+                    )
+                )
+            plan = replace(plan, slots=tuple(grown_slots))
+        fitted_plan = _caption_plan_with_fitted_fonts(
+            plan, self._caption_font_scale_ceiling_by_region
         )
+        for slot in fitted_plan.slots:
+            for line in slot.lines:
+                key = (slot.occupant_key, slot.appearance_seq, line.slot)
+                self._caption_font_scale_ceiling_by_region[key] = line.font_scale
+        return fitted_plan
 
     def _emit_render_transition(self, trace: _DesktopRenderTrace) -> None:
         previous = self._last_render_trace

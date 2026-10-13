@@ -565,7 +565,6 @@ impl OverlayFrameSubmitter for RecordingSubmitter {
             return Err(OpenVrError::Submit("submit failed".into()));
         }
         assert_eq!(frame.width(), 4096);
-        assert_eq!(frame.height(), 1056);
         Ok(())
     }
 
@@ -2617,6 +2616,72 @@ async fn runtime_caption_blocks_keep_channel_metadata_for_color_only_rendering()
     assert_eq!(
         channels.get("peer:2"),
         Some(&(Some(CaptionChannel::PeerChannel), "세상", false))
+    );
+}
+
+#[test]
+fn runtime_caption_fitting_survives_promotion_and_resets_for_reused_slot_identity() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let primary_text = "한".repeat(200);
+    let secondary_text = "원".repeat(200);
+    let mut occupant = slot_block(
+        "self:active",
+        "self:turn",
+        1,
+        "self",
+        &primary_text,
+        &secondary_text,
+        true,
+    );
+    occupant.block_variant = OverlayPresentationBlockVariant::ActiveSelf;
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 1,
+        blocks: vec![occupant.clone()],
+        ..Default::default()
+    });
+    let initial = renderer.render_blocks(runtime.caption_blocks()).unwrap();
+    let shrunk_primary = initial.layout().visible_blocks[0].primary_lines[0].font_size_px;
+    let shrunk_secondary = initial.layout().visible_blocks[0]
+        .secondary_line
+        .as_ref()
+        .unwrap()
+        .font_size_px;
+    assert!((shrunk_primary - 132.0 * 0.8).abs() < 0.01);
+    assert!((shrunk_secondary - 81.84 * 0.8).abs() < 0.01);
+    assert_eq!(runtime.state().snapshot().blocks[0].primary_text, primary_text);
+    assert_eq!(runtime.state().snapshot().blocks[0].secondary_text, secondary_text);
+
+    occupant.id = "self:finalized".into();
+    occupant.block_variant = OverlayPresentationBlockVariant::Finalized;
+    occupant.primary_text = "short primary".into();
+    occupant.secondary_text = "short secondary".into();
+    runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 2,
+        blocks: vec![occupant.clone()],
+        ..Default::default()
+    });
+    let promoted = renderer.render_blocks(runtime.caption_blocks()).unwrap();
+    assert_eq!(promoted.layout().visible_blocks[0].primary_lines[0].font_size_px, shrunk_primary);
+    assert_eq!(
+        promoted.layout().visible_blocks[0].secondary_line.as_ref().unwrap().font_size_px,
+        shrunk_secondary,
+    );
+
+    runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 3,
+        ..Default::default()
+    });
+    runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 4,
+        blocks: vec![occupant],
+        ..Default::default()
+    });
+    let reoccupied = renderer.render_blocks(runtime.caption_blocks()).unwrap();
+    assert!((reoccupied.layout().visible_blocks[0].primary_lines[0].font_size_px - 132.0).abs() < 0.01);
+    assert!(
+        (reoccupied.layout().visible_blocks[0].secondary_line.as_ref().unwrap().font_size_px - 81.84)
+            .abs()
+            < 0.01
     );
 }
 
