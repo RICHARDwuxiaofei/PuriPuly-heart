@@ -10,6 +10,12 @@ from puripuly_heart.app.ports.manual_typing import SelfChatboxTypingPort
 MANUAL_INPUT_TYPING_REASON = "manual_input"
 
 
+class ManualTranslationFailed(RuntimeError):
+    def __init__(self, utterance_id):
+        super().__init__("translation_failed")
+        self.utterance_id = str(utterance_id)
+
+
 @dataclass(slots=True)
 class ManualTypingOwner:
     output_provider: Callable[[], SelfChatboxTypingPort | None]
@@ -61,7 +67,7 @@ class ManualTypingOwner:
             await asyncio.shield(pending)
         translation = result(utterance_id)
         if translation is None:
-            raise RuntimeError("translation_failed")
+            raise ManualTranslationFailed(utterance_id)
         return str(utterance_id), translation.translated_text
 
     async def release(self) -> None:
