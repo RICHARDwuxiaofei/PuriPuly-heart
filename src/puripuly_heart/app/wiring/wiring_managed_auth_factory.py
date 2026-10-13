@@ -124,6 +124,7 @@ from puripuly_heart.core.openrouter_credentials import (
     resolve_openrouter_credentials,
 )
 from puripuly_heart.core.openrouter_handoff import mark_founder_letter_shown
+from puripuly_heart.core.qq_auth_diagnostics import exception_fields, log_qq_auth
 from puripuly_heart.core.runtime.oauth import OAuthRuntime
 from puripuly_heart.core.storage.secrets import SecretStore
 
@@ -1177,14 +1178,21 @@ class ManagedAuthRuntimeAdapter:
         release_service = self.release_service_provider()
         broker_client = getattr(release_service, "client", None)
         if current is None or canonical is None or broker_client is None:
+            log_qq_auth("preflight", "configuration_unavailable")
             return ManagedAuthExecutionResult(
                 succeeded=False,
-                message_key="qq_managed_auth.error.retry",
+                message_key="qq_managed_auth.configuration_unavailable",
             )
-        secret_store = self.secret_store_factory(
-            canonical.intent.secrets,
-            config_path=self.config_path,
-        )
+        try:
+            secret_store = self.secret_store_factory(
+                canonical.intent.secrets,
+                config_path=self.config_path,
+            )
+        except Exception as exc:
+            log_qq_auth("secret_storage", "local_storage_unavailable", fields=exception_fields(exc))
+            return ManagedAuthExecutionResult(
+                succeeded=False, message_key="qq_managed_auth.local_storage_unavailable"
+            )
         secret_store_port = SyncSecretStoreAdapter(secret_store)
         managed_state = managed_identity_state_port_from_vnext(self.settings, current)
         assertion_results: list[QqManagedAssertionResult] = []

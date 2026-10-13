@@ -40,6 +40,7 @@ from puripuly_heart.core.lifecycle import (
     SHUTDOWN_PHASE_FREEZE_INGRESS,
     SHUTDOWN_PHASE_STOP_EXTERNAL_PRODUCERS,
 )
+from puripuly_heart.core.qq_auth_diagnostics import exception_fields, log_qq_auth
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
 from puripuly_heart.ui.components.chatgpt_auth_dialog import ChatGptAuthDialog
 from puripuly_heart.ui.components.debug_preview_panel import DebugPreviewPanel
@@ -1776,27 +1777,40 @@ class TranslatorApp:
                 )
             except asyncio.CancelledError:
                 return
-            except Exception:
-                self._log_basic("[ManagedAuth] QQ auth task failed", level=logging.ERROR)
+            except Exception as exc:
+                log_qq_auth("authentication", "unknown_error", fields=exception_fields(exc))
                 result = None
             if not self._is_current_qq_managed_auth_generation(generation):
                 return
             if result is True:
-                enable_result = await application.set_translation_enabled(True)
+                log_qq_auth("authentication", "authentication_succeeded", level=logging.INFO)
+                try:
+                    enable_result = await application.set_translation_enabled(True)
+                    translation_ready = application.translation_enable_succeeded(enable_result)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log_qq_auth(
+                        "translation_start", "translation_init_failed", fields=exception_fields(exc)
+                    )
+                    translation_ready = False
                 if not self._is_current_qq_managed_auth_generation(generation):
                     return
-                if not application.translation_enable_succeeded(enable_result):
-                    set_error = getattr(dialog, "set_error", None)
-                    if callable(set_error):
-                        set_error("qq_auth.error.retry")
-                    self._qq_managed_auth_task_handle = None
-                    return
                 self._close_qq_managed_auth_dialog()
-                self._show_snackbar(t("qq_auth.success"), COLOR_SUCCESS)
-                self._set_dashboard_translation_visual_state(True)
                 self._qq_managed_auth_task_handle = None
                 self.application.clear_managed_auth_task(
                     "qq-managed-auth-dialog",
+                )
+                self._set_dashboard_translation_visual_state(translation_ready)
+                if not translation_ready:
+                    log_qq_auth("translation_start", "translation_init_failed")
+                self._show_snackbar(
+                    t(
+                        "qq_auth.success"
+                        if translation_ready
+                        else "qq_auth.error.translation_start_failed"
+                    ),
+                    COLOR_SUCCESS if translation_ready else COLOR_WARNING,
                 )
                 return
             message_key = "qq_auth.error.retry"
@@ -1807,6 +1821,14 @@ class TranslatorApp:
                     message_kwargs = dict(result[1])
             set_error = getattr(dialog, "set_error", None)
             if callable(set_error):
+                log_qq_auth(
+                    "authentication",
+                    (
+                        "unknown_error"
+                        if message_key == "qq_auth.error.retry"
+                        else message_key.rsplit(".", 1)[-1]
+                    ),
+                )
                 set_error(message_key, **message_kwargs)
             if self._is_current_qq_managed_auth_generation(generation):
                 self._qq_managed_auth_task_handle = None

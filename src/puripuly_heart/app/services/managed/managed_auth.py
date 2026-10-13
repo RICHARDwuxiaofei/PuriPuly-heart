@@ -6,8 +6,23 @@ from dataclasses import dataclass, field
 
 from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 from puripuly_heart.core.messages import TransactionResult
+from puripuly_heart.core.qq_auth_diagnostics import exception_fields, log_qq_auth
 
 QQ_AUTH_DIALOG_MESSAGE_KEY_BY_SERVICE_KEY = {
+    **{
+        f"qq_managed_auth.{name}": f"qq_auth.error.{name}"
+        for name in (
+            "configuration_unavailable",
+            "local_storage_unavailable",
+            "delivery_ack_pending",
+            "managed_secret_missing",
+            "network_timeout",
+            "network_proxy",
+            "network_tls",
+            "network_dns",
+            "network_network",
+        )
+    },
     "qq_managed_auth.already_claimed_discord": "qq_auth.error.already_claimed_discord",
     "qq_managed_auth.invalid_credential": "qq_auth.error.credential_mismatch",
     "qq_managed_auth.mismatch": "qq_auth.error.credential_mismatch",
@@ -141,15 +156,30 @@ class ManagedAuthOwner:
             or not state.managed_china
             or not state.release_service_available
         ):
+            code = (
+                "configuration_unavailable"
+                if not state.settings_available or not state.release_service_available
+                else "flow_not_ready"
+            )
+            log_qq_auth("preflight", code)
+            return "qq_auth.error.configuration_unavailable", {}
+        try:
+            result = await self.qq_executor(qq_identity, credential, referral_id)
+        except Exception as exc:
+            log_qq_auth("preflight", "unknown_error", fields=exception_fields(exc))
             return "qq_auth.error.retry", {}
-        result = await self.qq_executor(qq_identity, credential, referral_id)
         if result.transaction_result is not None:
             self.result_sink(result.transaction_result)
         if result.succeeded:
             self.clear_pending()
             self.last_referral_bonus_applied = result.referral_bonus_applied
             if result.runtime_rebuild != "never":
-                await self.runtime_ensurer(result.runtime_rebuild)
+                try:
+                    await self.runtime_ensurer(result.runtime_rebuild)
+                except Exception as exc:
+                    log_qq_auth(
+                        "translation_start", "translation_init_failed", fields=exception_fields(exc)
+                    )
             self.usage_view_sink(result.referral_id, result.pass_status)
             self.usage_refresh_sink()
             return True
