@@ -243,7 +243,7 @@ Every task, process, source, and provider session has an owner responsible for i
 
 - Generations, attachment tokens, request IDs, and current-owner checks prevent retired work from mutating current state or publishing output.
 - The owner decides whether admitted work drains or is cancelled. Gracefully admitted work retains its provider scope and frozen settings.
-- Replacement revokes retired authority before it can affect the new runtime. Retired resources remain owned until cleanup completes.
+- Replacement revokes retired authority before it can affect the new runtime. Retired resources remain owned until cleanup completes. Source-ordered recognition handoff evaluates cleanup debt after backend shutdown, not after channel-only close.
 
 ### Shutdown
 

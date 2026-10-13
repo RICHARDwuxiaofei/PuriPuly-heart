@@ -279,7 +279,7 @@ class ProviderRuntimeHandle:
             result = wait_for_ingress()
             if inspect.isawaitable(result):
                 await result
-        await _call_async_method(provider, "close")
+        await self._close_provider_for_shutdown(provider)
         if bool(getattr(provider, "cleanup_debt", 0)):
             return False
         async with self._lock:
@@ -290,7 +290,6 @@ class ProviderRuntimeHandle:
                 for candidate in self._retained_scoped_providers
                 if candidate is not provider
             ]
-        self._schedule_provider_retirement(provider, event_task=None)
         return True
 
     async def retire_for_dormant_reuse(self, provider: object) -> None:

@@ -4,18 +4,31 @@ import asyncio
 import gc
 import json
 import logging
+from dataclasses import replace
+from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
 import pytest
 
-from puripuly_heart.app.wiring.wiring_stt_factory import create_stt_backend_from_resolved_config
+from puripuly_heart.app.adapters.gpu_worker_process import DefaultGpuWorkerProcessFactory
+from puripuly_heart.app.wiring.wiring_local_asr_provider_runtime import SharedSTTProviderFactory
+from puripuly_heart.app.wiring.wiring_stt_factory import (
+    build_peer_capture_session_config_from_vnext,
+    build_peer_stt_provider_request,
+    create_stt_backend_from_resolved_config,
+)
 from puripuly_heart.config.runtime_resolution import STTRuntimeIntent, resolve_stt_config
+from puripuly_heart.config.settings_vnext.serialization import from_dict
+from puripuly_heart.core import network_clients
 from puripuly_heart.core.audio.ownership import (
     AudioSegmentIdentity,
     AudioSegmentSettingsSnapshot,
     PeerAudioSegmentLedger,
 )
+from puripuly_heart.core.clock import SystemClock
+from puripuly_heart.core.runtime.gpu_asr import SharedGpuASRRuntime
+from puripuly_heart.core.runtime.local_asr_provider_runtime import LocalASRProviderRuntimeOwner
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
 from puripuly_heart.core.stt.backend import (
     LEGACY_STT_SESSION_PROJECTION,
@@ -1437,3 +1450,177 @@ async def test_real_qwen_audio_shared_engine_uses_one_sentence_join_projection(
         (len(sentences[0]), len(expected_text)),
     ]
     await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_peer_language_handoff_finishes_backend_cleanup_before_new_recognition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ServerSocket(FakeWebSocket):
+        def __init__(self, text: str, *, gated: bool) -> None:
+            super().__init__()
+            self.text = text
+            self.has_audio = False
+            self.close_started = asyncio.Event()
+            self.close_gate = asyncio.Event()
+            if not gated:
+                self.close_gate.set()
+
+        async def send(self, value: str | bytes) -> None:
+            await super().send(value)
+            if isinstance(value, bytes):
+                self.has_audio = True
+                return
+            header = json.loads(value)["header"]
+            task_id = header["task_id"]
+            if header["action"] == "run-task":
+                self.has_audio = False
+                await self.push({"header": {"event": "task-started", "task_id": task_id}})
+            elif header["action"] == "finish-task":
+                if self.has_audio:
+                    await self.push(
+                        {
+                            "header": {"event": "result-generated", "task_id": task_id},
+                            "payload": {
+                                "output": {
+                                    "sentence": {
+                                        "sentence_id": "sentence-1",
+                                        "sentence_end": True,
+                                        "text": self.text,
+                                    }
+                                }
+                            },
+                        }
+                    )
+                await self.push({"header": {"event": "task-finished", "task_id": task_id}})
+
+        async def close(self) -> None:
+            self.close_started.set()
+            await self.close_gate.wait()
+            await super().close()
+
+    old_socket = ServerSocket("你好", gated=True)
+    new_socket = ServerSocket("こんにちは", gated=False)
+    sockets = iter((old_socket, new_socket))
+
+    async def connect(*_args: object, **_kwargs: object) -> ServerSocket:
+        return next(sockets)
+
+    monkeypatch.setattr(network_clients, "external_websocket_connect", connect)
+    settings = from_dict(
+        {
+            "intent": {
+                "peer_stt": {"provider": "qwen_audio"},
+                "languages": {
+                    "peer_source_language": "zh-CN",
+                    "peer_source_mode": "manual",
+                    "peer_expected_languages": ["zh-CN", "ja"],
+                },
+                "stt": {"drain_timeout_s": 0.5},
+            }
+        }
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("alibaba_api_key_beijing", "test-key")
+    factory = SharedSTTProviderFactory(
+        secrets=secrets,
+        clock=SystemClock(),
+        reset_deadline_s=1.0,
+        gpu_model_path=Path("."),
+    )
+    events: list[object] = []
+    owner = LocalASRProviderRuntimeOwner(
+        provider_factory=factory,
+        gpu_runtime_factory=lambda sink: SharedGpuASRRuntime(
+            process_factory=DefaultGpuWorkerProcessFactory(),
+            clock=factory.clock,
+            diagnostic_sink=sink,
+        ),
+        provisioning=None,
+        peer_event_handler=lambda event: asyncio.sleep(0, result=events.append(event)),
+    )
+
+    def configuration(mode: str):
+        candidate = replace(
+            settings,
+            intent=replace(
+                settings.intent,
+                languages=replace(settings.intent.languages, peer_source_mode=mode),
+            ),
+        )
+        config = build_peer_capture_session_config_from_vnext(candidate)
+        snapshot = AudioSegmentSettingsSnapshot(
+            provider_id=config.provider_id,
+            provider_signature=config.provider_signature,
+            runtime_signature=config.runtime_signature,
+            source_mode=config.delivery_language.source_mode,
+            source_language=config.delivery_language.source_language,
+            expected_languages=config.delivery_language.expected_languages,
+            target_sample_rate_hz=config.target_sample_rate_hz,
+            vad_speech_threshold=config.vad_speech_threshold,
+            vad_hangover_ms=config.vad_hangover_ms,
+            vad_pre_roll_ms=config.vad_pre_roll_ms,
+        )
+        ledger = PeerAudioSegmentLedger(activation_generation=1, settings=snapshot)
+        segment_id = uuid4()
+        start = ledger.observe_vad_event(
+            SpeechStart(
+                segment_id,
+                pre_roll=np.empty((0,), dtype=np.float32),
+                chunk=np.ones((8,), dtype=np.float32),
+            ),
+            now_monotonic_s=0.0,
+        )
+        end = ledger.observe_vad_event(
+            SpeechEnd(segment_id, trailing_silence_ms=500, reason="silence"),
+            now_monotonic_s=1.0,
+        )
+        return build_peer_stt_provider_request(config, gpu_device_id="auto"), start, end
+
+    admission = None
+    try:
+        await owner.start()
+        old_request, old_start, old_end = configuration("manual")
+        await owner.replace_provider(old_request, start=True)
+        old_engine = owner.current_provider("peer")
+        assert isinstance(old_engine, ScopedRecognitionEngine)
+        old_engine.event_drain_timeout_s = 0.05
+        await owner.handle_owned_vad_event("peer", old_start)
+        await owner.handle_owned_vad_event("peer", old_end)
+        await wait_for_condition(
+            lambda: any(isinstance(event, STTProviderTurnTerminal) for event in events)
+            and old_engine._session.state is QwenAudioSessionState.TASK_ACTIVE
+        )
+        new_request, new_start, new_end = configuration("auto")
+        await owner.handoff_provider(new_request, start=True)
+        admission = asyncio.create_task(owner.handle_owned_vad_event("peer", new_start))
+        await asyncio.wait_for(old_socket.close_started.wait(), timeout=1)
+        async with asyncio.timeout(1):
+            while not admission.done() and old_engine._backend_close_task is None:
+                await asyncio.sleep(0.001)
+        if admission.done():
+            await admission
+        assert not new_socket.sent
+        old_socket.close_gate.set()
+        await asyncio.wait_for(admission, timeout=1)
+        await owner.handle_owned_vad_event("peer", new_end)
+        await wait_for_condition(
+            lambda: len([event for event in events if isinstance(event, STTProviderTurnTerminal)])
+            == 2
+        )
+
+        terminals = [event for event in events if isinstance(event, STTProviderTurnTerminal)]
+        assert [(event.outcome, event.text) for event in terminals] == [
+            ("final", "你好"),
+            ("final", "こんにちは"),
+        ]
+        assert terminals[0].identity.settings_scope == old_engine.scoped_settings_scope
+        assert terminals[1].identity.settings_scope != terminals[0].identity.settings_scope
+        assert old_socket.closed
+        assert old_engine.cleanup_debt == 0
+        assert owner.snapshot.channel_for("peer").phase == "running"
+    finally:
+        old_socket.close_gate.set()
+        if admission is not None:
+            await asyncio.gather(admission, return_exceptions=True)
+        await owner.close()
