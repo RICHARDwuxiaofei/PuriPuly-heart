@@ -13,6 +13,71 @@ from puripuly_heart.config.translation_values import TranslationConnection, Tran
 from puripuly_heart.core.local_translation.devices import LlamaVulkanDevice
 
 
+def test_model_manager_preselects_configured_asr_and_not_cloud_translation():
+    from puripuly_heart.core.local_stt_assets import LOCAL_STT_MODEL_ID
+
+    settings = AppSettingsVNext()
+    settings = replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            stt=replace(settings.intent.stt, provider="local_qwen"),
+            peer_stt=replace(settings.intent.peer_stt, provider="deepgram"),
+            translation=replace(
+                settings.intent.translation,
+                model="deepseek_v4_flash_41",
+                connection="official_byok",
+            ),
+        ),
+    )
+    adapter = _adapter(settings, change_secret=AsyncMock(), apply=AsyncMock())
+    adapter.settings.require_canonical = lambda: settings
+    assert adapter.selected_model_asset_ids() == (LOCAL_STT_MODEL_ID,)
+
+
+def test_model_manager_preselects_complete_cpu_auto_and_local_gemma():
+    from puripuly_heart.core.local_stt_assets import REQUIRED_CPU_LOCAL_STT_MODEL_IDS
+
+    from puripuly_heart.core.local_translation.assets import GEMMA_MODEL_ID
+
+    settings = AppSettingsVNext()
+    settings = replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            stt=replace(settings.intent.stt, provider="local_cpu_auto"),
+            translation=replace(
+                settings.intent.translation, model="managed_gemma", connection="cpu"
+            ),
+        ),
+    )
+    adapter = _adapter(settings, change_secret=AsyncMock(), apply=AsyncMock())
+    adapter.settings.require_canonical = lambda: settings
+    assert set(adapter.selected_model_asset_ids()) == {
+        *REQUIRED_CPU_LOCAL_STT_MODEL_IDS,
+        GEMMA_MODEL_ID,
+    }
+
+
+async def test_model_manager_reuses_shared_asr_owner_without_provider_activation():
+    from puripuly_heart.core.local_stt_assets import LOCAL_QWEN_GPU_MODEL_ID
+
+    settings = AppSettingsVNext()
+    apply = AsyncMock()
+    adapter = _adapter(settings, change_secret=AsyncMock(), apply=apply)
+    owner = SimpleNamespace(
+        snapshot=SimpleNamespace(activity_for=lambda backend: None),
+        start_install=AsyncMock(return_value=SimpleNamespace(cancelled=False, failed_model_ids=())),
+    )
+    adapter.gpu = SimpleNamespace(provisioning_provider=lambda: owner)
+    await adapter.provision_asr_assets(model_id=LOCAL_QWEN_GPU_MODEL_ID, source="mirror")
+    request = owner.start_install.call_args.args[0]
+    assert request.backend == "gpu" and request.explicit_gpu_intent
+    assert request.preferred_source == "mirror" and request.origin == "model_assets_dialog"
+    apply.assert_not_awaited()
+    assert adapter.settings.canonical is settings
+
+
 def _custom_http_settings() -> AppSettingsVNext:
     settings = AppSettingsVNext()
     return replace(

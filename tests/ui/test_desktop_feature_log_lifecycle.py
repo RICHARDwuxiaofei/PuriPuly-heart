@@ -98,6 +98,7 @@ async def test_model_dialog_reports_actual_failure_without_raw_response(caplog):
     set_locale("zh-CN")
     try:
         application = SimpleNamespace(
+            selected_model_asset_ids=lambda: ("gemma-4-e4b-it-qat-ud-q4-k-xl",),
             gemma_download_source=lambda: "mirror",
             configure_gemma_source=configure,
             provision_gemma_assets=fail,
@@ -107,7 +108,7 @@ async def test_model_dialog_reports_actual_failure_without_raw_response(caplog):
         dialog = ModelAssetsDialog(page, application, lambda f: None)
         dialog.open()
         await dialog.install()
-        assert "镜像跳回" in dialog.status.value
+        assert "镜像跳回" in dialog.results["gemma-4-e4b-it-qat-ud-q4-k-xl"].value
         dialog.close()
         assert "code=mirror_redirect_external" in caplog.text
         assert "signed-uri-with-secret" not in caplog.text

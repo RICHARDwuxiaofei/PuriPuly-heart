@@ -104,6 +104,8 @@ UI_APPLICATION_USER_INTENT_METHODS = frozenset(
         "handle_gpu_notice_action",
         "handle_managed_gemma_notice_action",
         "install_selected_gpu_model_if_needed",
+        "provision_asr_assets",
+        "cancel_asr_assets",
         "edit_alibaba_connection_draft",
         "on_dashboard_language_change",
         "persist_api_key_verification",
@@ -1090,6 +1092,17 @@ class UiApplicationBoundary:
 
     def gemma_download_source(self) -> str:
         return self._provider.gemma_download_source()
+
+    def selected_model_asset_ids(self) -> tuple[str, ...]:
+        return self._provider.selected_model_asset_ids()
+
+    async def provision_asr_assets(self, *, model_id: str, source: str, on_status=None):
+        return await self._provider.provision_asr_assets(
+            model_id=model_id, source=source, on_status=on_status
+        )
+
+    async def cancel_asr_assets(self, *, model_id: str) -> None:
+        await self._provider.cancel_asr_assets(model_id=model_id)
 
     async def configure_gemma_source(self, source: str) -> None:
         await self._provider.configure_gemma_source(source)
