@@ -219,6 +219,13 @@ def _source_order(
     locale: str | None,
 ) -> tuple[str, ...]:
     selected = preferred_source or default_local_stt_source_for_locale(locale)
+    if (
+        preferred_source is None
+        and selected == "modelscope"
+        and selected not in manifest.sources
+        and "hf_mirror" in manifest.sources
+    ):
+        selected = "hf_mirror"
     names: list[str] = []
     if selected in manifest.sources:
         names.append(selected)

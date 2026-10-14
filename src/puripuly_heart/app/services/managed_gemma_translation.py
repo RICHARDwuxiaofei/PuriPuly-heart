@@ -139,6 +139,7 @@ class ManagedGemmaTranslationOwner:
                         "cancel_event": cancel_event,
                         "on_status": on_status,
                         "spec": spec,
+                        "locale": selection.locale,
                     },
                 ),
                 name=f"prepare-{generation}",

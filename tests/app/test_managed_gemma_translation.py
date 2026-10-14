@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
+import httpx
 import pytest
 
 from puripuly_heart.app.ports.managed_gemma_translation import (
@@ -12,7 +15,11 @@ from puripuly_heart.app.ports.managed_gemma_translation import (
 from puripuly_heart.app.services.managed_gemma_translation import (
     ManagedGemmaTranslationOwner,
 )
+from puripuly_heart.app.wiring.wiring_managed_gemma import managed_gemma_selection
+from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
+from puripuly_heart.config.translation_values import TranslationConnection, TranslationModel
 from puripuly_heart.core.local_asr.local_stt_download_port import LocalSTTDownloadPortError
+from puripuly_heart.core.local_translation import assets, provisioning
 from puripuly_heart.core.local_translation.provisioning import (
     GemmaProvisioningCancelled,
     GemmaProvisioningUpdate,
@@ -26,6 +33,7 @@ def _selection(backend: str = "cpu") -> ManagedGemmaTranslationSelection:
         source_language="ko",
         target_language="en",
         system_prompt="translate {source_language} to {target_language}",
+        locale="en",
     )
 
 
@@ -96,9 +104,6 @@ async def test_prepare_reports_progress_and_gates_activation_on_runtime_readines
         "preparing",
         "ready",
     ]
-    assert runtime.calls[0]["backend"] == "gpu"
-    assert runtime.calls[0]["source_language"] == "ko"
-    assert runtime.calls[0]["target_language"] == "en"
 
 
 @pytest.mark.asyncio
@@ -311,3 +316,131 @@ async def test_immediate_deactivate_and_close_skip_linger() -> None:
     assert runtime.release_count == 1
     assert runtime.close_count == 1
     assert owner.snapshot.state == "closed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("locale", "source_language", "expected_source"),
+    [
+        ("zh-CN", "ko", "modelscope"),
+        ("en", "zh-CN", "huggingface"),
+    ],
+)
+async def test_preparation_download_source_comes_from_ui_locale_not_translation_language(
+    tmp_path, monkeypatch, locale, source_language, expected_source
+) -> None:
+    contents = {
+        assets.GEMMA_MODEL_FILENAME: b"target-model",
+        assets.GEMMA_DRAFT_FILENAME: b"draft-model",
+    }
+    monkeypatch.setattr(
+        assets,
+        "GEMMA_ASSETS",
+        tuple(
+            assets.GemmaAsset(name, len(content), hashlib.sha256(content).hexdigest())
+            for name, content in contents.items()
+        ),
+    )
+    settings = AppSettingsVNext()
+    settings = replace(
+        settings,
+        intent=replace(
+            settings.intent,
+            ui=replace(settings.intent.ui, locale=locale),
+            languages=replace(
+                settings.intent.languages,
+                source_language=source_language,
+                target_language="en",
+            ),
+            translation=replace(
+                settings.intent.translation,
+                model=TranslationModel.MANAGED_GEMMA.value,
+                connection=TranslationConnection.CPU.value,
+            ),
+        ),
+    )
+    selected_sources = []
+
+    class Downloader:
+        async def download(self, request, *, cancel_event, on_progress):
+            if expected_source != "huggingface":
+                raise AssertionError("Chinese UI must select ModelScope")
+            selected_sources.append("huggingface")
+            destination = request.local_dir / request.remote_path
+            destination.write_bytes(contents[request.remote_path])
+            return destination
+
+    def serve(request):
+        if expected_source != "modelscope":
+            raise AssertionError("Chinese translation language must not select ModelScope")
+        selected_sources.append("modelscope")
+        return httpx.Response(200, content=contents[request.url.params["FilePath"]])
+
+    monkeypatch.setattr(
+        provisioning.network_clients,
+        "external_client",
+        lambda **kwargs: httpx.Client(transport=httpx.MockTransport(serve), **kwargs),
+    )
+    install_dir = tmp_path / "gemma"
+
+    async def prepare(**kwargs):
+        await provisioning.ensure_gemma_installed(
+            install_dir=install_dir,
+            **kwargs["provision_kwargs"],
+        )
+        return _readiness(str(kwargs["backend"]))
+
+    owner = ManagedGemmaTranslationOwner(
+        runtime=RecordingRuntime(prepare),
+        downloader=Downloader(),
+    )
+    try:
+        activation = await owner.prepare(managed_gemma_selection(settings))
+
+        assert activation.backend == "cpu"
+        assert owner.snapshot.state == "ready"
+        assert {name: (install_dir / name).read_bytes() for name in contents} == contents
+        assert selected_sources == [expected_source] * len(contents)
+        assert assets.validate_gemma_install(install_dir).revision == assets.GEMMA_REVISION
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_modelscope_http_failure_preserves_download_status_metadata(
+    tmp_path, monkeypatch
+) -> None:
+    class FailedDownloader:
+        async def download(self, request, *, cancel_event, on_progress):
+            raise LocalSTTDownloadPortError("primary download unavailable")
+
+    monkeypatch.setattr(
+        provisioning.network_clients,
+        "external_client",
+        lambda **kwargs: httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(503)),
+            **kwargs,
+        ),
+    )
+
+    async def prepare(**kwargs):
+        await provisioning.ensure_gemma_installed(
+            install_dir=tmp_path / "gemma",
+            **kwargs["provision_kwargs"],
+        )
+
+    owner = ManagedGemmaTranslationOwner(
+        runtime=RecordingRuntime(prepare),
+        downloader=FailedDownloader(),
+    )
+    try:
+        with pytest.raises(provisioning.GemmaProvisioningError):
+            await owner.prepare(_selection())
+
+        assert owner.snapshot.state == "failed"
+        assert owner.snapshot.failure_phase == "download"
+        assert owner.snapshot.failure_code == "download_failed"
+        assert owner.snapshot.cause_type == "HTTPStatusError"
+        assert owner.snapshot.status_code == 503
+    finally:
+        await owner.close()

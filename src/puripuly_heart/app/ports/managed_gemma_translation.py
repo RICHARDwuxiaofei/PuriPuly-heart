@@ -14,6 +14,7 @@ class ManagedGemmaTranslationSelection:
     source_language: str
     target_language: str
     system_prompt: str
+    locale: str
     model_id: str = GEMMA_MODEL_ID
     vulkan_device: str = "Vulkan0"
 

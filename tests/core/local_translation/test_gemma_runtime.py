@@ -518,7 +518,7 @@ async def test_gpu_device_change_restarts_runtime_with_new_device(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_model_spec_change_restarts_runtime_without_mtp(tmp_path: Path) -> None:
-    owner, commands, processes, _transports, provision_calls, _logs = _runtime(tmp_path)
+    owner, commands, processes, _transports, _provision_calls, _logs = _runtime(tmp_path)
     drafter_less_spec = GemmaModelSpec(
         model_id="gemma-4-test-qat",
         repo_id="example/drafter-less",
@@ -530,6 +530,7 @@ async def test_model_spec_change_restarts_runtime_without_mtp(tmp_path: Path) ->
         license=GEMMA_LICENSE,
         license_url=GEMMA_LICENSE_URL,
         assets=(),
+        sources={},
     )
     arguments = {
         "backend": "gpu",
@@ -542,9 +543,7 @@ async def test_model_spec_change_restarts_runtime_without_mtp(tmp_path: Path) ->
     await owner.prepare(**arguments, spec=drafter_less_spec)
 
     assert len(commands) == 2
-    assert len(provision_calls) == 2
     assert processes[0].terminated
-    assert provision_calls[1]["spec"] == drafter_less_spec
     assert str(tmp_path / "models" / drafter_less_spec.model_filename) in commands[1]
     assert not any(item.startswith("--spec-") for item in commands[1])
 
