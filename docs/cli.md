@@ -108,6 +108,16 @@ puripuly.exe overlay reset-position
 puripuly.exe overlay calibrate begin
 ```
 
+To repair an outdated Qwen3-ASR 0.6B CPU installation and verify the downloaded files:
+
+```powershell
+puripuly.exe models install --backend cpu --model-id qwen3-asr-0.6b-int8-sherpa
+puripuly.exe models prepare --backend cpu --verify-checksums
+puripuly.exe models status
+```
+
+The corrected decoder uses a new pinned source revision. An older installed revision is invalid until model repair replaces it; a restart alone does not update the files. Installation reports progress through the normal application owner and publishes `ready` only after validation and staged replacement complete.
+
 Capture/provider/output states in command receipts are runtime observations, not just persisted selections. Peer capture requires informed, explicit acceptance of the existing terms. Read them with `capture terms` (query `consent.peer_translation`) first. If consent is not already stored, the user may then explicitly run `capture set peer on --accept-peer-terms`; this flag is valid only for enabling the peer channel, routes through the existing GUI acceptance owner, and is never auto-supplied by the CLI.
 
 The finite fallback is equivalent only when it carries the same explicit consent field: `puripuly.exe command capture.set --arguments '{"channel":"peer","enabled":true,"accept_terms":true}'`. `accept_terms` is invalid for self capture or a peer-off request. Inspect the terms first and pass `true` only for the user's explicit informed choice.

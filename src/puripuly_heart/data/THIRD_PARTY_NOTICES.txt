@@ -115,12 +115,14 @@ License: Apache-2.0
 Provenance chain verified 2026-08-20 (all links Apache-2.0):
 Qwen3-ASR official (Qwen/Qwen3-ASR-0.6B, Apache-2.0)
   -> sherpa-onnx ONNX conversion (Wasser1462/Qwen3-ASR-onnx, Apache-2.0)
-  -> ModelScope source (zengshuishui/Qwen3-ASR-onnx, Apache-2.0)
-  -> HF mirror used by the app (csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25, pinned revision 2cc50d1abfe4d4f2df8d71f536d108bb40f943d2)
+  -> ModelScope source (zengshuishui/Qwen3-ASR-onnx, Apache-2.0, pinned revision de9e449eb376dcb472c1ce8141fbae8d524fabbd)
+  -> HF mirror used by the app (csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25, pinned revision 68818b2313fe77bd06f6a7c5068ff3ef59d02b8a)
   -> PuriPuly manifest (exact SHA-256 pins)
   -> local execution
 
 The mirror's own README states the files are downloaded from the ModelScope source above, and the conversion uses the official sherpa-onnx export scripts (https://github.com/Wasser1462/Qwen3-ASR-onnx, https://k2-fsa.github.io/sherpa/onnx/qwen3-asr/export.html). The local Qwen3-ASR-0.6B model is a default local CPU STT model; the app manifest identifies pinned downloadable ONNX/tokenizer assets for local ASR setup.
+
+The pinned decoder is the April 7, 2026 correction for abnormal x64 recognition output (https://github.com/k2-fsa/sherpa-onnx/issues/3473). Its SHA-256 is 4f6885be5959ae26af3089d38ee7972c5fafbeeb1cf8d5e76eab6d8b61ca5771; the encoder, convolution frontend, and tokenizer files are unchanged.
 
 ----
 
@@ -267,7 +269,7 @@ NOTICE, and AUTHORS payloads at the original `.dist-info` paths:
 - psutil 7.2.2.
 - PyAudioWPatch 0.2.12.8.
 - PyYAML 6.0.3.
-- sherpa-onnx 1.13.4 and sherpa-onnx-core 1.13.4. The core wheel contains no
+- sherpa-onnx 1.13.8 and sherpa-onnx-core 1.13.8. The core wheel contains no
   license-file member; both same-version wheels are from the sherpa-onnx
   project, and the complete LICENSE supplied by the sherpa-onnx wheel is
   retained together with both distributions' metadata.

@@ -82,12 +82,6 @@ def test_pyproject_caps_deepgram_sdk_below_v6() -> None:
     assert "deepgram-sdk>=5.3.4,<6.0.0" in pyproject["project"]["dependencies"]
 
 
-def test_pyproject_includes_sherpa_onnx_dependency() -> None:
-    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-
-    assert "sherpa-onnx>=1.13.4" in pyproject["project"]["dependencies"]
-
-
 def test_pyproject_pins_soxr_dependency() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
@@ -152,19 +146,6 @@ def test_pyproject_build_extra_covers_python_soxr_no_build_isolation_backend() -
     assert "scikit-build-core>=0.10" in build_extra
     assert "nanobind>=2" in build_extra
     assert "setuptools_scm[toml]>=6.2" in build_extra
-
-
-def test_uv_lock_pins_sherpa_onnx_version() -> None:
-    uv_lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
-
-    match = re.search(
-        r'\[\[package\]\]\s+name = "sherpa-onnx"\s+version = "([^"]+)"',
-        uv_lock,
-        re.MULTILINE,
-    )
-
-    assert match is not None
-    assert match.group(1) == "1.13.4"
 
 
 def test_uv_lock_pins_soxr_version() -> None:

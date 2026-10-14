@@ -171,6 +171,8 @@ GPU inference runs on Vulkan. It works regardless of the vendor — Radeon or Ar
 | Qwen3-ASR 1.7B | GPU | Q6_K |
 | OpenAI-compatible API | — | — |
 
+Local CPU ASR uses sherpa-onnx 1.13.8. Qwen3-ASR 0.6B uses the corrected April 7, 2026 INT8 decoder; older pinned model installations must be repaired or re-downloaded, not just restarted. See the [CLI model repair commands](docs/cli.md#common-controls). This update does not guarantee hallucination-free recognition: silent input with a language hint or custom vocabulary can still produce text.
+
 **LLM**
 
 | Model | Runtime | Quantization |

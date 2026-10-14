@@ -265,7 +265,7 @@ var
   LocalSttCurrentFileLabel: String;
 
 const
-  QwenDownloadSize = 987664355;
+  QwenDownloadSize = 987015347;
   ParakeetV3DownloadSize = 670478772;
   ParakeetJapaneseDownloadSize = 655571161;
   LocalSttDiskSpaceMargin = 67108864;
@@ -454,7 +454,7 @@ end;
 
 function HuggingFaceLocalSttUrl(RelativePath: String): String;
 begin
-  Result := 'https://huggingface.co/csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25/resolve/2cc50d1abfe4d4f2df8d71f536d108bb40f943d2/' + RelativePath;
+  Result := 'https://huggingface.co/csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25/resolve/68818b2313fe77bd06f6a7c5068ff3ef59d02b8a/' + RelativePath;
 end;
 
 function ModelScopeLocalSttRemotePath(RelativePath: String): String;
@@ -471,7 +471,7 @@ end;
 
 function ModelScopeLocalSttUrl(RelativePath: String): String;
 begin
-  Result := 'https://www.modelscope.cn/api/v1/models/zengshuishui/Qwen3-ASR-onnx/repo?Revision=c69fb1666ccb59a82c09840c511a6c894e6a2482&FilePath=' + ModelScopeLocalSttRemotePath(RelativePath);
+  Result := 'https://www.modelscope.cn/api/v1/models/zengshuishui/Qwen3-ASR-onnx/repo?Revision=de9e449eb376dcb472c1ce8141fbae8d524fabbd&FilePath=' + ModelScopeLocalSttRemotePath(RelativePath);
 end;
 
 function LocalSttDownloadUrl(SourceName: String; RelativePath: String): String;
@@ -486,9 +486,9 @@ end;
 function LocalSttSourceRevision(SourceName: String): String;
 begin
   if SourceName = 'modelscope' then begin
-    Result := 'c69fb1666ccb59a82c09840c511a6c894e6a2482';
+    Result := 'de9e449eb376dcb472c1ce8141fbae8d524fabbd';
   end else begin
-    Result := '2cc50d1abfe4d4f2df8d71f536d108bb40f943d2';
+    Result := '68818b2313fe77bd06f6a7c5068ff3ef59d02b8a';
   end;
 end;
 
@@ -558,7 +558,7 @@ function ValidateLocalSttAssets(BaseDir: String): Boolean;
 begin
   Result :=
     ValidateLocalSttAsset(BaseDir, 'conv_frontend.onnx', 'd22dc4423e0940e49884e903d2ea2f7e5567c14fc1aed97e4e26d6b8f208ef9e', 44148281) and
-    ValidateLocalSttAsset(BaseDir, 'decoder.int8.onnx', '61e5f8249f9e7c82d5e01e1938c79fb3f5b3135f91664928033029e42451bd18', 756563239) and
+    ValidateLocalSttAsset(BaseDir, 'decoder.int8.onnx', '4f6885be5959ae26af3089d38ee7972c5fafbeeb1cf8d5e76eab6d8b61ca5771', 755914231) and
     ValidateLocalSttAsset(BaseDir, 'encoder.int8.onnx', '60748d3e6744a57c9c91e1b17424a6c2990567e8adceb0783940c03ed98fa9d9', 182491662) and
     ValidateLocalSttAsset(BaseDir, 'tokenizer\merges.txt', '8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5', 1671853) and
     ValidateLocalSttAsset(BaseDir, 'tokenizer\tokenizer_config.json', '4942d005604266809309cabc9f4e9cb89ce855d59b14681fdc0e1cc62ea26c4c', 12487) and
@@ -701,7 +701,7 @@ function DownloadLocalSttSourceFiles(SourceName: String): Boolean;
 begin
   Result :=
     DownloadLocalSttFile(LocalSttDownloadUrl(SourceName, 'conv_frontend.onnx'), 'qwen-conv_frontend.onnx', 'd22dc4423e0940e49884e903d2ea2f7e5567c14fc1aed97e4e26d6b8f208ef9e', 44148281, 'Qwen3 ASR - conv_frontend.onnx') and
-    DownloadLocalSttFile(LocalSttDownloadUrl(SourceName, 'decoder.int8.onnx'), 'qwen-decoder.int8.onnx', '61e5f8249f9e7c82d5e01e1938c79fb3f5b3135f91664928033029e42451bd18', 756563239, 'Qwen3 ASR - decoder.int8.onnx') and
+    DownloadLocalSttFile(LocalSttDownloadUrl(SourceName, 'decoder.int8.onnx'), 'qwen-decoder.int8.onnx', '4f6885be5959ae26af3089d38ee7972c5fafbeeb1cf8d5e76eab6d8b61ca5771', 755914231, 'Qwen3 ASR - decoder.int8.onnx') and
     DownloadLocalSttFile(LocalSttDownloadUrl(SourceName, 'encoder.int8.onnx'), 'qwen-encoder.int8.onnx', '60748d3e6744a57c9c91e1b17424a6c2990567e8adceb0783940c03ed98fa9d9', 182491662, 'Qwen3 ASR - encoder.int8.onnx') and
     DownloadLocalSttFile(LocalSttDownloadUrl(SourceName, 'tokenizer/merges.txt'), 'qwen-merges.txt', '8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5', 1671853, 'Qwen3 ASR - merges.txt') and
     DownloadLocalSttFile(LocalSttDownloadUrl(SourceName, 'tokenizer/tokenizer_config.json'), 'qwen-tokenizer_config.json', '4942d005604266809309cabc9f4e9cb89ce855d59b14681fdc0e1cc62ea26c4c', 12487, 'Qwen3 ASR - tokenizer_config.json') and
