@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import ssl
 from dataclasses import dataclass, field, replace
 from typing import Any, cast
 from uuid import uuid4
@@ -1455,6 +1456,243 @@ async def test_recovery_is_three_attempts_with_point_eight_and_one_point_six_bac
     assert terminal.failure_diagnostics is not None
     assert terminal.failure_diagnostics.fields["outcome"] == "failed"
     await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", ["timeout", "network", "service_unavailable", "rate_limit"])
+async def test_connection_cooldown_retries_new_audio_after_repeated_outages(cause: str) -> None:
+    class StatusError(RuntimeError):
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+            super().__init__("temporarily unavailable")
+
+    unavailable = {
+        "timeout": TimeoutError("unavailable"),
+        "network": ConnectionError("unavailable"),
+        "service_unavailable": StatusError(503),
+        "rate_limit": StatusError(429),
+    }[cause]
+    clock = ControlledMonotonicClock()
+    emitted: list[object] = []
+    failures: list[object] = []
+    attempts: list[float] = []
+    session = ControlledScopedSession()
+    session.terminal_on_seal = ("final", "recovered speech")
+
+    async def factory(_settings, _epoch):
+        attempts.append(clock.now())
+        if len(attempts) <= 6:
+            raise RuntimeError("connection failed") from unavailable
+        return session
+
+    engine = ScopedRecognitionEngine(
+        session_factory=factory,
+        channel="peer",
+        event_sink=emitted.append,
+        terminal_failure_sink=failures.append,
+        monotonic_clock=clock.now,
+        sleep=lambda _delay: asyncio.sleep(0),
+        watchdog_resolver=lambda _: watchdogs(connect_recovery_cooldown_s=30.0),
+    )
+    ledger = PeerAudioSegmentLedger(activation_generation=1, settings=settings("qwen_audio"))
+    times = (0.0, 29.999, 30.0, 59.999, 60.0)
+    starts: list[OwnedVadEvent] = []
+    try:
+        for index, now in enumerate(times):
+            await clock.advance_to(now)
+            start, chunk, end = segment_events(ledger, start_sample=800 + index * 20, now=now)
+            starts.append(start)
+            await engine.handle_owned_vad_event(start)
+            await engine.handle_owned_vad_event(chunk)
+            await engine.handle_owned_vad_event(end)
+        terminals = [event for event in emitted if isinstance(event, STTProviderTurnTerminal)]
+        assert attempts == [0.0] * 3 + [30.0] * 3 + [60.0]
+        assert [(event.outcome, event.recovery_pending) for event in terminals] == [
+            ("failed", True),
+            ("failed", True),
+            ("failed", True),
+            ("failed", True),
+            ("final", False),
+        ]
+        assert terminals[-1].text == "recovered speech"
+        assert [request.identity.segment for request in session.requests] == [
+            starts[-1].segment.identity
+        ]
+        assert sum(call[3] for call in session.calls if call[0] == "send") == 20
+        failure_diagnostics = [event.failure_diagnostics for event in terminals[:-1]]
+        assert all(diagnostics is not None for diagnostics in failure_diagnostics)
+        assert len({diagnostics.diagnostic_id for diagnostics in failure_diagnostics}) == 4
+        assert len({diagnostics.cause_id for diagnostics in failure_diagnostics}) == 1
+        assert failures == []
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cause", ["auth", "configuration", "quota", "tls", "missing_certificate", "unknown"]
+)
+async def test_connection_cooldown_does_not_reopen_permanent_failures(cause: str) -> None:
+    class StatusError(RuntimeError):
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+            super().__init__("rejected")
+
+    rejection = {
+        "auth": StatusError(401),
+        "configuration": StatusError(400),
+        "quota": StatusError(402),
+        "tls": ssl.SSLCertVerificationError("certificate rejected"),
+        "missing_certificate": FileNotFoundError("certificate file missing"),
+        "unknown": RuntimeError("unclassified failure"),
+    }[cause]
+    clock = ControlledMonotonicClock()
+    emitted: list[object] = []
+    failures: list[object] = []
+    attempts = 0
+    recovered = ControlledScopedSession()
+    recovered.terminal_on_seal = ("final", "must not be admitted")
+
+    async def factory(_settings, _epoch):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 3:
+            raise RuntimeError("connection failed") from rejection
+        return recovered
+
+    engine = ScopedRecognitionEngine(
+        session_factory=factory,
+        event_sink=emitted.append,
+        terminal_failure_sink=failures.append,
+        monotonic_clock=clock.now,
+        sleep=lambda _delay: asyncio.sleep(0),
+        watchdog_resolver=lambda _: watchdogs(connect_recovery_cooldown_s=30.0),
+    )
+    ledger = PeerAudioSegmentLedger(activation_generation=1, settings=settings("qwen_audio"))
+    try:
+        for index, now in enumerate((0.0, 60.0)):
+            await clock.advance_to(now)
+            start, _chunk, end = segment_events(ledger, start_sample=1000 + index * 20, now=now)
+            await engine.handle_owned_vad_event(start)
+            await engine.handle_owned_vad_event(end)
+        terminals = [event for event in emitted if isinstance(event, STTProviderTurnTerminal)]
+        assert [(event.outcome, event.recovery_pending) for event in terminals] == [
+            ("failed", False),
+            ("failed", False),
+        ]
+        assert attempts == 3
+        assert len(failures) == 1
+        assert recovered.requests == []
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_toggle_off_clears_connection_cooldown_for_explicit_reenable() -> None:
+    clock = ControlledMonotonicClock()
+    emitted: list[object] = []
+    failures: list[object] = []
+    attempts = 0
+    recovered = ControlledScopedSession()
+    recovered.terminal_on_seal = ("final", "fresh activation")
+
+    async def factory(_settings, _epoch):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 3:
+            raise TimeoutError("unavailable")
+        return recovered
+
+    engine = ScopedRecognitionEngine(
+        session_factory=factory,
+        event_sink=emitted.append,
+        terminal_failure_sink=failures.append,
+        monotonic_clock=clock.now,
+        sleep=lambda _delay: asyncio.sleep(0),
+        watchdog_resolver=lambda _: watchdogs(connect_recovery_cooldown_s=30.0),
+    )
+    ledger = PeerAudioSegmentLedger(activation_generation=1, settings=settings("qwen_audio"))
+    start, _chunk, end = segment_events(ledger, start_sample=1200, now=0.0)
+    try:
+        await engine.handle_owned_vad_event(start)
+        await engine.handle_owned_vad_event(end)
+        await engine.abort_for_toggle_off()
+        await clock.advance_to(1.0)
+        fresh = PeerAudioSegmentLedger(activation_generation=2, settings=settings("qwen_audio"))
+        start, _chunk, end = segment_events(fresh, start_sample=1300, now=1.0)
+        await engine.handle_owned_vad_event(start)
+        await engine.handle_owned_vad_event(end)
+        terminals = [event for event in emitted if isinstance(event, STTProviderTurnTerminal)]
+        assert [(event.outcome, event.text) for event in terminals] == [
+            ("failed", ""),
+            ("final", "fresh activation"),
+        ]
+        assert terminals[-1].identity.segment.activation_generation == 2
+        assert attempts == 4
+        assert failures == []
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", ["toggle_off", "close_backend"])
+async def test_stopping_cooldown_recovery_reclaims_late_connection(stop: str) -> None:
+    clock = ControlledMonotonicClock()
+    emitted: list[object] = []
+    failures: list[object] = []
+    attempts = 0
+    open_gate = asyncio.Event()
+    late = ControlledScopedSession()
+    late.terminal_on_seal = ("final", "must not publish")
+
+    async def factory(_settings, _epoch):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 3:
+            raise TimeoutError("unavailable")
+        await open_gate.wait()
+        return late
+
+    engine = ScopedRecognitionEngine(
+        session_factory=factory,
+        event_sink=emitted.append,
+        terminal_failure_sink=failures.append,
+        monotonic_clock=clock.now,
+        sleep=lambda _delay: asyncio.sleep(0),
+        watchdog_resolver=lambda _: watchdogs(
+            readiness_timeout_s=1.0, connect_recovery_cooldown_s=30.0
+        ),
+        event_drain_timeout_s=0.01,
+    )
+    ledger = PeerAudioSegmentLedger(activation_generation=1, settings=settings("qwen_audio"))
+    start, _chunk, end = segment_events(ledger, start_sample=1400, now=0.0)
+    pending = None
+    try:
+        await engine.handle_owned_vad_event(start)
+        await engine.handle_owned_vad_event(end)
+        await clock.advance_to(30.0)
+        next_start, _chunk, _end = segment_events(ledger, start_sample=1500, now=30.0)
+        pending = asyncio.create_task(engine.handle_owned_vad_event(next_start))
+        await wait_until(lambda: attempts == 4)
+        if stop == "toggle_off":
+            await engine.abort_for_toggle_off()
+        else:
+            await engine.close_backend()
+        open_gate.set()
+        await pending
+        await wait_until(lambda: engine.cleanup_debt == 0)
+        terminals = [event for event in emitted if isinstance(event, STTProviderTurnTerminal)]
+        assert [(event.outcome, event.recovery_pending) for event in terminals] == [
+            ("failed", True)
+        ]
+        assert late.requests == []
+        assert ("close",) in late.calls
+        assert failures == []
+    finally:
+        open_gate.set()
+        if pending is not None:
+            await asyncio.gather(pending, return_exceptions=True)
+        await engine.close()
 
 
 @pytest.mark.asyncio

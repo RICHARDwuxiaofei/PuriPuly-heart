@@ -22,6 +22,10 @@ from puripuly_heart.core.audio.ownership import (
 )
 from puripuly_heart.core.diagnostics import emit_failure
 from puripuly_heart.core.messages import ErrorDiagnostics
+from puripuly_heart.core.network_diagnostics import (
+    classify_transport_error,
+    transport_exception_chain,
+)
 from puripuly_heart.core.stt.backend import (
     PermanentSTTScopedSessionError,
     STTIndependentRecognitionSession,
@@ -110,6 +114,7 @@ class STTRecognitionWatchdogs:
     connect_attempts: int = 3
     connect_retry_base_s: float = 0.8
     connect_retry_max_s: float = 1.6
+    connect_recovery_cooldown_s: float | None = None
 
     def __post_init__(self) -> None:
         values = (
@@ -121,6 +126,8 @@ class STTRecognitionWatchdogs:
             self.connect_retry_base_s,
             self.connect_retry_max_s,
         )
+        if self.connect_recovery_cooldown_s is not None and self.connect_recovery_cooldown_s <= 0:
+            raise ValueError("connection recovery cooldown must be positive")
         if self.max_session_age_s is not None and self.max_session_age_s <= 0:
             raise ValueError("recognition session age limit must be positive")
         if any(value <= 0 for value in values):
@@ -288,6 +295,7 @@ class ScopedRecognitionEngine:
     _episode_failures: int = field(init=False, default=0, repr=False)
     _episode_cause: ErrorDiagnostics | None = field(init=False, default=None, repr=False)
     _recovery_backoff_pending: bool = field(init=False, default=False, repr=False)
+    _connection_retry_at_s: float | None = field(init=False, default=None, repr=False)
     _closed: bool = field(init=False, default=False, repr=False)
     _closing: bool = field(init=False, default=False, repr=False)
     _deferred_event_sink: STTScopedTurnEventSink | None = field(
@@ -805,6 +813,9 @@ class ScopedRecognitionEngine:
             "source_discontinuity",
         }:
             self._episode_cause = None
+            if self._connection_retry_at_s is not None:
+                self._episode_failures = 0
+                self._connection_retry_at_s = None
         self._stream_recovery = None
         self._recognition_authorities.clear()
         self._estimated_speech_scope = None
@@ -948,7 +959,8 @@ class ScopedRecognitionEngine:
             if authority_generation != self._authority_generation:
                 return
             open_failure = exc
-            self._notify_terminal_failure(exc)
+            if self._connection_retry_at_s is None:
+                self._notify_terminal_failure(exc)
         if authority_generation != self._authority_generation:
             self._retire_current_session(watchdogs)
             return
@@ -992,6 +1004,10 @@ class ScopedRecognitionEngine:
                 "provider_not_ready",
                 exception=open_failure,
                 operation="readiness",
+                recovery_pending=self._connection_retry_at_s is not None,
+                failure_diagnostics=(
+                    self._episode_cause if self._connection_retry_at_s is not None else None
+                ),
             )
             turn.write_failed = True
             await self._finish_failed_turn_immediately(turn)
@@ -1277,6 +1293,12 @@ class ScopedRecognitionEngine:
         scope = self._settings_scope(settings)
         if self.accepted_settings_scope is not None and scope != self.accepted_settings_scope:
             raise PermanentSTTScopedSessionError("provider_configuration_scope_mismatch")
+        if self._connection_retry_at_s is not None:
+            if self.monotonic_clock() < self._connection_retry_at_s:
+                return
+            self._connection_retry_at_s = None
+            self._episode_failures = 0
+            self._recovery_backoff_pending = False
         if self._session is not None:
             if self._ended_provider_epoch_id == self._provider_epoch_id:
                 self._retire_current_session(watchdogs)
@@ -1401,6 +1423,49 @@ class ScopedRecognitionEngine:
                 await self.sleep(delay)
                 if self._closed or authority_generation != self._authority_generation:
                     return
+        cooldown_s = watchdogs.connect_recovery_cooldown_s
+        if cooldown_s is not None and last_error is not None:
+            diagnostics = recognition_failure_diagnostics(
+                last_error,
+                provider=settings.provider_id,
+                channel=self.channel,
+                operation="readiness",
+                reason="provider_not_ready",
+            )
+            configuration_failure = any(
+                isinstance(
+                    cause,
+                    (FileNotFoundError, IsADirectoryError, NotADirectoryError, PermissionError),
+                )
+                for cause in transport_exception_chain(last_error)
+            )
+            if not configuration_failure and (
+                diagnostics.category in {"timeout", "service_unavailable", "rate_limit"}
+                or (
+                    diagnostics.category == "network"
+                    and classify_transport_error(last_error) == "network"
+                )
+            ):
+                self._connection_retry_at_s = self.monotonic_clock() + cooldown_s
+                emit_failure(
+                    logger,
+                    replace(
+                        diagnostics,
+                        cause_id=(
+                            self._episode_cause.diagnostic_id if self._episode_cause else None
+                        ),
+                        retry_after_ms=int(cooldown_s * 1000),
+                        fields={
+                            **diagnostics.fields,
+                            "attempts": self._episode_failures,
+                            "recovery_pending": True,
+                        },
+                    ),
+                    severity="warning",
+                    disposition="degraded",
+                    stage="recovery",
+                )
+                return
         raise RuntimeError("provider_recovery_exhausted") from last_error
 
     async def _consume_session_events(
@@ -1760,6 +1825,7 @@ class ScopedRecognitionEngine:
         *,
         allow_provisional: bool = False,
         failure_retryable: bool = False,
+        recovery_pending: bool = False,
         exception: BaseException | None = None,
         operation: str = "turn_terminal",
         failure_diagnostics: ErrorDiagnostics | None = None,
@@ -1767,13 +1833,24 @@ class ScopedRecognitionEngine:
         if turn.terminal_ready.done():
             return
         diagnostics = recognition_failure_diagnostics(
-            failure_diagnostics or exception,
+            exception if recovery_pending else failure_diagnostics or exception,
             provider=turn.settings.provider_id,
             channel=self.channel,
             operation=operation,
             reason=reason,
             identity=turn.identity,
         )
+        if recovery_pending and failure_diagnostics is not None:
+            diagnostics = replace(
+                diagnostics,
+                category=failure_diagnostics.category,
+                status_code=failure_diagnostics.status_code,
+                cause_id=failure_diagnostics.diagnostic_id,
+                retry_after_ms=max(
+                    0,
+                    int(((self._connection_retry_at_s or 0.0) - self.monotonic_clock()) * 1000),
+                ),
+            )
         if turn.independent_recognition:
             turn.terminal_ready.set_result(
                 STTProviderInputTerminal(
@@ -1801,7 +1878,13 @@ class ScopedRecognitionEngine:
                 epoch_disposition="retire",
                 failure_retryable=failure_retryable and turn.settings.provider_id == "soniox",
             )
-        turn.terminal_ready.set_result(replace(terminal, failure_diagnostics=diagnostics))
+        turn.terminal_ready.set_result(
+            replace(
+                terminal,
+                recovery_pending=recovery_pending,
+                failure_diagnostics=diagnostics,
+            )
+        )
 
     async def _drain_completed_turns(self) -> None:
         async with self._terminal_drain_lock:
@@ -1898,7 +1981,8 @@ class ScopedRecognitionEngine:
             self._episode_failures = 0
             self._recovery_backoff_pending = False
             self._terminal_failure_notified = False
-        elif not (
+            self._connection_retry_at_s = None
+        elif not (terminal.recovery_pending and self._connection_retry_at_s is not None) and not (
             turn.independent_recognition
             and self._stream_recovery is not None
             and self._stream_recovery.pending

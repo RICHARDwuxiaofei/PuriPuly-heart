@@ -273,6 +273,12 @@ def _recognition_watchdogs(config: object) -> STTRecognitionWatchdogs:
         final_timeout_s=final_timeout_s,
         drain_timeout_s=drain_timeout_s,
         max_session_age_s=max_session_age_s,
+        connect_recovery_cooldown_s=(
+            30.0
+            if provider_id == STTProviderName.QWEN_AUDIO.value
+            and getattr(config, "channel") == "peer"
+            else None
+        ),
     )
 
 
