@@ -16,7 +16,7 @@ def log_feature(
     http_status: int | None = None,
     level: int = logging.ERROR,
 ) -> None:
-    if module not in {"ModelDownload", "QuickTranslate", "AudioTest"}:
+    if module not in {"ModelDownload", "QuickTranslate", "AudioTest", "WristVision"}:
         raise ValueError("Unknown diagnostic module")
     if not all(value.isascii() and value.replace("_", "").isalnum() for value in (stage, code)):
         raise ValueError("Diagnostic codes must be static identifiers")

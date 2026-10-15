@@ -14,6 +14,7 @@ from puripuly_heart.config.audio_host_api import WINDOWS_WASAPI_COMPATIBILITY_HO
 from puripuly_heart.config.overlay_calibration import OverlayCalibration
 from puripuly_heart.config.prompts import normalize_system_prompt_override
 from puripuly_heart.config.provider_values import normalize_cloud_free_tier_providers
+from puripuly_heart.config.wrist_vision import WristVisionIntent
 from puripuly_heart.config.resolved import normalize_legacy_vad_onset_threshold
 from puripuly_heart.core.translation_policy import (
     FIXED_TRANSLATION_POLICY,
@@ -775,6 +776,7 @@ class PromptIntent:
 
 @dataclass(frozen=True, slots=True)
 class UserIntentSettings:
+    wrist_vision: WristVisionIntent = field(default_factory=WristVisionIntent)
     translation: TranslationIntent = field(default_factory=TranslationIntent)
     local_llm: LocalLLMIntent = field(default_factory=LocalLLMIntent)
     stt: STTIntent = field(default_factory=STTIntent)

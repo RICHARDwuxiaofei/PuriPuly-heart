@@ -1,0 +1,22 @@
+PuriPuly Heart Wrist Vision - AGPL-3.0-or-later
+
+Selective design/algorithm reference:
+VRCS, https://github.com/Dreaminko/VRCS
+Read-only reference checkout: https://github.com/RICHARDwuxiaofei/VRCS
+Reference commit: 0700544f65d9bcb9f837a284e3e1f94350a72a41
+License: GNU Affero General Public License v3 (VRCS LICENSE; copyright notices of original authors remain applicable).
+
+Reference paths: apps/desktop/src-tauri/src/vr_overlay/backend.rs,
+ocr_capture.rs, ocr_selection.rs, ocr_geometry.rs, ocr_wrist.rs,
+ocr_wrist_renderer.rs, ocr_gesture.rs, ocr_input.rs, ocr_plane.rs,
+ocr_tracking.rs, ocr_renderer.rs, vision_runtime.rs; core/src/ocr and core/src/vision.
+
+Adaptations: independently implemented minimal OpenVR function-table process,
+controller-relative wrist transform and opposite-controller ray, release-gated
+trigger handling, eye-mirror D3D11 readback with RAII, compositor pose/scene guards,
+eye projection and perspective rectification. In particular, OpenVR projection Y
+sign conversion and retaining mirror SRV until the next acquisition follow the
+VRCS implementation and its OpenVR issue #1888 workaround.
+No VRCS backend, Tauri server, ASR or LLM configuration was copied wholesale.
+GDI panel rendering and inherited JSON-line transport are new PuriPuly adapters.
+Source modifications are supplied under the project's AGPL-3.0-or-later license.
