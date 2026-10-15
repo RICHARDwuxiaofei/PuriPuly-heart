@@ -18,7 +18,7 @@
 ## Shared work context
 
 - Read the current issue and applicable decisions before work or GitHub updates, preserving agreed scope and exclusions.
-- Publish only with authorization; make results, evidence, limits, and next steps understandable without local-session access.
+- Make results, evidence, limits, and next steps understandable without local-session access.
 - Link existing explanations and share only non-sensitive information.
 - Use clear, direct sentences and structured formats such as bullet points for shared work records and GitHub content.
 - Write all content published to GitHub in English.
