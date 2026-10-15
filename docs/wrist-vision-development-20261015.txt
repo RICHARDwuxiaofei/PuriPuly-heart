@@ -1,0 +1,159 @@
+PuriPuly Heart — Wrist Vision 开发记录（2026-10-15，Asia/Hong_Kong）
+
+结论
+已实际实现独立原生手腕进程、现有 SELF/PEER 消息接入、控制器射线/扳机操作、
+SteamVR 左眼镜像读取与透视裁剪、独立 DeepSeek 视觉服务及取消/错误/恢复链路。
+P0/P1 已完成代码与 Mock/本地构建验证，但不能等同于真实头显验收。
+P2 的本地 OCR、双目深度/平面拟合、原位贴片与目标追踪尚未实现；只有实验开关和
+明确的安全回退。不把“渲染了手腕卡片”称为“替换了场景文字”。
+本次没有创建/更新 PR、通知原作者、合并 main/dev 或发布任何 Release。
+
+1. 基线与保护
+本地仓库：D:\CODE\PuriPuly-heart-2.6.1\PuriPuly-heart-latest
+开始时分支：feat/desktop-diagnostics-upstream-20261013
+基线：86d0e698de7cefb8b6360f8e119ec63beb4ae2b0，工作区干净。
+保留既有桌面聊天窗、模型管理、录音测试、QQ 修复。没有从上游干净分支重来。
+新分支：feat/vr-wrist-vision-20261015
+阶段提交：
+001ec4bc322a8a156e9f3e1cdab2913516da3712 — 隔离原生组件、配置、视觉服务基础。
+ebaf26dd2c71416234d4547639b8862524606fad — 现有消息/设置/截图/视觉请求集成。
+f6a48aa736914183d934591520278a520e65dc8d — 生命周期回归与隔离开发包；本地包源码提交。
+本报告为后续独立文档提交；最终分支 HEAD 请结合 git log -1 与交付消息核对。
+旧功能分支仍停留在 86d0e698，未改写其历史。没有 reset/clean/强推。
+旧 QQ-Key-Tool/qq_issue_api_key.py 保持原样，未进入本仓库或测试包。
+其 SHA256：d439bec49a6e4a99e010b31bd26dcd7d6cd3d666484cb47a1dcb578ac5d38ffe。
+
+2. VRCS 参考与许可证
+只读参考：D:\CODE\VRCS
+读取 SHA：0700544f65d9bcb9f837a284e3e1f94350a72a41，结束复核仍相同、工作区干净。
+上游：https://github.com/Dreaminko/VRCS
+本地 Fork：https://github.com/RICHARDwuxiaofei/VRCS
+参考 backend.rs、ocr_capture/selection/geometry/input/gesture/wrist/wrist_renderer、
+ocr_renderer/plane/tracking、vision_runtime，以及 core/src/ocr 和 core/src/vision 的关键实现。
+选择性适配：OpenVR 函数表、手柄相对坐标、另一只手射线、触发边沿、
+GetMirrorTextureD3D11 读取/释放、镜像滞后规避、投影 Y 轴约定、选区透视校正。
+没有整体复制 Tauri 后端、ASR/LLM 或配置系统，也没有修改 VRCS。
+来源、SHA、AGPL 与适配说明在 native/wrist_vision/NOTICE.txt。
+
+3. 主要新增/修改文件
+独立 native/wrist_vision/：Cargo.toml、Cargo.lock、NOTICE.txt；
+src/main.rs、lib.rs、state.rs、geometry.rs；platform/vr.rs、capture.rs、render.rs、mod.rs。
+src/puripuly_heart/config/wrist_vision.py：校验并默认关闭的独立设置。
+config/settings_vnext/schema.py：新增可向后读取的 intent.wrist_vision。
+core/vision/translation.py：受限图片编码、单次 HTTP 请求、JSON 块解析、安全错误分类。
+app/adapters/wrist_vision_process.py：无 CMD 黑框、继承私有管道、剔除敏感环境变量。
+app/services/wrist_vision.py：消息历史、合并更新、截图授权状态、任务代次、取消与回收。
+app/services/ui_application.py、app/adapters/ui_runtime.py 及对应 ports：
+通过现有设置所有者、有效语言、SettingsSecretsPort 和外部 HTTP 客户端接入。
+ui/components/wrist_vision_dialog.py、title_bar.py、ui/app.py、settings contract/renderer/view：
+独立设置入口、状态/错误、关闭与退出回收；复用现有颜色与 UI 体系。
+data/i18n 五份资源：中文/英文完整新增文字，日/韩/俄当前使用英文回退，未冒称已翻译。
+core/feature_diagnostics.py：复用正常日志、日志页和轮转文件的 [WristVision] 安全摘要。
+scripts/ci/build-wrist-vision.ps1、scripts/dev/wrist_vision_mock_preview.py：本机构建/合成预览。
+scripts/preview/build_portable.py、entry.py、Launcher.cs、README-WRIST.txt：独立开发包配置。
+pyproject.toml/uv.lock：显式声明原本已锁定的 Pillow 12.3.0；锁文件离线检查通过。
+docs/architecture.md：补充所有权与隔离边界。其余变更为对应测试和脚本白名单。
+
+4. P0/P1 实现边界
+旧 native/overlay/、core/overlay/、app/services/overlay/ 相对基线零源码差异。
+Bridge v15、旧字幕的排序/过期/重试及 OSC 路由未改。新窗口是单独进程和 OpenVR 句柄。
+新功能默认关闭；本开发版需手动“应用/启动”，不因保存的偏好自动截图或上传。
+SELF/PEER 从既有投递权限验证后的事件扇出，按话轮 ID 去重/更新，不重复 STT/文本翻译。
+支持左右手、位置/尺寸/透明度、历史翻页、原文/译文模式及状态，关闭不退出主程序。
+控制器当前采用 OpenVR legacy state + 另一只手的几何射线；不是完整 SteamVR actions
+绑定方案。不同控制器/输入焦点的兼容性是必须优先进行的实机验收项。
+
+截图只在另一只手扳机确认后执行；进取景状态时要求先释放，防止同一次按压误确认。
+支持手腕框和头部跟随框；取消、取景超时、设备跟踪丢失会撤销待处理结果。
+读取 SteamVR compositor 的左眼 D3D11 镜像，不读取 Windows 桌面。
+有显式资源释放、场景 PID/Tracking Origin/位姿变化检查和越界/退化选区拒绝。
+元数据包含头部/眼部位姿、投影切线范围、世界四角、图像四角/尺寸、PID、Origin、时间。
+镜像帧没有可靠同步时间戳，当前是 best_effort_pose_guarded；不能保证任意动态场景完全
+消除滞后。保留镜像直到下一次获取的处理参考 VRCS/OpenVR #1888。
+新取景框在读回前隐藏；实际 VR 图像是否完全不含旧字幕，仍需头显场景确认。
+
+视觉使用独立服务，官方端点 https://api.deepseek.com/chat/completions，默认 deepseek-flash。
+协议依据：https://api-docs.deepseek.com/zh-cn/guides/vision/ （2026-10-15 核对）。
+复用同一应用配置中的 DeepSeek BYOK 安全存储，不往普通文本管线塞图片。
+目标语言留空时取当前有效语言；明确识别 401/403/429、服务不可用、超时、拒绝、
+空内容、非 JSON、截断/过大响应。无自动付费重试。
+选定截图仅存内存，完成/取消后释放，不记录图片、Base64、密钥或原始服务响应。
+每次确认最多一个请求，重复事件与迟到结果被代次规则丢弃。
+
+5. P2 状态
+NOT_IMPLEMENTED：本地 OCR 引擎/文字多边形、双眼对应点、可靠空间平面拟合、
+背景覆盖贴片、目标移动/图像变化追踪。没有这些就不放置猜测的空间文字。
+开启实验选项且允许回退时，结果明确显示在手腕卡片；关闭回退时在付费前拒绝。
+相关实机定位/贴片测试不是 PASS。
+
+6. 测试（本轮最终统计，避免重复累加过程中的重跑）
+Python：PASS 966，FAIL 0；一个既有 asyncio.iscoroutinefunction 弃用警告。
+命令：.venv/Scripts/python.exe -m pytest
+tests/config/test_wrist_vision_config.py tests/core/test_vision_translation.py
+tests/app/test_wrist_vision.py tests/app/test_wrist_native_process.py
+tests/app/test_wrist_application_boundary.py tests/ui/test_app_branches.py
+tests/ui/test_settings_surface_contract.py tests/ui/test_settings_view_branches.py
+tests/ui/test_desktop_feature_log_lifecycle.py tests/app/test_ui_application_boundary.py
+tests/app/test_ui_provider_runtime_adapter.py tests/app/test_quick_chat.py
+tests/app/test_quick_translate.py tests/app/test_audio_recording.py tests/app/test_manual_typing.py
+tests/core/test_overlay_protocol.py tests/core/test_overlay_presenter.py
+tests/core/test_overlay_bridge.py tests/app/test_overlay_process_manager.py
+tests/config/test_settings_vnext_migration_serialization.py tests/config/test_preview_isolation.py
+tests/test_preview_packaging.py tests/ui/test_wrist_vision_dialog.py
+-o addopts='' -q --basetemp=.cache/wrist-final-suite
+（以上换行仅为排版，执行时是同一条命令。）
+
+新增 Rust：PASS 7，FAIL 0。
+cargo test --offline --quiet --locked --manifest-path native/wrist_vision/Cargo.toml --target-dir .cache/wrist-target
+旧 Overlay Rust：PASS 288，FAIL 0，IGNORED 1（原有选择性性能探针）。
+cargo test --offline --quiet --locked --manifest-path native/overlay/Cargo.toml --target-dir .cache/beta-overlay-target
+两者使用 .venv/Scripts 的 CMake 与 .venv/Lib/site-packages/clang/native 的 LIBCLANG_PATH。
+
+PASS：Ruff（仅 Python）、Black、cargo fmt、新 PowerShell 构建脚本解析、git diff --check、
+uv lock --check --offline。
+PASS：真实编译出的 Windows Rust 子进程以 --mock 握手/渲染/EOF退出/重启；停一个不终止另一个。
+PASS：原生 Mock 确认事件→实际图片编码→实际视觉服务→Mock HTTP→解析→手腕结果→退出。
+PASS：模拟缺少原生组件时中文 UI 报错；正常日志页、关闭/重开后记录及轮转文件保留；
+安全日志不含测试凭据/QQ号/录音/图片Base64/代理密码。
+PASS：开发包内独立配置、密钥空间及禁止环境 Key 回退；实际包内 Mock E2E 和子进程退出。
+PASS：开发包 GPU 14 文件清单、真实 AMD Radeon(TM) Graphics 枚举及 worker 退出。
+PASS：便携 ZIP 的 7-Zip 完整性检查。
+Mock 面板：.cache/wrist-vision-mock.png，明确标注 MOCK，不是 VR 截图。
+
+过程中发现并修正：UI 测试替身新增接口、状态事件枚举不匹配、GDI 空文本访问异常、
+错误 EOF 后状态丢失/子进程回收、取景中配置改变或跟踪丢失的取消。
+构建依赖的首次环境缺失已通过项目现有 CMake/Clang 解决；未安装全局工具。
+初次离线解析因缓存元数据不全拒绝，随后仅显式复用已锁定 Pillow，最终 uv lock --check 通过。
+
+7. 本地开发包
+源码提交：f6a48aa736914183d934591520278a520e65dc8d。
+目录：D:\CODE\PuriPuly-heart-2.6.1\PuriPuly-heart-latest\dist\wrist-vision-dev-f6a48aa7\payload
+双击：该目录的 PuriPulyHeartPreview.exe。
+压缩包：同级上一层 PuriPulyHeart-WristVision-Dev-f6a48aa7.zip。
+ZIP 大小：354364429 字节。
+ZIP SHA256：a229ae153617d52b1d55ea5f454968676a562f80d722651192ee4586294c108b。
+原生手腕 EXE SHA256：0b06c5ca4f2623e691593c3681843476c130319e8a6f8e59ae9a1cb0387cf084。
+构建：scripts/ci/build-wrist-vision.ps1；随后
+.venv/Scripts/python.exe scripts/preview/build_portable.py --beta --wrist-development
+--vc-runtime <本机已安装的 x64 Microsoft.VC143.CRT 目录> --output <全新目录>。
+本地便携开发包，不是安装器或正式 Release；没有改软件生产版本 2.8.2、签名或已安装程序。
+数据：启动器旁 wrist-development-data；密钥：puripuly-heart.test.desktop-wrist-vision。
+与正式版、当前 desktop-beta 均隔离。首次真实试用需在这一隔离配置中输入自己的 Key，
+不从正式/Beta 自动迁移凭据，不重复领取 QQ 免费资格。
+不含数 GB 模型或个人配置。BUILD.json / SOURCE.zip 可核对实际源码与本机运行组件。
+
+8. 未实测与最短验收
+NOT_TESTED 六类：真实头显佩戴、真实手柄/焦点、VRChat 场景截图准确性及叠层排除、
+实际付费 DeepSeek 请求、游戏内长时间稳定性、开发包交互式 GUI 实机操作。
+P2 空间定位另属未实现，不应通过上述测试被宣称完成。
+
+回到电脑后：
+1) 从独立 payload 启动；确认不会覆盖原安装，设置隔离 Key 和目标语言。
+2) 开 SteamVR/VRChat；先确认旧字幕 Overlay 与桌面聊天仍正常。
+3) 设置→常规→手腕视觉→左手→应用/启动；用另一只手点按钮，检查 SELF/PEER 和翻页。
+4) 左右手切换、位置/尺寸、隐藏关闭重开；关闭手腕时旧字幕应继续工作。
+5) 对准静态告示牌，截图按钮→松开→扳机确认，只做一次可控的真实付费请求。
+6) 检查译文是否对应选区；如手腕框难以对准，改头部跟随框；分别测试取消/超时/断网。
+7) 检查普通日志 [WristVision]；关闭设置后日志仍在。不要附 Key 或私人截图给开发者。
+8) 最后退出主程序，确认 PuriPulyHeartWristVision.exe 无残留。
+实测未完成前，不向原作者宣布功能已完整验收，不提交上游 PR。
