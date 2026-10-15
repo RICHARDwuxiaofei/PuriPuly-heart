@@ -38,6 +38,7 @@ from puripuly_heart.app.services.quick_translate import QuickTranslateOwner
 from puripuly_heart.app.services.telemetry_reporting import TelemetryReportingOwner
 from puripuly_heart.app.services.wrist_vision import WristVisionOwner
 from puripuly_heart.config.provider_values import QwenRegion
+from puripuly_heart.core.feature_diagnostics import log_feature
 from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.core.lifecycle import (
     SHUTDOWN_PHASE_FREEZE_INGRESS,
@@ -592,7 +593,10 @@ class TranslatorApp:
 
     def on_quick_conversation_event(self, event):
         self._quick_owner().publish_event(event)
-        self._wrist_owner().publish_event(event)
+        try:
+            self._wrist_owner().publish_event(event)
+        except Exception as error:
+            log_feature("WristVision", "presentation", "event_delivery_failed", error=error)
 
     def _wrist_owner(self):
         if self._wrist_vision_owner is None:
@@ -601,8 +605,17 @@ class TranslatorApp:
                 preferences=self.application.wrist_vision_preferences,
                 translate=self.application.translate_wrist_image,
                 labels=wrist_labels,
+                on_state=self._wrist_state_changed,
             )
         return self._wrist_vision_owner
+
+    def _wrist_state_changed(self, phase, code):
+        dialog = getattr(self, "_wrist_vision_dialog", None)
+        if dialog is not None and dialog.dialog is not None and dialog.dialog.open:
+            dialog.status.value = (
+                (t("wrist.error") + " (" + str(code) + ")") if code else t("wrist.state_" + phase)
+            )
+            self.page.update()
 
     def _open_wrist_vision(self):
         if self._wrist_vision_dialog is None:

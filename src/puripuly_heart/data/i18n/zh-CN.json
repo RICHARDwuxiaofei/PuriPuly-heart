@@ -1,4 +1,12 @@
 {
+  "wrist.state_starting": "正在启动手腕进程…",
+  "wrist.state_chat": "手腕聊天已就绪。",
+  "wrist.state_framing": "对准取景框；先松开，再按另一只手的扳机确认。握柄键或菜单键取消。",
+  "wrist.state_capturing": "正在读取选中的 SteamVR 场景区域…",
+  "wrist.state_busy": "正在翻译截图…",
+  "wrist.state_result": "手腕译文已就绪。",
+  "wrist.state_off": "手腕窗口已关闭。",
+  "wrist.state_failed": "手腕操作失败，请查看日志。",
   "wrist.title": "手腕视觉（开发中）",
   "wrist.enabled": "开启独立 VR 手腕窗口",
   "wrist.capture": "截图翻译",

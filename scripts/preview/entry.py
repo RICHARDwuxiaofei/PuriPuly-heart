@@ -15,12 +15,16 @@ for name in tuple(os.environ):
 sys.path.insert(0, str(root / "src"))
 os.environ["PYTHONPATH"] = str(root / "src")
 beta = os.environ.get("PURIPULY_HEART_BETA_DISTRIBUTION") == "1"
+wrist = os.environ.get("PURIPULY_HEART_WRIST_DEVELOPMENT") == "1"
 os.environ["PURIPULY_HEART_TEST_PROFILE"] = "desktop-beta" if beta else "desktop-preview"
 os.environ["PURIPULY_HEART_TEST_DATA_DIR"] = str(
     Path(os.environ.get("LOCALAPPDATA", root.parent)) / "PuriPulyHeartBeta"
     if beta
     else root.parent / "preview-data"
 )
+if wrist:
+    os.environ["PURIPULY_HEART_TEST_PROFILE"] = "desktop-wrist-vision"
+    os.environ["PURIPULY_HEART_TEST_DATA_DIR"] = str(root.parent / "wrist-development-data")
 os.environ["FLET_VIEW_PATH"] = str(root.parent / "flet" / "flet")
 os.environ["FLET_SERVER_IP"] = "127.0.0.1"
 os.environ.pop("FLET_FORCE_WEB_SERVER", None)

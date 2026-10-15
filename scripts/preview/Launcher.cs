@@ -21,6 +21,11 @@ internal static class Launcher
 #else
             start.EnvironmentVariables.Remove("PURIPULY_HEART_BETA_DISTRIBUTION");
 #endif
+#if WRIST_DEVELOPMENT
+            start.EnvironmentVariables["PURIPULY_HEART_WRIST_DEVELOPMENT"] = "1";
+#else
+            start.EnvironmentVariables.Remove("PURIPULY_HEART_WRIST_DEVELOPMENT");
+#endif
             foreach (string name in Environment.GetEnvironmentVariables().Keys)
             {
                 if (name == "PYTHONHOME" || name == "VIRTUAL_ENV" || name == "PYTHONPATH" ||

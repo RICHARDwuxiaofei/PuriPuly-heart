@@ -3,12 +3,13 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
+import httpx
 import pytest
 
 from puripuly_heart.app.adapters.wrist_vision_process import spawn_wrist_vision
 from puripuly_heart.app.services.wrist_vision import WristVisionOwner
 from puripuly_heart.config.wrist_vision import WristVisionIntent
-from puripuly_heart.core.vision.translation import VisionBlock
+from puripuly_heart.core.vision.translation import VisionTranslationService
 
 EXE = Path(__file__).resolve().parents[2] / "build/wrist_vision/PuriPulyHeartWristVision.exe"
 pytestmark = pytest.mark.skipif(
@@ -73,10 +74,38 @@ async def test_stopping_one_child_does_not_stop_other_presentation_process():
 async def test_real_native_mock_to_python_vision_result_and_owned_shutdown():
     completed = asyncio.Event()
     uploaded = []
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        body = json.loads(request.content)
+        assert body["messages"][1]["content"][1]["image_url"]["url"].startswith(
+            "data:image/jpeg;base64,"
+        )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"blocks":[{"id":"1","original":"Test sign","translation":"测试告示"}]}'
+                        }
+                    }
+                ]
+            },
+        )
+
+    service = VisionTranslationService(
+        client_factory=lambda **kwargs: httpx.AsyncClient(
+            transport=httpx.MockTransport(handle), **kwargs
+        )
+    )
 
     async def translate(image):
         uploaded.append(image)
-        return [VisionBlock("1", "Test sign", "测试告示")]
+        return await service.translate(
+            image, key="mock-only-key", model="deepseek-flash", target_language="zh-CN", timeout=5
+        )
 
     preferences = dict(
         config=asdict(WristVisionIntent(enabled=True)),
@@ -105,6 +134,7 @@ async def test_real_native_mock_to_python_vision_result_and_owned_shutdown():
         await owner.send(dict(type="mock_confirm"))
         await asyncio.wait_for(completed.wait(), 5)
         assert len(uploaded) == 1 and uploaded[0].startswith(b"\x89PNG")
+        assert len(requests) == 1
         assert owner.phase == "result"
         await owner.disable()
         assert process.returncode == 0 and not owner.running

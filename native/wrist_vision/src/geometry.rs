@@ -186,6 +186,41 @@ pub fn stable(a: Pose, b: Pose) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn offscreen_frame_is_rejected_instead_of_capturing_other_text() {
+        let mut frame = IDENTITY;
+        frame[0][3] = 4.;
+        frame[2][3] = -1.;
+        assert_eq!(
+            project(
+                corners(frame, 1., 1.),
+                IDENTITY,
+                [-1., 1., -1., 1.],
+                [100, 100]
+            ),
+            Err("frame_outside_eye")
+        );
+    }
+    #[test]
+    fn camera_and_selection_rotation_preserve_projected_crop() {
+        let camera = [[0., 0., 1., 0.], [0., 1., 0., 0.], [-1., 0., 0., 0.]];
+        let mut local = IDENTITY;
+        local[2][3] = -1.;
+        let world = compose(camera, local);
+        let q = project(
+            corners(world, 1., 1.),
+            camera,
+            [-1., 1., -1., 1.],
+            [100, 100],
+        )
+        .unwrap();
+        assert_eq!(q, [[25., 25.], [75., 25.], [75., 75.], [25., 75.]]);
+    }
+    #[test]
+    fn malformed_or_oversized_texture_is_never_read() {
+        assert!(rectify(&[], [100, 100], [[0., 0.]; 4]).is_err());
+        assert!(rectify(&[], [u32::MAX, 100], [[0., 0.]; 4]).is_err());
+    }
+    #[test]
     fn projection_and_rectification() {
         let mut frame = IDENTITY;
         frame[2][3] = -1.;

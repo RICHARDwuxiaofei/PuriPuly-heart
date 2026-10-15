@@ -85,6 +85,8 @@ def stage_beta_vc_runtime(output, source):
         output / "app" / "build" / "gpu_worker",
         output / "app" / "build" / "overlay",
     ]
+    if (output / "app" / "build" / "wrist_vision").is_dir():
+        destinations.append(output / "app" / "build" / "wrist_vision")
     destinations.extend((output / "app" / "build" / "llama.cpp").glob("*/cpu"))
     destinations.extend((output / "app" / "build" / "llama.cpp").glob("*/vulkan"))
     hashes = {}
@@ -102,8 +104,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--beta", action="store_true")
+    parser.add_argument("--wrist-development", action="store_true")
     parser.add_argument("--vc-runtime", type=Path)
     args = parser.parse_args()
+    if args.wrist_development and not args.beta:
+        raise SystemExit("Wrist development requires the complete --beta native runtime payload")
     repo = Path(__file__).resolve().parents[2]
     output = args.output.resolve()
     if output.exists():
@@ -128,10 +133,30 @@ def main():
         gpu_inventory = validate_beta_inputs(repo)
         if args.vc_runtime is None:
             raise SystemExit("Beta requires --vc-runtime")
+    wrist_sha256 = None
+    if args.wrist_development:
+        from puripuly_heart.core.overlay.openvr_vendor import validate_openvr_runtime_dll
+
+        executable = repo / "build" / "wrist_vision" / "PuriPulyHeartWristVision.exe"
+        validate_openvr_runtime_dll(executable.with_name("openvr_api.dll"))
+        with executable.open("rb") as stream:
+            wrist_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
     output.mkdir(parents=True)
     shutil.copy2(
-        repo / "scripts" / "preview" / ("README-BETA.txt" if args.beta else "README.md"),
-        output / ("README-BETA.txt" if args.beta else "README.md"),
+        repo
+        / "scripts"
+        / "preview"
+        / (
+            "README-WRIST.txt"
+            if args.wrist_development
+            else "README-BETA.txt" if args.beta else "README.md"
+        ),
+        output
+        / (
+            "README-WRIST.txt"
+            if args.wrist_development
+            else "README-BETA.txt" if args.beta else "README.md"
+        ),
     )
     shutil.copy2(repo / "docs" / "desktop-feature-pr-notes.md", output / "FEATURES.md")
     runtime = output / "runtime"
@@ -188,6 +213,12 @@ def main():
                 copy_function=copy_payload_file,
             )
         openvr_sha256 = stage_beta_openvr_runtime(repo, output)
+        if args.wrist_development:
+            shutil.copytree(
+                repo / "build" / "wrist_vision",
+                app / "build" / "wrist_vision",
+                copy_function=copy_payload_file,
+            )
         subprocess.run(
             ["git", "archive", "--format=zip", f"--output={output / 'SOURCE.zip'}", revision],
             cwd=repo,
@@ -210,6 +241,7 @@ def main():
             "/target:winexe",
             "/reference:System.Windows.Forms.dll",
             *(["/define:BETA_DISTRIBUTION"] if args.beta else []),
+            *(["/define:WRIST_DEVELOPMENT"] if args.wrist_development else []),
             f"/out:{output / 'PuriPulyHeartPreview.exe'}",
             str(repo / "scripts" / "preview" / "Launcher.cs"),
         ],
@@ -236,11 +268,24 @@ def main():
                 packaging="portable bundled CPython + locked Flet desktop (not native release)",
                 python=sys.version,
                 isolated_keyring=(
-                    "puripuly-heart.test.desktop-beta"
-                    if args.beta
-                    else "puripuly-heart.test.desktop-preview"
+                    "puripuly-heart.test.desktop-wrist-vision"
+                    if args.wrist_development
+                    else (
+                        "puripuly-heart.test.desktop-beta"
+                        if args.beta
+                        else "puripuly-heart.test.desktop-preview"
+                    )
                 ),
-                data_directory="%LOCALAPPDATA%/PuriPulyHeartBeta" if args.beta else "preview-data",
+                data_directory=(
+                    "wrist-development-data"
+                    if args.wrist_development
+                    else "%LOCALAPPDATA%/PuriPulyHeartBeta" if args.beta else "preview-data"
+                ),
+                wrist_sha256=wrist_sha256,
+                wrist_development=args.wrist_development,
+                desktop_baseline=(
+                    "86d0e698de7cefb8b6360f8e119ec63beb4ae2b0" if args.wrist_development else None
+                ),
                 gpu_worker=gpu_inventory,
                 vc_runtime=vc_runtime,
                 openvr_sha256=openvr_sha256 if args.beta else None,

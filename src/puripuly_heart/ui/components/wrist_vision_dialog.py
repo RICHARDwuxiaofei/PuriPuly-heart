@@ -33,19 +33,25 @@ class WristVisionDialog:
                 value=self.values[key],
                 options=[ft.dropdown.Option(value, label) for value, label in options],
                 text_style=ft.TextStyle(color=COLOR_NEUTRAL_DARK),
+                label_style=ft.TextStyle(color=COLOR_NEUTRAL_DARK),
             )
             field.on_select = lambda e: self.values.__setitem__(key, field.value)
             return field
 
         self.enabled = ft.Switch(
             label=t("wrist.enabled"),
+            label_text_style=ft.TextStyle(color=COLOR_NEUTRAL_DARK),
             value=self.values["enabled"],
             on_change=lambda e: self.values.__setitem__("enabled", self.enabled.value),
         )
 
         def number(key):
             field = ft.TextField(
-                label=t("wrist." + key), value=str(self.values[key]), color=COLOR_NEUTRAL_DARK
+                label=t("wrist." + key),
+                value=str(self.values[key]),
+                color=COLOR_NEUTRAL_DARK,
+                label_style=ft.TextStyle(color=COLOR_NEUTRAL_DARK),
+                width=185,
             )
             field.on_change = lambda e: self.values.__setitem__(key, field.value)
             return field
@@ -55,14 +61,16 @@ class WristVisionDialog:
             ("original", t("wrist.original")),
             ("translation", t("wrist.translation")),
         ]
-        self.status = ft.Text(t("wrist.privacy"), color=COLOR_NEUTRAL_DARK)
+        self.status = ft.Text(t("wrist.state_" + self.owner.phase), color=COLOR_NEUTRAL_DARK)
         spatial = ft.Switch(
             label=t("wrist.spatial_enabled"),
+            label_text_style=ft.TextStyle(color=COLOR_NEUTRAL_DARK),
             value=self.values["spatial_enabled"],
             on_change=lambda e: self.values.__setitem__("spatial_enabled", spatial.value),
         )
         fallback = ft.Switch(
             label=t("wrist.fallback_to_wrist"),
+            label_text_style=ft.TextStyle(color=COLOR_NEUTRAL_DARK),
             value=self.values["fallback_to_wrist"],
             on_change=lambda e: self.values.__setitem__("fallback_to_wrist", fallback.value),
         )
@@ -70,6 +78,7 @@ class WristVisionDialog:
             label=t("wrist.target_language"),
             value=self.values["target_language"],
             color=COLOR_NEUTRAL_DARK,
+            label_style=ft.TextStyle(color=COLOR_NEUTRAL_DARK),
             on_change=lambda e: self.values.__setitem__("target_language", language.value),
         )
         self.save = ft.Button(t("wrist.apply"), on_click=lambda _: self.run_task(self.apply))
@@ -77,9 +86,11 @@ class WristVisionDialog:
             title=ft.Text(t("wrist.title"), color=COLOR_NEUTRAL_DARK),
             content=ft.Container(
                 width=620,
+                height=550,
                 content=ft.Column(
                     [
                         self.enabled,
+                        ft.Text(t("wrist.privacy"), color=COLOR_NEUTRAL_DARK),
                         self.status,
                         choice("hand", [("left", t("wrist.left")), ("right", t("wrist.right"))]),
                         ft.Row([number("width_m"), number("opacity")]),

@@ -1,4 +1,12 @@
 {
+  "wrist.state_starting": "Starting wrist process…",
+  "wrist.state_chat": "Wrist chat ready.",
+  "wrist.state_framing": "Aim the frame. Release, then pull the other controller trigger to confirm. Grip/menu cancels.",
+  "wrist.state_capturing": "Reading the selected SteamVR scene region…",
+  "wrist.state_busy": "Translating screenshot…",
+  "wrist.state_result": "Translation ready on wrist.",
+  "wrist.state_off": "Wrist overlay off.",
+  "wrist.state_failed": "Wrist operation failed. See logs.",
   "wrist.title": "Wrist Vision (development)",
   "wrist.enabled": "Enable independent VR wrist overlay",
   "wrist.capture": "Translate screenshot",

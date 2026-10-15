@@ -37,6 +37,15 @@ def test_beta_profile_is_separate_from_production_and_developer_preview(monkeypa
     )
 
 
+def test_wrist_development_profile_does_not_reuse_beta_keys(monkeypatch, tmp_path):
+    monkeypatch.setenv("PURIPULY_HEART_TEST_PROFILE", "desktop-wrist-vision")
+    monkeypatch.setenv("PURIPULY_HEART_TEST_DATA_DIR", str(tmp_path / "wrist-development-data"))
+    store = create_secret_store(SecretsIntent(), config_path=paths.default_settings_path())
+    assert store.service_name == "puripuly-heart.test.desktop-wrist-vision"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "production-secret")
+    assert _get_secret(InMemorySecretStore(), key="deepseek", env_var="DEEPSEEK_API_KEY") is None
+
+
 import pytest
 
 

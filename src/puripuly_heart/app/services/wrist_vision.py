@@ -104,7 +104,10 @@ class WristVisionOwner:
     def state(self, phase, code=None):
         self.phase, self.code = phase, code
         if self.on_state is not None:
-            self.on_state(phase, code)
+            try:
+                self.on_state(phase, code)
+            except Exception as error:
+                log_feature("WristVision", "presentation", "state_callback_failed", error=error)
 
     async def enable(self):
         async with self.lock:
@@ -269,6 +272,7 @@ class WristVisionOwner:
             log_feature("WristVision", "native", code)
             await self.cancel(notify=False)
             self.state("failed", code)
+            await self.send(dict(type="status", text=self.labels()["error"] + " (" + code + ")"))
         elif kind == "closed":
             await self.cancel(notify=False)
             self.running = False
@@ -343,6 +347,13 @@ class WristVisionOwner:
                 self.state("failed", "native_exited")
             else:
                 self.state("off")
+            if not self.stopping and process.returncode is None:
+                process.stdin.close()
+                try:
+                    await asyncio.wait_for(process.wait(), 3)
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
 
     async def _stop(self):
         self.stopping = True

@@ -230,6 +230,9 @@ refactoring/
 .tmp/
 /scripts/*
 !/scripts/preview/
+!/scripts/dev/
+/scripts/dev/*
+!/scripts/dev/wrist_vision_mock_preview.py
 !/scripts/bench_*.py
 !/scripts/ci/
 /scripts/ci/*
@@ -237,6 +240,7 @@ refactoring/
 !/scripts/ci/build-native-experimental.ps1
 !/scripts/ci/build-native-release-artifacts.ps1
 !/scripts/ci/build-gpu-worker-release.ps1
+!/scripts/ci/build-wrist-vision.ps1
 !/scripts/ci/prepare-native-release-inputs.ps1
 !/scripts/ci/prepare-soxr-release-inputs.ps1
 !/scripts/ci/read-project-version.py
