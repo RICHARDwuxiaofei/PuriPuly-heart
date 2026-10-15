@@ -14,6 +14,7 @@ from puripuly_heart.core.discord_oauth_loopback import (
 )
 from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 
+from puripuly_heart.app.adapters.wrist_vision_process import spawn_wrist_vision
 from puripuly_heart.app.language_selection import LanguageSelectionChange
 from puripuly_heart.app.ports.chatgpt_account import (
     CHATGPT_USAGE_SETTINGS_URL,
@@ -35,6 +36,7 @@ from puripuly_heart.app.services.application_shutdown import (
 )
 from puripuly_heart.app.services.quick_translate import QuickTranslateOwner
 from puripuly_heart.app.services.telemetry_reporting import TelemetryReportingOwner
+from puripuly_heart.app.services.wrist_vision import WristVisionOwner
 from puripuly_heart.config.provider_values import QwenRegion
 from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.core.lifecycle import (
@@ -55,6 +57,7 @@ from puripuly_heart.ui.components.model_assets_dialog import ModelAssetsDialog
 from puripuly_heart.ui.components.peer_translation_eula_dialog import PeerTranslationEulaDialog
 from puripuly_heart.ui.components.qq_managed_auth_dialog import QqManagedAuthDialog
 from puripuly_heart.ui.components.title_bar import TitleBar
+from puripuly_heart.ui.components.wrist_vision_dialog import WristVisionDialog, wrist_labels
 from puripuly_heart.ui.dashboard.contract import (
     DashboardCaptureIntents,
     DashboardTranslationIntents,
@@ -222,6 +225,8 @@ class TranslatorApp:
         self._github_star_prompt_shown_this_launch = False
         self._microphone_test_dialog: MicrophoneTestDialog | None = None
         self._quick_translate_owner = None
+        self._wrist_vision_owner = None
+        self._wrist_vision_dialog = None
         self._foundation_preview_dialog: ft.AlertDialog | None = None
         self._foundation_adapter = FletFoundationAdapter(
             self.application,
@@ -403,6 +408,12 @@ class TranslatorApp:
         return (
             application_shutdown_callback(
                 phase=SHUTDOWN_PHASE_STOP_EXTERNAL_PRODUCERS,
+                owner_name="WristVisionOwner",
+                callback_name="close_wrist_vision",
+                callback=self._close_wrist_vision,
+            ),
+            application_shutdown_callback(
+                phase=SHUTDOWN_PHASE_STOP_EXTERNAL_PRODUCERS,
                 owner_name="QuickTranslateOwner",
                 callback_name="close_quick_window",
                 callback=self._close_quick_window,
@@ -437,10 +448,16 @@ class TranslatorApp:
         if quick is not None:
             await quick.close()
 
+    async def _close_wrist_vision(self) -> None:
+        owner = getattr(self, "_wrist_vision_owner", None)
+        if owner is not None:
+            await owner.close()
+
     async def _on_page_lifecycle_end(self, _event=None) -> None:
         await self.shutdown()
 
     async def close_presentation(self) -> None:
+        await self._close_wrist_vision()
         quick = getattr(self, "_quick_translate_owner", None)
         if quick is not None:
             await quick.close()
@@ -513,7 +530,8 @@ class TranslatorApp:
     def _build_layout(self):
         self.view_dashboard = DashboardView()
         self.view_settings = SettingsView(
-            http_extension_registry=self.application.http_extension_registry()
+            http_extension_registry=self.application.http_extension_registry(),
+            on_wrist_vision=self._open_wrist_vision,
         )
         self.view_logs = LogsView()
         self.view_about = AboutView()
@@ -525,6 +543,7 @@ class TranslatorApp:
             on_close=self._request_window_close,
             on_model_assets=self._open_model_assets,
             on_quick_translate=self._open_quick_translate,
+            on_wrist_vision=self._open_wrist_vision,
         )
         self._model_assets_dialog = None
 
@@ -573,8 +592,29 @@ class TranslatorApp:
 
     def on_quick_conversation_event(self, event):
         self._quick_owner().publish_event(event)
+        self._wrist_owner().publish_event(event)
+
+    def _wrist_owner(self):
+        if self._wrist_vision_owner is None:
+            self._wrist_vision_owner = WristVisionOwner(
+                spawn=spawn_wrist_vision,
+                preferences=self.application.wrist_vision_preferences,
+                translate=self.application.translate_wrist_image,
+                labels=wrist_labels,
+            )
+        return self._wrist_vision_owner
+
+    def _open_wrist_vision(self):
+        if self._wrist_vision_dialog is None:
+            self._wrist_vision_dialog = WristVisionDialog(
+                self.page, self.application, self._wrist_owner(), self._run_page_task
+            )
+        self._wrist_vision_dialog.open()
 
     def sync_quick_context(self):
+        wrist = getattr(self, "_wrist_vision_owner", None)
+        if wrist is not None:
+            wrist.schedule_sync()
         if getattr(self, "_quick_translate_owner", None) is None or getattr(
             self, "_shutting_down", False
         ):

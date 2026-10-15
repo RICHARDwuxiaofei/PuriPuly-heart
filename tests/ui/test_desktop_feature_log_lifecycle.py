@@ -25,6 +25,8 @@ from tests.helpers.flet_page import DialogTrackingPage
         ("QuickTranslate", "translation", "translation_failed"),
         ("AudioTest", "device_open", "source_open_failed"),
         ("AudioTest", "playback", "playback_failed"),
+        ("WristVision", "vision_request", "request_timeout"),
+        ("WristVision", "native", "capture_tracking_changed"),
     ],
 )
 def test_normal_logs_survive_surface_close_reopen_and_file_flush(tmp_path, module, stage, code):

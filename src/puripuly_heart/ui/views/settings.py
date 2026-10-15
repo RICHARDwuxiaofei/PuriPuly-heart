@@ -441,8 +441,10 @@ class SettingsView(ft.Column):
     def __init__(
         self,
         http_extension_registry: HttpExtensionRegistryService | None = None,
+        on_wrist_vision: Callable[[], None] | None = None,
     ):
         super().__init__(expand=True, spacing=16)
+        self._on_wrist_vision = on_wrist_vision
 
         # Callbacks (assigned by App)
         self.on_settings_changed: Callable[[ImmediateSettingsIntent], None] | None = None
@@ -1753,6 +1755,11 @@ class SettingsView(ft.Column):
         )
         self._general_surface = compose_settings_general_surface(
             SettingsGeneralSurfaceSlots(
+                wrist_vision=(
+                    ft.Button(t("wrist.title"), on_click=lambda _: self._on_wrist_vision())
+                    if self._on_wrist_vision is not None
+                    else None
+                ),
                 ui=self._general_ui_card,
                 chatbox_source=self._general_chatbox_source_card,
                 audio_host_api=self._general_host_api_card,

@@ -811,6 +811,21 @@ class UiProviderRuntimeAdapter:
             opacity_percent=ui.quick_translate_opacity_percent,
         )
 
+    async def configure_wrist_vision(self, values: dict) -> None:
+        from puripuly_heart.config.wrist_vision import WristVisionIntent
+
+        config = WristVisionIntent(**values)
+        current = self.settings.require_canonical()
+        self.settings.begin()
+        try:
+            self.settings.canonical = replace(
+                current, intent=replace(current.intent, wrist_vision=config)
+            )
+            await self.settings.persist_async()
+        except BaseException:
+            self.settings.rollback()
+            raise
+
     async def configure_quick_window(self, values: dict) -> None:
         current = self.settings.require_canonical()
         mode = values.get("peer_display_mode", current.intent.ui.quick_translate_peer_display_mode)

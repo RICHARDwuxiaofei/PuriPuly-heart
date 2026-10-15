@@ -23,6 +23,7 @@ class TitleBar(ft.Container):
         on_close: Callable[[], None],
         on_model_assets: Callable[[], None] | None = None,
         on_quick_translate: Callable[[], None] | None = None,
+        on_wrist_vision: Callable[[], None] | None = None,
     ):
         self._page = page
         self._on_close = on_close
@@ -50,6 +51,15 @@ class TitleBar(ft.Container):
             [minimize_btn, self._close_btn],
             spacing=0,
         )
+        if on_wrist_vision is not None:
+            window_controls.controls.insert(
+                0,
+                ft.IconButton(
+                    icon=ft.Icons.VRPANO,
+                    tooltip=t("wrist.title"),
+                    on_click=lambda _: on_wrist_vision(),
+                ),
+            )
         if on_quick_translate is not None:
             window_controls.controls.insert(
                 0,

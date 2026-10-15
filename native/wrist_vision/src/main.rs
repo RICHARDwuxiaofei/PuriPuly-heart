@@ -65,11 +65,25 @@ fn run() -> Result<(), &'static str> {
     let mut framing_since = Instant::now();
     let mut last_error = String::new();
     let mut capture_id = 0_u64;
+    let mut last_config = Value::Null;
     loop {
         while let Ok(value) = rx.try_recv() {
             match value["type"].as_str().unwrap_or("") {
                 "exit" => return Ok(()),
                 "config" => {
+                    if last_config != Value::Null
+                        && last_config != value["values"]
+                        && matches!(mode, Mode::Framing | Mode::Busy)
+                    {
+                        emit(json!({"type":"cancel","id":capture_id}));
+                        capture_id += 1;
+                        mode = Mode::Chat;
+                        gate.reset();
+                        if let Some(v) = &vr {
+                            v.hide_all();
+                        }
+                    }
+                    last_config = value["values"].clone();
                     if let Some(v) = vr.as_mut() {
                         v.configure(&value["values"])?;
                     }
@@ -89,7 +103,9 @@ fn run() -> Result<(), &'static str> {
                 "snapshot" => {
                     rows = serde_json::from_value(value["rows"].clone()).unwrap_or_default();
                     rows.truncate(100);
-                    page = 0;
+                    if mode == Mode::Chat {
+                        page = 0;
+                    }
                     dirty = true;
                 }
                 "status" => {
@@ -120,9 +136,27 @@ fn run() -> Result<(), &'static str> {
                 "mock_render" if mock => {
                     let pixels = render::panel(&title, &status, &rows, &labels, page, None)?;
                     let checksum = pixels.iter().fold(0_u64, |a, v| a.wrapping_add(*v as u64));
+                    let mut result = json!({"type":"mock_rendered","size":[render::WIDTH,render::HEIGHT],"checksum":checksum});
+                    if value["dump_rgba"].as_bool() == Some(true) {
+                        result["rgba_hex"] = json!(pixels
+                            .iter()
+                            .map(|v| format!("{v:02x}"))
+                            .collect::<String>());
+                    }
+                    emit(result);
+                }
+                "mock_confirm" if mock => {
+                    capture_id += 1;
+                    emit(json!({"type":"framing"}));
+                    emit(json!({"type":"capturing","id":capture_id}));
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|_| "clock_unavailable")?
+                        .as_millis();
                     emit(
-                        json!({"type":"mock_rendered","size":[render::WIDTH,render::HEIGHT],"checksum":checksum}),
+                        json!({"type":"capture","id":capture_id,"size":[32,16],"rgb_hex":"dddddd".repeat(512),"metadata":{"captured_at_ms":timestamp,"scene_pid":1,"mock":true}}),
                     );
+                    mode = Mode::Busy;
                 }
                 _ => {}
             }
@@ -207,6 +241,11 @@ fn run() -> Result<(), &'static str> {
                 Err(code) => {
                     v.hide_all();
                     gate.reset();
+                    if mode == Mode::Busy || mode == Mode::Framing {
+                        emit(json!({"type":"cancel","id":capture_id}));
+                        capture_id += 1;
+                        mode = Mode::Chat;
+                    }
                     if last_error != code {
                         failure(code);
                         last_error = code.into();

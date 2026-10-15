@@ -112,6 +112,9 @@ impl Canvas {
                 .collect::<String>()
                 .encode_utf16()
                 .collect();
+            if text.is_empty() {
+                return;
+            }
             SetTextColor(self.dc, 0x00f7f3ec);
             let mut rect = RECT {
                 left: rect[0],
@@ -153,7 +156,13 @@ pub fn panel(
             if is_self { [42, 65, 76] } else { [64, 48, 72] },
         );
         canvas.text(
-            if is_self { "SELF" } else { "PEER" },
+            if is_self {
+                "SELF"
+            } else if row.role == "vision" {
+                "VISION"
+            } else {
+                "PEER"
+            },
             [x + 16, y + 8, x + 656, y + 42],
         );
         canvas.text(&row.text, [x + 16, y + 46, x + 656, y + 182]);

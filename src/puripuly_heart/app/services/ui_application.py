@@ -77,6 +77,8 @@ from puripuly_heart.core.updater import check_for_update
 
 UI_APPLICATION_USER_INTENT_METHODS = frozenset(
     {
+        "configure_wrist_vision",
+        "translate_wrist_image",
         "accept_peer_translation_eula_and_enable",
         "apply_loopback_capture_option",
         "apply_overlay_calibration",
@@ -152,6 +154,7 @@ UI_APPLICATION_USER_INTENT_METHODS = frozenset(
 
 _ORDERED_INTENTS = frozenset(
     {
+        "configure_wrist_vision",
         "configure_gemma_source",
         "configure_quick_window",
         "apply_loopback_capture_option",
@@ -445,6 +448,46 @@ class UiApplicationBoundary:
 
     async def configure_quick_window(self, values: dict) -> None:
         await self._provider.configure_quick_window(values)
+
+    def wrist_vision_preferences(self) -> dict:
+        from dataclasses import asdict
+
+        from puripuly_heart.config.wrist_vision import WristVisionIntent
+
+        settings = self.compatibility_settings()
+        config = settings.intent.wrist_vision if settings is not None else WristVisionIntent()
+        context = self._input_runtime.quick_window_context()
+        state = self.state().stt_state
+        return {
+            **context,
+            "config": asdict(config),
+            "recognition_state": str(getattr(state, "value", state) or "unknown")[:48],
+        }
+
+    async def configure_wrist_vision(self, values: dict) -> None:
+        await self._provider.configure_wrist_vision(values)
+
+    async def translate_wrist_image(self, image: bytes):
+        from puripuly_heart.core.vision.translation import VisionError, VisionTranslationService
+
+        settings = self.compatibility_settings()
+        if settings is None or not settings.intent.wrist_vision.enabled:
+            raise VisionError("vision_disabled")
+        config = settings.intent.wrist_vision
+        if config.spatial_enabled and not config.fallback_to_wrist:
+            raise VisionError("spatial_not_available")
+        loaded = self._settings_secrets.load_values(("deepseek_api_key",))
+        if loaded.snapshot is None:
+            raise VisionError("secret_storage_unavailable")
+        key = loaded.snapshot.get("deepseek_api_key")
+        target = (
+            config.target_language
+            or self._input_runtime.quick_window_context().get("target_language")
+            or settings.intent.languages.target_language
+        )
+        return await VisionTranslationService().translate(
+            image, key=key, model=config.model, target_language=target, timeout=config.timeout
+        )
 
     def set_manual_input_activity(self, has_text: bool) -> None:
         self._input_runtime.set_manual_input_activity(has_text)

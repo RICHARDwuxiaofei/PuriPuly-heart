@@ -99,7 +99,9 @@ def compose_settings_general_surface(
     *,
     placeholder_factory: Callable[[], ft.Control],
 ) -> SettingsGeneralSurfaceRegions:
-    primary_row_placeholder = placeholder_factory()
+    primary_row_placeholder = (
+        slots.wrist_vision if slots.wrist_vision is not None else placeholder_factory()
+    )
     primary_row = compose_settings_triple_row(
         slots.ui,
         slots.chatbox_source,

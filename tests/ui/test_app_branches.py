@@ -781,7 +781,7 @@ class ConstructionDummyDashboardView(ft.Container):
 
 
 class ConstructionDummySettingsView(ft.Container):
-    def __init__(self, *, http_extension_registry=None) -> None:
+    def __init__(self, *, http_extension_registry=None, on_wrist_vision=None) -> None:
         super().__init__()
         self.on_settings_changed = None
         self.on_prompt_apply_settings = None
