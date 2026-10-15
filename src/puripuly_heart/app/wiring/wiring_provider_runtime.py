@@ -21,6 +21,7 @@ from puripuly_heart.config.paths import default_http_extensions_dir
 from puripuly_heart.config.prompts import resolve_system_prompt
 from puripuly_heart.config.runtime_resolution import resolve_llm_config
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
+from puripuly_heart.config.translation_values import MANAGED_GEMMA_MODELS
 from puripuly_heart.config.vad_defaults import DEFAULT_STABLE_VAD_HANGOVER_MS
 from puripuly_heart.core.chatgpt.session import ChatGptAccessTokenPort
 from puripuly_heart.core.http_extensions import HttpExtensionRegistry
@@ -125,7 +126,13 @@ class ProviderRuntimeSignatures:
     last_llm_provider: tuple[object, ...] | None = None
     superseded_settings_ids: set[int] = field(default_factory=set)
 
-    def sync(
+    def sync_llm(self, canonical: AppSettingsVNext) -> None:
+        self.last_llm_provider = build_llm_provider_signature(
+            canonical,
+            http_extensions=self.http_extensions,
+        )
+
+    def sync_stt(
         self,
         settings: AppSettingsVNext,
         *,
@@ -135,10 +142,6 @@ class ProviderRuntimeSignatures:
     ) -> None:
         self.last_self_runtime = build_self_stt_runtime_signature_from_vnext(canonical)
         self.last_self_provider = build_self_stt_provider_signature_from_vnext(canonical)
-        self.last_llm_provider = build_llm_provider_signature(
-            canonical,
-            http_extensions=self.http_extensions,
-        )
         peer.last_runtime_signature = build_peer_stt_runtime_signature_from_vnext(canonical)
         peer.last_provider_signature = build_peer_stt_provider_signature_from_vnext(canonical)
         peer.last_intent_enabled = bool(peer_translation_enabled)
@@ -371,7 +374,7 @@ class ProviderRuntimeComponents:
     llm_rebuild: LlmProviderRebuildOwner
     effects: ProviderRuntimeEffects
     signatures: ProviderRuntimeSignatures
-    sync_signatures: Callable[[AppSettingsVNext], None]
+    sync_stt_signatures: Callable[[AppSettingsVNext], None]
     capture_signatures_before_canonical_mutation: Callable[[], None]
 
 
@@ -495,7 +498,7 @@ def compose_provider_runtime(
         canonical = canonical_settings(settings_value)
         translation = canonical.intent.translation
         secrets = create_secret_store(canonical.intent.secrets, config_path=config_path)
-        if translation.model == "managed_gemma":
+        if translation.model in MANAGED_GEMMA_MODELS:
             if managed_gemma is None:
                 raise RuntimeError("managed Gemma translation runtime is unavailable")
             config = translation_runtime_configuration_provider()
@@ -539,6 +542,9 @@ def compose_provider_runtime(
             chatgpt_session=chatgpt_session,
         )
 
+    def sync_llm_signature(current: object) -> None:
+        signature_state.sync_llm(canonical_settings(current))
+
     llm_rebuild = LlmProviderRebuildOwner(
         context_provider=llm_context,
         provider_factory=create_llm,
@@ -546,10 +552,12 @@ def compose_provider_runtime(
         usage_refresh=usage_refresh,
         failure_sink=failure_sink,
         success_sink=success_sink,
+        signature_sink=sync_llm_signature,
+        retry_sink=signature_state.mark_llm_retry,
     )
 
-    def sync_signatures(current: object) -> None:
-        signature_state.sync(
+    def sync_stt_signatures(current: object) -> None:
+        signature_state.sync_stt(
             current,
             canonical=canonical_settings(current),
             peer=peer(),
@@ -574,8 +582,7 @@ def compose_provider_runtime(
         recover_gpu=effects.gpu_recovery,
         refresh_peer=effects.refresh_peer,
         refresh_self_stt=effects.refresh_self_stt,
-        signature_sink=sync_signatures,
-        llm_retry_sink=signature_state.mark_llm_retry,
+        signature_sink=sync_stt_signatures,
         current_settings_provider=lambda: settings.canonical,
         signature_cache_provider=lambda: signature_state.cache(peer()),
         self_signature_builder=lambda current: build_self_stt_provider_signature_from_vnext(
@@ -602,7 +609,7 @@ def compose_provider_runtime(
         llm_rebuild=llm_rebuild,
         effects=effects,
         signatures=signature_state,
-        sync_signatures=sync_signatures,
+        sync_stt_signatures=sync_stt_signatures,
         capture_signatures_before_canonical_mutation=(capture_signatures_before_canonical_mutation),
     )
 

@@ -55,6 +55,7 @@ from puripuly_heart.config.provider_values import STT_INTERNAL_SAMPLE_RATE_HZ, L
 from puripuly_heart.config.resolved import OVERLAY_TARGET_DESKTOP
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.config.translation_values import (
+    MANAGED_GEMMA_MODELS,
     TranslationModel,
     provider_llm_for_translation,
 )
@@ -77,7 +78,7 @@ def managed_gemma_prefix_refresh_required(
 ) -> bool:
     settings = transition.settings
     model = settings.intent.translation.model
-    if model != TranslationModel.MANAGED_GEMMA.value:
+    if model not in MANAGED_GEMMA_MODELS:
         return False
     previous = transition.previous_settings
     return bool(
@@ -414,10 +415,10 @@ class SettingsRuntimeEffectsAdapter:
                 peer_translation_enabled=peer_enabled,
                 integrated_context_enabled=peer_enabled,
             )
-        self._sync_signatures(restored_settings)
+        self._sync_stt_signatures(restored_settings)
 
-    def sync_signatures(self, settings: AppSettingsVNext) -> None:
-        self._sync_signatures(settings)
+    def sync_stt_signatures(self, settings: AppSettingsVNext) -> None:
+        self._sync_stt_signatures(settings)
 
     def _self_runtime_converged(self, settings: AppSettingsVNext) -> bool | None:
         capture_provider = getattr(self, "_self_capture", None)
@@ -639,7 +640,7 @@ class SettingsRuntimeEffectsAdapter:
                 "Self STT runtime did not converge to requested settings",
             )
 
-        self._sync_signatures(settings)
+        self._sync_stt_signatures(settings)
 
         if reload_settings_view and (
             transition.source_language_changed
@@ -686,8 +687,8 @@ class SettingsRuntimeEffectsAdapter:
             authoritative=self._settings.authoritative,
         )
 
-    def _sync_signatures(self, settings: AppSettingsVNext) -> None:
-        self._runtime_signatures.sync(
+    def _sync_stt_signatures(self, settings: AppSettingsVNext) -> None:
+        self._runtime_signatures.sync_stt(
             settings,
             canonical=self._canonical_settings(settings),
             peer=self._peer.owner,

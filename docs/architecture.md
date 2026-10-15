@@ -149,6 +149,8 @@ GUI and headless hosts share application owners and runtime resources. Presentat
   - `ApplicationControlOwner` exposes typed operations and owner-backed queries.
   - CLI, GUI, and OSC mutations share application ordering and resource-conflict boundaries.
   - Queries distinguish persisted intent from effective runtime state.
+  - `translation_runtime_ready` reports provider attachment, not successful native-model preparation. Managed readiness and failures belong to `models.status`.
+  - Translation enablement publishes preparation demand before warmup. A current-generation warmup failure or cancellation rolls effective enablement off without discarding the selected provider or its actionable failure. Later explicit enablement retries; superseded work cannot overwrite newer intent.
   - Operations belong to the application, not the requesting client connection.
 - **Local control host**
   - The host owns authenticated same-user access and instance identity.
@@ -190,6 +192,7 @@ Settings changes follow this path:
 - Settings persistence owns intent. Runtime owners own its application.
 - The provider-apply boundary coordinates capture and Local ASR owners.
 - Failed or incomplete application must not appear as successfully applied runtime state.
+- LLM applied-profile signatures and retry state follow actual provider attachment or replacement. Initial attachment uses the exact launch snapshot; an absent provider remains retryable. Replacement records its outcome before usage refresh or STT convergence. Generic settings, restoration and post-transaction cache updates are STT-only and cannot assert LLM application. Provider application advances STT signatures only after STT convergence, so an independent STT failure can leave the overall transaction committed but runtime-degraded without losing the actual LLM binding.
 
 Implementation: `app/services/provider/provider_runtime_apply.py`. Behavior: `tests/app/test_stt_provider_apply_vertical.py`.
 
@@ -240,6 +243,27 @@ Implementation: `core/stt/scoped_engine.py`, `core/stt/session_projection.py`. B
   - A heuristic decision is not evidence of a known diagnostic cause.
 
 Implementation: `core/orchestrator/translation_turn.py`, `core/orchestrator/translation_request.py`, `core/runtime/provider_rebuild.py`. Behavior: `tests/core/test_translation_turn_owner.py`, `tests/core/test_translation_request_owner.py`.
+
+### Managed local translation
+
+- **Model and provisioning identity**
+  - E4B and 26B A4B QAT are distinct managed selections behind the same `LLMProvider` boundary.
+  - Each model owns its pinned assets, installation directory and verified manifest. Provisioning is on demand and atomic; selecting E4B does not provision 26B.
+  - The runtime owner validates the executable's pinned build/commit before launch, including supported runtime-root overrides.
+- **Execution ownership**
+  - One managed runtime owner owns one server and one loaded target model. Vulkan admits at most two active translations; effective CPU execution admits one.
+  - Three resident language-pair prefix slots are cache capacity, not authorization for three active translations. Same-pair concurrent requests reserve different mutable slots.
+  - The provider factory delegates managed capacity to this owner rather than applying the unrelated remote-provider concurrency preference. Channel owners retain turn ordering, stale-result rejection and destination eligibility.
+- **Slots and lifecycle**
+  - A request retains its slot through native completion or cancellation settlement. Prefix preparation, restore, save and LRU eviction cannot overwrite a busy slot.
+  - Model, device and backend transitions drain active work before replacing the server and reject results from superseded state. A failed request cannot terminate another valid request merely to reclaim its slot.
+  - Prefix compatibility includes model/artifact, runtime/executable, effective backend/profile, prompt/template and language pair.
+- **Backend policy**
+  - E4B preserves serialized CPU MTP and its internal GPU-to-CPU fallback; fallback uses CPU admission and the CPU profile.
+  - 26B is Vulkan-only with the fixed owner-selected placement/cache profile. Initialization failure is actionable, not permission to substitute CPU, E4B or a remote provider.
+
+Implementation: `core/local_translation/runtime.py`, `runtime_profile.py`, `assets.py`, `prefix_cache.py`, `providers/llm/managed_gemma.py`, and `app/wiring/wiring_managed_gemma.py`. Behavior: `tests/core/local_translation/test_gemma_runtime.py`, `tests/providers/test_managed_gemma_concurrency.py`. Fixed profiles and selection controls: [CLI guide](cli.md#managed-local-translation).
+
 
 ### ChatGPT connection
 
@@ -446,6 +470,8 @@ Exact handoff and teardown ordering belongs to owner implementations and lifecyc
 `tests/architecture/test_lifecycle_task_guard.py` scans all Python files under `src/puripuly_heart`, including evidence runners, using `tests/helpers/task_creation.py`. It recognizes direct asyncio task creation (`create_task`, `Task`, `ensure_future`), ordinary imported/assigned aliases, resolvable loop `create_task`, and identifiable Flet page or injected `run_task` bindings. Nested function and lambda bodies use completed enclosing lexical bindings, including aliases assigned after the callback definition; defaults and decorators retain definition-order analysis. A method name alone does not establish task creation.
 
 Each reviewed identity names its module, enclosing qualified function, callee family, maximum multiplicity, and lifetime rationale. Owning primitives, named owners, and legacy exceptions are separate dispositions. Removal is allowed; a new identity or increased multiplicity requires explicit review. Missing/empty protected roots and source discovery, decoding, or parsing failures fail the check.
+
+`ManagedGemmaRuntimeOwner._await_server_work` is a named-owner boundary: `_server_tasks` retains each shielded native operation until its outcome is consumed. Admission limits translation and prefix work together to two live workers on Vulkan or one on CPU; three resident slots do not increase that bound. Caller cancellation waits for settlement, and lifecycle stop bounds remaining work before transport/process teardown. The registry's single creation-site count is lexical, not a one-request runtime policy.
 
 This is bounded lexical analysis, not dynamic task-factory or whole-program alias resolution. Callback invocation timing, arbitrary untyped receivers, interprocedural aliases, star imports, indirect inheritance, global/nonlocal rebinding, pattern bindings, and conditional-flow joins are not resolved. Structural acceptance does not prove cancellation, draining, cleanup, or generation progress; owner behavior tests retain those responsibilities.
 

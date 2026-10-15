@@ -120,6 +120,8 @@ class LlmProviderRebuildOwner:
     usage_refresh: ProviderRuntimeAsyncEffect
     failure_sink: LlmProviderMessageSink
     success_sink: LlmProviderMessageSink
+    signature_sink: ProviderRuntimeSignatureSink
+    retry_sink: ProviderRuntimeRetrySink
     runtime: ProviderRuntimeRebuildService = dataclass_field(
         default_factory=ProviderRuntimeRebuildService,
     )
@@ -128,11 +130,19 @@ class LlmProviderRebuildOwner:
         context = self.context_provider()
         if context is None:
             return False
-        outcome = await self.runtime.rebuild_llm_provider(
-            replace_provider=context.replace_provider,
-            create_provider=lambda: self.provider_factory(context.settings),
-        )
+        try:
+            outcome = await self.runtime.rebuild_llm_provider(
+                replace_provider=context.replace_provider,
+                create_provider=lambda: self.provider_factory(context.settings),
+            )
+        except BaseException:
+            self.retry_sink()
+            raise
         provider = outcome.provider
+        if provider is None:
+            self.retry_sink()
+        else:
+            self.signature_sink(context.settings)
         self.availability_sink(provider is None and context.requires_secret)
         try:
             await self.usage_refresh()
@@ -158,7 +168,6 @@ class ProviderRuntimeOwner:
     refresh_peer: ProviderRuntimeAsyncEffect
     refresh_self_stt: ProviderRuntimeAsyncEffect
     signature_sink: ProviderRuntimeSignatureSink
-    llm_retry_sink: ProviderRuntimeRetrySink
     current_settings_provider: ProviderRuntimeSettingsProvider
     signature_cache_provider: ProviderRuntimeSignatureCacheProvider
     self_signature_builder: ProviderRuntimeSignatureBuilder
@@ -243,9 +252,6 @@ class ProviderRuntimeOwner:
             if llm_error is not None:
                 raise _ProviderRuntimeApplyFailures(llm_error, exc) from llm_error
             raise
-        finally:
-            if plan.should_rebuild_llm and not self.state_provider(settings).llm_available:
-                self.llm_retry_sink()
         if llm_error is not None:
             raise llm_error
 

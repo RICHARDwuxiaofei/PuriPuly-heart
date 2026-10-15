@@ -75,6 +75,7 @@ from puripuly_heart.core.diagnostics import (
     normalize_diagnostic,
     sanitize_diagnostic_fields,
 )
+from puripuly_heart.core.local_translation.provisioning import GemmaProvisioningCancelled
 from puripuly_heart.core.messages import (
     CONTENT_POLICY_METADATA_ONLY,
     DIAGNOSTIC_VISIBILITY_BASIC,
@@ -1436,18 +1437,31 @@ class ApplicationControlOwner:
             )
 
     def _transaction_receipt(self, transaction: TransactionResult, status: str) -> dict:
+        def retain(diagnostic: ErrorDiagnostics, *, disposition: str) -> dict:
+            record = self._retain_diagnostic(diagnostic, disposition=disposition)
+            if diagnostic.cause_id is not None:
+                cause_id = normalize_diagnostic(
+                    diagnostic,
+                    instance_id=self.instance_id,
+                    severity="error",
+                    disposition=disposition,
+                )["cause_id"]
+                if cause_id is not None:
+                    return {**record, "cause_id": cause_id}
+            return record
+
         data = {
             "status": transaction.status,
             "message": transaction.message.key if transaction.message is not None else None,
             "diagnostics": None,
         }
         if transaction.diagnostics is not None:
-            data["diagnostics"] = self._retain_diagnostic(
+            data["diagnostics"] = retain(
                 transaction.diagnostics,
                 disposition="degraded" if status == "degraded" else "failed",
             )
         data["secondary_diagnostics"] = [
-            self._retain_diagnostic(diagnostic, disposition="degraded")
+            retain(diagnostic, disposition="degraded")
             for diagnostic in transaction.secondary_diagnostics[:4]
         ]
         data["secondary_omitted_count"] = transaction.secondary_omitted_count + max(
@@ -1582,7 +1596,7 @@ class ApplicationControlOwner:
                             (operation.receipt.get("transaction") or {}).get("diagnostics"),
                         )
                     completed = True
-        except asyncio.CancelledError:
+        except asyncio.CancelledError, GemmaProvisioningCancelled:
             operation.receipt["status"] = "interrupted" if not self._open else "cancelled"
         except PeerCaptureTargetUnavailable:
             operation.receipt.update(
@@ -1593,7 +1607,7 @@ class ApplicationControlOwner:
                 status="rejected",
                 error={"code": "invalid_arguments", "type": "InvalidArgumentsError"},
             )
-        except Exception as exc:
+        except (Exception, BaseExceptionGroup) as exc:
             source = vars(exc).get("failure_diagnostics")
             if not isinstance(source, ErrorDiagnostics):
                 source = vars(exc).get("diagnostics")

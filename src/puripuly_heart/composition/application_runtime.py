@@ -249,6 +249,7 @@ from puripuly_heart.core.local_asr_provisioning import (
     LocalASRProvisioningSnapshot,
 )
 from puripuly_heart.core.local_gpu_assets import local_gpu_model_path
+from puripuly_heart.core.local_translation.assets import GEMMA_26B_MODEL_ID
 from puripuly_heart.core.observability import DiagnosticEvent
 from puripuly_heart.core.orchestrator.configuration import (
     TranslationRuntimeConfigurationOwner,
@@ -612,6 +613,11 @@ def compose_application_runtime(
                 status=snapshot.state,
                 backend=snapshot.backend,
                 progress_percent=snapshot.progress_percent,
+                action=(
+                    "cancel" if snapshot.state in {"checking", "downloading", "preparing"} else None
+                ),
+                gpu_only=snapshot.model_id == GEMMA_26B_MODEL_ID,
+                failure_phase=snapshot.failure_phase,
             )
         )
 
@@ -1509,13 +1515,20 @@ def compose_application_runtime(
             microphone_audio_settings()
         )
 
-    def sync_signature_caches(value) -> None:
-        signatures.sync(
+    def sync_stt_signature_caches(value) -> None:
+        signatures.sync_stt(
             value,
             canonical=canonical_settings(value),
             peer=require_peer().owner,
             peer_translation_enabled=settings.peer_translation_enabled(),
         )
+        sync_non_provider_signatures()
+
+    def record_initial_llm_binding(value: AppSettingsVNext, provider: object | None) -> None:
+        if provider is None:
+            signatures.mark_llm_retry()
+        else:
+            signatures.sync_llm(value)
         sync_non_provider_signatures()
 
     def require_provider_verifier() -> ProviderVerifierPort:
@@ -1987,7 +2000,7 @@ def compose_application_runtime(
         results=require_settings_application().results,
         sync_memory=(require_settings_application().runtime_effects.restore_memory),
         capture_runtime_signatures=capture_runtime_signatures_before_mutation,
-        sync_signatures=sync_signature_caches,
+        sync_stt_signatures=sync_stt_signature_caches,
         consume_superseded_settings=signatures.consume_superseded,
         active_local_asr_change=active_local_asr_change,
         compensate_local_asr=(
@@ -2101,7 +2114,7 @@ def compose_application_runtime(
         sync_presentation=sync_ui_from_settings,
         notify_fallback=require_settings_application().notify_fallback,
         runtime_logging=runtime_logging,
-        sync_runtime_signatures=sync_signature_caches,
+        initial_llm_binding_sink=record_initial_llm_binding,
         pipeline_launcher=pipeline_launcher,
         pipeline=pipeline,
         sync_local_asr_notice=lambda: require_local_asr().adapters.notice.sync(),
@@ -2310,8 +2323,7 @@ def compose_application_runtime(
         settings.canonical = value
         canonical = settings.project(value, authoritative=True)
         require_provisioning()
-        sync_signature_caches(value)
-        await pipeline_launcher.launch(
+        components = await pipeline_launcher.launch(
             runtime_pipeline_inputs_from_vnext(
                 canonical,
                 peer_translation_enabled=settings.peer_translation_enabled(),
@@ -2321,6 +2333,7 @@ def compose_application_runtime(
             vrc_mic_audio_gate=pipeline.vrc_mic_audio_gate,
             receiver_active=require_vrc_mic_sync().receiver is not None,
         )
+        record_initial_llm_binding(canonical, components.llm_runtime.provider)
 
     if local_asr_evidence_sink is not None:
         local_asr_evidence_sink(
