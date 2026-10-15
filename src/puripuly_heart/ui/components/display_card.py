@@ -7,6 +7,7 @@ from puripuly_heart.ui.flet_runtime import (
     run_control_method,
     update_control_if_mounted,
 )
+from puripuly_heart.ui.fonts import default_font_family
 from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.theme import (
     COLOR_DISPLAY_SOURCE,
@@ -24,6 +25,7 @@ DISPLAY_SOURCE_WEIGHT = ft.FontWeight.W_500
 DISPLAY_MESSAGE_WEIGHT = ft.FontWeight.BOLD
 
 DISPLAY_CARD_PADDING = 32
+DISPLAY_INPUT_TEXT_SIZE = 20
 
 DISPLAY_TEXT_WIDTH = 526
 DISPLAY_TEXT_HEIGHT = 210
@@ -135,7 +137,12 @@ class DisplayCard(ft.Container):
                     ft.ControlState.DISABLED,
                 )
             },
-            text_size=20,
+            text_size=DISPLAY_INPUT_TEXT_SIZE,
+            strut_style=ft.StrutStyle(
+                size=DISPLAY_INPUT_TEXT_SIZE,
+                font_family=default_font_family(),
+                force_strut_height=True,
+            ),
             color=COLOR_NEUTRAL_DARK,
             hint_style=ft.TextStyle(color=COLOR_SECONDARY, italic=True),
             expand=True,
