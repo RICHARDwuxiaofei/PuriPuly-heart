@@ -1159,34 +1159,20 @@ async def test_dashboard_gpu_action_runs_as_page_task(
     assert actions == ["install"]
 
 
-@pytest.mark.asyncio
-async def test_dashboard_managed_download_cancel_runs_owned_action(
+@pytest.mark.parametrize("status", ["checking", "downloading", "preparing"])
+def test_dashboard_managed_gemma_progress_notice_has_no_cancel_action(
     monkeypatch: pytest.MonkeyPatch,
+    status: str,
 ) -> None:
     from puripuly_heart.app.ports.ui_models import ManagedGemmaDashboardNotice
 
     view = _make_dashboard(monkeypatch)
-    tasks = []
-    actions = []
-
-    class Page:
-        def run_task(self, callback):
-            tasks.append(asyncio.create_task(callback()))
-
-    async def cancel(action):
-        actions.append(action)
-
-    attach_dummy_page(monkeypatch, view, Page())
-    view.on_managed_gemma_notice_action = cancel
     view.set_managed_gemma_notice(
-        ManagedGemmaDashboardNotice(status="downloading", progress_percent=37, action="cancel")
+        ManagedGemmaDashboardNotice(status=status, progress_percent=37, action="cancel")
     )
     label, callback = view.display_card.notice_actions[-1]
-    assert label == dashboard_module.t("dashboard.managed_gemma_action.cancel")
-    assert callable(callback)
-    callback()
-    await tasks[-1]
-    assert actions == ["cancel"]
+    assert label is None
+    assert callback is None
 
 
 def test_dashboard_steamvr_overlay_failure_notice_uses_actionable_reason_without_status_prefix(

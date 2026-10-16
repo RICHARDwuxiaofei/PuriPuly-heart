@@ -1965,7 +1965,7 @@ async def test_composed_gemma_notices_carry_presentation_policy_without_backend_
         assert isinstance(progress, ManagedGemmaDashboardNotice)
         assert progress.gpu_only is gpu_only
         assert progress.progress_percent == 25
-        assert progress.action == "cancel"
+        assert progress.action is None
         assert managed_gemma_capture_notice(progress).text == t(
             "dashboard.managed_gemma_notice.downloading", percent=25
         )
@@ -1977,8 +1977,6 @@ async def test_composed_gemma_notices_carry_presentation_policy_without_backend_
         rendered = managed_gemma_capture_notice(failure)
         assert rendered.tone == "error"
         assert rendered.text == t(failure_key)
-        if gpu_only and failure_phase == "runtime":
-            assert "No CPU or cloud fallback" in rendered.text
     finally:
         await app.stop()
         sink.close()

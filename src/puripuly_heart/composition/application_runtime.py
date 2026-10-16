@@ -613,9 +613,6 @@ def compose_application_runtime(
                 status=snapshot.state,
                 backend=snapshot.backend,
                 progress_percent=snapshot.progress_percent,
-                action=(
-                    "cancel" if snapshot.state in {"checking", "downloading", "preparing"} else None
-                ),
                 gpu_only=snapshot.model_id == GEMMA_26B_MODEL_ID,
                 failure_phase=snapshot.failure_phase,
             )
