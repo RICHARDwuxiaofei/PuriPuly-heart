@@ -431,7 +431,6 @@
   "dashboard.managed_gemma_notice.preparing": "翻訳モデルを読み込んでいます…",
   "dashboard.managed_gemma_notice.failed": "ローカル翻訳モデルを準備できませんでした。",
   "dashboard.managed_gemma_notice.gpu_only_failed": "VulkanでGemma 4 26Bを読み込めませんでした。選択したGPUとGPU/システムの空きメモリを確認するか、別の対応モデルを明示的に選択してください。CPUやクラウドには自動切り替えしません。",
-  "dashboard.managed_gemma_action.cancel": "キャンセル",
   "dashboard.managed_gemma_notice.cancelled": "ローカル翻訳モデルのセットアップをキャンセルしました。",
   "dashboard.gpu_action.rediscover": "再検索",
   "dashboard.gpu_action.restart": "再起動",

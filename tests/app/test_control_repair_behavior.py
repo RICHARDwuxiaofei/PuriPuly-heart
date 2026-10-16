@@ -1965,7 +1965,7 @@ async def test_composed_gemma_notices_carry_presentation_policy_without_backend_
         assert isinstance(progress, ManagedGemmaDashboardNotice)
         assert progress.gpu_only is gpu_only
         assert progress.progress_percent == 25
-        assert progress.action == "cancel"
+        assert progress.action is None
         assert managed_gemma_capture_notice(progress).text == t(
             "dashboard.managed_gemma_notice.downloading", percent=25
         )

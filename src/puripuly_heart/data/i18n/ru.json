@@ -431,7 +431,6 @@
   "dashboard.managed_gemma_notice.preparing": "Загрузка модели перевода…",
   "dashboard.managed_gemma_notice.failed": "Не удалось подготовить локальную модель перевода.",
   "dashboard.managed_gemma_notice.gpu_only_failed": "Не удалось загрузить Gemma 4 26B через Vulkan. Проверьте выбранный GPU и свободную память GPU/системы или явно выберите другую поддерживаемую модель. Автоматического перехода на CPU или облако нет.",
-  "dashboard.managed_gemma_action.cancel": "Отмена",
   "dashboard.managed_gemma_notice.cancelled": "Настройка локальной модели перевода отменена.",
   "dashboard.gpu_action.rediscover": "Искать снова",
   "dashboard.gpu_action.restart": "Запустить снова",

@@ -431,7 +431,6 @@
   "dashboard.managed_gemma_notice.preparing": "正在加载翻译模型…",
   "dashboard.managed_gemma_notice.failed": "未能准备本地翻译模型。",
   "dashboard.managed_gemma_notice.gpu_only_failed": "无法在 Vulkan 上加载 Gemma 4 26B。请检查所选 GPU 及可用显存/系统内存，或手动选择其他支持的模型。不会自动回退到 CPU 或云端。",
-  "dashboard.managed_gemma_action.cancel": "取消",
   "dashboard.managed_gemma_notice.cancelled": "已取消本地翻译模型设置。",
   "dashboard.gpu_action.rediscover": "重新查找",
   "dashboard.gpu_action.restart": "重新启动",

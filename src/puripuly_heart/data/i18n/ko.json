@@ -431,7 +431,6 @@
   "dashboard.managed_gemma_notice.preparing": "번역 모델을 불러오고 있어요",
   "dashboard.managed_gemma_notice.failed": "로컬 번역 모델을 준비하지 못했어요.",
   "dashboard.managed_gemma_notice.gpu_only_failed": "Vulkan에서 Gemma 4 26B를 불러오지 못했어요. 선택한 GPU와 GPU/시스템 여유 메모리를 확인하거나 다른 지원 모델을 직접 선택해주세요. CPU나 클라우드로 자동 전환하지 않아요.",
-  "dashboard.managed_gemma_action.cancel": "취소",
   "dashboard.managed_gemma_notice.cancelled": "로컬 번역 모델 설정을 취소했어요.",
   "dashboard.gpu_action.rediscover": "다시 찾기",
   "dashboard.gpu_action.restart": "다시 시작",

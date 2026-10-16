@@ -860,7 +860,7 @@ class DashboardView(ft.Column):
             candidates["managed_gemma"] = (
                 managed_gemma_notice.text,
                 managed_gemma_notice.tone,
-                self._managed_gemma_notice.action,
+                None,
             )
         if self._overlay_session_fallback_notice_active:
             candidates["overlay_fallback"] = (
@@ -908,7 +908,7 @@ class DashboardView(ft.Column):
         if selected is None:
             self.display_card.set_notice(None, None)
             return
-        text, tone, _action = candidates[selected]
+        text, tone, _ = candidates[selected]
         gpu_action = None if self._gpu_notice is None else self._gpu_notice.action
         action_label = gpu_capture_action_label(gpu_action if selected == "gpu" else None)
         on_action = (
@@ -916,13 +916,6 @@ class DashboardView(ft.Column):
             if selected != "gpu" or gpu_action is None
             else lambda: self._run_gpu_notice_action(gpu_action)
         )
-        if selected == "managed_gemma" and _action == "cancel":
-            action_label = t("dashboard.managed_gemma_action.cancel")
-
-            def cancel_managed_gemma() -> None:
-                self._run_notice_action(self.on_managed_gemma_notice_action, "cancel")
-
-            on_action = cancel_managed_gemma
         yields_to_content = selected in OVERLAY_YIELDING_NOTICE_SOURCES
         try:
             self.display_card.set_notice(

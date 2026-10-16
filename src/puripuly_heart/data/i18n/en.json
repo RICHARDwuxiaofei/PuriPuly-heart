@@ -431,7 +431,6 @@
   "dashboard.managed_gemma_notice.preparing": "Loading the translation model…",
   "dashboard.managed_gemma_notice.failed": "Couldn't prepare the local translation model.",
   "dashboard.managed_gemma_notice.gpu_only_failed": "Couldn't load Gemma 4 26B on Vulkan. Check the selected GPU and available GPU/system memory, or explicitly choose another supported model. No CPU or cloud fallback is used.",
-  "dashboard.managed_gemma_action.cancel": "Cancel",
   "dashboard.managed_gemma_notice.cancelled": "Local translation model setup was cancelled.",
   "dashboard.gpu_action.rediscover": "Search again",
   "dashboard.gpu_action.restart": "Start again",
