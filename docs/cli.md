@@ -374,6 +374,14 @@ A file-based command can also express both channels explicitly:
 - A successful persistence receipt does not prove that a provider is attached or active.
 - Inspect `asr status` / `providers.status` and its selected, runtime, capture-attached, activity, pending-handoff, and failure fields.
 
+### Index public translation
+
+Apply `translation.model: index_translate_35b` and `translation.connection: public_api` together through `settings apply`. This connection needs no API key and is the default for new installations; existing selections are preserved.
+
+- Startup and Index selection check availability in the background. `translation set on` waits for a pending check.
+- If Index is unavailable, the app saves a switch to `gemma4_26b_31b` / `managed`. It selects `openrouter` instead only when the applicable Managed allowance is confirmed exhausted. The saved selection survives restart; selecting Index again is explicit.
+- Inspect `settings current`, `providers.status` and the terminal operation result after a switch. The destination may require authentication or key setup; noninteractive callers can receive `action_required`. A saved selection does not establish translation readiness.
+
 ### Translation request parameters
 
 GPT 6 Luna (`translation.model: gpt_6_luna`) uses fixed request parameters:
