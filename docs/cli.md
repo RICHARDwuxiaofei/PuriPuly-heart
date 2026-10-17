@@ -142,7 +142,7 @@ puripuly.exe capture set self on
 puripuly.exe capture set peer off
 puripuly.exe translation set on
 puripuly.exe asr set --channel both --provider soniox
-puripuly.exe microphone test on
+puripuly.exe audio test on
 puripuly.exe audio target set <value-from-audio-target-status>
 puripuly.exe audio retry
 puripuly.exe overlay set on
@@ -264,17 +264,20 @@ For example:
 
 Numeric CLI values are sent as JSON numbers. The application owner validates field-specific bounds.
 
-### Microphone test
+### Audio test
 
-- `microphone test on` stays in progress until the owner receives an actual input frame. Scheduling a capture task is not enough.
-- `app status` returns a `microphone_test` object with:
-  - `state`, `desired_active`, and `effective_active`.
-  - Normalized `meter_level` (0–1).
-  - `failure_reason` and `failure_type`.
+`audio test on|off` runs the voice-activity check for both inputs at once: the selected microphone (`self`) and the current loopback target (`peer`, an output device or process). The test applies each channel's saved VAD threshold through the same gating parameters as normal capture. Speech is observed only; it is not sent to recognition or translation.
+
+- `audio test on` stays in progress until every channel is settled. The microphone is ready after its first input frame. The loopback channel is ready once its source opens, because an idle output can deliver no frames.
+- `app status` returns an `audio_test` object with:
+  - Overall `state` (`off`, `pending`, `ready`, `degraded`, `failed`, or `stopping`), `desired_active`, and `effective_active`.
+  - `channels.self` and `channels.peer`, each with `state`, `failure_reason`, `failure_type`, `device`, normalized `meter_level` (0–1), `speech_probability`, `speech_detected`, and the applied `speech_threshold`.
+  - `restore_capture`: the translation inputs that the test paused and will turn back on.
+- `applied` means both channels are ready. `degraded` means one channel is ready and the other failed. `action_required` (`select_available_audio_devices`) means no channel could start.
 - No audio content is returned.
-- An unavailable input produces `action_required`.
-- `microphone test off` can interrupt pending startup. It waits for owned input resources to close.
-- Testing takes exclusive self-input ownership and can disable normal self capture. Re-enable that capture explicitly afterward if needed.
+- While the test runs, Self and Peer capture are paused. Stopping the test turns back on only the inputs that were on before it started and were not changed during it. Turning Self or Peer capture on explicitly during the test stops the test.
+- `audio test off` can interrupt pending startup. It waits for owned input resources to close.
+- Changing the input device, Host API, output device, or loopback target stops a running test.
 
 ### Manual text
 

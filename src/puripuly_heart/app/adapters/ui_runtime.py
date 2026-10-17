@@ -69,8 +69,8 @@ from puripuly_heart.app.services.settings_projection import (
     SettingsProjectionOwner,
 )
 from puripuly_heart.app.services.translation_enable import TranslationEnableOwner
+from puripuly_heart.app.wiring_audio_test import AudioTestRuntime
 from puripuly_heart.app.wiring_managed_account import ManagedAccountComponents
-from puripuly_heart.app.wiring_microphone_test import MicrophoneTestRuntime
 from puripuly_heart.app.wiring_peer_application import PeerApplicationRuntime
 from puripuly_heart.app.wiring_runtime_pipeline import RuntimePipelineHandle
 from puripuly_heart.config.alibaba_connection import AlibabaEndpointMode, AlibabaRegion
@@ -173,28 +173,23 @@ class UiPeerCaptureRuntimeAdapter:
 
 
 @dataclass(slots=True)
-class UiMicrophoneRuntimeAdapter:
-    microphone: MicrophoneTestRuntime
-    level_log_interval_seconds: float
+class UiAudioTestRuntimeAdapter:
+    audio_test: AudioTestRuntime
 
-    async def start_microphone_test(
-        self,
-        *,
-        meter_callback=None,
-    ) -> bool:
-        return await self.microphone.start(
-            meter_callback=meter_callback,
-            level_log_interval_s=self.level_log_interval_seconds,
-        )
+    async def start_audio_test(self, *, observation_callback=None) -> bool:
+        return await self.audio_test.start(observation_callback=observation_callback)
 
-    def microphone_test_snapshot(self) -> dict[str, object]:
-        return self.microphone.snapshot
+    def audio_test_snapshot(self) -> dict[str, object]:
+        return self.audio_test.snapshot
 
-    async def wait_microphone_test_ready(self) -> bool:
-        return await self.microphone.wait_ready()
+    async def wait_audio_test_ready(self) -> bool:
+        return await self.audio_test.wait_ready()
 
-    async def stop_microphone_test(self) -> None:
-        await self.microphone.stop()
+    async def stop_audio_test(self) -> None:
+        await self.audio_test.stop()
+
+    def release_audio_test_capture_restore(self, channel: str) -> None:
+        self.audio_test.release_capture_restore(channel)
 
 
 @dataclass(slots=True)

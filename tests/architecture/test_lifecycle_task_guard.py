@@ -302,9 +302,9 @@ TASK_CREATION_REVIEWS = (
         "LocalSTTDownloadRuntime is the named lifecycle owner for download tasks",
     ),
     *_reviews(
-        "core/runtime/mic_test.py",
-        {"MicTestRuntime.start": 1, "MicTestRuntime.create_frame_task": 1},
-        "MicTestRuntime is the named lifecycle owner for microphone test tasks",
+        "core/runtime/audio_test.py",
+        {"AudioTestCaptureRuntime.start": 1, "AudioTestCaptureRuntime.create_frame_task": 1},
+        "AudioTestCaptureRuntime is the named lifecycle owner for each audio test channel's tasks",
     ),
     *_reviews(
         "core/runtime/oauth.py",
@@ -661,7 +661,7 @@ def test_order38_named_owner_allowlist_preserves_installer_legacy_task_debt() ->
         ASYNCIO_CREATE_TASK,
     ) in NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST
     assert (
-        "src/puripuly_heart/core/runtime/mic_test.py",
+        "src/puripuly_heart/core/runtime/audio_test.py",
         ASYNCIO_CREATE_TASK,
     ) in NAMED_LIFECYCLE_OWNER_TASK_ALLOWLIST
 

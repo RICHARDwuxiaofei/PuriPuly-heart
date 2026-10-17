@@ -182,7 +182,7 @@ def test_bind_settings_intents_carries_every_previously_ad_hoc_g14_callback(
         settings_secrets=SettingsSecretsOwner(secret_store_factory=lambda: None),
     )
     general = SettingsGeneralIntents(
-        start_microphone_test=make("start_microphone_test"),
+        start_audio_test=make("start_audio_test"),
         telemetry_enabled_change=make("telemetry_enabled_change"),
         list_loopback_capture_options=make("list_loopback_capture_options"),
         list_loopback_process_options=make("list_loopback_process_options"),
@@ -223,7 +223,7 @@ def test_bind_settings_intents_carries_every_previously_ad_hoc_g14_callback(
     assert view.on_local_llm_secret_changed is provider.local_llm_secret_changed
     assert view.on_gpu_discovery_requested is provider.gpu_discovery_requested
     assert view._settings_secrets is provider.settings_secrets
-    assert view.on_start_microphone_test is general.start_microphone_test
+    assert view.on_start_audio_test is general.start_audio_test
     assert view.on_telemetry_enabled_change is general.telemetry_enabled_change
     assert view.on_list_loopback_capture_options is general.list_loopback_capture_options
     assert view.on_list_loopback_process_options is general.list_loopback_process_options
@@ -271,7 +271,7 @@ def test_bind_settings_intents_keeps_optional_presentation_sinks_untouched(
             settings_secrets=SettingsSecretsOwner(secret_store_factory=lambda: None),
         ),
         general=SettingsGeneralIntents(
-            start_microphone_test=lambda *_a, **_k: None,
+            start_audio_test=lambda *_a, **_k: None,
             telemetry_enabled_change=lambda *_a, **_k: None,
             list_loopback_capture_options=lambda *_a, **_k: None,
             list_loopback_process_options=lambda *_a, **_k: None,

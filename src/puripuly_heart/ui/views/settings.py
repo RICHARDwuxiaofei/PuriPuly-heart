@@ -467,7 +467,7 @@ class SettingsView(ft.Column):
         self.on_desktop_overlay_recovery_action: Callable[[str], None] | None = None
         self.on_desktop_overlay_position_reset: Callable[[], None] | None = None
         self.on_view_logs: Callable[[], None] | None = None
-        self.on_start_microphone_test: Callable[[], None] | None = None
+        self.on_start_audio_test: Callable[[], None] | None = None
         self.on_gpu_discovery_requested: Callable[[], object] | None = None
         self.on_telemetry_enabled_change: Callable[[bool], None] | None = None
         self.on_list_loopback_capture_options: Callable[[], object] | None = None
@@ -611,7 +611,7 @@ class SettingsView(ft.Column):
         self.on_gpu_discovery_requested = provider.gpu_discovery_requested
         self._settings_secrets = provider.settings_secrets
         self._chatgpt_intents = provider.chatgpt
-        self.on_start_microphone_test = general.start_microphone_test
+        self.on_start_audio_test = general.start_audio_test
         self.on_telemetry_enabled_change = general.telemetry_enabled_change
         self.on_list_loopback_capture_options = general.list_loopback_capture_options
         self.on_list_loopback_process_options = general.list_loopback_process_options
@@ -747,7 +747,7 @@ class SettingsView(ft.Column):
             self._osc_connection_text,
             self._clipboard_auto_translate_text,
             self._activation_notice_button,
-            self._microphone_test_text,
+            self._audio_test_text,
             self._vrc_mic_text,
             self._mic_audio_text,
             self._audio_host_api_text,
@@ -1636,19 +1636,19 @@ class SettingsView(ft.Column):
             value=self._vrc_mic_text,
         )
 
-        self._microphone_test_text = self._build_clickable_text(
-            t("settings.microphone_test.action"),
-            self._on_microphone_test_click,
+        self._audio_test_text = self._build_clickable_text(
+            t("settings.audio_test.action"),
+            self._on_audio_test_click,
         )
-        self._microphone_test_title = ft.Text(
-            t("settings.microphone_test"),
+        self._audio_test_title = ft.Text(
+            t("settings.audio_test"),
             size=24,
             weight=ft.FontWeight.BOLD,
             color=COLOR_SECONDARY,
         )
-        microphone_test_card = self._wrap_unit_card(
-            title=self._microphone_test_title,
-            value=self._microphone_test_text,
+        audio_test_card = self._wrap_unit_card(
+            title=self._audio_test_title,
+            value=self._audio_test_text,
         )
 
         self._general_ui_card = ui_card
@@ -1755,7 +1755,7 @@ class SettingsView(ft.Column):
                 audio_host_api=self._general_host_api_card,
                 microphone=self._general_mic_audio_card,
                 loopback=self._general_loopback_audio_card,
-                microphone_test=microphone_test_card,
+                audio_test=audio_test_card,
                 self_vad=self._self_vad_card,
                 peer_vad=self._peer_vad_card,
                 clipboard_auto_translate=clipboard_auto_translate_card,
@@ -6495,34 +6495,45 @@ class SettingsView(ft.Column):
         _update_control_if_mounted(self._vad_slider)
 
     def _handle_vad_change(self, e) -> None:
-        if self._general_snapshot is None:
-            return
-
-        new_vad = float(e.control.value)
-
-        self._general_snapshot = replace(
-            self._general_snapshot,
-            self_vad_speech_threshold=new_vad,
-        )
-        self._emit_settings_changed(SelfVadSettingsIntent(new_vad))
+        self.apply_vad_threshold("self", float(e.control.value))
 
     def _handle_peer_vad_visual_change(self, e) -> None:
         self._peer_vad_slider.label = f"{float(e.control.value):.2f}"
         _update_control_if_mounted(self._peer_vad_slider)
 
     def _handle_peer_vad_change(self, e) -> None:
+        self.apply_vad_threshold("peer", float(e.control.value))
+
+    def vad_thresholds(self) -> dict[str, float] | None:
+        if self._general_snapshot is None:
+            return None
+        return {
+            "self": self._general_snapshot.self_vad_speech_threshold,
+            "peer": self._general_snapshot.peer_vad_speech_threshold,
+        }
+
+    def apply_vad_threshold(self, channel: str, value: float) -> None:
         if self._general_snapshot is None:
             return
-
-        new_vad = float(e.control.value)
-
-        self._general_snapshot = replace(
-            self._general_snapshot,
-            peer_vad_speech_threshold=new_vad,
-        )
-        self._peer_vad_slider.label = f"{new_vad:.2f}"
-        _update_control_if_mounted(self._peer_vad_slider)
-        self._emit_settings_changed(PeerVadSpeechThresholdIntent(new_vad))
+        new_vad = float(value)
+        if channel == "peer":
+            self._general_snapshot = replace(
+                self._general_snapshot,
+                peer_vad_speech_threshold=new_vad,
+            )
+            slider = self._peer_vad_slider
+            intent = PeerVadSpeechThresholdIntent(new_vad)
+        else:
+            self._general_snapshot = replace(
+                self._general_snapshot,
+                self_vad_speech_threshold=new_vad,
+            )
+            slider = self._vad_slider
+            intent = SelfVadSettingsIntent(new_vad)
+        slider.value = new_vad
+        slider.label = f"{new_vad:.2f}"
+        _update_control_if_mounted(slider)
+        self._emit_settings_changed(intent)
 
     def _on_vrc_mic_click(self, e) -> None:
         """Toggle VRC mic intercept immediately from the unit card."""
@@ -6531,11 +6542,11 @@ class SettingsView(ft.Column):
         next_value = "off" if self._general_snapshot.vrc_mic_intercept else "on"
         self._on_vrc_mic_selected(next_value)
 
-    def _on_microphone_test_click(self, e) -> None:
-        """Request the app/controller-owned microphone-test lifecycle."""
+    def _on_audio_test_click(self, e) -> None:
+        """Request the app/controller-owned audio-test lifecycle."""
         _ = e
-        if self.on_start_microphone_test is not None:
-            self.on_start_microphone_test()
+        if self.on_start_audio_test is not None:
+            self.on_start_audio_test()
 
     def _on_vrc_mic_selected(self, value: str) -> None:
         """处理选项卡的选择结果
@@ -6838,7 +6849,7 @@ class SettingsView(ft.Column):
         self._loopback_audio_title.value = t("settings.section.loopback_audio")
         self._self_vad_title.value = t("settings.section.self_vad_sensitivity")
         self._peer_vad_title.value = t("settings.section.peer_vad_sensitivity")
-        self._microphone_test_title.value = t("settings.microphone_test")
+        self._audio_test_title.value = t("settings.audio_test")
         self._translation_connection_title.value = t("settings.translation_connection")
         self._cloud_free_tier_title.value = t("settings.cloud_free_tier")
         self._soniox_speaker_diarization_title.value = t("settings.soniox_speaker_diarization")
@@ -6995,8 +7006,8 @@ class SettingsView(ft.Column):
             if self._general_snapshot is not None:
                 self._sync_telemetry_enabled_card(self._general_snapshot)
             self._set_unit_card_value_text(
-                self._microphone_test_text,
-                t("settings.microphone_test.action"),
+                self._audio_test_text,
+                t("settings.audio_test.action"),
             )
             self._sync_overlay_controls()
             self._sync_overlay_calibration_controls()

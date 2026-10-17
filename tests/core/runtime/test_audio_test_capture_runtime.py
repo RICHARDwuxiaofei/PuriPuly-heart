@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from puripuly_heart.core.runtime import MicTestRuntime
+from puripuly_heart.core.runtime import AudioTestCaptureRuntime
 from tests.helpers.lifecycle import assert_lifecycle_structure
 
 
@@ -23,19 +23,19 @@ class FailsOnceSource(RecordingSource):
             raise RuntimeError("source close failed")
 
 
-def test_mic_test_runtime_exposes_lifecycle_inventory_and_policy() -> None:
-    runtime = MicTestRuntime()
+def test_audio_test_capture_runtime_exposes_lifecycle_inventory_and_policy() -> None:
+    runtime = AudioTestCaptureRuntime()
 
     snapshot = runtime.lifecycle_owner_snapshot()
 
     assert_lifecycle_structure(snapshot)
-    assert snapshot["owner"] == "MicTestRuntime"
-    assert len(snapshot["resource_fields"]) == 5
+    assert snapshot["owner"] == "AudioTestCaptureRuntime"
+    assert len(snapshot["resource_fields"]) == 4
 
 
 @pytest.mark.asyncio
-async def test_mic_test_runtime_stop_cancels_session_frame_and_closes_source() -> None:
-    runtime = MicTestRuntime(cancel_timeout_s=0.01)
+async def test_audio_test_capture_runtime_stop_cancels_session_frame_and_closes_source() -> None:
+    runtime = AudioTestCaptureRuntime(cancel_timeout_s=0.01)
     source = RecordingSource()
     session_started = asyncio.Event()
     frame_cancelled = asyncio.Event()
@@ -67,11 +67,18 @@ async def test_mic_test_runtime_stop_cancels_session_frame_and_closes_source() -
 
 
 @pytest.mark.asyncio
-async def test_mic_test_runtime_source_close_failure_retains_source_for_retry() -> None:
-    runtime = MicTestRuntime(cancel_timeout_s=0.01)
+async def test_audio_test_capture_runtime_source_close_failure_retains_source_for_retry() -> None:
+    runtime = AudioTestCaptureRuntime(cancel_timeout_s=0.01)
     source = FailsOnceSource()
-    generation = runtime.begin_direct_capture()
-    assert runtime.attach_source(source, generation=generation) is True
+    session_started = asyncio.Event()
+
+    async def run_session(generation: int) -> None:
+        runtime.attach_source(source, generation=generation)
+        session_started.set()
+        await asyncio.sleep(999)
+
+    runtime.start(run_session)
+    await session_started.wait()
 
     with pytest.raises(RuntimeError, match="source close failed"):
         await runtime.close_source(source)
@@ -83,11 +90,14 @@ async def test_mic_test_runtime_source_close_failure_retains_source_for_retry() 
 
     assert runtime.source is None
     assert source.close_calls == 2
+    await runtime.stop()
 
 
 @pytest.mark.asyncio
-async def test_mic_test_runtime_stop_source_close_failure_keeps_retry_after_task_cleanup() -> None:
-    runtime = MicTestRuntime(cancel_timeout_s=0.01)
+async def test_audio_test_capture_runtime_stop_source_close_failure_keeps_retry_after_task_cleanup() -> (
+    None
+):
+    runtime = AudioTestCaptureRuntime(cancel_timeout_s=0.01)
     source = FailsOnceSource()
     session_started = asyncio.Event()
     frame_cancelled = asyncio.Event()
@@ -131,8 +141,8 @@ async def test_mic_test_runtime_stop_source_close_failure_keeps_retry_after_task
 
 
 @pytest.mark.asyncio
-async def test_mic_test_runtime_rejects_new_session_after_close() -> None:
-    runtime = MicTestRuntime(cancel_timeout_s=0.01)
+async def test_audio_test_capture_runtime_rejects_new_session_after_close() -> None:
+    runtime = AudioTestCaptureRuntime(cancel_timeout_s=0.01)
     await runtime.close()
 
     async def never_started(_generation: int) -> None:
@@ -143,8 +153,8 @@ async def test_mic_test_runtime_rejects_new_session_after_close() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mic_test_runtime_generation_changes_ignore_late_results() -> None:
-    runtime = MicTestRuntime(cancel_timeout_s=0.01)
+async def test_audio_test_capture_runtime_generation_changes_ignore_late_results() -> None:
+    runtime = AudioTestCaptureRuntime(cancel_timeout_s=0.01)
     session_started = asyncio.Event()
 
     async def run_session(generation: int) -> None:
@@ -159,29 +169,3 @@ async def test_mic_test_runtime_generation_changes_ignore_late_results() -> None
     await runtime.stop()
 
     assert runtime.is_current_generation(generation) is False
-
-
-@pytest.mark.asyncio
-async def test_mic_test_runtime_direct_capture_rejects_active_session_without_generation_change() -> (
-    None
-):
-    runtime = MicTestRuntime(cancel_timeout_s=0.01)
-    session_started = asyncio.Event()
-
-    async def run_session(generation: int) -> None:
-        assert runtime.is_current_generation(generation)
-        session_started.set()
-        await asyncio.sleep(999)
-
-    runtime.start(run_session)
-    await session_started.wait()
-    active_generation = runtime.generation
-
-    with pytest.raises(RuntimeError, match="active capture"):
-        runtime.begin_direct_capture()
-
-    assert runtime.generation == active_generation
-    assert runtime.is_current_generation(active_generation) is True
-    assert runtime.session_task is not None
-
-    await runtime.stop()

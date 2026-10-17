@@ -6,18 +6,17 @@ from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, TypeVar
 
 _TaskResultT = TypeVar("_TaskResultT")
-MicTestSessionRunner = Callable[[int], Awaitable[None]]
-MicTestRuntimeStateChanged = Callable[["MicTestRuntime"], None]
+AudioTestSessionRunner = Callable[[int], Awaitable[None]]
+AudioTestCaptureRuntimeStateChanged = Callable[["AudioTestCaptureRuntime"], None]
 
 
-class MicTestRuntime:
-    """Owns microphone-test capture, source, and frame/session tasks."""
+class AudioTestCaptureRuntime:
+    """Owns one audio-test channel's capture source and frame/session tasks."""
 
     resource_fields = (
         "_session_task",
         "_source",
         "_pending_frame_task",
-        "_direct_capture_generation",
         "_generation",
     )
     stop_ingress = "stop capture and reject new tests"
@@ -28,14 +27,13 @@ class MicTestRuntime:
         self,
         *,
         cancel_timeout_s: float = 2.0,
-        state_changed: MicTestRuntimeStateChanged | None = None,
+        state_changed: AudioTestCaptureRuntimeStateChanged | None = None,
     ) -> None:
         self._cancel_timeout_s = max(0.0, float(cancel_timeout_s))
         self._state_changed = state_changed
         self._session_task: asyncio.Task[None] | None = None
         self._source: object | None = None
         self._pending_frame_task: asyncio.Task[Any] | None = None
-        self._direct_capture_generation: int | None = None
         self._generation = 0
         self._closing = False
         self._closed = False
@@ -43,7 +41,7 @@ class MicTestRuntime:
 
     @property
     def owner_name(self) -> str:
-        return "MicTestRuntime"
+        return "AudioTestCaptureRuntime"
 
     @property
     def session_task(self) -> asyncio.Task[None] | None:
@@ -69,10 +67,6 @@ class MicTestRuntime:
     def is_closing(self) -> bool:
         return self._closing
 
-    @property
-    def has_active_direct_capture(self) -> bool:
-        return self._direct_capture_generation is not None
-
     def lifecycle_owner_snapshot(self) -> dict[str, object]:
         return {
             "owner": self.owner_name,
@@ -82,15 +76,15 @@ class MicTestRuntime:
             "late_callback_rule": self.late_callback_rule,
         }
 
-    def start(self, run_session: MicTestSessionRunner) -> asyncio.Task[None]:
+    def start(self, run_session: AudioTestSessionRunner) -> asyncio.Task[None]:
         if self._closing or self._closed:
             state = "closing" if self._closing else "closed"
-            raise RuntimeError(f"MicTestRuntime is {state} to new capture sessions")
+            raise RuntimeError(f"{self.owner_name} is {state} to new capture sessions")
         if self._has_active_capture_resources():
-            raise RuntimeError("MicTestRuntime already owns active capture resources")
+            raise RuntimeError(f"{self.owner_name} already owns active capture resources")
         if self._session_task is not None:
             if not self._session_task.done():
-                raise RuntimeError("MicTestRuntime already owns an active capture session")
+                raise RuntimeError(f"{self.owner_name} already owns an active capture session")
             self._observe_task_exception(self._session_task)
             self._session_task = None
 
@@ -104,26 +98,6 @@ class MicTestRuntime:
         task.add_done_callback(self._on_session_task_done)
         self._notify_state_changed()
         return task
-
-    def begin_direct_capture(self) -> int:
-        if self._closing or self._closed:
-            state = "closing" if self._closing else "closed"
-            raise RuntimeError(f"MicTestRuntime is {state} to direct capture")
-        if self._has_active_capture_resources():
-            raise RuntimeError("MicTestRuntime already owns an active capture")
-        self._generation += 1
-        self._direct_capture_generation = self._generation
-        self._notify_state_changed()
-        return self._generation
-
-    def end_direct_capture(self, generation: int) -> None:
-        if self._direct_capture_generation == generation:
-            self._direct_capture_generation = None
-        if generation == self._generation and self._session_task is None:
-            self._generation += 1
-            self._notify_state_changed()
-        elif self._direct_capture_generation is None:
-            self._notify_state_changed()
 
     def is_current_generation(self, generation: int) -> bool:
         return not self._closing and not self._closed and generation == self._generation
@@ -153,7 +127,7 @@ class MicTestRuntime:
     ) -> asyncio.Task[_TaskResultT]:
         if not self.is_current_generation(generation):
             coroutine.close()
-            raise RuntimeError("MicTestRuntime generation is stale to new frame tasks")
+            raise RuntimeError(f"{self.owner_name} generation is stale to new frame tasks")
         task = asyncio.create_task(coroutine, name=f"{self.owner_name}:frame")
         self._pending_frame_task = task
         task.add_done_callback(self._on_frame_task_done)
@@ -176,7 +150,6 @@ class MicTestRuntime:
         source = self._source
         self._session_task = None
         self._pending_frame_task = None
-        self._direct_capture_generation = None
         self._notify_state_changed()
 
         await self._cancel_task_bounded(frame_task)
@@ -202,7 +175,7 @@ class MicTestRuntime:
     async def _run_session_guarded(
         self,
         *,
-        run_session: MicTestSessionRunner,
+        run_session: AudioTestSessionRunner,
         generation: int,
     ) -> None:
         if self.is_current_generation(generation):
@@ -212,14 +185,12 @@ class MicTestRuntime:
         return (
             self._session_task is not None
             or self._pending_frame_task is not None
-            or self._direct_capture_generation is not None
             or self._source is not None
         )
 
     def _has_active_capture_resources(self) -> bool:
         return (
             self._source is not None
-            or self._direct_capture_generation is not None
             or (self._pending_frame_task is not None and not self._pending_frame_task.done())
             or (self._session_task is not None and not self._session_task.done())
         )
@@ -268,4 +239,4 @@ async def _call_close(resource: object) -> None:
         await result
 
 
-__all__ = ["MicTestRuntime"]
+__all__ = ["AudioTestCaptureRuntime"]

@@ -107,7 +107,7 @@ COMMANDS = {
     "capture.set": "Set self or peer capture explicitly",
     "translation.set": "Set translation explicitly",
     "text.submit": "Submit manual text through the self pipeline",
-    "microphone.test": "Start or stop microphone test",
+    "audio.test": "Start or stop the microphone and loopback audio test",
     "audio.target.set": "Set peer loopback target",
     "audio.retry": "Retry lost peer process target",
     "settings.apply": "Apply focused typed settings changes",
@@ -159,7 +159,7 @@ COMMAND_ARGUMENTS = {
     },
     "translation.set": {"enabled": "boolean"},
     "text.submit": {"text": "non-empty string (protected content)"},
-    "microphone.test": {"enabled": "boolean"},
+    "audio.test": {"enabled": "boolean"},
     "audio.target.set": {"value": "available audio.target option value"},
     "audio.retry": {},
     "settings.apply": {
@@ -1166,7 +1166,7 @@ class ApplicationControlOwner:
                 **base,
                 "host_pid": os.getpid(),
                 "channels": self._channels(),
-                "microphone_test": self.application.microphone_test_snapshot(),
+                "audio_test": self.application.audio_test_snapshot(),
                 "translation_enabled": self.application.state().translation_enabled,
                 "translation_runtime_ready": self.application.state().translation_runtime_ready,
                 "overlay_target": self.application.state().overlay_target,
@@ -1488,7 +1488,7 @@ class ApplicationControlOwner:
                 and "locale" in changes
             )
             independent_stop = command in {"app.stop", "models.cancel", "gemma.cancel"} or (
-                command == "microphone.test" and arguments.get("enabled") is False
+                command == "audio.test" and arguments.get("enabled") is False
             )
             resource_lock = (
                 None
@@ -1864,35 +1864,31 @@ class ApplicationControlOwner:
             if not isinstance(text, str) or not text.strip():
                 raise InvalidArgumentsError("text must be non-empty")
             return self._text_admission_data(await app.submit_text(text))
-        if command == "microphone.test":
+        if command == "audio.test":
             if not _boolean(args, "enabled"):
-                await app.stop_microphone_test()
-                snapshot = app.microphone_test_snapshot()
+                await app.stop_audio_test()
+                snapshot = app.audio_test_snapshot()
                 return {
                     "status": (
                         "applied"
                         if snapshot["state"] == "off" and not snapshot["effective_active"]
                         else "failed"
                     ),
-                    "microphone_test": snapshot,
+                    "audio_test": snapshot,
                 }
-            started = await app.start_microphone_test()
-            ready = await app.wait_microphone_test_ready() if started else False
-            snapshot = app.microphone_test_snapshot()
-            if ready and snapshot["failure_reason"] is None:
-                return {"status": "applied", "microphone_test": snapshot}
-            if (
-                started
-                and snapshot["state"] in {"off", "stopping"}
-                and snapshot["failure_reason"] is None
-            ):
-                return {"status": "cancelled", "microphone_test": snapshot}
-            if snapshot["state"] in {"pending", "ready", "stopping"}:
-                return {"status": "degraded", "microphone_test": snapshot}
+            started = await app.start_audio_test()
+            ready = await app.wait_audio_test_ready() if started else False
+            snapshot = app.audio_test_snapshot()
+            if ready and snapshot["state"] == "ready":
+                return {"status": "applied", "audio_test": snapshot}
+            if started and snapshot["state"] in {"off", "stopping"}:
+                return {"status": "cancelled", "audio_test": snapshot}
+            if snapshot["state"] in {"pending", "ready", "degraded"}:
+                return {"status": "degraded", "audio_test": snapshot}
             return {
                 "status": "action_required",
-                "action": "select_available_microphone",
-                "microphone_test": snapshot,
+                "action": "select_available_audio_devices",
+                "audio_test": snapshot,
             }
         if command == "audio.target.set":
             value = args["value"]
@@ -2776,7 +2772,7 @@ def _validate_command_args(command: str, args: dict, *, locale_choices: tuple[st
         "capture.set": {"channel", "enabled"},
         "translation.set": {"enabled"},
         "text.submit": {"text"},
-        "microphone.test": {"enabled"},
+        "audio.test": {"enabled"},
         "audio.target.set": {"value"},
         "secrets.set": {"name", "value"},
         "secrets.delete": {"name"},
@@ -2801,7 +2797,7 @@ def _validate_command_args(command: str, args: dict, *, locale_choices: tuple[st
             raise InvalidArgumentsError("accept_terms must be a boolean")
         if accept_terms and (args["channel"] != "peer" or not args["enabled"]):
             raise InvalidArgumentsError("accept_terms is only valid when enabling peer capture")
-    elif command in {"translation.set", "microphone.test", "overlay.set"}:
+    elif command in {"translation.set", "audio.test", "overlay.set"}:
         if type(args["enabled"]) is not bool:
             raise InvalidArgumentsError("enabled must be a boolean")
     elif command == "overlay.lock":

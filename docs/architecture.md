@@ -59,6 +59,7 @@ Broker is a control-plane dependency, not part of the normal utterance data path
 | Self capture owner      | Microphone source and capture lifecycle                    | `core/runtime/self_capture.py`                       |
 | Self translation owner  | Self STT events, turns, state, output projection           | `core/orchestrator/self_translation_channel.py`      |
 | Peer capture owner      | Peer audio source, segmentation, and capture lifecycle | `core/runtime/peer_channel.py`                       |
+| Audio test owner        | Test-only microphone and loopback capture, VAD observation, Self/Peer capture pause and restore | `app/services/audio_test.py`, `core/runtime/audio_test.py` |
 | Local ASR runtime       | Local recognition channels and backend transitions         | `core/runtime/local_asr_provider_runtime.py`         |
 | Managed local translation | Local model provisioning and runtime lifecycle | `app/services/managed_gemma_translation.py` and `core/local_translation/runtime.py` |
 | Translation turn owner  | Request lifecycle, cancellation, stale-result rejection    | `core/orchestrator/translation_turn.py`                 |
@@ -94,6 +95,7 @@ Peer:   loopback / process audio → capture / segmentation → recognition
 - Self and Peer share audio contracts. Each channel retains its own endpoint policies.
 - Capture authority determines which audio may enter recognition.
 - Source completion drains admitted input. Stop or discontinuity invalidates affected work.
+- The audio test opens its own sources and VAD gating with each channel's capture parameters. Its audio never reaches recognition. Self and Peer capture stay paused while it runs.
 
 Implementation: `core/audio/ownership.py`, `core/audio/listen_delivery.py`.
 

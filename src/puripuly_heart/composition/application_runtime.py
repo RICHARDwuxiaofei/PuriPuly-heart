@@ -16,11 +16,11 @@ from puripuly_heart.app.adapters.local_asr_application import LocalASRApplicatio
 from puripuly_heart.app.adapters.peer_application_state import PeerApplicationSettings
 from puripuly_heart.app.adapters.system_directory_opener import SystemDirectoryOpener
 from puripuly_heart.app.adapters.ui_runtime import (
+    UiAudioTestRuntimeAdapter,
     UiDiagnosticsRuntimeAdapter,
     UiEngagementRuntimeAdapter,
     UiInputRuntimeAdapter,
     UiManagedRuntimeAdapter,
-    UiMicrophoneRuntimeAdapter,
     UiOverlayRuntimeAdapter,
     UiPeerCaptureRuntimeAdapter,
     UiProviderRuntimeAdapter,
@@ -169,6 +169,11 @@ from puripuly_heart.app.wiring.wiring_provider_runtime_policy import (
 from puripuly_heart.app.wiring_application_runtime_logging import (
     compose_application_runtime_logging,
 )
+from puripuly_heart.app.wiring_audio_test import (
+    AudioTestCaptureControl,
+    AudioTestRuntime,
+    compose_audio_test_runtime,
+)
 from puripuly_heart.app.wiring_capture_runtime import CaptureOwnerFactory
 from puripuly_heart.app.wiring_composition import (
     create_desktop_overlay_policy,
@@ -189,10 +194,6 @@ from puripuly_heart.app.wiring_managed_account import (
     ManagedOpenRouterReleaseRuntime,
     ManagedTranslationRuntimeAccess,
     compose_managed_account,
-)
-from puripuly_heart.app.wiring_microphone_test import (
-    MicrophoneTestAudioSettings,
-    MicrophoneTestRuntime,
 )
 from puripuly_heart.app.wiring_peer_application import (
     PeerApplicationRuntime,
@@ -222,7 +223,6 @@ from puripuly_heart.composition.application_state import ApplicationUiStateAdapt
 from puripuly_heart.config.alibaba_connection import resolve_alibaba_connection
 from puripuly_heart.config.paths import default_http_extensions_dir, user_config_dir
 from puripuly_heart.config.provider_values import (
-    STT_INTERNAL_SAMPLE_RATE_HZ,
     LLMProviderName,
     OpenRouterCredentialSource,
     QwenRegion,
@@ -491,7 +491,7 @@ def compose_application_runtime(
     local_asr_diagnostics: LocalASRDiagnosticsOwner | None = None
     audio_diagnostics: AudioDiagnosticsApplicationOwner | None = None
     self_application: SelfCaptureApplicationOwner | None = None
-    microphone: MicrophoneTestRuntime | None = None
+    audio_test: AudioTestRuntime | None = None
     last_self_capture_lifecycle: str | None = None
     vrc_mic_sync: OscControlIntegrationOwner | None = None
     manual_typing: ManualTypingOwner | None = None
@@ -529,17 +529,6 @@ def compose_application_runtime(
             eula_accepted=canonical.state.peer_translation.eula_accepted,
             overlay_intent_enabled=settings.overlay_enabled(),
             provider_id=canonical.intent.peer_stt.provider,
-        )
-
-    def microphone_audio_settings() -> MicrophoneTestAudioSettings | None:
-        canonical = settings.canonical
-        if canonical is None:
-            return None
-        return MicrophoneTestAudioSettings(
-            input_host_api=canonical.intent.audio.input_host_api,
-            input_device=canonical.intent.audio.input_device,
-            internal_sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
-            internal_channels=1,
         )
 
     def current_canonical() -> AppSettingsVNext:
@@ -1242,16 +1231,28 @@ def compose_application_runtime(
             )
         return vrc_mic_sync
 
-    def require_microphone() -> MicrophoneTestRuntime:
-        nonlocal microphone
-        if microphone is None:
-            microphone = MicrophoneTestRuntime(
-                audio_provider=microphone_audio_settings,
-                self_capture_provider=lambda: pipeline.self_capture,
-                local_pending_provider=lambda: require_local_asr().self_pending,
-                disable_self_capture=stop_self_capture,
-                clock=clock,
+    async def set_peer_capture_enabled(enabled: bool) -> object:
+        return await require_peer().owner.set_enabled(enabled)
+
+    def peer_capture_session() -> object | None:
+        components = pipeline.current
+        return components.resource_owner.peer_capture if components is not None else None
+
+    def require_audio_test() -> AudioTestRuntime:
+        nonlocal audio_test
+        if audio_test is None:
+            audio_test = compose_audio_test_runtime(
+                settings_provider=lambda: settings.canonical,
+                capture_control=AudioTestCaptureControl(
+                    self_capture_provider=lambda: pipeline.self_capture,
+                    local_pending_provider=lambda: require_local_asr().self_pending,
+                    set_self_enabled=require_self_application().set_enabled,
+                    peer_owner_provider=lambda: peer.owner if peer is not None else None,
+                    peer_capture_provider=peer_capture_session,
+                    set_peer_enabled=set_peer_capture_enabled,
+                ),
                 log_sink=log_basic,
+                log_diagnostic=log_diagnostic,
                 diagnostic_sink=lambda message, level, exception: log_diagnostic(
                     message,
                     level=level,
@@ -1259,7 +1260,7 @@ def compose_application_runtime(
                 ),
                 error_sink=log_error,
             )
-        return microphone
+        return audio_test
 
     def require_manual_typing() -> ManualTypingOwner:
         nonlocal manual_typing
@@ -1412,7 +1413,7 @@ def compose_application_runtime(
                     runtime_logging=runtime_logging,
                     pipeline=pipeline,
                     runtime_signatures=signatures,
-                    microphone=require_microphone(),
+                    audio_test=require_audio_test(),
                     clipboard=require_clipboard(),
                     provisioning=require_provisioning(),
                     gpu=require_gpu(),
@@ -1508,9 +1509,7 @@ def compose_application_runtime(
         )
 
     def sync_non_provider_signatures(_value=None) -> None:
-        effects_state.microphone_audio_signature = MicrophoneTestRuntime.audio_signature(
-            microphone_audio_settings()
-        )
+        effects_state.audio_test_signature = AudioTestRuntime.audio_signature(settings.canonical)
 
     def sync_stt_signature_caches(value) -> None:
         signatures.sync_stt(
@@ -2164,14 +2163,14 @@ def compose_application_runtime(
         vrc_mic_sync=lambda: vrc_mic_sync,
         github_prompt=lambda: github_prompt,
         clipboard=lambda: clipboard,
-        microphone=lambda: microphone,
+        audio_test=lambda: audio_test,
         close_managed_gemma_owner=managed_gemma.close,
         local_asr_provisioning=lambda: provisioning,
     )
 
     overlay_owner = require_overlay()
     peer_runtime = require_peer()
-    microphone_runtime = require_microphone()
+    audio_test_runtime = require_audio_test()
     desktop_owner = require_desktop()
     calibration_owner = require_calibration()
     settings_owner = require_settings_application()
@@ -2215,10 +2214,7 @@ def compose_application_runtime(
                 devices=devices
             ),
         ),
-        microphone=UiMicrophoneRuntimeAdapter(
-            microphone=microphone_runtime,
-            level_log_interval_seconds=1.0,
-        ),
+        audio_test=UiAudioTestRuntimeAdapter(audio_test=audio_test_runtime),
         overlay=UiOverlayRuntimeAdapter(
             overlay=overlay_owner,
             desktop=desktop_owner,
@@ -2248,7 +2244,7 @@ def compose_application_runtime(
                 desktop_overlay=desktop_owner,
                 managed=managed_account,
                 calibration=calibration_owner,
-                microphone=lambda: microphone,
+                audio_test=lambda: audio_test,
             ),
         ),
         runtime_shutdown=runtime_shutdown,

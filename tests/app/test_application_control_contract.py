@@ -14,7 +14,7 @@ from puripuly_heart.app.services.capture.peer_capture_target_application import 
     PeerCaptureTargetUnavailable,
 )
 from puripuly_heart.app.services.overlay.overlay_application import OverlayApplicationOwner
-from puripuly_heart.app.wiring import wiring_microphone_test
+from puripuly_heart.app.wiring import wiring_audio_test
 from puripuly_heart.composition import application_runtime
 from puripuly_heart.composition.headless_application import (
     HeadlessApplicationPresentation,
@@ -30,6 +30,11 @@ from puripuly_heart.core.audio.source import (
 )
 from puripuly_heart.core.http_extensions import http_extension_secret_key
 from puripuly_heart.core.messages import TransactionResult
+from puripuly_heart.core.peer_capture import (
+    PeerCaptureResolvedTarget,
+    PeerCaptureTargetResolution,
+    PeerCaptureTargetStatus,
+)
 
 
 def isolated_settings(path):
@@ -310,8 +315,48 @@ async def test_declared_extension_secret_roundtrip_is_private_and_revision_safe(
         await app.stop()
 
 
+class LoudnessEngine:
+    def speech_probability(self, samples, *, sample_rate_hz):
+        return 0.9 if float(np.max(np.abs(samples))) > 0.1 else 0.05
+
+    def reset(self):
+        return None
+
+
+class ControlledSource:
+    def __init__(self):
+        self.frame = asyncio.Event()
+        self.closed = 0
+
+    async def frames(self):
+        await self.frame.wait()
+        samples = np.full(512 * 4, 0.75, dtype=np.float32)
+        samples[::2] = -0.75
+        yield AudioFrameF32(samples=samples, sample_rate_hz=16000)
+        await asyncio.Event().wait()
+
+    async def close(self):
+        self.closed += 1
+
+
+class ControlledTargetResolver:
+    def __init__(self):
+        self.available = False
+
+    async def resolve(self, target):
+        if not self.available:
+            return PeerCaptureTargetResolution(
+                status=PeerCaptureTargetStatus.UNAVAILABLE,
+                reason="process_not_running",
+            )
+        return PeerCaptureTargetResolution(
+            status=PeerCaptureTargetStatus.RESOLVED,
+            target=PeerCaptureResolvedTarget(intent=target),
+        )
+
+
 @pytest.mark.asyncio
-async def test_control_microphone_reports_route_failure_pending_frame_meter_and_released_stop(
+async def test_control_audio_test_reports_channel_failures_pending_stop_and_live_observations(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("PURIPULY_HEART_SECRETS_PASSPHRASE", "isolated-test-passphrase")
@@ -324,8 +369,11 @@ async def test_control_microphone_reports_route_failure_pending_frame_meter_and_
     try:
         await app.start()
         control = app.control()
-        control.bind_instance("isolated-microphone")
-        microphone = app._microphone.microphone
+        control.bind_instance("isolated-audio-test")
+        audio_test = app._audio_test.audio_test
+        resolver = ControlledTargetResolver()
+        audio_test.target_resolver = resolver
+        audio_test.vad_engine_factory = LoudnessEngine
         route = MicrophoneTestRouteObservation(
             saved_host_api="",
             actual_host_api="",
@@ -340,47 +388,35 @@ async def test_control_microphone_reports_route_failure_pending_frame_meter_and_
             wasapi_exclusive=False,
         )
         monkeypatch.setattr(
-            wiring_microphone_test, "observe_microphone_test_route", lambda **_kwargs: route
+            wiring_audio_test, "observe_microphone_test_route", lambda **_kwargs: route
         )
-        receipt = await control.submit(
-            "microphone.test", {"enabled": True}, request_id="missing-mic"
-        )
+        receipt = await control.submit("audio.test", {"enabled": True}, request_id="missing")
         failed = await control.wait(receipt["operation_id"], timeout=5)
         assert failed["status"] == "action_required"
-        assert failed["microphone_test"]["failure_reason"] == "input_route_unavailable"
-        assert failed["microphone_test"]["effective_active"] is False
-        assert (await control.query("app.status", {}))["microphone_test"][
-            "failure_reason"
-        ] == "input_route_unavailable"
+        channels = failed["audio_test"]["channels"]
+        assert channels["self"]["failure_reason"] == "input_route_unavailable"
+        assert channels["peer"]["failure_reason"] == "target_unavailable"
+        assert channels["peer"]["failure_type"] == "process_not_running"
+        assert failed["audio_test"]["effective_active"] is False
+        assert (await control.query("app.status", {}))["audio_test"]["state"] == "failed"
 
-        class ControlledSource:
-            def __init__(self):
-                self.frame = asyncio.Event()
-                self.closed = 0
-
-            async def frames(self):
-                await self.frame.wait()
-                yield AudioFrameF32(
-                    samples=np.asarray([0.25, -0.75], dtype=np.float32), sample_rate_hz=16000
-                )
-                await asyncio.Event().wait()
-
-            async def close(self):
-                self.closed += 1
-
-        source = ControlledSource()
-        microphone.source_factory = lambda **_kwargs: source
+        mic = ControlledSource()
+        loopback = ControlledSource()
+        audio_test.microphone_source_factory = lambda **_kwargs: mic
+        audio_test.loopback_source_factory = lambda _target, _device: loopback
+        resolver.available = True
         monkeypatch.setattr(
-            wiring_microphone_test,
+            wiring_audio_test,
             "observe_microphone_test_route",
             lambda **_kwargs: replace(
                 route,
                 should_attempt_open=True,
                 resolved_device_idx=2,
+                resolved_device_name="controlled",
             ),
         )
         monkeypatch.setattr(
-            wiring_microphone_test,
+            wiring_audio_test,
             "determine_self_mic_capture_channels",
             lambda **_kwargs: SelfMicCaptureChannelDecision(
                 device_idx=2,
@@ -395,40 +431,62 @@ async def test_control_microphone_reports_route_failure_pending_frame_meter_and_
                 ),
             ),
         )
-        await microphone.close()
-        microphone._owner = None
         pending_receipt = await control.submit(
-            "microphone.test", {"enabled": True}, request_id="pending-stop-mic"
+            "audio.test", {"enabled": True}, request_id="pending-stop"
         )
-        pending_start = await control.wait(pending_receipt["operation_id"], timeout=0.01)
+        pending_start = await control.wait(pending_receipt["operation_id"], timeout=0.05)
         assert pending_start["terminal"] is False
         off_receipt = await control.submit(
-            "microphone.test", {"enabled": False}, request_id="stop-pending-mic"
+            "audio.test", {"enabled": False}, request_id="stop-pending"
         )
         pending_off = await control.wait(off_receipt["operation_id"], timeout=5)
         assert pending_off["status"] == "applied"
-        assert pending_off["microphone_test"]["state"] == "off"
-        assert source.closed == 1
+        assert pending_off["audio_test"]["state"] == "off"
+        assert (mic.closed, loopback.closed) == (1, 1)
         assert (await control.wait(pending_receipt["operation_id"], timeout=5))[
             "status"
         ] == "cancelled"
-        source = ControlledSource()
-        receipt = await control.submit("microphone.test", {"enabled": True}, request_id="ready-mic")
-        pending = await control.wait(receipt["operation_id"], timeout=0.01)
+
+        mic = ControlledSource()
+        loopback = ControlledSource()
+        receipt = await control.submit("audio.test", {"enabled": True}, request_id="ready")
+        pending = await control.wait(receipt["operation_id"], timeout=0.05)
         assert pending["terminal"] is False
-        assert (await control.query("app.status", {}))["microphone_test"]["state"] == "pending"
-        source.frame.set()
+        assert (await control.query("app.status", {}))["audio_test"]["state"] == "pending"
+        mic.frame.set()
+        loopback.frame.set()
         ready = await control.wait(receipt["operation_id"], timeout=5)
         assert ready["status"] == "applied"
-        status = (await control.query("app.status", {}))["microphone_test"]
+        for _ in range(100):
+            status = (await control.query("app.status", {}))["audio_test"]
+            if status["channels"]["peer"]["meter_level"] > 0:
+                break
+            await asyncio.sleep(0.01)
         assert status["state"] == "ready"
         assert status["effective_active"] is True
-        assert status["meter_level"] == 0.75
-        off = await control.submit("microphone.test", {"enabled": False}, request_id="stop-mic")
+        for channel in ("self", "peer"):
+            observed = status["channels"][channel]
+            assert observed["meter_level"] == pytest.approx(0.75)
+            assert observed["speech_probability"] == pytest.approx(0.9)
+            assert observed["speech_detected"] is True
+            assert observed["speech_threshold"] is not None
+        assert status["channels"]["self"]["device"]["name"] == "controlled"
+        off = await control.submit("audio.test", {"enabled": False}, request_id="stop")
         stopped = await control.wait(off["operation_id"], timeout=5)
         assert stopped["status"] == "applied"
-        assert stopped["microphone_test"]["state"] == "off"
-        assert source.closed == 1
+        assert stopped["audio_test"]["state"] == "off"
+        assert (mic.closed, loopback.closed) == (1, 1)
+
+        resolver.available = False
+        mic = ControlledSource()
+        receipt = await control.submit("audio.test", {"enabled": True}, request_id="degraded")
+        mic.frame.set()
+        degraded = await control.wait(receipt["operation_id"], timeout=5)
+        assert degraded["status"] == "degraded"
+        assert degraded["audio_test"]["state"] == "degraded"
+        assert degraded["audio_test"]["channels"]["self"]["state"] == "ready"
+        end = await control.submit("audio.test", {"enabled": False}, request_id="end")
+        assert (await control.wait(end["operation_id"], timeout=5))["status"] == "applied"
     finally:
         await app.stop()
 

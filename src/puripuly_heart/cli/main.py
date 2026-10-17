@@ -161,7 +161,9 @@ def build_parser() -> argparse.ArgumentParser:
     asr_set.add_argument("--provider", required=True)
     asr_set.add_argument("--no-wait", action="store_true")
     cap_sub.add_parser("status")
-    audio = sub.add_parser("audio", help="Discover audio devices and processes")
+    audio = sub.add_parser(
+        "audio", help="Discover audio devices, set the loopback target, and test audio"
+    )
     audio_sub = audio.add_subparsers(dest="action", required=True)
     audio_sub.add_parser("devices").add_subparsers(dest="verb", required=True).add_parser("list")
     audio_sub.add_parser("processes").add_subparsers(dest="verb", required=True).add_parser("list")
@@ -171,6 +173,9 @@ def build_parser() -> argparse.ArgumentParser:
     audio_target_set.add_argument("value")
     audio_target_set.add_argument("--no-wait", action="store_true")
     audio_sub.add_parser("retry").add_argument("--no-wait", action="store_true")
+    audio_test = audio_sub.add_parser("test")
+    audio_test.add_argument("state", choices=("on", "off"))
+    audio_test.add_argument("--no-wait", action="store_true")
     settings = sub.add_parser("settings", help="Inspect choices and apply typed settings changes")
     settings_sub = settings.add_subparsers(dest="action", required=True)
     for name in ("current", "choices"):
@@ -185,10 +190,6 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--stdin", action="store_true", help="Read content from standard input")
     submit.add_argument("--file", type=Path, help="Read UTF-8 content from a file")
     submit.add_argument("--no-wait", action="store_true")
-    microphone = sub.add_parser("microphone", help="Control the microphone test")
-    microphone_set = microphone.add_subparsers(dest="action", required=True).add_parser("test")
-    microphone_set.add_argument("state", choices=("on", "off"))
-    microphone_set.add_argument("--no-wait", action="store_true")
     models = sub.add_parser(
         "models", help="Inspect, prepare, install, retry or cancel local models"
     )
@@ -717,7 +718,6 @@ async def _run(args: argparse.Namespace) -> int:
         "asr",
         "secrets",
         "text",
-        "microphone",
         "audio",
         "models",
         "gemma",
@@ -762,14 +762,13 @@ async def _run(args: argparse.Namespace) -> int:
             values = {
                 "text": sys.stdin.read() if args.stdin else args.file.read_text(encoding="utf-8")
             }
-        elif args.domain == "microphone":
-            name, values = "microphone.test", {"enabled": args.state == "on"}
         elif args.domain == "audio":
-            name, values = (
-                ("audio.target.set", {"value": args.value})
-                if args.action == "target"
-                else ("audio.retry", {})
-            )
+            if args.action == "target":
+                name, values = "audio.target.set", {"value": args.value}
+            elif args.action == "test":
+                name, values = "audio.test", {"enabled": args.state == "on"}
+            else:
+                name, values = "audio.retry", {}
         elif args.domain == "models":
             name, values = f"models.{args.action}", {"backend": args.backend}
             if args.action == "install" and args.model_id:

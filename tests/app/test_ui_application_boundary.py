@@ -52,7 +52,7 @@ class RecordingBackend:
             llm=object(),
             stt_session_state=lambda channel: f"{channel}-listening",
         )
-        self.microphone_test_active = True
+        self.audio_test_active = True
         self.desktop_overlay_captions_locked = True
         self.last_discord_managed_auth_referral_bonus_applied = True
         self.peer_retry_result = True
@@ -242,7 +242,7 @@ def test_state_is_a_semantic_snapshot_without_exposing_backend_objects() -> None
     assert state.translation_enabled is True
     assert state.stt_state == "self-listening"
     assert state.peer_translation_eula_accepted is False
-    assert state.microphone_test_active is True
+    assert state.audio_test_active is True
     assert state.provider_name == "local_llm"
     assert state.overlay_target == "desktop"
     assert state.desktop_overlay_captions_locked is True
@@ -309,6 +309,35 @@ async def test_eula_acceptance_is_owned_at_the_boundary_before_peer_enable() -> 
     assert backend.events[0][0] == "settings"
     assert backend.settings.state.peer_translation.eula_accepted is True
     assert backend.events[1] == ("peer", True)
+
+
+@pytest.mark.asyncio
+async def test_explicit_capture_choice_during_audio_test_takes_over_from_the_test() -> None:
+    backend = RecordingBackend()
+
+    async def stop_audio_test() -> None:
+        backend.events.append(("audio-test-stop",))
+        backend.audio_test_active = False
+
+    backend.stop_audio_test = stop_audio_test
+    backend.release_audio_test_capture_restore = lambda channel: backend.events.append(
+        ("audio-test-release", channel)
+    )
+    boundary = UiApplicationBoundary(backend)
+
+    await boundary.set_peer_translation_enabled(False)
+    await boundary.set_stt_enabled(True)
+    await boundary.set_peer_translation_enabled(True)
+
+    assert backend.events == [
+        ("audio-test-release", "peer"),
+        ("peer", False),
+        ("audio-test-release", "self"),
+        ("audio-test-stop",),
+        ("self", True),
+        ("audio-test-release", "peer"),
+        ("peer", True),
+    ]
 
 
 @pytest.mark.asyncio

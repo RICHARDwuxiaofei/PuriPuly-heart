@@ -3875,6 +3875,26 @@ def test_peer_vad_slider_change_updates_state_and_emits_intent(
     assert changed[0].intent.desktop_audio.vad_speech_threshold == 0.77
 
 
+def test_audio_test_threshold_changes_share_the_settings_sliders_and_intents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettingsVNext()
+    changed: list[AppSettingsVNext] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+    monkeypatch.setattr(type(view._vad_slider), "update", lambda self: None)
+
+    view.apply_vad_threshold("self", 0.65)
+    view.apply_vad_threshold("peer", 0.35)
+
+    assert view.vad_thresholds() == {"self": 0.65, "peer": 0.35}
+    assert (view._vad_slider.value, view._vad_slider.label) == (0.65, "0.65")
+    assert (view._peer_vad_slider.value, view._peer_vad_slider.label) == (0.35, "0.35")
+    assert changed[-1].intent.stt.vad_speech_threshold == 0.65
+    assert changed[-1].intent.desktop_audio.vad_speech_threshold == 0.35
+
+
 def test_audio_change_messages_use_basic_runtime_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5059,12 +5079,12 @@ def test_general_osc_card_is_locale_independent(
         i18n_module.set_locale(old_locale)
 
 
-def test_microphone_test_card_click_invokes_start_callback_without_modal(
+def test_audio_test_card_click_invokes_start_callback_without_modal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
     calls: list[str] = []
-    view.on_start_microphone_test = lambda: calls.append("start")
+    view.on_start_audio_test = lambda: calls.append("start")
     modal_calls: list[str] = []
 
     class DummyModal:
@@ -5073,29 +5093,29 @@ def test_microphone_test_card_click_invokes_start_callback_without_modal(
 
     monkeypatch.setattr(settings_view, "SettingsModal", DummyModal)
 
-    view._on_microphone_test_click(None)
+    view._on_audio_test_click(None)
 
     assert calls == ["start"]
     assert modal_calls == []
 
 
-def test_microphone_test_card_clicks_always_request_start_without_inline_state(
+def test_audio_test_card_clicks_always_request_start_without_inline_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
-    card = _general_tab_card(view, t("settings.microphone_test"))
+    card = _general_tab_card(view, t("settings.audio_test"))
     calls: list[str] = []
-    view.on_start_microphone_test = lambda: calls.append("start")
+    view.on_start_audio_test = lambda: calls.append("start")
 
     assert not any(isinstance(node, ft.Slider) for node in _iter_control_tree(card))
-    assert view._microphone_test_text.content.value == t("settings.microphone_test.action")
+    assert view._audio_test_text.content.value == t("settings.audio_test.action")
 
-    view._on_microphone_test_click(None)
+    view._on_audio_test_click(None)
     assert calls == ["start"]
 
-    view._on_microphone_test_click(None)
+    view._on_audio_test_click(None)
     assert calls == ["start", "start"]
-    assert view._microphone_test_text.content.value == t("settings.microphone_test.action")
+    assert view._audio_test_text.content.value == t("settings.audio_test.action")
 
 
 def test_api_tab_places_independent_managed_key_card_above_api_keys(

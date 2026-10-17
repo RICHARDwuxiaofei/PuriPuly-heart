@@ -48,6 +48,7 @@ from puripuly_heart.core.lifecycle import (
 )
 from puripuly_heart.core.messages import ErrorDiagnostics
 from puripuly_heart.core.qq_auth_diagnostics import exception_fields, log_qq_auth
+from puripuly_heart.ui.components.audio_test_dialog import AudioTestDialog
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
 from puripuly_heart.ui.components.chatgpt_auth_dialog import ChatGptAuthDialog
 from puripuly_heart.ui.components.debug_preview_panel import DebugPreviewPanel
@@ -56,7 +57,6 @@ from puripuly_heart.ui.components.founder_letter_dialog import FounderLetterDial
 from puripuly_heart.ui.components.local_qwen_hallucination_dialog import (
     LocalQwenHallucinationDialog,
 )
-from puripuly_heart.ui.components.microphone_test_dialog import MicrophoneTestDialog
 from puripuly_heart.ui.components.model_assets_dialog import ModelAssetsDialog
 from puripuly_heart.ui.components.peer_translation_eula_dialog import PeerTranslationEulaDialog
 from puripuly_heart.ui.components.qq_managed_auth_dialog import QqManagedAuthDialog
@@ -226,7 +226,7 @@ class TranslatorApp:
         self._launch_high_priority_feedback_reason: str | None = None
         self._launch_high_priority_snackbar = None
         self._github_star_prompt_shown_this_launch = False
-        self._microphone_test_dialog: MicrophoneTestDialog | None = None
+        self._audio_test_dialog: AudioTestDialog | None = None
         self._foundation_preview_dialog: ft.AlertDialog | None = None
         self._foundation_adapter = FletFoundationAdapter(
             self.application,
@@ -288,7 +288,7 @@ class TranslatorApp:
                 ),
             ),
             general=SettingsGeneralIntents(
-                start_microphone_test=self._on_start_microphone_test,
+                start_audio_test=self._on_start_audio_test,
                 telemetry_enabled_change=self._on_telemetry_enabled_change,
                 list_loopback_capture_options=(
                     lambda: self.application.list_loopback_capture_options()
@@ -1031,13 +1031,13 @@ class TranslatorApp:
         self._run_page_task(_task)
 
     def _close_open_dialog_for_navigation(self) -> None:
-        microphone_test_dialog = getattr(self, "_microphone_test_dialog", None)
-        if microphone_test_dialog is not None and getattr(
-            microphone_test_dialog,
+        audio_test_dialog = getattr(self, "_audio_test_dialog", None)
+        if audio_test_dialog is not None and getattr(
+            audio_test_dialog,
             "is_open",
             False,
         ):
-            microphone_test_dialog.close(notify=True)
+            audio_test_dialog.close(notify=True)
             return
 
         try:
@@ -1486,53 +1486,71 @@ class TranslatorApp:
     def _on_settings_changed(self, intent: ImmediateSettingsIntent) -> None:
         async def _task():
             await self.application.apply_settings_intent(intent)
-            self._sync_microphone_test_dialog_if_inactive()
+            self._sync_audio_test_dialog_if_stopped()
 
         self._queue_settings_mutation_task(_task)
 
-    def _on_start_microphone_test(self) -> None:
+    def _on_start_audio_test(self) -> None:
         async def _task():
-            dialog = self._get_microphone_test_dialog()
-            dialog.reset()
-            dialog.open()
-            started = await self.application.start_microphone_test(meter_callback=dialog.set_level)
+            dialog = self._get_audio_test_dialog()
+            if dialog.is_open:
+                return
+            thresholds = None
+            view_settings = getattr(self, "view_settings", None)
+            read_thresholds = getattr(view_settings, "vad_thresholds", None)
+            if callable(read_thresholds):
+                thresholds = read_thresholds()
+            dialog.open(thresholds)
+            started = await self.application.start_audio_test(
+                observation_callback=dialog.add_samples
+            )
             if not started:
                 dialog.show_failure()
-                return
 
         self._queue_settings_mutation_task(_task)
 
-    def _on_stop_microphone_test(self) -> None:
+    def _on_stop_audio_test(self) -> None:
         async def _task() -> None:
-            await self.application.stop_microphone_test()
-            self._close_microphone_test_dialog()
+            await self.application.stop_audio_test()
+            self._close_audio_test_dialog()
 
         self._queue_settings_mutation_task(_task)
 
-    def _get_microphone_test_dialog(self) -> MicrophoneTestDialog:
-        dialog = getattr(self, "_microphone_test_dialog", None)
+    def _get_audio_test_dialog(self) -> AudioTestDialog:
+        dialog = getattr(self, "_audio_test_dialog", None)
         if dialog is None:
-            dialog = MicrophoneTestDialog(
+            dialog = AudioTestDialog(
                 self.page,
-                on_close=self._on_microphone_test_dialog_dismiss,
+                on_close=self._on_audio_test_dialog_dismiss,
+                on_threshold_change=self._on_audio_test_threshold_change,
+                snapshot_provider=self.application.audio_test_snapshot,
+                run_task=self._run_page_task,
             )
-            self._microphone_test_dialog = dialog
+            self._audio_test_dialog = dialog
         return dialog
 
-    def _close_microphone_test_dialog(self) -> None:
-        dialog = getattr(self, "_microphone_test_dialog", None)
+    def _on_audio_test_threshold_change(self, channel: str, value: float) -> None:
+        view_settings = getattr(self, "view_settings", None)
+        apply_threshold = getattr(view_settings, "apply_vad_threshold", None)
+        if callable(apply_threshold):
+            apply_threshold(channel, value)
+
+    def _close_audio_test_dialog(self) -> None:
+        dialog = getattr(self, "_audio_test_dialog", None)
         if dialog is None:
             return
         dialog.close(notify=False)
-        dialog.reset()
 
-    def _on_microphone_test_dialog_dismiss(self) -> None:
-        self._on_stop_microphone_test()
+    def _on_audio_test_dialog_dismiss(self) -> None:
+        self._on_stop_audio_test()
 
-    def _sync_microphone_test_dialog_if_inactive(self) -> None:
-        if self.application.state().microphone_test_active:
+    def _sync_audio_test_dialog_if_stopped(self) -> None:
+        dialog = getattr(self, "_audio_test_dialog", None)
+        if dialog is None or not dialog.is_open:
             return
-        self._close_microphone_test_dialog()
+        if self.application.audio_test_snapshot().get("state") != "off":
+            return
+        self._close_audio_test_dialog()
 
     def _on_prompt_apply_settings(self, intent: PromptApplyIntent) -> None:
         async def _task():

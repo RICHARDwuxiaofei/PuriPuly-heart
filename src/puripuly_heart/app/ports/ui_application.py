@@ -48,7 +48,7 @@ class UiApplicationState:
     translation_enabled: bool
     stt_state: object | None
     peer_translation_eula_accepted: bool | None
-    microphone_test_active: bool
+    audio_test_active: bool
     provider_name: str | None
     overlay_target: str | None
     desktop_overlay_captions_locked: bool
@@ -195,17 +195,17 @@ class UiApplicationPort(Protocol):
 
     async def ensure_gpu_device_discovery(self) -> None: ...
 
-    async def start_microphone_test(
+    async def start_audio_test(
         self,
         *,
-        meter_callback: Callable[[float], None] | None = None,
+        observation_callback: Callable[[str, tuple[object, ...]], object] | None = None,
     ) -> bool: ...
 
-    def microphone_test_snapshot(self) -> dict[str, object]: ...
+    def audio_test_snapshot(self) -> dict[str, object]: ...
 
-    async def wait_microphone_test_ready(self) -> bool: ...
+    async def wait_audio_test_ready(self) -> bool: ...
 
-    async def stop_microphone_test(self) -> None: ...
+    async def stop_audio_test(self) -> None: ...
 
     async def set_desktop_overlay_captions_locked(self, locked: bool) -> dict[str, str]: ...
 

@@ -202,18 +202,20 @@ class UiProviderRuntimePort(Protocol):
     ) -> object: ...
 
 
-class UiMicrophoneRuntimePort(Protocol):
-    async def start_microphone_test(
+class UiAudioTestRuntimePort(Protocol):
+    async def start_audio_test(
         self,
         *,
-        meter_callback: Callable[[float], None] | None = None,
+        observation_callback: Callable[[str, tuple[object, ...]], object] | None = None,
     ) -> bool: ...
 
-    def microphone_test_snapshot(self) -> dict[str, object]: ...
+    def audio_test_snapshot(self) -> dict[str, object]: ...
 
-    async def wait_microphone_test_ready(self) -> bool: ...
+    async def wait_audio_test_ready(self) -> bool: ...
 
-    async def stop_microphone_test(self) -> None: ...
+    async def stop_audio_test(self) -> None: ...
+
+    def release_audio_test_capture_restore(self, channel: str) -> None: ...
 
 
 class UiOverlayRuntimePort(Protocol):
@@ -295,11 +297,11 @@ class UiDiagnosticsRuntimePort(Protocol):
 
 
 __all__ = [
+    "UiAudioTestRuntimePort",
     "UiDiagnosticsRuntimePort",
     "UiEngagementRuntimePort",
     "UiInputRuntimePort",
     "UiManagedRuntimePort",
-    "UiMicrophoneRuntimePort",
     "UiOverlayRuntimePort",
     "UiPeerCaptureRuntimePort",
     "UiProviderRuntimePort",

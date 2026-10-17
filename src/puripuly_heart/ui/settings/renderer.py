@@ -111,7 +111,7 @@ def compose_settings_general_surface(
         slots.loopback,
     )
     vad_row = compose_settings_triple_row(
-        slots.microphone_test,
+        slots.audio_test,
         slots.self_vad,
         slots.peer_vad,
     )
