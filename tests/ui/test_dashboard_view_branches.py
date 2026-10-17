@@ -73,7 +73,14 @@ class FakeDisplayCard:
         self.input_is_focused = False
         self.focus_calls = 0
 
-    def set_status(self, status: str, font_family: str | None = None) -> None:
+    def set_status(
+        self,
+        status: str,
+        font_family: str | None = None,
+        *,
+        letter_spacing: float | None = None,
+    ) -> None:
+        _ = letter_spacing
         self.statuses.append((status, font_family))
 
     def set_display(
@@ -82,9 +89,11 @@ class FakeDisplayCard:
         *,
         is_error: bool = False,
         font_family: str | None = None,
+        letter_spacing: float | None = None,
         debug_prefix: str | None = None,
         as_translation: bool = False,
     ) -> None:
+        _ = letter_spacing
         self.display_calls.append((text, is_error, font_family))
         self.display_metadata_calls.append(
             {"debug_prefix": debug_prefix, "as_translation": as_translation}
@@ -95,8 +104,10 @@ class FakeDisplayCard:
         text: str | None,
         font_family: str | None = None,
         *,
+        letter_spacing: float | None = None,
         debug_prefix: str | None = None,
     ) -> None:
+        _ = letter_spacing
         self.translation_calls.append((text, font_family))
 
     def set_notice(
@@ -112,10 +123,24 @@ class FakeDisplayCard:
         self.notice_actions.append((action_label, on_action))
         self.notice_yields.append(bool(yields_to_content))
 
-    def set_input_font(self, font_family: str | None) -> None:
+    def set_input_font(
+        self,
+        font_family: str | None,
+        *,
+        letter_spacing: float | None = None,
+    ) -> None:
+        _ = letter_spacing
         self.input_fonts.append(font_family)
 
-    def apply_locale(self, display_font_family: str | None, input_font_family: str | None) -> None:
+    def apply_locale(
+        self,
+        display_font_family: str | None,
+        input_font_family: str | None,
+        *,
+        display_letter_spacing: float | None = None,
+        input_letter_spacing: float | None = None,
+    ) -> None:
+        _ = (display_letter_spacing, input_letter_spacing)
         self.locale_calls.append((display_font_family, input_font_family))
 
     def set_input_focus_for_test(self, focused: bool) -> None:
@@ -342,8 +367,7 @@ def test_dashboard_submit_and_language_selection_paths(monkeypatch: pytest.Monke
     view._swap_languages()
 
     assert sends == [("You", "hello")]
-    assert view._recent_source_langs == ["ja"]
-    assert view._recent_target_langs == ["fr"]
+    assert view._recent_langs == ["fr", "ja"]
     assert lang_changes[-1] == ("fr", "ja", "en", "ko")
     assert view.language_card.languages[-1] == ("name-fr", "name-ja", "name-en", "name-ko")
 
@@ -412,16 +436,72 @@ def test_dashboard_recent_languages_are_included_in_language_change(
     view.on_language_change = changes.append
 
     for idx in range(8):
-        view._add_to_recent(f"s{idx}", is_source=True)
-        view._add_to_recent(f"t{idx}", is_source=False)
+        view._add_to_recent(f"s{idx}")
+        view._add_to_recent(f"t{idx}")
 
-    assert len(view._recent_source_langs) == 6
-    assert len(view._recent_target_langs) == 6
-    assert view._recent_source_langs[0] == "s7"
-    assert view._recent_source_langs[-1] == "s2"
+    assert view._recent_langs == ["t7", "s7", "t6"]
     view._notify_language_change()
-    assert changes[-1].recent_source_codes == tuple(view._recent_source_langs)
-    assert changes[-1].recent_target_codes == tuple(view._recent_target_langs)
+    assert changes[-1].recent_source_codes == ("t7", "s7", "t6")
+    assert changes[-1].recent_target_codes == ("t7", "s7", "t6")
+
+
+def test_hint_editor_uses_the_dashboard_recent_language_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.ui.components.settings.language_hint_editor import LanguageHintEditor
+
+    view = _make_dashboard(monkeypatch)
+    added: list[str] = []
+    editor = LanguageHintEditor(on_add=added.append)
+    editor.bind_recent_languages(
+        codes=view.recent_language_codes,
+        remember=view.remember_recent_language,
+    )
+
+    view._on_source_select("ja")
+    view._on_target_select("fr")
+    editor._handle_select("de")
+    editor.set_terms(["ko", "en", "zh-CN", "fr"])
+
+    assert view._recent_langs == ["de", "fr", "ja"]
+    assert editor._recent_for_modal() == ["de", "fr", "ja"]
+    assert added == ["de"]
+
+
+def test_hint_editor_remembers_a_language_without_saving_the_language_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.ui.components.settings.language_hint_editor import LanguageHintEditor
+
+    view = _make_dashboard(monkeypatch)
+    changes = []
+    view.on_language_change = changes.append
+    order: list[tuple[str, str]] = []
+
+    def remember(code: str) -> None:
+        order.append(("remember", code))
+        view._add_to_recent(code)
+
+    editor = LanguageHintEditor(on_add=lambda code: order.append(("add", code)))
+    editor.bind_recent_languages(
+        codes=view.recent_language_codes,
+        remember=remember,
+    )
+
+    editor._handle_select("ja")
+    editor._handle_select("ar")
+    editor._handle_select("en")
+
+    assert changes == []
+    assert view._recent_langs == ["en", "ar", "ja"]
+    assert order == [
+        ("remember", "ja"),
+        ("add", "ja"),
+        ("remember", "ar"),
+        ("add", "ar"),
+        ("remember", "en"),
+        ("add", "en"),
+    ]
 
 
 def test_dashboard_public_setters_update_components(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -473,7 +553,7 @@ def test_dashboard_public_setters_update_components(monkeypatch: pytest.MonkeyPa
     assert view._stt_showing_warning is True
     assert view.trans_button.states[-1]["needs_key"] is True
     assert view.stt_button.states[-1]["needs_key"] is True
-    assert view._recent_source_langs == ["a", "b", "c", "d", "e", "f"]
+    assert view._recent_langs == ["a", "b", "c"]
 
 
 def test_dashboard_projects_osc_state_without_emitting_intents(
@@ -1333,7 +1413,7 @@ def test_dashboard_peer_source_selection_restores_follow_self_blank(
 
     assert view._peer_source_lang_code == ""
     assert view._peer_target_lang_code == "fr"
-    assert view._recent_source_langs == ["ko"]
+    assert view._recent_langs == ["ko"]
     assert changes[-1] == ("ko", "en", "", "fr")
     assert view.language_card.languages[-1] == ("name-ko", "name-en", "name-ko", "name-fr")
 
@@ -1352,7 +1432,7 @@ def test_dashboard_peer_target_selection_restores_follow_self_blank(
 
     assert view._peer_source_lang_code == "ja"
     assert view._peer_target_lang_code == ""
-    assert view._recent_target_langs == ["en"]
+    assert view._recent_langs == ["en"]
     assert changes[-1] == ("ko", "en", "ja", "")
     assert view.language_card.languages[-1] == ("name-ko", "name-en", "name-ja", "name-en")
 

@@ -834,6 +834,9 @@ class ConstructionDummySettingsView(ft.Container):
         self.on_overlay_calibration_apply = overlay.calibration_apply
         self.on_overlay_calibration_cancel = overlay.calibration_cancel
 
+    def bind_recent_language_queue(self, dashboard) -> None:
+        self.recent_language_dashboard = dashboard
+
     def set_overlay_runtime_state(self, *_args, **_kwargs) -> None:
         return None
 

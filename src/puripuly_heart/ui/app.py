@@ -67,8 +67,8 @@ from puripuly_heart.ui.dashboard.contract import (
 )
 from puripuly_heart.ui.fonts import (
     font_for_language,
-    locale_body_letter_spacing,
     register_ui_fonts,
+    typeface_for_language,
 )
 from puripuly_heart.ui.foundation.adapter import FletFoundationAdapter
 from puripuly_heart.ui.foundation.preview import FoundationPreviewSurface
@@ -99,6 +99,7 @@ from puripuly_heart.ui.theme import (
     COLOR_SUCCESS,
     COLOR_WARNING,
     get_app_theme,
+    text_style,
 )
 from puripuly_heart.ui.views.about import AboutView
 from puripuly_heart.ui.views.dashboard import DashboardView
@@ -472,10 +473,7 @@ class TranslatorApp:
         self.page.title = t("app.title")
         self.page.theme_mode = ft.ThemeMode.LIGHT
         register_ui_fonts(self.page)
-        self.page.theme = get_app_theme(
-            font_family=font_for_language(get_locale()),
-            body_letter_spacing=locale_body_letter_spacing(get_locale()),
-        )
+        self.page.theme = get_app_theme(face=typeface_for_language(get_locale()))
         self.page.bgcolor = COLOR_BACKGROUND
         self.page.padding = 0
         self.page.window.frameless = FOUNDATION_DESIGN_TOKENS.window.frameless
@@ -499,6 +497,7 @@ class TranslatorApp:
         self.view_settings = SettingsView(
             http_extension_registry=self.application.http_extension_registry()
         )
+        self.view_settings.bind_recent_language_queue(self.view_dashboard)
         self.view_logs = LogsView()
         self.view_about = AboutView()
         self.view_settings.set_overlay_runtime_state(self.overlay_state)
@@ -819,10 +818,7 @@ class TranslatorApp:
                         on_click=on_click,
                         style=ft.ButtonStyle(
                             color=ft.Colors.WHITE,
-                            text_style=ft.TextStyle(
-                                size=18,
-                                font_family=font_for_language(get_locale()),
-                            ),
+                            text_style=text_style(size=18),
                             overlay_color=COLOR_PRIMARY,
                         ),
                     ),
@@ -1184,10 +1180,7 @@ class TranslatorApp:
 
     def apply_locale(self) -> None:
         self.page.title = t("app.title")
-        self.page.theme = get_app_theme(
-            font_family=font_for_language(get_locale()),
-            body_letter_spacing=locale_body_letter_spacing(get_locale()),
-        )
+        self.page.theme = get_app_theme(face=typeface_for_language(get_locale()))
         self.view_dashboard.apply_locale()
         self.view_settings.apply_locale()
         self.refresh_overlay_peer_contract()
@@ -2594,10 +2587,7 @@ async def _check_and_notify_update(
                         on_click=_open_download,
                         style=ft.ButtonStyle(
                             color=ft.Colors.WHITE,
-                            text_style=ft.TextStyle(
-                                size=18,
-                                font_family=font_for_language(get_locale()),
-                            ),
+                            text_style=text_style(size=18),
                             overlay_color=COLOR_PRIMARY,
                         ),
                     ),

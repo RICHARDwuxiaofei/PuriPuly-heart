@@ -9,6 +9,7 @@ pytest.importorskip("flet")
 
 from puripuly_heart.ui.components import display_card as display_card_module
 from puripuly_heart.ui.components.display_card import DisplayCard
+from puripuly_heart.ui.fonts import default_font_family
 from tests.helpers.flet_page import attach_dummy_page
 
 
@@ -695,7 +696,60 @@ def test_input_line_metrics_do_not_follow_the_source_language_font(
     assert all(style == strut for style in strut_styles)
     assert strut.force_strut_height is True
     assert strut.size == card._input_field.text_size
-    assert strut.font_family == display_card_module.default_font_family()
+    assert strut.font_family == default_font_family()
+
+
+def test_display_text_uses_content_language_tracking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    card = DisplayCard(on_submit=lambda _text: None)
+    _mute_display_updates(monkeypatch, card)
+
+    card.set_display("안녕", font_family="NanumSquareRound")
+    assert card._display_text.font_family == "NanumSquareRound"
+    assert card._display_text.style.letter_spacing == 0
+
+    card.set_display("こんにちは", font_family="MPLUSRounded1c", letter_spacing=0.5)
+    assert card._display_text.font_family == "MPLUSRounded1c"
+    assert card._display_text.style.letter_spacing == 0.5
+
+    card.set_display_translation("你好", font_family="ResourceHanRoundedCN", letter_spacing=0.4)
+    assert card._display_text.font_family == "ResourceHanRoundedCN"
+    assert card._display_text.style.letter_spacing == 0.4
+
+
+def test_input_and_hint_keep_each_language_typeface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    card = DisplayCard(on_submit=lambda _text: None)
+    monkeypatch.setattr(type(card._input_field), "update", lambda self: None)
+    _mute_display_updates(monkeypatch, card)
+    card.set_input_font("MPLUSRounded1c", letter_spacing=0.5)
+
+    card.set_input_font(None)
+    assert card._input_field.text_style.font_family == ""
+    assert card._input_field.text_style.letter_spacing == 0
+
+    card.apply_locale(
+        display_font_family="MPLUSRounded1c",
+        input_font_family="NanumSquareRound",
+        display_letter_spacing=0.5,
+        input_letter_spacing=None,
+    )
+    assert card._input_field.hint_style.font_family == "MPLUSRounded1c"
+    assert card._input_field.hint_style.letter_spacing == 0.5
+    assert card._input_field.hint_style.italic is True
+    assert card._input_field.text_style.font_family == "NanumSquareRound"
+    assert card._input_field.text_style.letter_spacing == 0
+
+    card.set_input_font("MPLUSRounded1c", letter_spacing=0.5)
+    assert card._input_field.text_style.font_family == "MPLUSRounded1c"
+    assert card._input_field.text_style.letter_spacing == 0.5
+    assert card._input_field.strut_style.font_family == default_font_family()
+
+    card.set_input_font("ResourceHanRoundedCN", letter_spacing=0.4)
+    assert card._input_field.text_style.font_family == "ResourceHanRoundedCN"
+    assert card._input_field.text_style.letter_spacing == 0.4
 
 
 def test_input_footer_stays_outside_the_expanding_display_region() -> None:

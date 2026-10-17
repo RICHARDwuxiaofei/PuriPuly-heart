@@ -5,7 +5,10 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 
-from puripuly_heart.app.language_selection import LanguageSelectionChange
+from puripuly_heart.app.language_selection import (
+    LanguageSelectionChange,
+    unify_recent_language_codes,
+)
 from puripuly_heart.app.ports.runtime_apply import RuntimeApplyPort
 from puripuly_heart.app.ports.settings_runtime_effects import SettingsRuntimeEffectsPort
 from puripuly_heart.app.ports.settings_view import (
@@ -552,13 +555,18 @@ def materialize_immediate_settings_intent(
             clipboard=replace(updated.intent.clipboard, auto_translate_enabled=intent.enabled),
         )
     elif isinstance(intent, PeerExpectedLanguagesIntent):
-        updated = _with_intent(
-            updated,
-            languages=replace(
-                updated.intent.languages,
-                peer_expected_languages=list(intent.languages),
-            ),
+        languages = replace(
+            updated.intent.languages,
+            peer_expected_languages=list(intent.languages),
         )
+        if intent.recent_languages:
+            recent_languages = unify_recent_language_codes(intent.recent_languages)
+            languages = replace(
+                languages,
+                recent_source_languages=list(recent_languages),
+                recent_target_languages=list(recent_languages),
+            )
+        updated = _with_intent(updated, languages=languages)
     elif isinstance(intent, CustomVocabularySettingsIntent):
         custom_terms = dict(updated.intent.stt.custom_terms)
         custom_terms[intent.source_language] = list(intent.terms)
@@ -835,10 +843,29 @@ def materialize_provider_apply_intent(
     return updated
 
 
+def language_selection_reloads_settings_view(
+    current: AppSettingsVNext,
+    change: LanguageSelectionChange,
+) -> bool:
+    languages = current.intent.languages
+    return (
+        change.source_code != languages.source_language
+        or change.target_code != languages.target_language
+        or change.secondary_target_code != languages.secondary_target_language
+        or change.peer_source_code != languages.peer_source_language
+        or change.peer_target_code != languages.peer_target_language
+        or change.peer_source_mode != languages.peer_source_mode
+    )
+
+
 def materialize_language_selection(
     current: AppSettingsVNext,
     change: LanguageSelectionChange,
 ) -> AppSettingsVNext:
+    recent_languages = unify_recent_language_codes(
+        change.recent_source_codes,
+        change.recent_target_codes,
+    )
     return _with_intent(
         current,
         languages=replace(
@@ -849,8 +876,8 @@ def materialize_language_selection(
             peer_source_mode=change.peer_source_mode,
             peer_source_language=change.peer_source_code,
             peer_target_language=change.peer_target_code,
-            recent_source_languages=list(change.recent_source_codes),
-            recent_target_languages=list(change.recent_target_codes),
+            recent_source_languages=list(recent_languages),
+            recent_target_languages=list(recent_languages),
         ),
     )
 
@@ -1177,8 +1204,9 @@ class SettingsApplicationOwner:
         if current is None:
             return
         updated = materialize_language_selection(current, change)
+        reload_settings_view = language_selection_reloads_settings_view(current, change)
         await self.apply(updated)
-        if self.settings.canonical is not None:
+        if reload_settings_view and self.settings.canonical is not None:
             self.projection.render(
                 self.settings.canonical,
                 preserve_custom_vocab_draft=True,

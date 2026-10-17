@@ -36,3 +36,15 @@ Temporary launchers, fixture assets, and probe scripts are not part of the repos
 ## Limits
 
 Not verified: physical microphone/output behavior, full multi-GB downloads or model inference, mainland direct-download routing, game/VR operation, or redesigned settings/microphone UI. The retained surfaces still need their separately planned UI integration and polishing.
+
+## Development refresh
+
+Merged upstream `dev` through `22e19771`, including shared typefaces, the unified recent-language queue, and removal of obsolete experiment artifacts. The branch's retained model/audio scope and existing feature exclusions are unchanged. No additional runtime integration edits were needed.
+
+```powershell
+.venv/Scripts/python.exe -m pytest -o addopts='' -q --tb=short tests/ui/test_typeface.py tests/ui/test_app_branches.py tests/ui/test_dashboard_view_branches.py tests/ui/test_display_card.py tests/ui/test_language_modal.py tests/ui/test_settings_view_branches.py tests/config/test_dual_target_settings.py tests/app/test_settings_application_owner.py tests/ui/test_model_assets_selection.py tests/app/test_audio_recording.py tests/app/test_active_byok_secret_application.py
+```
+
+Result: **595 passed**, with two deprecation warnings. `ruff check src tests` also passed. This is the refresh-specific selection, not another repository-wide run.
+
+The real native GUI started from the refreshed source with the same isolated, offline settings/store setup described above. English and Korean dashboard rendering were inspected with window-only screenshots. CLI `settings.apply` returned terminal `applied` for the locale change; a new GUI instance retained Korean after restart. Translation and both capture channels remained off, and ordered shutdown exited both probe hosts. The temporary launcher was removed.
