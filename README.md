@@ -440,6 +440,8 @@ uv sync --frozen --extra dev
 uv run python -m puripuly_heart.main run-gui
 ```
 
+The main-card input uses the source language's font and letter spacing independently of the UI language. Languages without extra letter spacing use zero tracking; the placeholder retains the UI language's typography.
+
 ### CLI
 
 The CLI can run the application without a GUI or control an already-running application. See the [CLI guide](docs/cli.md) for commands.

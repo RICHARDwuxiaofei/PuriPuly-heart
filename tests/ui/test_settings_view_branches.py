@@ -4107,6 +4107,87 @@ def test_peer_auto_detection_languages_card_loads_saved_hints(
     assert view._peer_auto_languages_editor._terms == ["ja", "zh-TW"]
 
 
+def test_hint_language_add_keeps_the_selected_language_when_settings_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettingsVNext()
+    view, _ = _make_settings_view(monkeypatch, settings=settings)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_peer_auto_languages_add("ja")
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._peer_auto_languages_editor._terms == ["ja"]
+    assert view._general_snapshot.peer_expected_languages == ("ja",)
+
+    view._on_peer_auto_languages_add("ar")
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._peer_auto_languages_editor._terms == ["ja", "ar"]
+
+    view._on_peer_auto_languages_add("en")
+    view.load_from_settings(
+        _vnext(settings, peer_expected_languages=["ja"]),
+        config_path=Path("settings.json"),
+    )
+
+    assert view._peer_auto_languages_editor._terms == ["ja", "ar", "en"]
+
+    view.load_from_settings(
+        _vnext(settings, peer_expected_languages=["ja", "ar", "en"]),
+        config_path=Path("settings.json"),
+    )
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._peer_auto_languages_editor._terms == []
+
+
+def test_hint_language_add_saves_hints_without_a_language_selection_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettingsVNext()
+    view, _ = _make_settings_view(monkeypatch, settings=settings)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    recent: list[str] = ["zh-CN", "ca", "ja"]
+
+    class Dashboard:
+        def recent_language_codes(self) -> list[str]:
+            return list(recent)
+
+        def remember_recent_language(self, code: str) -> None:
+            if code in recent:
+                recent.remove(code)
+            recent.insert(0, code)
+            del recent[3:]
+
+    view.bind_recent_language_queue(Dashboard())
+    emitted: list[AppSettingsVNext] = []
+    view.on_settings_changed = emitted.append
+    editor = view._peer_auto_languages_editor
+
+    editor._handle_select("ja")
+    editor._handle_select("ar")
+    editor._handle_select("en")
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert editor._terms == ["ja", "ar", "en"]
+    assert [item.intent.languages.peer_expected_languages for item in emitted] == [
+        ["ja"],
+        ["ja", "ar"],
+        ["ja", "ar", "en"],
+    ]
+    assert [item.intent.languages.recent_source_languages for item in emitted] == [
+        ["ja", "zh-CN", "ca"],
+        ["ar", "ja", "zh-CN"],
+        ["en", "ar", "ja"],
+    ]
+    assert [item.intent.languages.recent_target_languages for item in emitted] == [
+        ["ja", "zh-CN", "ca"],
+        ["ar", "ja", "zh-CN"],
+        ["en", "ar", "ja"],
+    ]
+
+
 def test_peer_auto_languages_add_button_uses_region_tone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

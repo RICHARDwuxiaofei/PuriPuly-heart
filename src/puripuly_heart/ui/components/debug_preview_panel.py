@@ -11,6 +11,7 @@ from puripuly_heart.ui.theme import (
     COLOR_ON_BACKGROUND,
     COLOR_PRIMARY,
     COLOR_SURFACE,
+    text_style,
 )
 
 DEBUG_PREVIEW_PANEL_DATA_KEY = "debug-preview-panel"
@@ -225,7 +226,7 @@ class DebugPreviewPanel(ft.Container):
                 ft.ControlState.HOVERED: COLOR_PRIMARY,
             },
             bgcolor=COLOR_SURFACE,
-            text_style=ft.TextStyle(size=12, weight=ft.FontWeight.BOLD),
+            text_style=text_style(size=12, weight=ft.FontWeight.BOLD),
             padding=ft.Padding.symmetric(horizontal=10, vertical=8),
             shape=ft.RoundedRectangleBorder(radius=12),
             overlay_color=ft.Colors.TRANSPARENT,
@@ -239,7 +240,7 @@ class DebugPreviewPanel(ft.Container):
                 ft.ControlState.HOVERED: COLOR_PRIMARY,
             },
             bgcolor=ft.Colors.TRANSPARENT,
-            text_style=ft.TextStyle(size=12, weight=ft.FontWeight.W_600),
+            text_style=text_style(size=12, weight=ft.FontWeight.W_600),
             padding=ft.Padding.symmetric(horizontal=10, vertical=7),
             shape=ft.RoundedRectangleBorder(radius=10),
             overlay_color=ft.Colors.with_opacity(0.08, COLOR_PRIMARY),
@@ -269,18 +270,21 @@ class DebugPreviewPanel(ft.Container):
     def apply_locale(self) -> None:
         _set_text_button_label(self._toggle_button, t("debug_preview.button"))
         self._toggle_button.tooltip = t("debug_preview.tooltip")
+        self._toggle_button.style = self._toggle_style()
         for action in self._actions:
-            _set_text_button_label(self._action_buttons[action.key], t(action.label_key))
+            button = self._action_buttons[action.key]
+            _set_text_button_label(button, t(action.label_key))
+            button.style = self._action_style()
         if self._extended_toggle_button is not None:
             _set_text_button_label(
                 self._extended_toggle_button,
                 t("debug_preview.more_diagnostics"),
             )
+            self._extended_toggle_button.style = self._action_style()
         for action in self._extended_actions:
-            _set_text_button_label(
-                self._extended_action_buttons[action.key],
-                t(action.label_key),
-            )
+            button = self._extended_action_buttons[action.key]
+            _set_text_button_label(button, t(action.label_key))
+            button.style = self._action_style()
         self._update_if_mounted()
 
     def _is_mounted(self) -> bool:

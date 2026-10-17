@@ -235,6 +235,7 @@ class ClipboardSettingsIntent:
 @dataclass(frozen=True, slots=True)
 class PeerExpectedLanguagesIntent:
     languages: tuple[str, ...]
+    recent_languages: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

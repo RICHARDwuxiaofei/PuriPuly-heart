@@ -153,7 +153,7 @@ from puripuly_heart.ui.flet_runtime import (
     is_hover_active,
     update_control_if_mounted,
 )
-from puripuly_heart.ui.fonts import font_for_language
+from puripuly_heart.ui.fonts import TypeFace, font_for_language, locale_body_letter_spacing
 from puripuly_heart.ui.gpu_device import GpuDeviceOption
 from puripuly_heart.ui.i18n import (
     available_locales,
@@ -192,6 +192,7 @@ from puripuly_heart.ui.theme import (
     COLOR_SECONDARY,
     COLOR_WARNING,
     text_field_outline_border,
+    text_style,
 )
 
 logger = logging.getLogger(__name__)
@@ -360,10 +361,7 @@ def _settings_secondary_text_button_style() -> ft.ButtonStyle:
             ft.ControlState.HOVERED: COLOR_PRIMARY,
             ft.ControlState.DEFAULT: COLOR_SECONDARY,
         },
-        text_style=ft.TextStyle(
-            size=20,
-            font_family=font_for_language(get_locale()),
-        ),
+        text_style=text_style(size=20),
         overlay_color=ft.Colors.TRANSPARENT,
         animation_duration=0,
     )
@@ -501,6 +499,7 @@ class SettingsView(ft.Column):
         self._provider_draft: ProviderSettingsSnapshot | None = None
         self._provider_edits: dict[type, ProviderSettingsEdit] = {}
         self._general_snapshot: GeneralSettingsSnapshot | None = None
+        self._peer_auto_languages_pending: tuple[str, ...] | None = None
         self._prompt_snapshot: PromptSettingsSnapshot | None = None
         self._overlay_snapshot: OverlaySettingsSnapshot | None = None
         self._config_path: Path | None = None
@@ -941,7 +940,7 @@ class SettingsView(ft.Column):
 
     def _get_button_style(
         self,
-        font_family: str,
+        font_family: str | None,
         *,
         size: int = 20,
         default_color: str = COLOR_SECONDARY,
@@ -957,9 +956,9 @@ class SettingsView(ft.Column):
         return ft.ButtonStyle(
             color=color,
             icon_color=color,
-            text_style=ft.TextStyle(
+            text_style=text_style(
+                TypeFace(font_family, locale_body_letter_spacing(get_locale())),
                 size=size,
-                font_family=font_family,
             ),
             overlay_color=ft.Colors.TRANSPARENT,
             animation_duration=0,
@@ -1163,10 +1162,7 @@ class SettingsView(ft.Column):
                     ft.ControlState.HOVERED: COLOR_PRIMARY,
                     ft.ControlState.DEFAULT: COLOR_SECONDARY,
                 },
-                text_style=ft.TextStyle(
-                    size=20,
-                    font_family=font_for_language(get_locale()),
-                ),
+                text_style=text_style(size=20),
                 overlay_color=ft.Colors.TRANSPARENT,
                 animation_duration=0,
             ),
@@ -1500,10 +1496,7 @@ class SettingsView(ft.Column):
                     ft.ControlState.HOVERED: COLOR_PRIMARY,
                     ft.ControlState.DEFAULT: COLOR_SECONDARY,
                 },
-                text_style=ft.TextStyle(
-                    size=20,
-                    font_family=font_for_language(get_locale()),
-                ),
+                text_style=text_style(size=20),
                 overlay_color=ft.Colors.TRANSPARENT,
                 animation_duration=0,
             ),
@@ -3226,6 +3219,15 @@ class SettingsView(ft.Column):
         self._custom_vocab_tag_editor.set_terms(list(self._prompt_snapshot.custom_vocabulary_terms))
         self._custom_vocab_tag_editor.clear_input()
 
+    def bind_recent_language_queue(self, dashboard: object) -> None:
+        """Point the hint editor at the dashboard's shared recent-language queue."""
+        codes = getattr(dashboard, "recent_language_codes", None)
+        remember = getattr(dashboard, "remember_recent_language", None)
+        editor = getattr(self, "_peer_auto_languages_editor", None)
+        if editor is None or not callable(codes) or not callable(remember):
+            return
+        editor.bind_recent_languages(codes=codes, remember=remember)
+
     def _sync_peer_auto_languages_editor(
         self,
         settings: GeneralSettingsSnapshot | None = None,
@@ -3233,23 +3235,38 @@ class SettingsView(ft.Column):
         if not hasattr(self, "_peer_auto_languages_editor"):
             return
         settings = settings or self._general_snapshot
-        languages = () if settings is None else settings.peer_expected_languages
+        languages = () if settings is None else tuple(settings.peer_expected_languages)
+        pending = self._peer_auto_languages_pending
+        if pending is not None and languages != pending:
+            if (
+                self._general_snapshot is not None
+                and self._general_snapshot.peer_expected_languages != pending
+            ):
+                self._general_snapshot = replace(
+                    self._general_snapshot,
+                    peer_expected_languages=pending,
+                )
+            self._peer_auto_languages_editor.set_terms(list(pending))
+            return
+        self._peer_auto_languages_pending = None
         self._peer_auto_languages_editor.set_terms(list(languages))
 
     def _set_peer_auto_languages(self, languages: list[str]) -> None:
         if self._general_snapshot is None:
             return
-        normalized = list(
+        normalized = tuple(
             dict.fromkeys(language.strip() for language in languages if language.strip())
         )
-        if self._general_snapshot.peer_expected_languages == tuple(normalized):
+        if self._general_snapshot.peer_expected_languages == normalized:
             return
+        self._peer_auto_languages_pending = normalized
         self._general_snapshot = replace(
             self._general_snapshot,
-            peer_expected_languages=tuple(normalized),
+            peer_expected_languages=normalized,
         )
-        self._sync_peer_auto_languages_editor()
-        self._emit_settings_changed(PeerExpectedLanguagesIntent(tuple(normalized)))
+        self._peer_auto_languages_editor.set_terms(list(normalized))
+        recent_languages = self._peer_auto_languages_editor.recent_language_codes()
+        self._emit_settings_changed(PeerExpectedLanguagesIntent(normalized, recent_languages))
 
     def _on_peer_auto_languages_add(self, language: str) -> None:
         if self._general_snapshot is None:

@@ -12,7 +12,12 @@ from pathlib import Path
 import flet as ft
 
 from puripuly_heart.ui.flet_runtime import control_page, update_control_if_mounted
-from puripuly_heart.ui.fonts import font_for_language
+from puripuly_heart.ui.fonts import (
+    LOG_TYPEFACE,
+    TypeFace,
+    font_for_language,
+    locale_body_letter_spacing,
+)
 from puripuly_heart.ui.i18n import get_locale, language_name, source_label, t
 from puripuly_heart.ui.logs.contract import LogsSurfaceSlots
 from puripuly_heart.ui.logs.renderer import compose_logs_surface
@@ -20,6 +25,7 @@ from puripuly_heart.ui.theme import (
     COLOR_ON_BACKGROUND,
     COLOR_PRIMARY,
     COLOR_SECONDARY,
+    text_style,
 )
 
 MAX_LOG_ENTRIES = 4000
@@ -177,9 +183,9 @@ class LogsView(ft.Column):
                 ft.ControlState.HOVERED: COLOR_PRIMARY,
                 ft.ControlState.DEFAULT: COLOR_SECONDARY,
             },
-            text_style=ft.TextStyle(
+            text_style=text_style(
+                TypeFace(font_family, locale_body_letter_spacing(get_locale())),
                 size=20,
-                font_family=font_family,
             ),
             overlay_color=ft.Colors.TRANSPARENT,
             animation_duration=0,
@@ -215,9 +221,9 @@ class LogsView(ft.Column):
         self._log_text = ft.Text(
             "",
             size=16,
-            font_family="Consolas",
+            font_family=LOG_TYPEFACE.font_family,
             color=COLOR_ON_BACKGROUND,
-            style=ft.TextStyle(letter_spacing=0),
+            style=text_style(LOG_TYPEFACE),
             selectable=True,
         )
 
