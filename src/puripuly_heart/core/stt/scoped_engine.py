@@ -39,6 +39,7 @@ from puripuly_heart.core.stt.backend import (
     STTRecognitionUnit,
     STTRecognitionUnitTerminal,
     STTScopedTurnSession,
+    scoped_event_for_delivery,
 )
 from puripuly_heart.core.stt.diagnostics import recognition_cause, recognition_failure_diagnostics
 from puripuly_heart.core.stt.scoped_event_buffer import STTProviderEventBuffer
@@ -182,6 +183,7 @@ class _ActiveTurn:
     retention_allocations: list[object] = field(default_factory=list)
     final_wait_started_at_s: float | None = None
     independent_recognition: bool = False
+    pending_update: STTProviderTurnUpdate | None = None
 
 
 @dataclass(slots=True)
@@ -263,6 +265,9 @@ class ScopedRecognitionEngine:
     _lifetime_task: asyncio.Task[None] | None = field(init=False, default=None, repr=False)
     _lifetime_deadline_s: float | None = field(init=False, default=None, repr=False)
     _session_max_age_s: float | None = field(init=False, default=None, repr=False)
+    _session_initial_readiness_pending: bool = field(init=False, default=False, repr=False)
+    _quarantined_session: STTScopedTurnSession | None = field(init=False, default=None, repr=False)
+    _delivery_generation: int = field(init=False, default=0, repr=False)
     _input_lock: asyncio.Lock = field(init=False, repr=False)
     _turn_resolved: asyncio.Event = field(init=False, repr=False)
     _abort_lock: asyncio.Lock = field(init=False, repr=False)
@@ -338,8 +343,10 @@ class ScopedRecognitionEngine:
 
     @property
     def cleanup_debt(self) -> int:
-        session_debt = sum(not task.done() for task in self._cleanup_tasks) + sum(
-            not task.done() for task in self._factory_tasks
+        session_debt = (
+            sum(not task.done() for task in self._cleanup_tasks)
+            + sum(not task.done() for task in self._factory_tasks)
+            + int(self._quarantined_session is not None)
         )
         if session_debt:
             return session_debt
@@ -390,6 +397,16 @@ class ScopedRecognitionEngine:
         await self._event_drained.wait()
 
     async def handle_stream_input(self, owned: OwnedStreamInput) -> None:
+        if (
+            owned.settings.provider_id == "qwen_audio"
+            and owned.event.boundary_reason == "source_discontinuity"
+        ):
+            if not self._closed and (owned.is_current is None or owned.is_current()):
+                await self.abort(reason="source_discontinuity")
+                if self.channel == "peer":
+                    self._episode_failures = 0
+                    self._recovery_backoff_pending = False
+            return
         authority_generation = self._authority_generation
         async with self._input_lock:
             if (
@@ -803,6 +820,12 @@ class ScopedRecognitionEngine:
     async def abort(
         self, *, reason: str = "cancelled", failure_diagnostics: ErrorDiagnostics | None = None
     ) -> None:
+        if not (
+            reason == "closed"
+            and self._closing
+            and all(turn.local_sealed for turn in self._turns.values())
+        ):
+            self._delivery_generation += 1
         self._authority_generation += 1
         if reason in {
             "cancelled",
@@ -874,12 +897,20 @@ class ScopedRecognitionEngine:
 
     async def close(self) -> None:
         if self._closed:
+            if not await self._reclaim_quarantined_session(self.event_drain_timeout_s):
+                raise RuntimeError("provider_resource_quarantined")
             return
         self._closing = True
+        if self._session_scope is not None and self._session_scope[0] == "qwen_audio":
+            pending = tuple(self._terminal_wait_tasks)
+            if pending and all(turn.local_sealed for turn in self._turns.values()):
+                await asyncio.gather(*pending)
+                await self._drain_completed_turns()
         await self.abort(reason="closed")
         self._closed = True
         self._cancel_lifetime_check()
         await self._await_event_drain(self.event_drain_timeout_s)
+        self._delivery_generation += 1
         self._event_buffer.close()
         event_task = self._event_dispatch_task
         if event_task is not None:
@@ -901,6 +932,8 @@ class ScopedRecognitionEngine:
             )
             for task in done:
                 self._consume_task_result(task)
+        if not await self._reclaim_quarantined_session(self.event_drain_timeout_s):
+            raise RuntimeError("provider_resource_quarantined")
 
     async def close_backend(self) -> None:
         await self.close()
@@ -982,6 +1015,7 @@ class ScopedRecognitionEngine:
             normalizer=STTScopedTurnNormalizer(
                 identity,
                 diagnostic_sink=self._normalization_diagnostic,
+                preserve_text=settings.provider_id == "qwen_audio",
             ),
             retention_profile=(
                 self.retention_profile_resolver(settings)
@@ -1131,7 +1165,7 @@ class ScopedRecognitionEngine:
         *,
         context_only: bool,
     ) -> None:
-        if not self._has_write_authority(session, turn):
+        if turn.write_failed or not self._has_write_authority(session, turn):
             return
         if turn.independent_recognition and self._stream_recovery is not None:
             recovery = self._stream_recovery
@@ -1163,6 +1197,15 @@ class ScopedRecognitionEngine:
             or turn.retained_bytes + retained_bytes > profile.max_retained_bytes
         ):
             await self._fail_for_retention(turn)
+            return
+        if (
+            turn.settings.provider_id == "qwen_audio"
+            and (self.channel == "peer" or self._session_initial_readiness_pending)
+            and not turn.successful_payloads
+            and callable(getattr(session, "prepare_turn_audio", None))
+            and not await self._prepare_qwen_turn_audio(session, turn)
+        ):
+            await self._finish_failed_turn_immediately(turn)
             return
         transient_owner = object()
         native_owner = object()
@@ -1312,6 +1355,7 @@ class ScopedRecognitionEngine:
                 self._retire_current_session(watchdogs)
         if self.cleanup_debt:
             await self._await_cleanup_debt(watchdogs.readiness_timeout_s)
+            await self._reclaim_quarantined_session(watchdogs.drain_timeout_s)
             if self.cleanup_debt:
                 raise RuntimeError("provider_resource_quarantined")
         if self._closed or authority_generation != self._authority_generation:
@@ -1374,6 +1418,7 @@ class ScopedRecognitionEngine:
                     last_error = exc
                 else:
                     self._session = session
+                    self._session_initial_readiness_pending = settings.provider_id == "qwen_audio"
                     self._provider_epoch_id = epoch_id
                     self._session_scope = scope
                     self._session_opened_at_s = self.monotonic_clock()
@@ -1423,50 +1468,169 @@ class ScopedRecognitionEngine:
                 await self.sleep(delay)
                 if self._closed or authority_generation != self._authority_generation:
                     return
+        if last_error is not None and self._start_connection_cooldown(
+            settings, watchdogs, last_error
+        ):
+            return
+        raise RuntimeError("provider_recovery_exhausted") from last_error
+
+    def _retryable_connection_error(self, error: BaseException, provider_id: str) -> bool:
+        diagnostics = recognition_failure_diagnostics(
+            error,
+            provider=provider_id,
+            channel=self.channel,
+            operation="readiness",
+            reason="provider_not_ready",
+        )
+        configuration_failure = any(
+            isinstance(
+                cause,
+                (FileNotFoundError, IsADirectoryError, NotADirectoryError, PermissionError),
+            )
+            for cause in transport_exception_chain(error)
+        )
+        return not configuration_failure and (
+            diagnostics.category in {"timeout", "service_unavailable", "rate_limit"}
+            or (diagnostics.category == "network" and classify_transport_error(error) == "network")
+        )
+
+    def _start_connection_cooldown(
+        self,
+        settings: AudioSegmentSettingsSnapshot,
+        watchdogs: STTRecognitionWatchdogs,
+        error: BaseException,
+    ) -> bool:
         cooldown_s = watchdogs.connect_recovery_cooldown_s
-        if cooldown_s is not None and last_error is not None:
-            diagnostics = recognition_failure_diagnostics(
-                last_error,
-                provider=settings.provider_id,
-                channel=self.channel,
-                operation="readiness",
-                reason="provider_not_ready",
+        if cooldown_s is None or not self._retryable_connection_error(error, settings.provider_id):
+            return False
+        diagnostics = recognition_failure_diagnostics(
+            error,
+            provider=settings.provider_id,
+            channel=self.channel,
+            operation="readiness",
+            reason="provider_not_ready",
+        )
+        self._connection_retry_at_s = self.monotonic_clock() + cooldown_s
+        emit_failure(
+            logger,
+            replace(
+                diagnostics,
+                cause_id=self._episode_cause.diagnostic_id if self._episode_cause else None,
+                retry_after_ms=int(cooldown_s * 1000),
+                fields={
+                    **diagnostics.fields,
+                    "attempts": self._episode_failures,
+                    "recovery_pending": True,
+                },
+            ),
+            severity="warning",
+            disposition="degraded",
+            stage="recovery",
+        )
+        return True
+
+    async def _prepare_qwen_turn_audio(
+        self, session: STTScopedTurnSession, turn: _ActiveTurn
+    ) -> bool:
+        watchdogs = turn.watchdogs
+        prepare = getattr(session, "prepare_turn_audio")
+        deadline = self.monotonic_clock() + watchdogs.readiness_timeout_s
+        if self._session_opened_at_s is not None and self._session_max_age_s is not None:
+            deadline = min(deadline, self._session_opened_at_s + self._session_max_age_s)
+        first_cause = self._episode_cause
+        last_error: BaseException = TimeoutError("provider_readiness_timeout")
+        base_failures = self._episode_failures
+        for attempt in range(base_failures, watchdogs.connect_attempts):
+            if not self._has_write_authority(session, turn):
+                return False
+            remaining = deadline - self.monotonic_clock()
+            if remaining <= 0:
+                break
+            task = asyncio.create_task(
+                prepare(turn.identity),
+                name=f"scoped-stt-readiness:{turn.identity.provider_turn_id}",
             )
-            configuration_failure = any(
-                isinstance(
-                    cause,
-                    (FileNotFoundError, IsADirectoryError, NotADirectoryError, PermissionError),
+            operations = self._operation_tasks.setdefault(id(session), set())
+            operations.add(task)
+            try:
+                done, _pending = await asyncio.wait(
+                    {task}, timeout=min(watchdogs.write_timeout_s, remaining)
                 )
-                for cause in transport_exception_chain(last_error)
-            )
-            if not configuration_failure and (
-                diagnostics.category in {"timeout", "service_unavailable", "rate_limit"}
-                or (
-                    diagnostics.category == "network"
-                    and classify_transport_error(last_error) == "network"
+            except asyncio.CancelledError:
+                task.cancel()
+                raise
+            retry_safe = True
+            if task not in done:
+                task.cancel()
+                done, _pending = await asyncio.wait({task}, timeout=watchdogs.drain_timeout_s)
+                retry_safe = task in done
+                last_error = TimeoutError("provider_readiness_timeout")
+            else:
+                try:
+                    task.result()
+                except BaseException as exc:
+                    last_error = exc
+                else:
+                    operations.discard(task)
+                    if not operations:
+                        self._operation_tasks.pop(id(session), None)
+                    self._session_initial_readiness_pending = False
+                    return self._has_write_authority(session, turn)
+            if task.done():
+                operations.discard(task)
+                self._consume_task_result(task)
+                if not operations:
+                    self._operation_tasks.pop(id(session), None)
+            if not self._has_write_authority(session, turn):
+                return False
+            retry_safe = retry_safe and getattr(session, "readiness_retry_safe", True)
+            if not retry_safe:
+                self._quarantined_session = session
+            self._episode_failures = attempt + 1
+            if first_cause is None:
+                first_cause = recognition_failure_diagnostics(
+                    last_error,
+                    provider=turn.settings.provider_id,
+                    channel=self.channel,
+                    operation="readiness",
+                    reason="provider_not_ready",
+                    identity=turn.identity,
                 )
-            ):
-                self._connection_retry_at_s = self.monotonic_clock() + cooldown_s
                 emit_failure(
                     logger,
-                    replace(
-                        diagnostics,
-                        cause_id=(
-                            self._episode_cause.diagnostic_id if self._episode_cause else None
-                        ),
-                        retry_after_ms=int(cooldown_s * 1000),
-                        fields={
-                            **diagnostics.fields,
-                            "attempts": self._episode_failures,
-                            "recovery_pending": True,
-                        },
-                    ),
+                    first_cause,
                     severity="warning",
                     disposition="degraded",
-                    stage="recovery",
+                    stage="readiness",
                 )
-                return
-        raise RuntimeError("provider_recovery_exhausted") from last_error
+            self._episode_cause = first_cause
+            if not self._retryable_connection_error(last_error, turn.settings.provider_id):
+                self._episode_failures = watchdogs.connect_attempts
+                break
+            if not retry_safe:
+                break
+            if attempt + 1 < watchdogs.connect_attempts:
+                delay = min(
+                    watchdogs.connect_retry_base_s * (2**attempt),
+                    watchdogs.connect_retry_max_s,
+                )
+                await self.sleep(min(delay, max(0.0, deadline - self.monotonic_clock())))
+        if not self._has_write_authority(session, turn):
+            return False
+        self._episode_cause = first_cause
+        recovery_pending = self._start_connection_cooldown(turn.settings, watchdogs, last_error)
+        self._set_turn_failure(
+            turn,
+            "provider_not_ready",
+            exception=last_error,
+            operation="readiness",
+            recovery_pending=recovery_pending,
+            failure_diagnostics=first_cause,
+        )
+        turn.write_failed = True
+        if not recovery_pending:
+            self._notify_terminal_failure(last_error)
+        return False
 
     async def _consume_session_events(
         self,
@@ -1495,19 +1659,21 @@ class ScopedRecognitionEngine:
                     if event.text.strip():
                         self._last_native_speech_at_s = self.monotonic_clock()
                         self._schedule_lifetime_check()
-                    event = replace(
-                        event,
-                        estimated_last_speech_at=(
-                            self._estimated_last_speech_at
-                            if self._estimated_speech_scope
-                            == (
-                                stream.activation_generation,
-                                stream.capture_epoch,
-                                stream.settings_scope,
-                            )
-                            else None
-                        ),
-                    )
+                    native = event.provenance.transcription
+                    if native is None or native.timestamp_basis is None:
+                        event = replace(
+                            event,
+                            estimated_last_speech_at=(
+                                self._estimated_last_speech_at
+                                if self._estimated_speech_scope
+                                == (
+                                    stream.activation_generation,
+                                    stream.capture_epoch,
+                                    stream.settings_scope,
+                                )
+                                else None
+                            ),
+                        )
                     await self._emit(
                         STTRecognitionUnitTerminal(event, "final" if event.text else "empty")
                     )
@@ -1610,6 +1776,13 @@ class ScopedRecognitionEngine:
                     await self._drain_completed_turns()
                     continue
                 if isinstance(event, STTProviderTurnUpdate):
+                    if (
+                        turn.settings.provider_id == "qwen_audio"
+                        and self._turn_order
+                        and self._turn_order[0] != turn.identity
+                    ):
+                        turn.pending_update = event
+                        continue
                     try:
                         normalized = turn.normalizer.apply_update(event)
                     except STTNormalizationError as exc:
@@ -1620,6 +1793,10 @@ class ScopedRecognitionEngine:
                     continue
                 if isinstance(event, STTProviderTurnTerminal):
                     if turn.terminal_ready.done():
+                        continue
+                    if turn.settings.provider_id == "qwen_audio":
+                        turn.terminal_ready.set_result(event)
+                        await self._drain_completed_turns()
                         continue
                     try:
                         terminal = turn.normalizer.apply_terminal(event)
@@ -1832,6 +2009,15 @@ class ScopedRecognitionEngine:
     ) -> None:
         if turn.terminal_ready.done():
             return
+        if (
+            turn.pending_update is not None
+            and turn.authority_generation == self._authority_generation
+        ):
+            update, turn.pending_update = turn.pending_update, None
+            try:
+                turn.normalizer.apply_update(update)
+            except STTNormalizationError as exc:
+                reason = exc.reason
         diagnostics = recognition_failure_diagnostics(
             exception if recovery_pending else failure_diagnostics or exception,
             provider=turn.settings.provider_id,
@@ -1894,10 +2080,34 @@ class ScopedRecognitionEngine:
                 if turn is None:
                     self._turn_order.popleft()
                     continue
+                update, turn.pending_update = turn.pending_update, None
+                if update is not None and turn.authority_generation == self._authority_generation:
+                    try:
+                        normalized = turn.normalizer.apply_update(update)
+                    except STTNormalizationError as exc:
+                        self._set_turn_failure(turn, exc.reason)
+                    else:
+                        if normalized is not None:
+                            await self._emit(normalized)
                 if not turn.local_sealed or not turn.terminal_ready.done():
                     break
                 self._turn_order.popleft()
-                await self._finish_turn(turn, turn.terminal_ready.result())
+                terminal = turn.terminal_ready.result()
+                if (
+                    turn.settings.provider_id == "qwen_audio"
+                    and isinstance(terminal, STTProviderTurnTerminal)
+                    and turn.normalizer.terminal is None
+                ):
+                    try:
+                        terminal = turn.normalizer.apply_terminal(terminal)
+                    except STTNormalizationError as exc:
+                        terminal = STTProviderTurnTerminal(
+                            identity=turn.identity,
+                            outcome="failed",
+                            failure_reason=exc.reason,
+                            epoch_disposition="retire",
+                        )
+                await self._finish_turn(turn, terminal)
 
     async def _finish_turn(
         self,
@@ -1958,7 +2168,11 @@ class ScopedRecognitionEngine:
                     epoch_disposition="retire",
                 )
             )
-        if terminal.outcome in ("final", "empty", "submitted"):
+        older_than_pending_recovery = self._connection_retry_at_s is not None and any(
+            pending.terminal_ready.done() and pending.terminal_ready.result().recovery_pending
+            for pending in self._turns.values()
+        )
+        if terminal.outcome in ("final", "empty", "submitted") and not older_than_pending_recovery:
             if self._episode_cause is not None:
                 recovered = recognition_failure_diagnostics(
                     None,
@@ -1982,10 +2196,14 @@ class ScopedRecognitionEngine:
             self._recovery_backoff_pending = False
             self._terminal_failure_notified = False
             self._connection_retry_at_s = None
-        elif not (terminal.recovery_pending and self._connection_retry_at_s is not None) and not (
-            turn.independent_recognition
-            and self._stream_recovery is not None
-            and self._stream_recovery.pending
+        elif (
+            terminal.outcome not in ("final", "empty", "submitted")
+            and not (terminal.recovery_pending and self._connection_retry_at_s is not None)
+            and not (
+                turn.independent_recognition
+                and self._stream_recovery is not None
+                and self._stream_recovery.pending
+            )
         ):
             self._episode_failures += 1
             if turn.settings.provider_id == "soniox" and terminal.outcome in ("failed", "degraded"):
@@ -2127,6 +2345,7 @@ class ScopedRecognitionEngine:
         allowed = (
             session is not None
             and self._session_allows_sealed_turn_overlap(session)
+            and len(self._turns) < getattr(session, "max_inflight_turns", float("inf"))
             and not self._session_retirement_requested
             and self._ended_provider_epoch_id != self._provider_epoch_id
             and self._session_scope == self._settings_scope(settings)
@@ -2217,6 +2436,7 @@ class ScopedRecognitionEngine:
         if epoch_id is not None:
             self._retiring_provider_epoch_ids.add(epoch_id)
         self._session = None
+        self._session_initial_readiness_pending = False
         self._recognition_stream = None
         self._last_receipt_sequence = 0
         self._session_consumer = None
@@ -2398,6 +2618,14 @@ class ScopedRecognitionEngine:
             task.cancel()
 
     async def _emit(self, event: STTProviderTurnEvent) -> None:
+        if (
+            isinstance(event, STTProviderTurnUpdate | STTProviderTurnTerminal)
+            and event.identity.settings_scope
+            and event.identity.settings_scope[0] == "qwen_audio"
+            and not (isinstance(event, STTProviderTurnTerminal) and event.outcome == "cancelled")
+        ):
+            generation = self._delivery_generation
+            event = replace(event, is_current=lambda: generation == self._delivery_generation)
         sink = self.event_sink
         if sink is None and isinstance(event, STTProviderInputTerminal):
             sink = self._deferred_event_sink
@@ -2434,6 +2662,9 @@ class ScopedRecognitionEngine:
                 raise RuntimeError("scoped STT event sink is not bound")
             self._event_dispatching = True
             try:
+                event = scoped_event_for_delivery(event)
+                if event is None:
+                    continue
                 result = sink(event)
                 if inspect.isawaitable(result):
                     await result
@@ -2493,7 +2724,11 @@ class ScopedRecognitionEngine:
                     if turn.identity.provider_epoch_id == retiring_epoch_id:
                         self._set_turn_failure(turn, "provider_retirement_drain_timeout")
                 await self._drain_completed_turns()
-        await self._bounded_cleanup_call(session.close(), watchdogs.drain_timeout_s)
+        closed = await self._bounded_cleanup_call(session.close(), watchdogs.drain_timeout_s)
+        if closed and self._quarantined_session is session:
+            self._quarantined_session = None
+        elif not closed and not getattr(session, "readiness_retry_safe", True):
+            self._quarantined_session = session
         if consumer is not None and not consumer.done():
             consumer.cancel()
         if consumer is not None:
@@ -2516,20 +2751,34 @@ class ScopedRecognitionEngine:
         _done, unresolved = await asyncio.wait(pending, timeout=timeout)
         return not unresolved
 
-    async def _bounded_cleanup_call(self, awaitable: Awaitable[None], timeout: float) -> None:
+    async def _reclaim_quarantined_session(self, timeout: float) -> bool:
+        session = self._quarantined_session
+        if session is None:
+            return True
+        if any(not task.done() for task in self._cleanup_tasks):
+            return False
+        if not await self._bounded_cleanup_call(session.close(), timeout):
+            return False
+        if self._quarantined_session is session:
+            self._quarantined_session = None
+        return True
+
+    async def _bounded_cleanup_call(self, awaitable: Awaitable[None], timeout: float) -> bool:
         task = asyncio.create_task(awaitable)
         done, _pending = await asyncio.wait({task}, timeout=timeout)
         if task in done:
             try:
                 task.result()
             except asyncio.CancelledError:
-                pass
+                return False
             except Exception as exc:
                 self._record_cleanup_failure(exc, "provider_cleanup_failed")
-            return
+                return False
+            return True
         self._record_cleanup_failure(TimeoutError(), "provider_cleanup_timeout")
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        return False
 
     def _schedule_late_factory_reclaim(
         self,

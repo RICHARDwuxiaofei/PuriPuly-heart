@@ -187,16 +187,33 @@ The finite fallback is equivalent only when it carries the same explicit consent
 - `accept_terms` is invalid for self capture or a peer-off request.
 - Inspect the terms first. Pass `true` only for the user's explicit informed choice.
 
-### Qwen Audio Peer recovery
+### Qwen Audio handover and Peer recovery
+
+- **Local completion and publication**
+  - Directly selected Qwen Audio assigns each local segment to one native task. A local end sends `finish-task`; the next segment can use the other connection without waiting for the preceding task's result. Its PCM waits for its own `task-started`.
+  - Peer retains its four/five-second pause opportunities and six-second hard boundary. It collects distinct native final sentences and drain tails into one completed local-segment result before translation admission. Native sentence endings, partials and `fixed` values do not independently trigger Peer translations.
+  - SELF shares the handover mechanism but retains its own VAD endpoint and stable-contribution/low-latency merge policy. It does not gain Peer's six-second cut. Successor contributions remain ordered behind their predecessor; manual input does not wait for ASR drain.
+  - The native silence parameters remain 800 ms for Peer and 6000 ms for SELF. They are not the app's local endpoint policy or an end-to-end latency guarantee. Handover removes predecessor waiting where a slot is available; it does not remove initial readiness, recognition, merge or translation time.
+- **Audio scope and limits**
+  - Each channel has at most two connections and two in-flight local turns; using both channels can use four connections. The connection limit includes current, retained and retiring Qwen owners: healthy matching-scope sockets may be reused, while another scope or a replacement after retirement waits for confirmed old cleanup before admitting native tasks. Their queues, settings and result authority are separate. If both slots are occupied, subsequent input waits within the existing bounded capture queue and operation/retention limits.
+  - Qwen receives locally selected speech/context/tail audio rather than an all-capture stream between local segments. Capture permission, source selection and mute/activation gates still apply. Selected context and tails can contain background audio or pauses.
+  - Existing onset context and applicable 300 ms Peer continuation context are retained. Context can overlap preceding input, but handover adds no second replay, whole-stream copy or fabricated keepalive audio. Normal recognition starts tasks on demand, not empty standby tasks. Explicit key verification retains a bounded no-PCM permission probe.
+  - Each task retains at most 256 native sentences, 4096 source-map records and 256 KiB of text/identity/timing/map evidence. A native readiness attempt, PCM/finish write and final completion each retain their five-second defaults. Readiness retries have a separate existing budget, described below; five seconds is not an aggregate retry guarantee. These are failure bounds, not added healthy-path delays. Source/VAD-idle retirement remains 60 seconds. Failure or expiry is not successful empty recognition, and uncertain writes are not replayed.
+  - Equal locally selected PCM and task/request counts do not establish equal token charges. The restored local boundaries/context differ from the previous continuous Peer candidate; real-service concurrency, latency and billing require separate qualification.
+  - Other providers retain their own policies. Peer output remains excluded from the VRChat chatbox.
 
 - **Transient connection failures**
-  - Peer capture remains enabled when temporary connection timeouts, network failures, service unavailability, or rate limits exhaust its three short connection attempts.
-  - It waits 30 seconds before allowing another bounded attempt sequence on the next utterance.
+  - Initial Qwen session admission on either channel retains up to three safe pre-PCM readiness attempts within its 30-second budget, with 0.8/1.6-second retry backoffs.
+  - SELF retains its existing stop-on-failure behavior after initial retries are exhausted. It does not gain Peer's cooldown or automatic retries for later task failures.
+  - Peer also applies its readiness recovery to successor tasks. Capture remains enabled when temporary connection timeouts, network failures, service unavailability, or rate limits exhaust its three short attempts.
+  - A failed attempt must be safely retired before retry; unresolved cleanup is not permission to reuse its socket or native task identity. An unresolved session remains owned and contributes cleanup debt. That channel must reclaim old Qwen resources before constructing or admitting another Qwen owner, including explicit re-enable and return from another provider. Failed reclamation retains the typed runtime cause `provider_resource_quarantined`; the public capture receipt keeps its existing generic degraded-provider-failure projection. Other-provider, other-channel and manual work remain independent. Actual audio/finish writes retain their separate limits, and capture queue/expiry limits remain active during readiness.
+  - Peer waits 30 seconds before allowing another bounded attempt sequence on the next utterance.
   - Silence does not trigger background reconnects.
   - Failed or expired utterances are not replayed after recovery.
 - **Stopping and invalidation**
   - Authentication, configuration, certificate, and unclassified failures stop the channel rather than enter this recovery loop.
-  - Turning capture off or replacing the provider invalidates pending connections.
+  - Turning capture off or applying an invalidating provider configuration revokes the affected channel's old Qwen authority, including both slots and queued updates. Late old-task text cannot publish under the replacement scope. Drain-intended EOF/idle completion remains distinct from abort.
+  - A capture discontinuity also cancels pre-gap queued input and revokes both old slots. Its control notification is delivered independently of blocked audio dispatch; this does not enable all-capture PCM submission for Qwen. Deferred results recheck authority before consumption, so not-yet-admitted old text cannot enter the merge or translation owner. Previously admitted speech remains subject to the existing channel policies. Fresh post-gap input uses new recognition authority.
 - **Recovery observations**
   - During the wait, `capture status` can report active audio capture without implying that recognition is available.
   - Retained recognition diagnostics expose `recovery_pending` and `retry_after_ms`.

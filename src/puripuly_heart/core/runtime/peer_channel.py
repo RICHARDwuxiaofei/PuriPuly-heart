@@ -241,8 +241,17 @@ class _GenerationGuardedVadSink:
         ledger = self.runtime.segment_ledger
         if ledger is None:
             return
+        qwen_discontinuity = (
+            ledger.settings.provider_id == "qwen_audio"
+            and event.boundary_reason == "source_discontinuity"
+        )
         if ledger.settings.provider_id not in {"gemini_transcribe", "rolling_free"}:
-            return
+            if not qwen_discontinuity:
+                return
+            event = replace(event, chunk=event.chunk[:0], capture=())
+            self._closing = True
+            if self._worker is not None and not self._worker.done():
+                self._worker.cancel()
         if event.capture:
             self.runtime._current_stream_capture_epoch = event.capture[-1].capture_epoch
         elif event.boundary_reason == "source_discontinuity":
@@ -266,6 +275,15 @@ class _GenerationGuardedVadSink:
                 )
             ),
         )
+        if qwen_discontinuity:
+            try:
+                await cast(_VadSink, self.sink).handle_stream_input(owned)
+            finally:
+                await self.abort()
+                self._worker = None
+                self._closing = False
+                self.runtime._cancel_segment_ledger(ledger)
+            return
         await self._submit(owned)
 
     async def observe_source_activity(
@@ -1052,6 +1070,12 @@ class PeerCaptureSessionOwner:
         async with self._lock:
             if self._closed:
                 raise RuntimeError("PeerCaptureSessionOwner is closed")
+            invalidate_qwen = (
+                self._config is not None
+                and self._config.provider_id == "qwen_audio"
+                and self._config.runtime_signature != config.runtime_signature
+            )
+            restart = restart or invalidate_qwen
             self._requested_config = config
             requested_profile, _threshold = self._delivery_policy_for_config(config)
             if enabled and requested_profile == "on":
@@ -1124,6 +1148,12 @@ class PeerCaptureSessionOwner:
                         release_mode=release_mode,
                     )
                     return self.snapshot
+                if invalidate_qwen:
+                    await self._teardown_resources(
+                        target_state=PeerCaptureSessionState.STOPPED,
+                        generation=generation,
+                        release_mode="abort",
+                    )
                 await self._start_generation(
                     generation, config, provider_operation=provider_operation
                 )
@@ -1164,6 +1194,11 @@ class PeerCaptureSessionOwner:
                 or self._loop_task is not None
             ):
                 return self.snapshot
+            invalidate_qwen = (
+                self._config is not None
+                and self._config.provider_id == "qwen_audio"
+                and self._config.runtime_signature != config.runtime_signature
+            )
             self._generation += 1
             generation = self._generation
             provider_operation = current_diagnostic_operation()
@@ -1177,6 +1212,10 @@ class PeerCaptureSessionOwner:
         async with self._activation_lock:
             if generation != self._generation or self._closed:
                 return self.snapshot
+            if invalidate_qwen:
+                await self._provider.release(mode="abort")
+                self._retire_provider_attachment()
+                self._provider_signature = None
             reusable = (
                 self._provider.is_ready(config) and self._provider_attachment_token is not None
             )

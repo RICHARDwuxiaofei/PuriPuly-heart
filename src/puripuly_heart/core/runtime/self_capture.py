@@ -157,13 +157,23 @@ class _GenerationGuardedVadSink:
     async def handle_stream_input(self, event: CaptureStreamInput) -> None:
         if not self.owner.is_current_generation(self.capture_generation.value):
             return
+        qwen_discontinuity = (
+            self.ledger.settings.provider_id == "qwen_audio"
+            and event.boundary_reason == "source_discontinuity"
+        )
         if self.ledger.settings.provider_id not in {"gemini_transcribe", "rolling_free"}:
-            return
-        if self._worker is None:
-            self._worker = asyncio.create_task(self._run(), name="self-vad-dispatch")
-        elif self._worker.done():
-            await self._worker
-            raise RuntimeError("self VAD dispatch worker stopped")
+            if not qwen_discontinuity:
+                return
+            event = replace(event, chunk=event.chunk[:0], capture=())
+            self._closing = True
+            if self._worker is not None and not self._worker.done():
+                self._worker.cancel()
+        if not qwen_discontinuity:
+            if self._worker is None:
+                self._worker = asyncio.create_task(self._run(), name="self-vad-dispatch")
+            elif self._worker.done():
+                await self._worker
+                raise RuntimeError("self VAD dispatch worker stopped")
         if event.capture:
             self.owner._current_stream_capture_epoch = event.capture[-1].capture_epoch
         elif event.boundary_reason == "source_discontinuity":
@@ -186,6 +196,14 @@ class _GenerationGuardedVadSink:
                 )
             ),
         )
+        if qwen_discontinuity:
+            try:
+                await cast(_VadSink, self.sink).handle_stream_input(owned)
+            finally:
+                await self.abort()
+                self._worker = None
+                self._closing = False
+            return
         samples = int(event.chunk.size)
         if samples and self._stream_drop_pending:
             return
@@ -801,6 +819,13 @@ class SelfCaptureSessionOwner:
             if self._closed:
                 raise RuntimeError("SelfCaptureSessionOwner is closed")
             if (
+                self._config is not None
+                and self._config.provider_id == "qwen_audio"
+                and self._config.runtime_signature != config.runtime_signature
+            ):
+                restart = True
+                force_immediate = True
+            if (
                 enabled
                 and not restart
                 and self._desired_active
@@ -885,6 +910,11 @@ class SelfCaptureSessionOwner:
         async with self._state_lock:
             if self._closed:
                 raise RuntimeError("SelfCaptureSessionOwner is closed")
+            invalidate_qwen = (
+                self._config is not None
+                and self._config.provider_id == "qwen_audio"
+                and self._config.runtime_signature != config.runtime_signature
+            )
             self._generation += 1
             generation = self._generation
             self._generation_operation = (generation, current_diagnostic_operation())
@@ -897,6 +927,8 @@ class SelfCaptureSessionOwner:
         async with self._activation_lock:
             if self._is_superseded(generation):
                 return self.snapshot
+            if invalidate_qwen:
+                await self._release_provider(mode="abort")
             attachment_token = self._provider_attachment_token
             result: SelfCaptureProviderMutation | None = None
             failure_exception: Exception | None = None
@@ -1144,7 +1176,16 @@ class SelfCaptureSessionOwner:
                 if self._config.capture_signature == config.capture_signature:
                     await self._transition_provider(generation, config)
                     return
-            if self._source is not None or self._loop_task is not None or self._vad is not None:
+            if (
+                self._source is not None
+                or self._loop_task is not None
+                or self._vad is not None
+                or (
+                    self._config is not None
+                    and self._config.provider_id == "qwen_audio"
+                    and self._config.runtime_signature != config.runtime_signature
+                )
+            ):
                 mode, release_backend_after = self._release_plan(
                     self._config or config,
                     force_immediate=force_immediate,

@@ -360,6 +360,7 @@ TASK_CREATION_REVIEWS = (
             "ScopedRecognitionEngine.close_backend": 1,
             "ScopedRecognitionEngine._handle_end": 1,
             "ScopedRecognitionEngine._ensure_session": 2,
+            "ScopedRecognitionEngine._prepare_qwen_turn_audio": 1,
             "ScopedRecognitionEngine._run_write": 1,
             "ScopedRecognitionEngine._retire_current_session": 1,
             "ScopedRecognitionEngine._schedule_lifetime_check": 1,
@@ -442,14 +443,10 @@ TASK_CREATION_REVIEWS = (
     *_reviews(
         "providers/stt/qwen_audio.py",
         {
-            "_QwenAudioSession.start": 2,
-            "_QwenAudioSession._begin_task": 1,
-            "_QwenAudioSession._send_value": 1,
-            "_QwenAudioSession._handle_task_started": 1,
-            "_QwenAudioSession._handle_task_finished": 1,
-            "_QwenAudioSession._finish_active_task_locked": 1,
+            "_QwenAudioSession._ready": 1,
+            "_QwenAudioSession._seal": 1,
         },
-        "Qwen Audio session owns send, receive, timeout, queued-audio, and keepalive tasks; session close cancels and drains keepalive work",
+        "Each Qwen channel owns two slot receivers and per-task final watchdogs, cancelled and joined on slot reuse, stop, or abort",
     ),
     *_reviews(
         "providers/stt/sdk_network.py",

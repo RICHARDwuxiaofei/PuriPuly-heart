@@ -207,6 +207,7 @@ Implementation: `app/services/provider/provider_runtime_apply.py`. Behavior: `te
   - Local audio completion and transcript delivery are distinct.
   - Capture scope and provider lifetime authorize recognition results.
   - Provider recovery stays inside the recognition boundary.
+  - Direct Qwen Audio overlaps locally bounded tasks using at most two connections and bounded unsent audio per Self/Peer channel, preserving source order and each channel's endpoint and publication policies.
 - **Failure identity**
   - Typed turn/input/epoch results and provider-mutation results retain the original safe cause before reduction to a terminal reason.
   - Capture generation, provider generation/epoch, and turn identity remain distinct.
