@@ -250,6 +250,16 @@ Implementation: `core/stt/scoped_engine.py`, `core/stt/session_projection.py`. B
 
 Implementation: `core/orchestrator/translation_turn.py`, `core/orchestrator/translation_request.py`, `core/runtime/provider_rebuild.py`. Behavior: `tests/core/test_translation_turn_owner.py`, `tests/core/test_translation_request_owner.py`.
 
+### Progressive Self turns
+
+- `SelfTranslationChannelOwner` owns source reconciliation, acoustic continuation, grace, and source closure independently of translation completion.
+- `TranslationTurnLifecycleOwner` owns draft-to-final translation work and preserves compatible running requests when source closes.
+- Freed speculative capacity resumes only the current open draft; sealed turns retain normal bounded admission.
+- Speculative context is not accepted history. Canonical source is admitted once; logical cancellation does not release occupied provider capacity.
+- `SelfTurnPresentation` carries authoritative turn identity, revisions, and per-target status independently of overlay display state.
+
+Implementation: `core/orchestrator/self_translation_channel.py`, `core/orchestrator/translation_turn.py`, `domain/events.py`. Behavior: `tests/core/test_self_stream_233.py`.
+
 ### Managed local translation
 
 - **Model and provisioning identity**
@@ -300,6 +310,13 @@ Implementation: `app/services/chatgpt_account.py`, `providers/llm/chatgpt_plan.p
 - **Identity and delivery health**
   - Publication/turn identities and explicitly admitted operation/request identities cross each destination boundary unchanged.
   - Optional observer failure is separate delivery-health evidence, not a new translation failure.
+- **Progressive Self publication**
+  - Chatbox updates are independent of the overlay; newer revisions can replace unsent updates within the same turn.
+  - Earlier required corrections retain a sending opportunity without blocking successor translation. Manual bypass and normal pagination supersession remain.
+  - Identical successfully sent compatible previews are promoted to final without resending or restarting pagination.
+- **Application turn presentation**
+  - Views update turns by identity, revision, and target status. Older results may update their history without replacing the current dashboard turn.
+  - Preview rendering is separate from final-only accepted logging and context admission.
 - **OSC recovery**
   - OSC owners retain a failed publication obligation until actual local sends complete it.
   - An empty or unrelated delta and old cache equality cannot establish recovery.
