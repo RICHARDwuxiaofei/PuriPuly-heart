@@ -16,6 +16,7 @@ from puripuly_heart.core.audio.format import (
     AudioCaptureSpan,
     AudioFrameF32,
 )
+from puripuly_heart.core.owned_thread import run_owned_thread_call
 from puripuly_heart.core.runtime_logging import emit_basic_log
 
 logger = logging.getLogger(__name__)
@@ -744,20 +745,22 @@ class SoundDeviceAudioSource(AudioSource):
             return
         self._closed = True
 
-        stream = self._stream
-        with contextlib.suppress(Exception):
-            stream.stop()
-        with contextlib.suppress(Exception):
-            stream.close()
+        def close_native() -> None:
+            with contextlib.suppress(Exception):
+                self._stream.stop()
+            with contextlib.suppress(Exception):
+                self._stream.close()
 
         try:
-            self._queue.sync_q.put_nowait(None)
-        except Exception:
-            pass
-
-        self._queue.close()
-        with contextlib.suppress(Exception):
-            await self._queue.wait_closed()
+            await run_owned_thread_call(close_native)
+        finally:
+            try:
+                self._queue.sync_q.put_nowait(None)
+            except Exception:
+                pass
+            self._queue.close()
+            with contextlib.suppress(Exception):
+                await self._queue.wait_closed()
 
 
 def resolve_sounddevice_input_device(*, host_api: str = "", device: str = "") -> int | None:

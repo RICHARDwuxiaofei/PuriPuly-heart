@@ -245,6 +245,7 @@ class AudioTestDialog:
         self._is_open = False
         self._close_notified = False
         self._render_task: object | None = None
+        self._start_failed = False
 
     @property
     def dialog(self) -> ft.AlertDialog | None:
@@ -260,6 +261,7 @@ class AudioTestDialog:
     def open(self, thresholds: Mapping[str, float] | None = None) -> None:
         if self._is_open:
             return
+        self._start_failed = False
         for channel, panel in self._panels.items():
             panel.history.extend([(0.0, 0.0)] * HISTORY_SAMPLES)
             panel.last_sample_at = None
@@ -298,10 +300,19 @@ class AudioTestDialog:
         snapshot = self._snapshot_provider()
         channels = snapshot.get("channels")
         channels = channels if isinstance(channels, Mapping) else {}
+        if any(
+            isinstance(item, Mapping) and item.get("state") in {"pending", "ready", "failed"}
+            for item in channels.values()
+        ):
+            self._start_failed = False
         now = self._clock()
         for channel, panel in self._panels.items():
             channel_snapshot = channels.get(channel)
-            panel.apply_snapshot(channel_snapshot if isinstance(channel_snapshot, Mapping) else {})
+            panel.apply_snapshot(
+                {"state": "failed"}
+                if self._start_failed
+                else channel_snapshot if isinstance(channel_snapshot, Mapping) else {}
+            )
             if isinstance(channel_snapshot, Mapping) and channel_snapshot.get("state") == "ready":
                 panel.fill_silence(now)
             panel.render()
@@ -311,6 +322,7 @@ class AudioTestDialog:
             update_control_if_mounted(self._content)
 
     def show_failure(self) -> None:
+        self._start_failed = True
         for panel in self._panels.values():
             panel.apply_snapshot({"state": "failed"})
         if self._content is not None:

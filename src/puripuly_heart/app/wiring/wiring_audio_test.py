@@ -134,7 +134,7 @@ class AudioTestCaptureControl:
             enabled=enabled,
             busy=enabled or self.local_pending_provider() or source_open,
             source_open=source_open,
-            token=(id(owner), snapshot.generation if snapshot is not None else None),
+            token=(id(owner), owner),
             close_exception=owner.last_cleanup_exception if owner is not None else None,
         )
 
@@ -152,7 +152,7 @@ class AudioTestCaptureControl:
             enabled=enabled,
             busy=enabled or source_open,
             source_open=source_open,
-            token=(id(owner), snapshot.activation_generation if snapshot is not None else None),
+            token=(id(owner), owner),
         )
 
 

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -32,7 +30,7 @@ class AudioTestCaptureAdapter:
         frame_count = 0
         try:
             try:
-                opened = await request.opener.open()
+                opened = await request.opener.open(on_acquired=runtime.retain_source)
             except asyncio.CancelledError:
                 raise
             except AudioTestSourceUnavailable as exc:
@@ -43,7 +41,7 @@ class AudioTestCaptureAdapter:
                 return
 
             if not runtime.attach_source(opened.source, generation=generation):
-                await self._close_unattached_source(opened.source)
+                await runtime.close_source(opened.source)
                 return
             source = opened.source
             if request.opened_callback is not None:
@@ -91,6 +89,7 @@ class AudioTestCaptureAdapter:
             self._fail(request, "capture_failed", type(exc).__name__)
         finally:
             cleanup_failures: list[Exception] = []
+            source = source or runtime.source
             if pending_frame is not None and not pending_frame.done():
                 try:
                     await runtime.cancel_frame_task(pending_frame)
@@ -119,15 +118,6 @@ class AudioTestCaptureAdapter:
         )
         if request.failure_callback is not None:
             request.failure_callback(request.generation, reason, cause)
-
-    @staticmethod
-    async def _close_unattached_source(source: object) -> None:
-        with contextlib.suppress(Exception):
-            close = getattr(source, "close", None)
-            if callable(close):
-                outcome = close()
-                if inspect.isawaitable(outcome):
-                    await outcome
 
     @staticmethod
     def _raise_cleanup_failures(failures: list[Exception]) -> None:

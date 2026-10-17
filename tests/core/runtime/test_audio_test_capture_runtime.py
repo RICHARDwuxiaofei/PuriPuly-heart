@@ -169,3 +169,56 @@ async def test_audio_test_capture_runtime_generation_changes_ignore_late_results
     await runtime.stop()
 
     assert runtime.is_current_generation(generation) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resistant_frame", (False, True))
+async def test_unsettled_tasks_remain_owned_and_block_restart(resistant_frame: bool) -> None:
+    runtime = AudioTestCaptureRuntime(cancel_timeout_s=0.001)
+    source = RecordingSource()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+
+    async def resistant() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release.wait()
+
+    async def run_session(generation: int) -> None:
+        runtime.attach_source(source, generation=generation)
+        if resistant_frame:
+            runtime.create_frame_task(resistant(), generation=generation)
+            started.set()
+            await asyncio.Event().wait()
+        else:
+            started.set()
+            await resistant()
+
+    task = runtime.start(run_session)
+    await started.wait()
+    await asyncio.sleep(0)
+    frame_task = runtime.pending_frame_task
+    try:
+        await runtime.stop()
+        assert cancelled.is_set()
+        retained = runtime.pending_frame_task if resistant_frame else runtime.session_task
+        assert retained is (frame_task if resistant_frame else task)
+        assert retained is not None and not retained.done()
+        assert runtime.has_resources
+        assert source.close_calls == 0
+        with pytest.raises(RuntimeError, match="active capture resources"):
+            runtime.start(run_session)
+        await runtime.stop()
+        assert not retained.done()
+        assert source.close_calls == 0
+    finally:
+        release.set()
+        await asyncio.gather(
+            *(item for item in (task, frame_task) if item is not None), return_exceptions=True
+        )
+        await runtime.close()
+    assert not runtime.has_resources
+    assert source.close_calls == 1

@@ -17,6 +17,7 @@ from puripuly_heart.core.audio.audio_test_vad import (
     AudioTestVadSample,
     AudioTestVadSettings,
 )
+from puripuly_heart.core.owned_thread import run_owned_thread_call
 from puripuly_heart.core.runtime.audio_test import AudioTestCaptureRuntime
 
 AudioTestObservationCallback = Callable[[AudioTestChannel, tuple[AudioTestVadSample, ...]], object]
@@ -112,6 +113,8 @@ class AudioTestSessionOwner:
     _lifecycle_lock: asyncio.Lock | None = field(init=False, default=None, repr=False)
     _stopping: bool = field(init=False, default=False, repr=False)
     _closed: bool = field(init=False, default=False, repr=False)
+    _starting: bool = field(init=False, default=False, repr=False)
+    _admission_revision: int = field(init=False, default=0, repr=False)
     _restore: dict[AudioTestChannel, object] = field(
         init=False,
         default_factory=dict,
@@ -129,11 +132,9 @@ class AudioTestSessionOwner:
 
     @property
     def active(self) -> bool:
-        for session in self._sessions.values():
-            task = session.runtime.session_task
-            if task is not None and not task.done():
-                return True
-        return False
+        return self._starting or any(
+            session.runtime.has_resources for session in self._sessions.values()
+        )
 
     @property
     def snapshot(self) -> dict[str, object]:
@@ -147,13 +148,13 @@ class AudioTestSessionOwner:
         }
         states = {item["state"] for item in channels.values()}
         state = self._overall_state(states)
+        if self._starting:
+            state = "pending"
         return {
             "state": state,
             "desired_active": state in {"pending", "ready", "degraded"},
-            "effective_active": state in {"ready", "degraded"}
-            and any(
-                session.state == "ready" and session.runtime.source is not None
-                for session in self._sessions.values()
+            "effective_active": any(
+                session.runtime.source is not None for session in self._sessions.values()
             ),
             "channels": channels,
             "restore_capture": [channel for channel in self.channels if channel in self._restore],
@@ -194,66 +195,80 @@ class AudioTestSessionOwner:
         if self._closed:
             return False
         async with self._lock():
-            if self._closed or self.active:
+            if self._closed:
                 return False
-            for channel in self.channels:
-                if not await self._recover_before_start(self._session(channel).runtime):
-                    return False
-            if not await self._pause_translation_capture():
-                await self._restore_translation_capture()
-                return False
-
-            self._observation_callback = observation_callback
-            loop = asyncio.get_running_loop()
-            started = False
+            if self.active and any(
+                session.state in {"pending", "ready"} for session in self._sessions.values()
+            ):
+                self._observation_callback = observation_callback
+                return True
             for channel in self.channels:
                 session = self._session(channel)
-                session.reset()
-                session.state = "pending"
-                session.readiness = loop.create_future()
-                try:
-                    plan = self.plan_factory(channel)
-                except Exception as exc:
-                    self._fail_session(session, "unavailable", type(exc).__name__)
-                    self._emit("plan_failed", {"channel": channel}, exc)
-                    continue
-                try:
-                    session.runtime.start(
-                        lambda generation, channel=channel, plan=plan: self._run_session(
-                            channel,
-                            generation,
-                            plan=plan,
+                if not await self._recover_before_start(session.runtime):
+                    self._fail_session(session, "resource_release_incomplete", None)
+                    return False
+            revision = self._admission_revision
+            self._starting = True
+            try:
+                if not await self._pause_translation_capture():
+                    if not self._closed:
+                        await self._restore_translation_capture()
+                    return False
+                if self._closed or revision != self._admission_revision:
+                    if not self._closed:
+                        await self._restore_translation_capture()
+                    return False
+                self._observation_callback = observation_callback
+                loop = asyncio.get_running_loop()
+                started = False
+                for channel in self.channels:
+                    session = self._session(channel)
+                    session.reset()
+                    session.state = "pending"
+                    session.readiness = loop.create_future()
+                    try:
+                        plan = self.plan_factory(channel)
+                    except Exception as exc:
+                        self._fail_session(session, "unavailable", type(exc).__name__)
+                        self._emit("plan_failed", {"channel": channel}, exc)
+                        continue
+                    try:
+                        session.runtime.start(
+                            lambda generation, channel=channel, plan=plan: self._run_session(
+                                channel,
+                                generation,
+                                plan=plan,
+                            )
                         )
-                    )
-                except RuntimeError as exc:
-                    self._fail_session(session, "session_start_failed", type(exc).__name__)
-                    continue
-                started = True
-            if not started:
-                await self._restore_translation_capture()
-            return started
+                    except RuntimeError as exc:
+                        self._fail_session(session, "session_start_failed", type(exc).__name__)
+                        continue
+                    started = True
+                if not started:
+                    await self._restore_translation_capture()
+                return started
+            finally:
+                self._starting = False
 
     async def stop(self) -> None:
+        self._admission_revision += 1
         async with self._lock():
             await self._stop_sessions()
-            if not self._closed:
+            if self.active:
+                raise RuntimeError("Audio test resource release is incomplete")
+            if not self._closed and not self.active:
                 await self._restore_translation_capture()
 
     async def close(self) -> None:
         self._closed = True
+        self._admission_revision += 1
         async with self._lock():
-            self._stopping = True
             try:
-                for session in self._sessions.values():
-                    session.settle(False)
-                for session in self._sessions.values():
-                    await session.runtime.close()
+                await self._stop_sessions(close=True)
+                if self.active:
+                    raise RuntimeError("Audio test resource release is incomplete")
             finally:
-                self._stopping = False
-                for session in self._sessions.values():
-                    session.reset()
                 self._restore.clear()
-                self._observation_callback = None
 
     def mark_ready(self, channel: AudioTestChannel, generation: int) -> None:
         session = self._current(channel, generation)
@@ -316,7 +331,7 @@ class AudioTestSessionOwner:
         try:
             settings = self.vad_settings(channel)
             try:
-                probe = plan.probe_factory(settings)
+                probe = await run_owned_thread_call(lambda: plan.probe_factory(settings))
             except Exception as exc:
                 self.mark_failure(channel, generation, "vad_unavailable", type(exc).__name__)
                 self._emit("vad_unavailable", {"channel": channel}, exc)
@@ -364,41 +379,46 @@ class AudioTestSessionOwner:
         session.clear_observation()
         session.probe = None
 
-    async def _stop_sessions(self) -> None:
+    async def _stop_sessions(self, *, close: bool = False) -> None:
         self._stopping = True
+        failures: list[Exception] = []
         try:
             for session in self._sessions.values():
-                if session.state != "off" or session.runtime.session_task is not None:
+                if session.state != "off" or session.runtime.has_resources:
                     session.state = "stopping"
                 session.settle(False)
             for session in self._sessions.values():
-                runtime = session.runtime
-                task = runtime.session_task
-                frame_task = runtime.pending_frame_task
-                await runtime.stop()
+                try:
+                    if close:
+                        await session.runtime.close()
+                    else:
+                        await session.runtime.stop()
+                except Exception as exc:
+                    failures.append(exc)
+                    self._fail_session(session, "resource_release_incomplete", type(exc).__name__)
+                else:
+                    if session.runtime.has_resources:
+                        self._fail_session(session, "resource_release_incomplete", None)
+                    else:
+                        session.reset()
                 session.clear_observation()
                 session.probe = None
-                if (
-                    runtime.source is not None
-                    or task is not None
-                    and not task.done()
-                    or frame_task is not None
-                    and not frame_task.done()
-                ):
-                    session.state = "failed"
-                    session.failure_reason = "resource_release_incomplete"
-                    continue
-                session.reset()
         finally:
             self._stopping = False
             self._observation_callback = None
+        if failures:
+            raise ExceptionGroup("Audio test cleanup failed", failures)
 
     async def _pause_translation_capture(self) -> bool:
-        self._restore.clear()
         for channel in self.channels:
             initial = self.capture_control.state(channel)
             if initial.close_exception is not None:
                 self._log(f"[AudioTest] channel={channel} capture cleanup failure is retained")
+                self._fail_session(
+                    self._session(channel),
+                    "resource_release_incomplete",
+                    type(initial.close_exception).__name__,
+                )
                 return False
             if not initial.busy:
                 continue
@@ -413,6 +433,9 @@ class AudioTestSessionOwner:
                 self._log(
                     f"[AudioTest] channel={channel} failed to pause translation capture "
                     f"cause={type(exc).__name__}"
+                )
+                self._fail_session(
+                    self._session(channel), "capture_pause_failed", type(exc).__name__
                 )
                 return False
             if initial.enabled:
@@ -435,16 +458,19 @@ class AudioTestSessionOwner:
                 )
 
     async def _recover_before_start(self, runtime: AudioTestCaptureRuntime) -> bool:
-        if runtime.source is None and runtime.pending_frame_task is None:
-            return True
-        if runtime.pending_frame_task is not None and not runtime.pending_frame_task.done():
+        if any(
+            task is not None and not task.done()
+            for task in (runtime.session_task, runtime.pending_frame_task)
+        ):
             return False
+        if not runtime.has_resources:
+            return True
         try:
             await runtime.stop()
         except Exception as exc:
             self._emit("cleanup_retry_failed", {"error_type": type(exc).__name__}, exc)
             return False
-        return runtime.source is None and runtime.pending_frame_task is None
+        return not runtime.has_resources
 
     def _session(self, channel: AudioTestChannel) -> _ChannelSession:
         session = self._sessions.get(channel)

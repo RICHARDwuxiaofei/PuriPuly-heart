@@ -49,7 +49,9 @@ async def test_microphone_route_miss_is_unavailable_without_opening() -> None:
     opened: list[object] = []
 
     with pytest.raises(AudioTestSourceUnavailable) as raised:
-        await _microphone(_route(attempt=False, error="LookupError"), opened.append).open()
+        await _microphone(_route(attempt=False, error="LookupError"), opened.append).open(
+            on_acquired=lambda _source: None
+        )
 
     assert (raised.value.reason, raised.value.cause) == ("input_route_unavailable", "LookupError")
     assert opened == []
@@ -71,7 +73,7 @@ async def test_microphone_falls_back_to_internal_channels_and_reports_opened_dev
             raise OSError("invalid channel count")
         return Source()
 
-    opened = await _microphone(_route(), factory, logs).open()
+    opened = await _microphone(_route(), factory, logs).open(on_acquired=lambda _source: None)
 
     assert calls == [2, 1]
     assert opened.device == {
@@ -110,7 +112,7 @@ async def test_loopback_unresolved_target_is_unavailable() -> None:
             output_device="",
             target_resolver=resolver,
             source_factory=lambda *args: opened.append(args),
-        ).open()
+        ).open(on_acquired=lambda _source: None)
 
     assert (raised.value.reason, raised.value.cause) == (
         "target_unavailable",
@@ -138,7 +140,7 @@ async def test_loopback_opens_resolved_targets_with_the_live_target_and_device_f
             PeerCaptureTargetResolution(status=PeerCaptureTargetStatus.RESOLVED, target=resolved)
         ),
         source_factory=factory,
-    ).open()
+    ).open(on_acquired=lambda _source: None)
 
     assert calls == [(resolved, "Headset")]
     assert opened.source is source
@@ -163,7 +165,7 @@ async def test_loopback_opens_resolved_targets_with_the_live_target_and_device_f
             )
         ),
         source_factory=lambda *_args: object(),
-    ).open()
+    ).open(on_acquired=lambda _source: None)
 
     assert opened.device["kind"] == "process"
     assert opened.device["name"] == "VRChat.exe"

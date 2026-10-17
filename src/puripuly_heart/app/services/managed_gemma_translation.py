@@ -17,11 +17,13 @@ from puripuly_heart.core.local_asr.local_stt_download_port import (
 )
 from puripuly_heart.core.local_asr.local_stt_runtime_installer import LocalSTTProvisioningLease
 from puripuly_heart.core.local_translation.assets import (
+    InstalledGemmaManifest,
     default_gemma_install_dir,
     inspect_gemma_install,
     resolve_gemma_spec,
 )
 from puripuly_heart.core.local_translation.provisioning import (
+    GemmaProvisioningCallback,
     GemmaProvisioningCancelled,
     GemmaProvisioningError,
     GemmaProvisioningUpdate,
@@ -36,6 +38,7 @@ from puripuly_heart.core.local_translation.runtime import (
     ManagedGemmaRuntimeVersionError,
 )
 from puripuly_heart.core.observability import DiagnosticEvent
+from puripuly_heart.core.owned_thread import run_owned_thread_call
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +100,9 @@ class ManagedGemmaTranslationOwner:
         self._generation = 0
         self._cancel_event: threading.Event | None = None
         self._prepare_task: asyncio.Task[ManagedGemmaReadiness] | None = None
+        self._asset_task: asyncio.Task[InstalledGemmaManifest] | None = None
+        self._asset_cancel_event: threading.Event | None = None
+        self._asset_model_id: str | None = None
         self._linger_task: asyncio.Task[None] | None = None
         self._active_generation: int | None = None
         self._selected_model_id: str | None = None
@@ -233,57 +239,81 @@ class ManagedGemmaTranslationOwner:
             task.cancel()
         return True
 
+    def cancel_assets(self, model_id: str) -> bool:
+        if model_id != self._asset_model_id:
+            return False
+        cancellation = self._asset_cancel_event
+        task = self._asset_task
+        if cancellation is None or task is None:
+            return False
+        cancellation.set()
+        if not task.done():
+            task.cancel()
+        return True
+
     async def install_assets(
         self,
         *,
         source: str | None = None,
         model_id: str | None = None,
         files: tuple[Path, ...] = (),
-        on_status=None,
+        on_status: GemmaProvisioningCallback | None = None,
         locale: str | None = None,
-    ):
+    ) -> InstalledGemmaManifest:
         from puripuly_heart.core.feature_diagnostics import log_feature
 
-        async with self._lock:
-            if self._closed:
-                raise RuntimeError("Model owner closed")
-            spec = resolve_gemma_spec(model_id)
-            cancellation = threading.Event()
-            self._cancel_event = cancellation
-            downloader = (
-                LocalGemmaDownloadAdapter(files, spec)
-                if source == "local" and files
-                else None if source == "local" else self._downloader
-            )
-            task = start_lifecycle_task(
-                self._task_scope,
-                ensure_gemma_installed(
+        if self._closed:
+            raise RuntimeError("Model owner closed")
+        if self._lock.locked() or self._asset_task is not None:
+            raise GemmaProvisioningError("Another model task is active", failure_code="task_busy")
+        spec = resolve_gemma_spec(model_id)
+        cancellation = threading.Event()
+        downloader = (
+            LocalGemmaDownloadAdapter(files, spec)
+            if source == "local" and files
+            else None if source == "local" else self._downloader
+        )
+
+        async def install() -> InstalledGemmaManifest:
+            async with self._lock:
+                if self._closed:
+                    raise RuntimeError("Model owner closed")
+                return await ensure_gemma_installed(
                     source=source,
                     spec=spec,
                     downloader=downloader,
                     cancel_event=cancellation,
                     on_status=on_status,
                     locale=locale,
-                ),
-                name="install-assets",
-            )
-            self._prepare_task = task
-            try:
-                return await task
-            except GemmaProvisioningCancelled:
-                raise
-            except Exception as error:
-                log_feature(
-                    "ModelDownload",
-                    "installation",
-                    getattr(error, "failure_code", "install_failed"),
-                    error=error,
+                    verify_existing_checksums=True,
                 )
+
+        task = start_lifecycle_task(self._task_scope, install(), name="install-assets")
+        self._asset_task = task
+        self._asset_cancel_event = cancellation
+        self._asset_model_id = spec.model_id
+        try:
+            return await task
+        except asyncio.CancelledError as exc:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
                 raise
-            finally:
-                if self._prepare_task is task:
-                    self._prepare_task = None
-                    self._cancel_event = None
+            raise GemmaProvisioningCancelled("Gemma asset installation cancelled") from exc
+        except GemmaProvisioningCancelled:
+            raise
+        except Exception as error:
+            log_feature(
+                "ModelDownload",
+                "installation",
+                getattr(error, "failure_code", "install_failed"),
+                error=error,
+            )
+            raise
+        finally:
+            if self._asset_task is task:
+                self._asset_task = None
+                self._asset_cancel_event = None
+                self._asset_model_id = None
 
     async def delete_assets(self, model_id: str) -> None:
         from puripuly_heart.core.model_install_removal import (
@@ -305,19 +335,22 @@ class ManagedGemmaTranslationOwner:
             if self._active_generation is None:
                 await self._runtime.release()
             install_dir = default_gemma_install_dir(resolve_gemma_spec(model_id))
-            lease = await asyncio.to_thread(
-                LocalSTTProvisioningLease.acquire,
-                model_root=install_dir.parent,
-                wait=False,
-            )
-            if lease is None:
-                raise GemmaProvisioningError(
-                    "Another model task is active", failure_code="task_busy"
+
+            def remove_install() -> None:
+                lease = LocalSTTProvisioningLease.acquire(
+                    model_root=install_dir.parent,
+                    wait=False,
                 )
-            try:
-                await asyncio.to_thread(remove_model_install_dir, install_dir)
-            finally:
-                await asyncio.to_thread(lease.close)
+                if lease is None:
+                    raise GemmaProvisioningError(
+                        "Another model task is active", failure_code="task_busy"
+                    )
+                try:
+                    remove_model_install_dir(install_dir)
+                finally:
+                    lease.close()
+
+            await run_owned_thread_call(remove_install)
 
     def schedule_demand_sync(
         self,
@@ -356,7 +389,7 @@ class ManagedGemmaTranslationOwner:
 
     async def close(self) -> None:
         lingering = self._cancel_linger()
-        if self._closed and self._prepare_task is None:
+        if self._closed and self._prepare_task is None and self._asset_task is None:
             await self._await_cancelled_linger(lingering)
             await self._runtime.close()
             return
@@ -364,9 +397,15 @@ class ManagedGemmaTranslationOwner:
         self._generation += 1
         self._active_generation = None
         self.cancel()
-        task = self._prepare_task
-        if task is not None and task is not asyncio.current_task():
-            await asyncio.gather(task, return_exceptions=True)
+        if self._asset_model_id is not None:
+            self.cancel_assets(self._asset_model_id)
+        tasks = tuple(
+            task
+            for task in (self._prepare_task, self._asset_task)
+            if task is not None and task is not asyncio.current_task()
+        )
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self._await_cancelled_linger(lingering)
         try:
             await self._task_scope.close()

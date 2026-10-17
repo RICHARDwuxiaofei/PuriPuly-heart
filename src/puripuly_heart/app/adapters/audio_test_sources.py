@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -12,6 +11,7 @@ from puripuly_heart.core.audio.source import (
     MicrophoneTestRouteObservation,
     SelfMicCaptureChannelDecision,
 )
+from puripuly_heart.core.owned_thread import run_owned_thread_call
 from puripuly_heart.core.peer_capture import (
     PeerCaptureResolvedTarget,
     PeerCaptureTargetIntent,
@@ -36,22 +36,32 @@ class MicrophoneAudioTestSourceOpener:
     source_factory: MicrophoneSourceFactory
     log_sink: AudioTestLogSink
 
-    async def open(self) -> AudioTestOpenedSource:
-        observation = self.route_observer(
-            saved_host_api=self.saved_host_api,
-            requested_device=self.requested_device,
-        )
-        if not observation.should_attempt_open:
-            raise AudioTestSourceUnavailable(
-                "input_route_unavailable",
-                observation.resolution_exception_class or "unavailable",
+    async def open(self, *, on_acquired: Callable[[object], None]) -> AudioTestOpenedSource:
+        source: object | None = None
+
+        def open_sync() -> AudioTestOpenedSource:
+            nonlocal source
+            observation = self.route_observer(
+                saved_host_api=self.saved_host_api,
+                requested_device=self.requested_device,
             )
-        decision = self.channel_decision(
-            device_idx=observation.resolved_device_idx,
-            internal_channels=self.internal_channels,
-        )
-        source = self._open(observation, decision.preferred_capture_channels)
-        return AudioTestOpenedSource(source=source, device=self._device(source, observation))
+            if not observation.should_attempt_open:
+                raise AudioTestSourceUnavailable(
+                    "input_route_unavailable",
+                    observation.resolution_exception_class or "unavailable",
+                )
+            decision = self.channel_decision(
+                device_idx=observation.resolved_device_idx,
+                internal_channels=self.internal_channels,
+            )
+            source = self._open(observation, decision.preferred_capture_channels)
+            return AudioTestOpenedSource(source=source, device=self._device(source, observation))
+
+        try:
+            return await run_owned_thread_call(open_sync)
+        finally:
+            if source is not None:
+                on_acquired(source)
 
     def _open(self, observation: MicrophoneTestRouteObservation, channels: int) -> object:
         def open_channels(count: int) -> object:
@@ -96,17 +106,25 @@ class LoopbackAudioTestSourceOpener:
     target_resolver: PeerCaptureTargetResolverPort
     source_factory: LoopbackSourceFactory
 
-    async def open(self) -> AudioTestOpenedSource:
+    async def open(self, *, on_acquired: Callable[[object], None]) -> AudioTestOpenedSource:
         resolution = await self.target_resolver.resolve(self.target)
         if resolution.status is not PeerCaptureTargetStatus.RESOLVED or resolution.target is None:
             raise AudioTestSourceUnavailable(
                 "target_unavailable",
                 resolution.reason or "unavailable",
             )
-        source = self.source_factory(resolution.target, self.output_device)
-        if inspect.isawaitable(source):
-            source = await source
-        return AudioTestOpenedSource(source=source, device=self._device(source))
+        source: object | None = None
+
+        def open_sync() -> AudioTestOpenedSource:
+            nonlocal source
+            source = self.source_factory(resolution.target, self.output_device)
+            return AudioTestOpenedSource(source=source, device=self._device(source))
+
+        try:
+            return await run_owned_thread_call(open_sync)
+        finally:
+            if source is not None:
+                on_acquired(source)
 
     def _device(self, source: object) -> dict[str, object]:
         if self.target.kind == "process":

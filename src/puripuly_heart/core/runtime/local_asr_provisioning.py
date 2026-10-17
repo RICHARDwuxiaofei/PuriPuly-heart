@@ -54,6 +54,7 @@ from puripuly_heart.core.local_stt_runtime_installer import (
     ensure_local_stt_installed,
 )
 from puripuly_heart.core.model_install_removal import remove_model_install_dir
+from puripuly_heart.core.owned_thread import run_owned_thread_call
 from puripuly_heart.core.runtime.local_stt_download import LocalSTTDownloadRuntime
 
 ProvisioningStateChanged = Callable[
@@ -314,17 +315,19 @@ class LocalASRProvisioningOwner:
             )
         manifest = self._manifest_for(backend, model_id)
         root = (self._model_root or default_local_stt_model_root()).resolve()
-        lease = await asyncio.to_thread(
-            LocalSTTProvisioningLease.acquire, model_root=root, wait=False
-        )
-        if lease is None:
-            raise LocalSTTRuntimeInstallError(
-                "Another model task is active", failure_code="task_busy"
-            )
-        try:
-            await asyncio.to_thread(remove_model_install_dir, root / manifest.install_dirname)
-        finally:
-            await asyncio.to_thread(lease.close)
+
+        def remove_install() -> None:
+            lease = LocalSTTProvisioningLease.acquire(model_root=root, wait=False)
+            if lease is None:
+                raise LocalSTTRuntimeInstallError(
+                    "Another model task is active", failure_code="task_busy"
+                )
+            try:
+                remove_model_install_dir(root / manifest.install_dirname)
+            finally:
+                lease.close()
+
+        await run_owned_thread_call(remove_install)
         if backend == "gpu":
             return await self.inspect_gpu(explicit_intent=True)
         return await self.inspect_cpu((model_id,))

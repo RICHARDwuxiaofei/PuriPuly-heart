@@ -171,6 +171,7 @@ _ORDERED_INTENTS = frozenset(
         "set_translation_enabled",
         "set_overlay_enabled",
         "persist_provider_secret_change",
+        "start_audio_test",
     }
 )
 
@@ -741,6 +742,8 @@ class UiApplicationBoundary:
         self._audio_test.release_audio_test_capture_restore(channel)
         if enabled and self.state().audio_test_active:
             await self._audio_test.stop_audio_test()
+            if self.state().audio_test_active:
+                raise RuntimeError("Audio test resources are still being released")
 
     async def set_desktop_overlay_captions_locked(self, locked: bool) -> dict[str, str]:
         return await self._overlay.set_desktop_overlay_captions_locked(locked)

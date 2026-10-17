@@ -76,7 +76,7 @@ class FakeGemma:
         self.deleted.append(model_id)
         self.status = "missing"
 
-    def cancel(self):
+    def cancel_assets(self, model_id):
         return True
 
 

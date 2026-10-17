@@ -3297,6 +3297,14 @@ async def test_audio_test_start_failure_marks_both_channels_failed() -> None:
 
     texts = _dialog_text_values(app.page.opened[0])
     assert texts.count(t("audio_test.error.generic")) == 2
+    app._audio_test_dialog.refresh()
+    app._audio_test_dialog.refresh()
+    assert _dialog_text_values(app.page.opened[0]).count(t("audio_test.error.generic")) == 2
+    controller.audio_test_snapshot = lambda: _audio_snapshot(
+        "ready", self_={"state": "ready"}, peer={"state": "ready"}
+    )
+    app._audio_test_dialog.refresh()
+    assert t("audio_test.error.generic") not in _dialog_text_values(app.page.opened[0])
 
 
 @pytest.mark.asyncio
@@ -4134,3 +4142,68 @@ async def test_main_gui_registers_awaited_idempotent_page_lifecycle_handler(
 
     assert lifecycle_events == ["started", "stop_started", "stop_completed"]
     assert page.tasks == []
+
+
+@pytest.mark.asyncio
+async def test_audio_test_dismiss_preempts_gated_settings_start_and_allows_later_start() -> None:
+    from tests.app.test_audio_test_session_owner import Harness
+
+    harness = Harness()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = harness.control.set_enabled
+    opened = []
+
+    async def pause(channel, enabled):
+        await original(channel, enabled)
+        if channel == "peer" and not enabled:
+            entered.set()
+            await release.wait()
+
+    harness.control.set_enabled = pause
+    for channel, opener in harness.openers.items():
+        open_source = opener.open
+
+        async def open_owned(*, on_acquired, channel=channel, open_source=open_source):
+            opened.append(channel)
+            return await open_source(on_acquired=on_acquired)
+
+        opener.open = open_owned
+    controller = SimpleNamespace(
+        start_audio_test=harness.owner.start,
+        stop_audio_test=harness.owner.stop,
+        audio_test_snapshot=lambda: harness.owner.snapshot,
+        audio_test_active=False,
+    )
+    app = _audio_test_app(controller)
+    app._on_start_audio_test()
+    starting = asyncio.create_task(app.page.tasks[0]())
+    stopping = None
+    try:
+        await entered.wait()
+        assert app._settings_mutation_worker_active
+        app._audio_test_dialog._handle_dismiss(None)
+        stopping = asyncio.create_task(app.page.tasks[-1]())
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(starting, stopping), timeout=2)
+        assert not app._settings_mutation_worker_active
+        assert not harness.owner.active
+        assert harness.owner.snapshot["state"] == "off"
+        assert opened == []
+        assert harness.control.enabled == {"self": True, "peer": True}
+        app._on_start_audio_test()
+        await app.page.tasks[-1]()
+        harness.sources["self"].feed(0.0)
+        assert await harness.owner.wait_ready()
+        assert set(opened) == {"self", "peer"}
+        app._audio_test_dialog._handle_dismiss(None)
+        await app.page.tasks[-1]()
+        assert harness.owner.snapshot["state"] == "off"
+        assert all(source.closed for source in harness.sources.values())
+    finally:
+        release.set()
+        await asyncio.gather(
+            *(task for task in (starting, stopping) if task is not None), return_exceptions=True
+        )
+        await harness.owner.close()

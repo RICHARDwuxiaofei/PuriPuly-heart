@@ -257,8 +257,8 @@ def _source_plans(
         )
     return tuple(
         (
-            ("huggingface", HF_MIRROR_ENDPOINT, name)
-            if name == "hf_mirror" and name not in manifest.sources
+            (name if name in manifest.sources else "huggingface", HF_MIRROR_ENDPOINT, name)
+            if name == "hf_mirror"
             else (name, None, name)
         )
         for name in names

@@ -301,6 +301,7 @@ async def test_start_failure_runs_owned_shutdown_and_preserves_original_error() 
 @pytest.mark.asyncio
 async def test_eula_acceptance_is_owned_at_the_boundary_before_peer_enable() -> None:
     backend = RecordingBackend()
+    backend.audio_test_active = False
     boundary = UiApplicationBoundary(backend)
 
     result = await boundary.accept_peer_translation_eula_and_enable()
@@ -492,3 +493,115 @@ async def test_boundary_stop_owns_github_prompt_generation_and_cancellation() ->
     assert await task is False
     assert cancelled.is_set() is True
     assert boundary.application_lifecycle().is_terminal
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("paused_channel", ("self", "peer"))
+@pytest.mark.parametrize("override_channel", ("self", "peer"))
+async def test_audio_start_orders_gated_pause_before_explicit_capture_takeover(
+    paused_channel: str, override_channel: str
+) -> None:
+    from tests.app.test_audio_test_session_owner import Harness
+
+    harness = Harness()
+    pause_entered = asyncio.Event()
+    release_pause = asyncio.Event()
+    original = harness.control.set_enabled
+
+    async def set_enabled(channel: str, enabled: bool) -> None:
+        await original(channel, enabled)
+        if channel == paused_channel and not enabled:
+            pause_entered.set()
+            await release_pause.wait()
+
+    harness.control.set_enabled = set_enabled
+
+    class Backend(RecordingBackend):
+        def __getattribute__(self, name):
+            if name == "audio_test_active":
+                return harness.owner.active
+            return super().__getattribute__(name)
+
+        async def start_audio_test(self, **kwargs):
+            return await harness.owner.start(**kwargs)
+
+        async def stop_audio_test(self):
+            await harness.owner.stop()
+
+        def release_audio_test_capture_restore(self, channel):
+            harness.owner.release_capture_restore(channel)
+
+        async def set_stt_enabled(self, enabled):
+            await original("self", enabled)
+
+        async def set_peer_translation_enabled(self, enabled):
+            await original("peer", enabled)
+
+    boundary = UiApplicationBoundary(Backend())
+    starting = asyncio.create_task(boundary.start_audio_test())
+    takeover = None
+    try:
+        await pause_entered.wait()
+        assert harness.owner.active
+        assert harness.owner.snapshot["state"] == "pending"
+        operation = (
+            boundary.set_stt_enabled
+            if override_channel == "self"
+            else boundary.set_peer_translation_enabled
+        )
+        takeover = asyncio.create_task(operation(True))
+        await asyncio.sleep(0)
+        assert not takeover.done()
+        assert not any(harness.control.enabled.values()) or paused_channel == "self"
+        release_pause.set()
+        assert await starting
+        await takeover
+        assert not harness.owner.active
+        assert harness.owner.snapshot["state"] == "off"
+        assert harness.control.enabled == {"self": True, "peer": True}
+        assert override_channel not in harness.owner.snapshot["restore_capture"]
+    finally:
+        release_pause.set()
+        await asyncio.gather(
+            *(task for task in (starting, takeover) if task is not None), return_exceptions=True
+        )
+        await harness.owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ("stop", "close"))
+async def test_audio_stop_interrupts_startup_while_capture_pause_is_gated(operation: str) -> None:
+    from tests.app.test_audio_test_session_owner import Harness
+
+    harness = Harness()
+    paused = asyncio.Event()
+    release = asyncio.Event()
+    original = harness.control.set_enabled
+
+    async def set_enabled(channel: str, enabled: bool) -> None:
+        await original(channel, enabled)
+        if channel == "peer" and not enabled:
+            paused.set()
+            await release.wait()
+
+    harness.control.set_enabled = set_enabled
+    starting = asyncio.create_task(harness.owner.start())
+    stopping = None
+    try:
+        await paused.wait()
+        stopping = asyncio.create_task(getattr(harness.owner, operation)())
+        await asyncio.sleep(0)
+        release.set()
+        assert await starting is False
+        await stopping
+        assert harness.owner.snapshot["state"] == "off"
+        assert harness.control.enabled == {"self": operation == "stop", "peer": operation == "stop"}
+        assert all(
+            harness.owner.runtime_for(channel).source is None for channel in ("self", "peer")
+        )
+    finally:
+        release.set()
+        await asyncio.gather(
+            *(task for task in (starting, stopping) if task is not None), return_exceptions=True
+        )
+        await harness.owner.close()

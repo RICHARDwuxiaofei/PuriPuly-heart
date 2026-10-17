@@ -185,9 +185,11 @@ puripuly.exe models delete --model-id gemma-4-26b-a4b-it-qat-ud-q4-k-xl
 
 - Only one model task runs at a time. A second task returns `failed` with `task_busy`.
 - A download, import, or delete does not change settings or provider selection.
-- `delete` refuses a model that running recognition or translation is using (`model_in_use`). It renames the install before removing it, so files in use are never partially deleted.
+- Explicit Gemma download/repair verifies installed checksums before reusing files. Same-size corruption triggers a verified replacement; passive status and ordinary on-demand reuse do not hash every installed file.
+- `delete` refuses a model that running recognition or translation is using (`model_in_use`). It renames the install before removing it, so files in use are never partially deleted. Cancellation or shutdown keeps its provisioning lease until the filesystem worker settles.
 - `import` is available for Gemma models and needs the pinned file names listed in `required_files`. Files are verified before installation.
 - These commands do not hold the settings command queue, so other commands keep working during a long download.
+- Explicit Gemma asset work has a separate cancellation lifetime from runtime preparation. Turning translation demand off or starting an audio test does not cancel an asset transfer; `models cancel` targets that asset, while shutdown cancels and drains both lifetimes. A conflicting managed operation returns `task_busy` instead of queuing an asset with another operation's cancellation authority.
 
 ### Peer capture and consent
 
@@ -287,15 +289,17 @@ Numeric CLI values are sent as JSON numbers. The application owner validates fie
 `audio test on|off` runs the voice-activity check for both inputs at once: the selected microphone (`self`) and the current loopback target (`peer`, an output device or process). The test applies each channel's saved VAD threshold through the same gating parameters as normal capture. Speech is observed only; it is not sent to recognition or translation.
 
 - `audio test on` stays in progress until every channel is settled. The microphone is ready after its first input frame. The loopback channel is ready once its source opens, because an idle output can deliver no frames.
+- Opening the desktop test view can attach live graphs to a CLI-started test without restarting its inputs.
 - `app status` returns an `audio_test` object with:
   - Overall `state` (`off`, `pending`, `ready`, `degraded`, `failed`, or `stopping`), `desired_active`, and `effective_active`.
   - `channels.self` and `channels.peer`, each with `state`, `failure_reason`, `failure_type`, `device`, normalized `meter_level` (0–1), `speech_probability`, `speech_detected`, and the applied `speech_threshold`.
+  - `effective_active` can remain true after cleanup fails while an open input is still owned. A failed or stopping snapshot is not proof of release.
   - `restore_capture`: the translation inputs that the test paused and will turn back on.
 - `applied` means both channels are ready. `degraded` means one channel is ready and the other failed. `action_required` (`select_available_audio_devices`) means no channel could start.
 - No audio content is returned.
-- While the test runs, Self and Peer capture are paused. Stopping the test turns back on only the inputs that were on before it started and were not changed during it. Turning Self or Peer capture on explicitly during the test stops the test.
-- `audio test off` can interrupt pending startup. It waits for owned input resources to close.
-- Changing the input device, Host API, output device, or loopback target stops a running test.
+- While the test runs, Self and Peer capture are paused. Stopping the test restores only the inputs that were on before it started and have not had an explicit capture choice or owner replacement. VAD tuning and failed retries do not discard valid restoration intent. Turning Self or Peer capture on explicitly stops the test; shutdown does not restore capture.
+- `audio test off` and GUI dismissal can interrupt pending startup. Successful off waits for all owned inputs and tasks to settle. Cleanup failure stays visible and blocks conflicting restart until a later stop can finish it.
+- Changing the input device, Host API, output device, or loopback target stops a running test before applying the new target.
 
 ### Manual text
 
@@ -330,6 +334,7 @@ A direct JSON file rewrite is not a settings operation.
 - Revisions and settings events follow successfully committed changes, including GUI-only edits.
 - Queries return the committed snapshot without advancing its revision.
 - Staged preparation and failed persistence are not reported as persisted settings.
+- One request may combine provider choices with locale, language, audio and output changes. Provider-affecting mixed changes commit together before applying both runtime boundaries. Missing credentials or runtime failures report `degraded` without undoing saved intent or claiming that an old provider matches the new selection. Inspect the terminal receipt and effective runtime state.
 
 ### Activation notice
 

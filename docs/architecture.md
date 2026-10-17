@@ -98,6 +98,9 @@ Peer:   loopback / process audio → capture / segmentation → recognition
 - Capture authority determines which audio may enter recognition.
 - Source completion drains admitted input. Stop or discontinuity invalidates affected work.
 - The audio test opens its own sources and VAD gating with each channel's capture parameters. Its audio never reaches recognition. Self and Peer capture stay paused while it runs.
+- Audio-test pause/launch shares application mutation ordering with capture and settings. Stop and GUI dismissal fence pending admission independently of the settings queue. Each channel drains independently; unsettled tasks or failed release remain owned and visible, blocking conflicting restart or restoration.
+- Test restoration retains capture-owner and explicit-choice authority, not configuration generation. Failed retries retain valid restoration debt; explicit capture choices or owner replacement invalidate it. Shutdown never restores capture. Observation callbacks may attach, detach or replace without restarting sources.
+- Audio-test route/source opening and VAD construction use owned synchronous work. Late-created sources transfer into channel ownership before cancellation completes. Shared microphone, desktop-loopback and process native-close work drains off the event loop; Janus and asynchronous cleanup stay on it.
 
 Implementation: `core/audio/ownership.py`, `core/audio/listen_delivery.py`.
 
@@ -195,10 +198,11 @@ Settings changes follow this path:
 
 - Settings persistence owns intent. Runtime owners own its application.
 - The provider-apply boundary coordinates capture and Local ASR owners.
+- Mixed provider and ordinary settings edits use one full-draft persistence transaction. The settings application owner prepares the existing provider runtime plan before signatures advance, then attempts both generic and provider effects. Independent failures retain committed intent and their diagnostics; applied is published only after both boundaries finish. A provider-owned LLM replacement suppresses duplicate generic managed-Gemma prefix rebuilding.
 - Failed or incomplete application must not appear as successfully applied runtime state.
-- LLM applied-profile signatures and retry state follow actual provider attachment or replacement. Initial attachment uses the exact launch snapshot; an absent provider remains retryable. Replacement records its outcome before usage refresh or STT convergence. Generic settings, restoration and post-transaction cache updates are STT-only and cannot assert LLM application. Provider application advances STT signatures only after STT convergence, so an independent STT failure can leave the overall transaction committed but runtime-degraded without losing the actual LLM binding.
+- LLM applied-profile signatures and retry state follow actual provider attachment or replacement. Initial attachment uses the exact launch snapshot; an absent provider remains retryable. Replacement records its outcome before usage refresh or STT convergence. Generic settings-effect, restoration and post-transaction cache updates are STT-only and cannot assert LLM application. Provider application advances STT signatures only after STT convergence, so an independent STT failure can leave the overall transaction committed but runtime-degraded without losing the actual LLM binding.
 
-Implementation: `app/services/provider/provider_runtime_apply.py`. Behavior: `tests/app/test_stt_provider_apply_vertical.py`.
+Implementation: `app/services/settings/settings_application.py`, `app/services/provider/provider_runtime_apply.py`. Behavior: `tests/app/test_application_control_contract.py`, `tests/app/test_stt_provider_apply_vertical.py`.
 
 ## Provider Boundaries
 
@@ -407,9 +411,12 @@ Build policy and validation: `scripts/ci/build-native-experimental.ps1`, `releas
   - Each source attempt writes to owned staging under the model provisioning lease.
   - Transfer or integrity failure prevents promotion of that attempt.
   - A successful attempt is validated before replacing the installed model.
+  - Explicit Gemma repair verifies installed checksums before reuse; passive status and on-demand reuse retain their cheap inspection path.
 - **Provisioning lifecycle**
   - Setup provisions required CPU ASR assets before app replacement. Provisioning failure blocks installation.
   - Managed Gemma and optional GPU ASR keep on-demand runtime preparation.
+  - Explicit asset operations have cancellation identity separate from runtime preparation demand. Demand-off preserves asset work; explicit asset cancellation and shutdown own its settlement.
+  - Destructive model work retains its provisioning lease until the owned filesystem worker settles, including cancellation.
   - Adding mirrors does not change these lifecycle owners.
 
 Implementation: `core/local_asr/local_stt_runtime_installer.py`, `core/local_translation/provisioning.py`, `installer.iss`. Behavior: `tests/core/test_local_stt_runtime_installer.py`, `tests/core/local_translation/test_gemma_provisioning.py`, `tests/scripts/test_install_local_stt_model.py`.

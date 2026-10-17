@@ -24,7 +24,7 @@ class AudioTestOpenedSource:
 
 
 class AudioTestSourceOpener(Protocol):
-    async def open(self) -> AudioTestOpenedSource: ...
+    async def open(self, *, on_acquired: Callable[[object], None]) -> AudioTestOpenedSource: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +47,11 @@ class AudioTestCaptureRequest:
 
 
 class AudioTestRuntimePort(Protocol):
+    @property
+    def source(self) -> object | None: ...
+
+    def retain_source(self, source: object) -> None: ...
+
     def is_current_generation(self, generation: int) -> bool: ...
 
     def attach_source(self, source: object, *, generation: int) -> bool: ...

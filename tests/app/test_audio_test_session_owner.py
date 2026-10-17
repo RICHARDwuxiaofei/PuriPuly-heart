@@ -50,9 +50,10 @@ class Opener:
         self.source = source
         self.device = device
 
-    async def open(self) -> AudioTestOpenedSource:
+    async def open(self, *, on_acquired) -> AudioTestOpenedSource:
         if isinstance(self.source, BaseException):
             raise self.source
+        on_acquired(self.source)
         return AudioTestOpenedSource(source=self.source, device=self.device)
 
 
@@ -215,7 +216,7 @@ async def test_capture_that_stays_open_blocks_the_test_and_restores_paused_chann
 
     assert harness.control.calls == [("self", False), ("peer", False), ("self", True)]
     assert harness.owner.active is False
-    assert harness.owner.snapshot["state"] == "off"
+    assert harness.owner.snapshot["state"] == "failed"
     assert any("failed to pause translation capture" in line for line in harness.logs)
 
 
@@ -291,3 +292,109 @@ async def test_frames_after_stop_and_restart_after_close_are_rejected() -> None:
     await harness.owner.close()
     assert await harness.start() is False
     assert harness.control.calls == []
+
+
+@pytest.mark.asyncio
+async def test_active_start_attaches_detaches_and_reattaches_without_restarting() -> None:
+    harness = Harness()
+    assert await harness.owner.start()
+    harness.sources["self"].feed(0.0)
+    assert await harness.owner.wait_ready()
+    runtimes = {channel: harness.owner.runtime_for(channel) for channel in ("self", "peer")}
+    generations = {channel: runtime.generation for channel, runtime in runtimes.items()}
+    first: list[str] = []
+    second: list[str] = []
+
+    assert await harness.owner.start(
+        observation_callback=lambda channel, _samples: first.append(channel)
+    )
+    harness.sources["peer"].feed(0.5)
+    await _until(lambda: first == ["peer"])
+    assert await harness.owner.start(observation_callback=None)
+    harness.sources["peer"].feed(0.2)
+    await _until(lambda: harness.channel("peer")["meter_level"] == pytest.approx(0.2))
+    assert first == ["peer"]
+    assert await harness.owner.start(
+        observation_callback=lambda channel, _samples: second.append(channel)
+    )
+    harness.sources["self"].feed(0.4)
+    await _until(lambda: second == ["self"])
+    assert harness.owner.snapshot["restore_capture"] == ["self", "peer"]
+    assert {channel: runtime.generation for channel, runtime in runtimes.items()} == generations
+    assert not any(source.closed for source in harness.sources.values())
+    await harness.owner.stop()
+    assert harness.control.enabled == {"self": True, "peer": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_succeeds", (False, True))
+async def test_failed_retry_retains_original_capture_restoration(retry_succeeds: bool) -> None:
+    harness = Harness()
+    for channel in ("self", "peer"):
+        harness.openers[channel] = Opener(AudioTestSourceUnavailable("unavailable"), {})
+    assert await harness.start()
+    assert await harness.owner.wait_ready() is False
+    await _until(lambda: not harness.owner.active)
+    assert harness.owner.snapshot["restore_capture"] == ["self", "peer"]
+    if retry_succeeds:
+        for channel in ("self", "peer"):
+            harness.openers[channel] = Opener(harness.sources[channel], {})
+    assert await harness.start()
+    if retry_succeeds:
+        harness.sources["self"].feed(0.0)
+        assert await harness.owner.wait_ready()
+    else:
+        assert await harness.owner.wait_ready() is False
+    assert harness.owner.snapshot["restore_capture"] == ["self", "peer"]
+    await harness.owner.stop()
+    assert harness.control.enabled == {"self": True, "peer": True}
+
+
+@pytest.mark.asyncio
+async def test_failed_retry_preserves_explicit_override_and_owner_replacement() -> None:
+    harness = Harness()
+    harness.probe_error = RuntimeError("unavailable")
+    assert await harness.start()
+    assert await harness.owner.wait_ready() is False
+    await _until(lambda: not harness.owner.active)
+    harness.owner.release_capture_restore("self")
+    harness.control.user_set("peer", False)
+    assert await harness.start()
+    assert await harness.owner.wait_ready() is False
+    await harness.owner.stop()
+    assert harness.control.enabled == {"self": False, "peer": False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("closing", (False, True))
+async def test_first_channel_cleanup_failure_does_not_skip_peer_and_retries(
+    closing: bool, monkeypatch
+) -> None:
+    harness = Harness()
+    assert await harness.start()
+    harness.sources["self"].feed(0.0)
+    assert await harness.owner.wait_ready()
+    runtime = harness.owner.runtime_for("self")
+    operation = "close" if closing else "stop"
+    original = getattr(runtime, operation)
+
+    async def fail() -> None:
+        raise RuntimeError("synthetic close failure")
+
+    monkeypatch.setattr(runtime, operation, fail)
+    with pytest.raises(ExceptionGroup, match="Audio test cleanup failed"):
+        await getattr(harness.owner, operation)()
+    assert harness.sources["peer"].closed
+    assert harness.owner.runtime_for("peer").session_task is None
+    assert not harness.sources["self"].closed
+    assert harness.channel("self")["state"] == "failed"
+    assert harness.channel("self")["failure_reason"] == "resource_release_incomplete"
+    assert harness.channel("peer")["state"] == "off"
+    assert harness.owner.snapshot["effective_active"] is True
+    assert harness.control.enabled == {"self": False, "peer": False}
+    monkeypatch.setattr(runtime, operation, original)
+    await getattr(harness.owner, operation)()
+    assert harness.sources["self"].closed
+    assert harness.owner.snapshot["state"] == "off"
+    assert not harness.owner.active
+    assert harness.control.enabled == {"self": not closing, "peer": not closing}

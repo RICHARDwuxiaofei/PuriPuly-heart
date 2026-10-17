@@ -1511,7 +1511,7 @@ class TranslatorApp:
             await self.application.stop_audio_test()
             self._close_audio_test_dialog()
 
-        self._queue_settings_mutation_task(_task)
+        self._run_page_task(_task)
 
     def _get_audio_test_dialog(self) -> AudioTestDialog:
         dialog = getattr(self, "_audio_test_dialog", None)

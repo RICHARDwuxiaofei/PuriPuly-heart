@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
 from copy import deepcopy
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -45,6 +47,7 @@ def isolated_settings(path):
             settings.intent,
             secrets=SecretsIntent(backend="encrypted_file", encrypted_file_path="secrets.json"),
             osc=replace(settings.intent.osc, connection_mode="off"),
+            telemetry=replace(settings.intent.telemetry, enabled=False),
         ),
     )
     path.write_text(json.dumps(to_dict(settings)), encoding="utf-8")
@@ -115,8 +118,16 @@ def test_headless_runtime_error_is_localized_in_dashboard_state(caplog) -> None:
     ]
 
 
-async def test_mixed_provider_language_and_osc_changes_are_all_committed(tmp_path, monkeypatch):
+@pytest.mark.parametrize("route", ("mixed", "provider_only", "general_only"))
+@pytest.mark.parametrize("synthetic_provider", (False, True))
+async def test_settings_routes_converge_provider_and_general_effects(
+    tmp_path, monkeypatch, route, synthetic_provider
+):
+    from puripuly_heart.app.wiring import wiring_provider_runtime
+    from puripuly_heart.ui.i18n import get_locale
+
     monkeypatch.setenv("PURIPULY_HEART_SECRETS_PASSPHRASE", "isolated-test-passphrase")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     path = tmp_path / "settings.json"
     isolated_settings(path)
     app = compose_headless_application(path)
@@ -124,26 +135,422 @@ async def test_mixed_provider_language_and_osc_changes_are_all_committed(tmp_pat
         await app.start()
         control = app.control()
         control.bind_instance("mixed-settings")
+        previous = await control.query("settings.current", {})
+        initial_provider = control.pipeline.llm_runtime.provider
+        assert initial_provider is not None
+        replacement = SimpleNamespace()
+        replacements = []
+        audio = app._settings.application.runtime_effects._audio_test
+        stop_calls = []
+        stop_audio = type(audio).stop
+
+        async def observe_stop(runtime):
+            if runtime is audio:
+                stop_calls.append(True)
+            await stop_audio(runtime)
+
+        monkeypatch.setattr(type(audio), "stop", observe_stop)
+        from puripuly_heart.app.services import application_audio_devices
+
+        monkeypatch.setattr(
+            application_audio_devices,
+            "enumerate_audio_devices",
+            lambda _settings: {
+                "host_apis": ["Windows WASAPI"],
+                "microphones": [{"name": "isolated microphone", "host_api": "Windows WASAPI"}],
+                "loopback_outputs": [],
+            },
+        )
+        if synthetic_provider:
+
+            def create_backend(**kwargs):
+                replacements.append(kwargs)
+                return replacement
+
+            monkeypatch.setattr(
+                wiring_provider_runtime, "create_translation_backend", create_backend
+            )
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+            receiver.bind(("127.0.0.1", 0))
+            send_port = receiver.getsockname()[1]
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                receive_port = reservation.getsockname()[1]
+            provider_changes = {
+                "translation.model": "deepseek_v4_flash_41",
+                "translation.connection": "official_byok",
+            }
+            general_changes = {
+                "locale": "ja",
+                "languages": {"source": "ja", "target": "en"},
+                "osc.connection": {
+                    "mode": "manual",
+                    "send_port": send_port,
+                    "receive_port": receive_port,
+                },
+                "chatbox.activation_notice.enabled": False,
+                "self_vad.speech_threshold": 0.65,
+                "audio.input_device": "isolated microphone",
+            }
+            changes = {}
+            if route != "general_only":
+                changes.update(provider_changes)
+            if route != "provider_only":
+                changes.update(general_changes)
+            submitted = await control.submit(
+                "settings.apply",
+                {"changes": changes},
+                request_id="mixed-settings",
+                expected_revision=previous["revision"],
+            )
+            result = await control.wait(submitted["operation_id"], timeout=10)
+            current = await control.query("settings.current", {})
+            intent = current["settings"]["intent"]
+            if route != "general_only":
+                assert intent["translation"]["model"] == "deepseek_v4_flash_41"
+                assert intent["translation"]["connection"] == "official_byok"
+                assert control.pipeline.llm_runtime.provider is (
+                    replacement if synthetic_provider else None
+                )
+                assert current["revision"] == previous["revision"] + 1
+                assert result["status"] == ("applied" if synthetic_provider else "degraded")
+                presentation = app._settings.application.runtime_effects._presentation
+                assert presentation.projections["translation_needs_key"] is True
+                assert (await control.query("secrets.presence", {}))["presence"][
+                    "deepseek_api_key"
+                ] is False
+                if not synthetic_provider:
+                    assert result["transaction"]["diagnostics"]["code"] == (
+                        "provider_runtime_apply_exception"
+                    )
+            else:
+                assert result["status"] == "applied"
+                assert control.pipeline.llm_runtime.provider is initial_provider
+                assert not replacements
+            assert (
+                json.loads(path.read_text(encoding="utf-8"))["intent"]
+                == to_dict(app.compatibility_settings())["intent"]
+            )
+            if route != "provider_only":
+                assert intent["languages"]["source_language"] == "ja"
+                assert intent["languages"]["target_language"] == "en"
+                config = control.pipeline.translation_runtime_configuration.snapshot().value
+                assert config.source_language == "ja"
+                assert config.target_language == "en"
+                assert get_locale() == "ja"
+                assert app.effective_osc_ports() == (send_port, receive_port)
+                assert control.pipeline.current.output_runtime.activation_notice_enabled is False
+                assert intent["stt"]["vad_speech_threshold"] == 0.65
+                assert audio.vad_settings("self").speech_threshold == 0.65
+                assert stop_calls
+            else:
+                assert intent["languages"] == previous["settings"]["intent"]["languages"]
+                assert intent["ui"] == previous["settings"]["intent"]["ui"]
+                assert app.effective_osc_ports() == (None, None)
+            assert control.settings.mutation_depth == 0
+            assert control.settings.rollback_pending is False
+    finally:
+        await app.stop()
+
+
+@pytest.mark.parametrize(
+    ("setup", "changes"),
+    (
+        (
+            {},
+            {"translation.model": "managed_gemma", "translation.connection": "cpu"},
+        ),
+        (
+            {"translation.model": "local_llm", "translation.connection": "ollama"},
+            {"local_llm.base_url": "http://127.0.0.1:12345/v1", "local_llm.model": "isolated"},
+        ),
+        (
+            {"translation.model": "qwen38_flash", "translation.connection": "official_byok"},
+            {"translation.qwen.region": "singapore"},
+        ),
+    ),
+)
+@pytest.mark.parametrize("provider_fails", (False, True))
+async def test_mixed_llm_options_and_managed_switch_replace_once(
+    tmp_path, monkeypatch, setup, changes, provider_fails
+):
+    from puripuly_heart.app.wiring import wiring_provider_runtime
+    from puripuly_heart.ui.i18n import get_locale
+
+    monkeypatch.setenv("PURIPULY_HEART_SECRETS_PASSPHRASE", "isolated-test-passphrase")
+    path = tmp_path / "settings.json"
+    isolated_settings(path)
+    app = compose_headless_application(path)
+    try:
+        await app.start()
+        control = app.control()
+        control.bind_instance("mixed-options")
+        assert control.pipeline.llm_runtime.provider is not None
+        replacements = []
+
+        def create_backend(**kwargs):
+            provider = SimpleNamespace()
+            replacements.append((provider, kwargs))
+            return provider
+
+        monkeypatch.setattr(wiring_provider_runtime, "create_translation_backend", create_backend)
+        if setup:
+            submitted = await control.submit(
+                "settings.apply", {"changes": setup}, request_id="setup-options"
+            )
+            assert (await control.wait(submitted["operation_id"], timeout=10))[
+                "status"
+            ] == "applied"
+        initial_provider = control.pipeline.llm_runtime.provider
+        replacements.clear()
+        if provider_fails:
+
+            def fail_backend(**kwargs):
+                replacements.append((None, kwargs))
+                raise ValueError("controlled provider construction failure")
+
+            monkeypatch.setattr(wiring_provider_runtime, "create_translation_backend", fail_backend)
+        previous = await control.query("settings.current", {})
+        submitted = await control.submit(
+            "settings.apply",
+            {"changes": {**changes, "locale": "ja", "languages": {"source": "ja", "target": "en"}}},
+            request_id="mixed-options",
+        )
+        result = await control.wait(submitted["operation_id"], timeout=10)
+        assert result["status"] == ("degraded" if provider_fails else "applied")
+        assert len(replacements) == 1
+        assert control.pipeline.llm_runtime.provider is replacements[0][0]
+        assert control.pipeline.llm_runtime.provider is not initial_provider
+        current = await control.query("settings.current", {})
+        assert current["revision"] == previous["revision"] + 1
+        assert current["settings"]["intent"]["ui"]["locale"] == "ja"
+        assert get_locale() == "ja"
+        config = control.pipeline.translation_runtime_configuration.snapshot().value
+        assert config.source_language == "ja"
+        assert config.target_language == "en"
+        if provider_fails:
+            assert (
+                result["transaction"]["diagnostics"]["code"] == "provider_runtime_apply_exception"
+            )
+        assert control.settings.mutation_depth == 0
+        assert control.settings.rollback_pending is False
+    finally:
+        await app.stop()
+
+
+@pytest.mark.parametrize("provider_fails", (False, True))
+async def test_mixed_general_failure_still_applies_provider_and_retains_causes(
+    tmp_path, monkeypatch, provider_fails
+):
+    from puripuly_heart.app.wiring import wiring_provider_runtime
+    from puripuly_heart.ui.i18n import get_locale
+
+    monkeypatch.setenv("PURIPULY_HEART_SECRETS_PASSPHRASE", "isolated-test-passphrase")
+    path = tmp_path / "settings.json"
+    isolated_settings(path)
+    app = compose_headless_application(path)
+    try:
+        await app.start()
+        control = app.control()
+        control.bind_instance("mixed-failure")
+        initial_provider = control.pipeline.llm_runtime.provider
+        assert initial_provider is not None
+        replacement = SimpleNamespace()
+        replacements = []
+
+        def create_backend(**kwargs):
+            replacements.append(kwargs)
+            if provider_fails:
+                raise ValueError("controlled provider construction failure")
+            return replacement
+
+        def fail_locale():
+            raise RuntimeError("controlled locale presentation failure")
+
+        monkeypatch.setattr(wiring_provider_runtime, "create_translation_backend", create_backend)
+        effects = app._settings.application.runtime_effects
+        monkeypatch.setattr(effects._presentation, "apply_locale", fail_locale)
+        previous = await control.query("settings.current", {})
         submitted = await control.submit(
             "settings.apply",
             {
                 "changes": {
                     "translation.model": "deepseek_v4_flash_41",
                     "translation.connection": "official_byok",
+                    "locale": "ja",
                     "languages": {"source": "ja", "target": "en"},
-                    "osc.connection": {"mode": "manual", "send_port": 9200, "receive_port": 9201},
                 }
             },
-            request_id="mixed-settings",
+            request_id="mixed-failure",
         )
         result = await control.wait(submitted["operation_id"], timeout=10)
-        assert result["status"] in {"applied", "degraded"}
-        intent = (await control.query("settings.current", {}))["settings"]["intent"]
-        assert intent["translation"]["connection"] == "official_byok"
-        assert intent["languages"]["source_language"] == "ja"
-        assert intent["languages"]["target_language"] == "en"
-        assert intent["osc"]["connection_mode"] == "manual"
-        assert intent["osc"]["send_port"] == 9200
+        assert result["status"] == "degraded"
+        assert len(replacements) == 1
+        assert control.pipeline.llm_runtime.provider is (None if provider_fails else replacement)
+        assert get_locale() == "ja"
+        assert (
+            control.pipeline.translation_runtime_configuration.snapshot().value.source_language
+            == "ja"
+        )
+        current = await control.query("settings.current", {})
+        assert current["revision"] == previous["revision"] + 1
+        assert (
+            json.loads(path.read_text(encoding="utf-8"))["intent"]
+            == to_dict(app.compatibility_settings())["intent"]
+        )
+        transaction = result["transaction"]
+        assert transaction["diagnostics"]["code"] == "settings_runtime_apply_exception"
+        if provider_fails:
+            secondary = transaction["secondary_diagnostics"]
+            assert [item["code"] for item in secondary] == ["provider_runtime_apply_exception"]
+            assert secondary[0]["cause_id"] == transaction["diagnostics"]["diagnostic_id"]
+        assert control.settings.mutation_depth == 0
+        assert control.settings.rollback_pending is False
+        committed_provider = control.pipeline.llm_runtime.provider
+
+        def fail_save(*_args):
+            raise OSError("controlled next persistence failure")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(control.settings.persistence, "persist", fail_save)
+            submitted = await control.submit(
+                "settings.apply",
+                {"changes": {"locale": "en"}},
+                request_id="next-save-failure",
+            )
+            failed = await control.wait(submitted["operation_id"], timeout=10)
+        assert failed["status"] == "persistence_failed"
+        assert await control.query("settings.current", {}) == current
+        assert control.pipeline.llm_runtime.provider is committed_provider
+    finally:
+        await app.stop()
+
+
+async def test_mixed_save_failure_keeps_binding_settings_and_revision_then_recovers(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PURIPULY_HEART_SECRETS_PASSPHRASE", "isolated-test-passphrase")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    path = tmp_path / "settings.json"
+    isolated_settings(path)
+    app = compose_headless_application(path)
+    try:
+        await app.start()
+        control = app.control()
+        control.bind_instance("mixed-save")
+        previous = await control.query("settings.current", {})
+        initial_provider = control.pipeline.llm_runtime.provider
+        assert initial_provider is not None
+        previous_file = path.read_bytes()
+
+        def fail_save(*_args):
+            raise OSError("controlled persistence failure")
+
+        changes = {
+            "translation.model": "deepseek_v4_flash_41",
+            "translation.connection": "official_byok",
+            "locale": "ja",
+            "languages": {"source": "ja", "target": "en"},
+        }
+        with monkeypatch.context() as patch:
+            patch.setattr(control.settings.persistence, "persist", fail_save)
+            submitted = await control.submit(
+                "settings.apply", {"changes": changes}, request_id="mixed-save-failure"
+            )
+            result = await control.wait(submitted["operation_id"], timeout=10)
+        assert result["status"] == "persistence_failed"
+        assert await control.query("settings.current", {}) == previous
+        assert path.read_bytes() == previous_file
+        assert control.pipeline.llm_runtime.provider is initial_provider
+        assert control.settings.mutation_depth == 0
+        assert control.settings.rollback_pending is False
+        submitted = await control.submit(
+            "settings.apply",
+            {"changes": changes},
+            request_id="mixed-save-recovery",
+            expected_revision=previous["revision"],
+        )
+        result = await control.wait(submitted["operation_id"], timeout=10)
+        assert result["status"] == "degraded"
+        assert control.pipeline.llm_runtime.provider is None
+        assert (await control.query("settings.current", {}))["revision"] == previous["revision"] + 1
+    finally:
+        await app.stop()
+
+
+async def test_provider_only_full_draft_does_not_overwrite_newer_general_settings(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PURIPULY_HEART_SECRETS_PASSPHRASE", "isolated-test-passphrase")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    path = tmp_path / "settings.json"
+    isolated_settings(path)
+    app = compose_headless_application(path)
+    try:
+        await app.start()
+        control = app.control()
+        control.bind_instance("stale-provider-draft")
+        stale = deepcopy(app.compatibility_settings())
+        initial_provider = control.pipeline.llm_runtime.provider
+        submitted = await control.submit(
+            "settings.apply",
+            {"changes": {"locale": "ja", "languages": {"target": "ja"}}},
+            request_id="current-general",
+        )
+        assert (await control.wait(submitted["operation_id"], timeout=10))["status"] == "applied"
+        general = deepcopy(app.compatibility_settings().intent)
+        assert await app.apply_providers(stale) is True
+        assert app.compatibility_settings().intent.ui == general.ui
+        assert app.compatibility_settings().intent.languages == general.languages
+        assert control.pipeline.llm_runtime.provider is initial_provider
+    finally:
+        await app.stop()
+
+
+async def test_mixed_provider_interruption_retains_commit_without_claiming_runtime_applied(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PURIPULY_HEART_SECRETS_PASSPHRASE", "isolated-test-passphrase")
+    path = tmp_path / "settings.json"
+    isolated_settings(path)
+    app = compose_headless_application(path)
+    try:
+        await app.start()
+        control = app.control()
+        control.bind_instance("mixed-interrupted")
+        previous = await control.query("settings.current", {})
+        initial_provider = control.pipeline.llm_runtime.provider
+        entered = asyncio.Event()
+
+        async def block_rebuild():
+            entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(
+            app._provider.provider_application.runtime, "rebuild_llm", block_rebuild
+        )
+        submitted = await control.submit(
+            "settings.apply",
+            {
+                "changes": {
+                    "translation.model": "deepseek_v4_flash_41",
+                    "translation.connection": "official_byok",
+                    "locale": "ja",
+                }
+            },
+            request_id="mixed-interrupted",
+        )
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        control.freeze_ingress()
+        await control.drain_operations()
+        result = await control.operation(submitted["operation_id"])
+        assert result["status"] == "interrupted"
+        assert result["transaction"]["status"] == "settings_commit_success_runtime_interrupted"
+        assert result["revision"] == previous["revision"] + 1
+        assert json.loads(path.read_text(encoding="utf-8"))["intent"]["ui"]["locale"] == "ja"
+        assert control.pipeline.llm_runtime.provider is initial_provider
+        assert control.settings.mutation_depth == 0
+        assert control.settings.rollback_pending is False
     finally:
         await app.stop()
 

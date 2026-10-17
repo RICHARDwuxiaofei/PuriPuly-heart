@@ -5,6 +5,8 @@ import inspect
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, TypeVar
 
+from puripuly_heart.core.owned_thread import run_owned_thread_call
+
 _TaskResultT = TypeVar("_TaskResultT")
 AudioTestSessionRunner = Callable[[int], Awaitable[None]]
 AudioTestCaptureRuntimeStateChanged = Callable[["AudioTestCaptureRuntime"], None]
@@ -38,6 +40,7 @@ class AudioTestCaptureRuntime:
         self._closing = False
         self._closed = False
         self._close_lock = asyncio.Lock()
+        self._source_close_lock = asyncio.Lock()
 
     @property
     def owner_name(self) -> str:
@@ -66,6 +69,10 @@ class AudioTestCaptureRuntime:
     @property
     def is_closing(self) -> bool:
         return self._closing
+
+    @property
+    def has_resources(self) -> bool:
+        return self._has_active_capture_resources()
 
     def lifecycle_owner_snapshot(self) -> dict[str, object]:
         return {
@@ -102,6 +109,12 @@ class AudioTestCaptureRuntime:
     def is_current_generation(self, generation: int) -> bool:
         return not self._closing and not self._closed and generation == self._generation
 
+    def retain_source(self, source: object) -> None:
+        if self._source is not None and self._source is not source:
+            raise RuntimeError(f"{self.owner_name} already owns a source")
+        self._source = source
+        self._notify_state_changed()
+
     def attach_source(self, source: object, *, generation: int) -> bool:
         if not self.is_current_generation(generation):
             return False
@@ -110,14 +123,16 @@ class AudioTestCaptureRuntime:
         return True
 
     async def close_source(self, source: object | None) -> None:
-        if source is None:
-            return
-        if self._source is not source:
-            return
-        await _call_close(source)
-        if self._source is source:
-            self._source = None
-            self._notify_state_changed()
+        async with self._source_close_lock:
+            if source is None or self._source is not source:
+                return
+            frame_task = self._pending_frame_task
+            if frame_task is not None and not frame_task.done():
+                return
+            await _call_close(source)
+            if self._source is source:
+                self._source = None
+                self._notify_state_changed()
 
     def create_frame_task(
         self,
@@ -138,24 +153,18 @@ class AudioTestCaptureRuntime:
         frame_task = task or self._pending_frame_task
         if frame_task is None:
             return
-        if self._pending_frame_task is frame_task:
-            self._pending_frame_task = None
-            self._notify_state_changed()
         await self._cancel_task_bounded(frame_task)
 
     async def stop(self) -> None:
         self._generation += 1
         task = self._session_task
         frame_task = self._pending_frame_task
-        source = self._source
-        self._session_task = None
-        self._pending_frame_task = None
         self._notify_state_changed()
-
         await self._cancel_task_bounded(frame_task)
         await self._cancel_task_bounded(task)
-        if source is not None:
-            await self.close_source(source)
+        if any(item is not None and not item.done() for item in (frame_task, task)):
+            return
+        await self.close_source(self._source)
 
     async def close(self) -> None:
         if self._closed and not self._has_resources():
@@ -198,7 +207,7 @@ class AudioTestCaptureRuntime:
     async def _cancel_task_bounded(self, task: asyncio.Task[Any] | None) -> None:
         if task is None or task is asyncio.current_task():
             return
-        if not task.done():
+        if not task.done() and not task.cancelling():
             task.cancel()
         done, _pending = await asyncio.wait({task}, timeout=self._cancel_timeout_s)
         for completed in done:
@@ -234,9 +243,12 @@ async def _call_close(resource: object) -> None:
     close = getattr(resource, "close", None)
     if not callable(close):
         return
-    result = close()
-    if inspect.isawaitable(result):
-        await result
+    if inspect.iscoroutinefunction(close):
+        await close()
+    else:
+        result = await run_owned_thread_call(close)
+        if inspect.isawaitable(result):
+            await result
 
 
 __all__ = ["AudioTestCaptureRuntime"]

@@ -848,6 +848,7 @@ def compose_application_runtime(
                 log_basic=log_basic,
                 log_diagnostic=log_diagnostic,
                 translation_demand_sink=sync_local_translation_demand,
+                stop_audio_test=lambda: require_audio_test().stop(),
             )
         return peer
 
@@ -2019,6 +2020,7 @@ def compose_application_runtime(
         mark_llm_retry=signatures.mark_llm_retry,
         rolling_stt_secret_rebind=provider_runtime.effects.rebind_rolling_stt_secret,
     )
+    require_settings_application().provider_runtime = provider_runtime.runtime
 
     def selected_translation_runtime_applied() -> bool:
         current = settings.canonical

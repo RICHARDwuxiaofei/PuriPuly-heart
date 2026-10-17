@@ -42,9 +42,10 @@ class Opener:
     def __init__(self, result: object) -> None:
         self.result = result
 
-    async def open(self) -> AudioTestOpenedSource:
+    async def open(self, *, on_acquired) -> AudioTestOpenedSource:
         if isinstance(self.result, BaseException):
             raise self.result
+        on_acquired(self.result)
         return AudioTestOpenedSource(source=self.result, device={"name": "Mic"})
 
 

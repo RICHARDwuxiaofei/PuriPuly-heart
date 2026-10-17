@@ -486,6 +486,7 @@ class SettingsRuntimeEffectsAdapter:
         *,
         strict_runtime_errors: bool,
         reload_settings_view: bool,
+        rebuild_managed_gemma: bool = True,
     ) -> None:
         settings = transition.settings
         self.apply_activation_notice(settings)
@@ -526,10 +527,11 @@ class SettingsRuntimeEffectsAdapter:
                 strict_runtime_errors=strict_runtime_errors,
             )
 
-        await refresh_managed_gemma_prefix(
-            transition,
-            rebuild=self._rebuild_managed_gemma,
-        )
+        if rebuild_managed_gemma:
+            await refresh_managed_gemma_prefix(
+                transition,
+                rebuild=self._rebuild_managed_gemma,
+            )
 
         presenter = self._overlay.current_presenter()
         if presenter is not None:

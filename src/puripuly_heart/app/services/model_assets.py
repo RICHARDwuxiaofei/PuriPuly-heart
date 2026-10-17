@@ -150,7 +150,7 @@ class ModelAssetsApplication:
         if choice.purpose == "translation":
             owner = self.gemma()
             if owner is not None:
-                owner.cancel()
+                owner.cancel_assets(model_id)
         else:
             owner = self.provisioning()
             if owner is not None:

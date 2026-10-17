@@ -332,7 +332,16 @@ async def _download_asset(
         if isinstance(download_failure, httpx.HTTPError) or (
             isinstance(download_failure, LocalSTTDownloadPortError)
             and not isinstance(download_failure, LocalSTTDownloadPortCancelled)
-            and download_failure.failure_code == "download_failed"
+            and download_failure.failure_code
+            in {
+                "download_failed",
+                "download_timeout",
+                "mirror_unavailable",
+                "mirror_redirect_external",
+                "range_invalid",
+                "file_size_mismatch",
+                "checksum_failed",
+            }
         ):
             _raise_if_cancelled(cancel_event)
             raise _GemmaSourceError(
@@ -402,6 +411,7 @@ async def ensure_gemma_installed(
     spec: GemmaModelSpec | None = None,
     source: str | None = None,
     locale: str | None = None,
+    verify_existing_checksums: bool = False,
 ) -> InstalledGemmaManifest:
     if cancel_event is None:
         cancel_event = threading.Event()
@@ -436,6 +446,7 @@ async def ensure_gemma_installed(
             spec=resolved_spec,
             source=source,
             locale=locale,
+            verify_existing_checksums=verify_existing_checksums,
         )
     finally:
         if lease is not None:
@@ -454,6 +465,7 @@ async def _ensure_gemma_installed_with_lease(
     spec: GemmaModelSpec,
     source: str | None,
     locale: str | None,
+    verify_existing_checksums: bool,
 ) -> InstalledGemmaManifest:
     resolved = install_dir
     if source is not None and source not in {*MODEL_DOWNLOAD_SOURCES, "local"}:
@@ -480,7 +492,7 @@ async def _ensure_gemma_installed_with_lease(
         inspect_gemma_install,
         resolved,
         spec=spec,
-        verify_checksums=source == "local",
+        verify_checksums=verify_existing_checksums or source == "local",
         check_cancelled=lambda: _raise_if_cancelled(cancel_event),
         cancel_event=cancel_event,
     )

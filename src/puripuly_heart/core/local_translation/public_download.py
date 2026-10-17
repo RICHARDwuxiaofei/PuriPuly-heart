@@ -18,6 +18,7 @@ def download_public_file(payload: dict, *, on_progress, client_factory=external_
     mirror_hostname = urlsplit(endpoint).hostname
     url = f"{endpoint}/{payload['repo_id']}/resolve/{payload['revision']}/{payload['remote_path']}"
     target = Path(payload["local_dir"]) / payload["remote_path"]
+    target.parent.mkdir(parents=True, exist_ok=True)
     expected = int(payload["expected_size_bytes"])
     partial = target.with_suffix(target.suffix + ".partial")
     with client_factory(timeout=httpx.Timeout(30, connect=15), follow_redirects=False) as client:
