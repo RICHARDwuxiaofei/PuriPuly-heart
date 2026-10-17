@@ -33,19 +33,19 @@ REQUIRED_DISCORD_AUTH_KEYS = [
 
 _EXPECTED_EXACT_STRINGS = {
     "en": {
-        "discord_auth.body": "PuriPuly uses AI for high-quality translation.\nA quick verification is all it takes to start.\n\nThere are two ways:\n1. Verify via Discord: free tokens for 800 uses\n2. Sign in with ChatGPT: requires Plus or higher\n\nYou can try both, so no need to overthink it.\nThe developer pays for the tokens personally.\nWe don't keep personal information.",
+        "discord_auth.body": "PuriPuly uses AI for high-quality translation.\nA quick verification is all it takes to start.\n\nThere are two ways:\n1. Verify via Discord: free tokens for 800 uses\n2. Sign in with ChatGPT: requires Plus or higher\n\nYou can try both, so no need to overthink it.\nI pay for the tokens out of my own pocket.\nI don't keep any personal information.",
         "discord_auth.success": "Discord verification is complete.",
     },
     "ko": {
-        "discord_auth.body": "PuriPuly는 고품질 번역을 위해 AI를 사용해요.\n간단한 인증을 통해서 사용할 수 있어요.\n\n두가지 방법이 있어요.\n1. Discord로 인증: 800회 분량의 토큰을 무료로 지급\n2. ChatGPT로 로그인: Plus 구독 이상 필요\n\n둘 다 해볼 수 있으니 고민하지 않아도 되어요.\n토큰은 개발자의 사비로 지불합니다.\n개인 정보는 보관하지 않아요.",
+        "discord_auth.body": "PuriPuly는 고품질 번역을 위해 AI를 사용해요.\n간단한 인증을 통해서 사용할 수 있어요.\n\n두가지 방법이 있어요.\n1. Discord로 인증: 800회 분량의 토큰을 무료로 지급\n2. ChatGPT로 로그인: Plus 구독 이상 필요\n\n둘 다 해볼 수 있으니 고민하지 않아도 되어요.\n토큰은 제 사비로 지불해요.\n개인 정보는 보관하지 않아요.",
         "discord_auth.success": "Discord 인증이 완료되었어요.",
     },
     "ja": {
-        "discord_auth.body": "PuriPulyは高品質な翻訳のためにAIを使っています。\n簡単な認証で使えるようになります。\n\n方法は2つあります。\n1. Discordで認証：800回分のトークンを無料で付与\n2. ChatGPTでログイン：Plus以上のプランが必要\n\nどちらも試せるので、迷わなくて大丈夫です。\nトークンは開発者が自費で負担しています。\n個人情報は保存しません。",
+        "discord_auth.body": "PuriPulyは高品質な翻訳のためにAIを使っています。\n簡単な認証で使えるようになります。\n\n方法は2つあります。\n1. Discordで認証：800回分のトークンを無料で付与\n2. ChatGPTでログイン：Plus以上のプランが必要\n\nどちらも試せるので、迷わなくて大丈夫です。\nトークンは私が自費で負担しています。\n個人情報は保存しません。",
         "discord_auth.success": "Discord認証が完了しました。",
     },
     "zh-CN": {
-        "discord_auth.body": "PuriPuly 使用 AI 提供高质量翻译。\n只需简单认证即可使用。\n\n有两种方式：\n1. 使用 Discord 认证：免费获得 800 次用量的 Token\n2. 使用 ChatGPT 登录：需要 Plus 及以上订阅\n\n两种都可以尝试，不用纠结。\nToken 由开发者自费承担。\n我们不会保存个人信息。",
+        "discord_auth.body": "PuriPuly 使用 AI 提供高质量翻译。\n只需简单认证即可使用。\n\n有两种方式：\n1. 使用 Discord 认证：免费获得 800 次用量的 Token\n2. 使用 ChatGPT 登录：需要 Plus 及以上订阅\n\n两种都可以尝试，不用纠结。\nToken 由我自费承担。\n我不会保存个人信息。",
         "discord_auth.success": "Discord 认证已完成。",
     },
 }
