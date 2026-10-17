@@ -626,8 +626,7 @@ async def test_asset_import_uses_requested_profile_and_reuses_only_verified_inst
 ) -> None:
     pinned = assets.resolve_gemma_spec(model_id)
     contents = {
-        asset.filename: f"imported-{index}".encode()
-        for index, asset in enumerate(pinned.assets)
+        asset.filename: f"imported-{index}".encode() for index, asset in enumerate(pinned.assets)
     }
     spec = replace(
         pinned,
@@ -665,7 +664,9 @@ async def test_asset_import_uses_requested_profile_and_reuses_only_verified_inst
             *contents,
             assets.GEMMA_INSTALLED_MANIFEST_FILENAME,
         }
-        install_dir.joinpath(spec.model_filename).write_bytes(b"x" * len(contents[spec.model_filename]))
+        install_dir.joinpath(spec.model_filename).write_bytes(
+            b"x" * len(contents[spec.model_filename])
+        )
         with pytest.raises(provisioning.GemmaProvisioningError) as caught:
             await owner.install_assets(source="local", model_id=model_id)
         assert caught.value.failure_code == "missing_file"
