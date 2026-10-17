@@ -147,7 +147,7 @@ Composition may construct resources, but must transfer long-lived ownership to a
 
 ## Local Application Control
 
-GUI and headless hosts share application owners and runtime resources. Presentation adapters determine whether there is a main window.
+GUI and headless hosts share application owners, runtime resources and turn-event contracts. Presentation adapters determine whether there is a main window.
 
 - **Operations and queries**
   - `ApplicationControlOwner` exposes typed operations and owner-backed queries.

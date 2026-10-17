@@ -7,6 +7,7 @@ import socket
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
+from uuid import uuid4
 
 import numpy as np
 import pytest
@@ -30,6 +31,7 @@ from puripuly_heart.core.audio.source import (
     SelfMicCaptureChannelDecision,
     SoundDeviceInputMetadata,
 )
+from puripuly_heart.core.diagnostics import DIAGNOSTIC_RECORD_ATTRIBUTE
 from puripuly_heart.core.http_extensions import http_extension_secret_key
 from puripuly_heart.core.messages import TransactionResult
 from puripuly_heart.core.peer_capture import (
@@ -37,6 +39,13 @@ from puripuly_heart.core.peer_capture import (
     PeerCaptureTargetResolution,
     PeerCaptureTargetStatus,
 )
+from puripuly_heart.domain.events import (
+    SelfTurnPresentation,
+    SelfTurnTargetPresentation,
+    UIEvent,
+    UIEventType,
+)
+from puripuly_heart.domain.models import Transcript, Translation
 
 
 def isolated_settings(path):
@@ -116,6 +125,192 @@ def test_headless_runtime_error_is_localized_in_dashboard_state(caplog) -> None:
     assert [(record.levelno, record.getMessage()) for record in caplog.records] == [
         (logging.ERROR, "Application message: local_stt.download_failed")
     ]
+
+
+@pytest.fixture
+def headless_event_bridge():
+    presentation = HeadlessApplicationPresentation()
+    presentation.application = SimpleNamespace(
+        get_event_language_codes=lambda: ("fr", "en"),
+        state=lambda: SimpleNamespace(translation_enabled=True, stt_state=None),
+        clear_managed_auth_pending_state=lambda: None,
+        schedule_github_star_prompt_translation_success_observed=lambda: None,
+    )
+    bridge = presentation.create_ui_event_bridge(event_queue=asyncio.Queue(), runtime_logging=None)
+    yield presentation, bridge
+    bridge.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ("cancelled", "expired"))
+async def test_headless_self_turn_progress_rejects_stale_state_and_recovers(
+    headless_event_bridge, caplog, terminal
+):
+    presentation, bridge = headless_event_bridge
+    dashboard = presentation.dashboard
+    source = SelfTurnPresentation(
+        utterance_id=uuid4(),
+        turn_generation=1,
+        turn_order=1,
+        revision=1,
+        source_revision=1,
+        source_text="synthetic progressive source",
+        source_language="fr",
+        source_closed=False,
+        status="active",
+        targets=(
+            SelfTurnTargetPresentation("en", 1, "pending"),
+            SelfTurnTargetPresentation("de", 1, "pending"),
+        ),
+        created_at=0.0,
+    )
+
+    async def publish(snapshot):
+        await bridge._handle_event(
+            UIEvent(
+                UIEventType.SELF_TURN_UPDATED,
+                utterance_id=snapshot.utterance_id,
+                payload=snapshot,
+                source="Mic",
+                channel="self",
+            )
+        )
+
+    def ready(snapshot, language, text):
+        return SelfTurnTargetPresentation(
+            language,
+            snapshot.source_revision,
+            "ready",
+            Translation(
+                snapshot.utterance_id,
+                text,
+                source_text=snapshot.source_text,
+                source_language=snapshot.source_language,
+                target_language=language,
+            ),
+        )
+
+    await publish(source)
+    assert dashboard.transcript == source.source_text
+    assert dashboard.translation is None
+    first = replace(
+        source,
+        revision=2,
+        targets=(ready(source, "en", "synthetic first translation"), source.targets[1]),
+    )
+    await publish(first)
+    assert dashboard.translation == "synthetic first translation"
+    both = replace(
+        first,
+        revision=3,
+        targets=(first.targets[0], ready(source, "de", "synthetic second translation")),
+    )
+    await publish(both)
+    assert dashboard.translation.splitlines() == [
+        "synthetic first translation",
+        "synthetic second translation",
+    ]
+    extended = replace(both, revision=4, source_revision=2, source_text="synthetic extended source")
+    await publish(extended)
+    assert dashboard.transcript == extended.source_text
+    assert dashboard.translation is None
+    current = replace(
+        extended,
+        revision=5,
+        targets=(
+            ready(extended, "en", "synthetic current translation"),
+            replace(both.targets[1], status="failed"),
+        ),
+    )
+    await publish(current)
+    assert dashboard.translation == "synthetic current translation"
+    await publish(both)
+    await publish(replace(both, revision=6))
+    assert dashboard.transcript == current.source_text
+    assert dashboard.translation == "synthetic current translation"
+    ended = replace(current, revision=6, status=terminal)
+    await publish(ended)
+    assert dashboard.transcript == current.source_text
+    assert dashboard.translation is None
+    await publish(replace(current, revision=99, source_closed=True, status="complete"))
+    assert dashboard.translation is None
+    successor = replace(
+        source,
+        utterance_id=uuid4(),
+        turn_order=2,
+        source_text="synthetic successor source",
+    )
+    successor = replace(
+        successor,
+        targets=(
+            ready(successor, "en", "synthetic successor translation"),
+            replace(ready(successor, "de", "synthetic invalid target"), status="cancelled"),
+        ),
+    )
+    await publish(successor)
+    assert dashboard.transcript == successor.source_text
+    assert dashboard.translation == "synthetic successor translation"
+    await publish(replace(ended, revision=100))
+    assert dashboard.transcript == successor.source_text
+    assert dashboard.translation == "synthetic successor translation"
+    generation = replace(
+        source,
+        utterance_id=uuid4(),
+        turn_generation=2,
+        source_text="synthetic next generation source",
+    )
+    generation = replace(
+        generation, targets=(ready(generation, "en", "synthetic generation translation"),)
+    )
+    await publish(generation)
+    await publish(replace(successor, revision=100, turn_order=100))
+    assert dashboard.transcript == generation.source_text
+    assert dashboard.translation == "synthetic generation translation"
+    failures = [
+        value[0]
+        for record in caplog.records
+        if (value := getattr(record, DIAGNOSTIC_RECORD_ATTRIBUTE, None)) is not None
+        and value[0].code == "destination_publish_failed"
+    ]
+    assert failures == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel,source", (("self", "You"), ("peer", "Peer")))
+async def test_headless_legacy_manual_and_peer_events_remain_supported(
+    headless_event_bridge, caplog, channel, source
+):
+    presentation, bridge = headless_event_bridge
+    utterance_id = uuid4()
+    transcript = Transcript(utterance_id, "synthetic legacy source", True, channel=channel)
+    translation = Translation(
+        utterance_id,
+        "synthetic legacy translation",
+        source_text=transcript.text,
+        source_language="fr",
+        target_language="en",
+        channel=channel,
+    )
+    for event_type, payload in (
+        (UIEventType.TRANSCRIPT_FINAL, transcript),
+        (UIEventType.TRANSLATION_DONE, translation),
+    ):
+        await bridge._handle_event(
+            UIEvent(
+                event_type,
+                utterance_id=utterance_id,
+                payload=payload,
+                source=source,
+                channel=channel,
+            )
+        )
+    assert presentation.dashboard.transcript == transcript.text
+    assert presentation.dashboard.translation == translation.text
+    assert not any(
+        value[0].code == "destination_publish_failed"
+        for record in caplog.records
+        if (value := getattr(record, DIAGNOSTIC_RECORD_ATTRIBUTE, None)) is not None
+    )
 
 
 @pytest.mark.parametrize("route", ("mixed", "provider_only", "general_only"))
