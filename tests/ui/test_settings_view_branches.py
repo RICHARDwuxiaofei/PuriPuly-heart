@@ -7109,7 +7109,12 @@ class PromptApplyBackend:
         self.apply_started = asyncio.Event()
         self.release_apply = asyncio.Event()
 
-    async def apply_settings(self, settings: AppSettingsVNext) -> bool:
+    async def apply_settings(
+        self,
+        settings: AppSettingsVNext,
+        *,
+        provider_requested: bool = False,
+    ) -> bool:
         self.apply_started.set()
         await self.release_apply.wait()
         if self.succeed:

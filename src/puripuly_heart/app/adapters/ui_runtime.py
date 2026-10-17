@@ -341,8 +341,13 @@ class UiSettingsRuntimeAdapter:
     ) -> AppSettingsVNext:
         return self.merge_provider_settings(settings)
 
-    async def apply_settings(self, settings: AppSettingsVNext) -> object:
-        return await self.application.apply(settings)
+    async def apply_settings(
+        self,
+        settings: AppSettingsVNext,
+        *,
+        provider_requested: bool = False,
+    ) -> object:
+        return await self.application.apply(settings, provider_requested=provider_requested)
 
     async def apply_telemetry_enabled(self, enabled: bool) -> object | None:
         settings = self.settings.canonical

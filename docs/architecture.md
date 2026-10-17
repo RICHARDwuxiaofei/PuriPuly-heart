@@ -98,7 +98,7 @@ Peer:   loopback / process audio → capture / segmentation → recognition
 - Capture authority determines which audio may enter recognition.
 - Source completion drains admitted input. Stop or discontinuity invalidates affected work.
 - The audio test opens its own sources and VAD gating with each channel's capture parameters. Its audio never reaches recognition. Self and Peer capture stay paused while it runs.
-- Audio-test pause/launch shares application mutation ordering with capture and settings. Stop and GUI dismissal fence pending admission independently of the settings queue. Each channel drains independently; unsettled tasks or failed release remain owned and visible, blocking conflicting restart or restoration.
+- Audio-test start authority belongs to the application boundary and is captured at GUI/control submission before the settings queue or either application ordering wait. Stop and dismissal revoke older starts even before a channel owner exists; stale control operations settle cancelled. Pause/launch still shares capture/settings ordering. Each channel drains independently; unsettled tasks or failed release remain owned and visible, blocking conflicting restart or restoration.
 - Test restoration retains capture-owner and explicit-choice authority, not configuration generation. Failed retries retain valid restoration debt; explicit capture choices or owner replacement invalidate it. Shutdown never restores capture. Observation callbacks may attach, detach or replace without restarting sources.
 - Audio-test route/source opening and VAD construction use owned synchronous work. Late-created sources transfer into channel ownership before cancellation completes. Shared microphone, desktop-loopback and process native-close work drains off the event loop; Janus and asynchronous cleanup stay on it.
 
@@ -199,6 +199,7 @@ Settings changes follow this path:
 - Settings persistence owns intent. Runtime owners own its application.
 - The provider-apply boundary coordinates capture and Local ASR owners.
 - Mixed provider and ordinary settings edits use one full-draft persistence transaction. The settings application owner prepares the existing provider runtime plan before signatures advance, then attempts both generic and provider effects. Independent failures retain committed intent and their diagnostics; applied is published only after both boundaries finish. A provider-owned LLM replacement suppresses duplicate generic managed-Gemma prefix rebuilding.
+- Mixed settings retain explicit provider-request intent separately from saved-value differences. An identical explicit retry consults the provider owner's pending plan; general-only edits do not acquire provider retry authority.
 - Failed or incomplete application must not appear as successfully applied runtime state.
 - LLM applied-profile signatures and retry state follow actual provider attachment or replacement. Initial attachment uses the exact launch snapshot; an absent provider remains retryable. Replacement records its outcome before usage refresh or STT convergence. Generic settings-effect, restoration and post-transaction cache updates are STT-only and cannot assert LLM application. Provider application advances STT signatures only after STT convergence, so an independent STT failure can leave the overall transaction committed but runtime-degraded without losing the actual LLM binding.
 
@@ -415,7 +416,7 @@ Build policy and validation: `scripts/ci/build-native-experimental.ps1`, `releas
 - **Provisioning lifecycle**
   - Setup provisions required CPU ASR assets before app replacement. Provisioning failure blocks installation.
   - Managed Gemma and optional GPU ASR keep on-demand runtime preparation.
-  - Explicit asset operations have cancellation identity separate from runtime preparation demand. Demand-off preserves asset work; explicit asset cancellation and shutdown own its settlement.
+  - Explicit asset operations have cancellation identity separate from runtime preparation demand. Their admitted task excludes conflicting provisioning without holding the runtime transition lock across transfer. Runtime release and provider cutover remain independent; explicit asset cancellation and shutdown own transfer settlement.
   - Destructive model work retains its provisioning lease until the owned filesystem worker settles, including cancellation.
   - Adding mirrors does not change these lifecycle owners.
 

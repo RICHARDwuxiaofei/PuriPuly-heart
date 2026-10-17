@@ -189,7 +189,7 @@ puripuly.exe models delete --model-id gemma-4-26b-a4b-it-qat-ud-q4-k-xl
 - `delete` refuses a model that running recognition or translation is using (`model_in_use`). It renames the install before removing it, so files in use are never partially deleted. Cancellation or shutdown keeps its provisioning lease until the filesystem worker settles.
 - `import` is available for Gemma models and needs the pinned file names listed in `required_files`. Files are verified before installation.
 - These commands do not hold the settings command queue, so other commands keep working during a long download.
-- Explicit Gemma asset work has a separate cancellation lifetime from runtime preparation. Turning translation demand off or starting an audio test does not cancel an asset transfer; `models cancel` targets that asset, while shutdown cancels and drains both lifetimes. A conflicting managed operation returns `task_busy` instead of queuing an asset with another operation's cancellation authority.
+- Explicit Gemma asset work has a separate cancellation lifetime from runtime preparation. Turning translation demand off, starting an audio test or selecting a non-Gemma provider neither waits for nor cancels an asset transfer; `models cancel` targets that asset, while shutdown cancels and drains both lifetimes. Conflicting `gemma.prepare` or deletion returns `failed` with `task_busy` promptly. Explicitly retry after the asset settles; preparation is not automatically queued.
 
 ### Peer capture and consent
 
@@ -298,7 +298,7 @@ Numeric CLI values are sent as JSON numbers. The application owner validates fie
 - `applied` means both channels are ready. `degraded` means one channel is ready and the other failed. `action_required` (`select_available_audio_devices`) means no channel could start.
 - No audio content is returned.
 - While the test runs, Self and Peer capture are paused. Stopping the test restores only the inputs that were on before it started and have not had an explicit capture choice or owner replacement. VAD tuning and failed retries do not discard valid restoration intent. Turning Self or Peer capture on explicitly stops the test; shutdown does not restore capture.
-- `audio test off` and GUI dismissal can interrupt pending startup. Successful off waits for all owned inputs and tasks to settle. Cleanup failure stays visible and blocks conflicting restart until a later stop can finish it.
+- `audio test off` and GUI dismissal invalidate earlier start requests even while they wait for application ordering. Those requests cannot open inputs after stop completes; a later new on request can start normally. Successful off waits for all owned inputs and tasks to settle. Cleanup failure stays visible and blocks conflicting restart until a later stop can finish it.
 - Changing the input device, Host API, output device, or loopback target stops a running test before applying the new target.
 
 ### Manual text
@@ -335,6 +335,7 @@ A direct JSON file rewrite is not a settings operation.
 - Queries return the committed snapshot without advancing its revision.
 - Staged preparation and failed persistence are not reported as persisted settings.
 - One request may combine provider choices with locale, language, audio and output changes. Provider-affecting mixed changes commit together before applying both runtime boundaries. Missing credentials or runtime failures report `degraded` without undoing saved intent or claiming that an old provider matches the new selection. Inspect the terminal receipt and effective runtime state.
+- Resubmitting the same provider fields explicitly retries pending provider application even when the saved values already match. It stays `degraded` while attachment still fails. Ordinary locale/language-only edits do not trigger that retry, and an unchanged saved snapshot does not advance the revision.
 
 ### Activation notice
 

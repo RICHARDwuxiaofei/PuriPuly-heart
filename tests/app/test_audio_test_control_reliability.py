@@ -240,3 +240,155 @@ async def test_specialized_target_entrypoints_close_test_before_cutover(
     assert not audio.active
     assert all(source.closed for source in sources)
     assert target.current_value() == "device:Controlled Speakers"
+
+
+class _ObservedOrderingLock(asyncio.Lock):
+    def __init__(self):
+        super().__init__()
+        self.waiting = asyncio.Event()
+
+    async def acquire(self):
+        if self.locked():
+            self.waiting.set()
+        return await super().acquire()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lock_name", ("_resource_lock", "_lock"))
+@pytest.mark.parametrize("existing_owner", (False, True))
+@pytest.mark.parametrize("entrypoint", ("gui", "control"))
+async def test_preowner_ordering_start_is_revoked_by_completed_stop_and_recovers(
+    audio_application, lock_name, existing_owner, entrypoint
+):
+    from tests.ui.test_app_branches import _audio_test_app
+
+    app, control, audio, sources, _path = audio_application
+    original_owner = audio.owner() if existing_owner else None
+    gate = _ObservedOrderingLock()
+    setattr(control, lock_name, gate)
+    await gate.acquire()
+    gui = None
+    starting = None
+    on_receipt = None
+    try:
+        if entrypoint == "gui":
+            gui = _audio_test_app(SimpleNamespace())
+            gui._ui_application = app
+            gui._on_start_audio_test()
+            starting = asyncio.create_task(gui.page.tasks[0]())
+        else:
+            on_receipt = await control.submit(
+                "audio.test", {"enabled": True}, request_id="preowner-on"
+            )
+        await asyncio.wait_for(gate.waiting.wait(), timeout=2)
+        assert sources == []
+        assert audio.owner_if_created is original_owner
+        if gui is not None:
+            gui._audio_test_dialog._handle_dismiss(None)
+            await asyncio.wait_for(gui.page.tasks[-1](), timeout=2)
+            assert not gui._audio_test_dialog.is_open
+        else:
+            off_receipt = await control.submit(
+                "audio.test", {"enabled": False}, request_id="preowner-off"
+            )
+            stopped = await control.wait(off_receipt["operation_id"], timeout=2)
+            assert stopped["terminal"]
+            assert stopped["status"] == "applied"
+            assert stopped["audio_test"]["state"] == "off"
+        assert audio.snapshot["state"] == "off"
+        assert audio.owner_if_created is original_owner
+        gate.release()
+        if starting is not None:
+            await asyncio.wait_for(starting, timeout=2)
+        else:
+            cancelled = await control.wait(on_receipt["operation_id"], timeout=2)
+            assert cancelled["terminal"]
+            assert cancelled["status"] == "cancelled"
+            assert cancelled["audio_test"]["state"] == "off"
+        assert audio.owner_if_created is original_owner
+        assert not audio.active
+        assert sources == []
+        if gui is not None:
+            gui._on_start_audio_test()
+            await asyncio.wait_for(gui.page.tasks[-1](), timeout=2)
+            assert await app.wait_audio_test_ready()
+            gui._audio_test_dialog._handle_dismiss(None)
+            await asyncio.wait_for(gui.page.tasks[-1](), timeout=2)
+        else:
+            valid = await control.submit(
+                "audio.test", {"enabled": True}, request_id="later-valid-on"
+            )
+            ready = await control.wait(valid["operation_id"], timeout=2)
+            assert ready["terminal"] and ready["status"] == "applied"
+            replay = await control.submit("audio.test", {"enabled": True}, request_id="preowner-on")
+            assert replay["operation_id"] == on_receipt["operation_id"]
+            assert replay["status"] == "cancelled"
+            off = await control.submit(
+                "audio.test", {"enabled": False}, request_id="later-valid-off"
+            )
+            stopped = await control.wait(off["operation_id"], timeout=2)
+            assert stopped["terminal"] and stopped["status"] == "applied"
+        assert len(sources) == 2
+        assert all(source.closed for source in sources)
+        assert audio.snapshot["state"] == "off"
+    finally:
+        if gate.locked():
+            gate.release()
+        if starting is not None:
+            await asyncio.gather(starting, return_exceptions=True)
+        await app.stop_audio_test()
+
+
+@pytest.mark.asyncio
+async def test_control_start_keeps_submission_authority_before_its_task_runs(audio_application):
+    app, control, audio, sources, _path = audio_application
+    on = await control.submit("audio.test", {"enabled": True}, request_id="unexecuted-on")
+    await app.stop_audio_test()
+    cancelled = await control.wait(on["operation_id"], timeout=2)
+    assert cancelled["terminal"] and cancelled["status"] == "cancelled"
+    assert audio.owner_if_created is None
+    assert sources == []
+    valid = await control.submit("audio.test", {"enabled": True}, request_id="unexecuted-recovery")
+    ready = await control.wait(valid["operation_id"], timeout=2)
+    assert ready["terminal"] and ready["status"] == "applied"
+    await app.stop_audio_test()
+    assert len(sources) == 2 and all(source.closed for source in sources)
+
+
+@pytest.mark.asyncio
+async def test_gui_start_waiting_in_settings_queue_is_revoked_before_dialog_open(audio_application):
+    from tests.ui.test_app_branches import _audio_test_app
+
+    app, control, audio, sources, _path = audio_application
+    gui = _audio_test_app(SimpleNamespace())
+    gui._ui_application = app
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def earlier_settings():
+        entered.set()
+        await release.wait()
+
+    gui._queue_settings_mutation_task(earlier_settings)
+    worker = asyncio.create_task(gui.page.tasks[0]())
+    try:
+        await entered.wait()
+        gui._on_start_audio_test()
+        off = await control.submit("audio.test", {"enabled": False}, request_id="queued-gui-off")
+        stopped = await control.wait(off["operation_id"], timeout=2)
+        assert stopped["terminal"] and stopped["status"] == "applied"
+        release.set()
+        await asyncio.wait_for(worker, timeout=2)
+        assert getattr(gui, "_audio_test_dialog", None) is None
+        assert audio.owner_if_created is None
+        assert sources == []
+        gui._on_start_audio_test()
+        await asyncio.wait_for(gui.page.tasks[-1](), timeout=2)
+        assert await app.wait_audio_test_ready()
+        gui._audio_test_dialog._handle_dismiss(None)
+        await asyncio.wait_for(gui.page.tasks[-1](), timeout=2)
+        assert len(sources) == 2 and all(source.closed for source in sources)
+    finally:
+        release.set()
+        await asyncio.gather(worker, return_exceptions=True)
+        await app.stop_audio_test()

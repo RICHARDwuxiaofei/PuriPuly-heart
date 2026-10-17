@@ -182,6 +182,8 @@ def _guard_application_intent(method: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(method)
         async def invoke_async(self, *args: Any, **kwargs: Any) -> Any:
             self._admit_application_intent(method.__name__)
+            if method.__name__ == "start_audio_test" and kwargs.get("admission_revision") is None:
+                kwargs["admission_revision"] = self.audio_test_start_revision()
             control = self._control
             if method.__name__ == "set_translation_enabled":
                 preparation = kwargs.get("preparation")
@@ -290,6 +292,7 @@ class UiApplicationBoundary:
         self._scene_observation_provider = scene_observation_provider
         self._index_selection = index_selection
         self._translation_selection_intent = 0
+        self._audio_test_start_revision = 0
         self._github_star_prompt_runtime = GithubStarPromptRuntime(
             diagnostics_sink=self._github_star_prompt_runtime_diagnostics_sink,
         )
@@ -657,8 +660,15 @@ class UiApplicationBoundary:
     ) -> AppSettingsVNext:
         return self._settings.merge_settings_tab_apply_with_current_languages(settings)
 
-    async def apply_settings(self, settings: AppSettingsVNext) -> object:
-        result = await self._settings.apply_settings(settings)
+    async def apply_settings(
+        self,
+        settings: AppSettingsVNext,
+        *,
+        provider_requested: bool = False,
+    ) -> object:
+        result = await self._settings.apply_settings(
+            settings, provider_requested=provider_requested
+        )
         await self._publish_osc_state()
         return result
 
@@ -720,11 +730,17 @@ class UiApplicationBoundary:
     async def ensure_gpu_device_discovery(self) -> None:
         await self._provider.ensure_gpu_device_discovery()
 
+    def audio_test_start_revision(self) -> int:
+        return self._audio_test_start_revision
+
     async def start_audio_test(
         self,
         *,
         observation_callback: Callable[[str, tuple[object, ...]], object] | None = None,
+        admission_revision: int | None = None,
     ) -> bool:
+        if admission_revision != self._audio_test_start_revision:
+            return False
         return bool(
             await self._audio_test.start_audio_test(observation_callback=observation_callback)
         )
@@ -736,10 +752,13 @@ class UiApplicationBoundary:
         return await self._audio_test.wait_audio_test_ready()
 
     async def stop_audio_test(self) -> None:
+        self._audio_test_start_revision += 1
         await self._audio_test.stop_audio_test()
 
     async def _yield_audio_test_capture(self, channel: str, enabled: bool) -> None:
         self._audio_test.release_audio_test_capture_restore(channel)
+        if enabled:
+            self._audio_test_start_revision += 1
         if enabled and self.state().audio_test_active:
             await self._audio_test.stop_audio_test()
             if self.state().audio_test_active:

@@ -76,7 +76,10 @@ from puripuly_heart.core.diagnostics import (
     normalize_diagnostic,
     sanitize_diagnostic_fields,
 )
-from puripuly_heart.core.local_translation.provisioning import GemmaProvisioningCancelled
+from puripuly_heart.core.local_translation.provisioning import (
+    GemmaProvisioningCancelled,
+    GemmaProvisioningError,
+)
 from puripuly_heart.core.messages import (
     CONTENT_POLICY_METADATA_ONLY,
     DIAGNOSTIC_VISIBILITY_BASIC,
@@ -437,6 +440,7 @@ class _Operation:
     backend: str | None = None
     install_started: bool = False
     interrupt_requested: bool = False
+    audio_test_revision: int | None = None
 
 
 class InvalidArgumentsError(ValueError):
@@ -1331,6 +1335,11 @@ class ApplicationControlOwner:
             receipt,
             backend=arguments.get("backend", "gpu") if command == "models.install" else None,
             request_signature=signature,
+            audio_test_revision=(
+                self.application.audio_test_start_revision()
+                if command == "audio.test" and arguments.get("enabled") is True
+                else None
+            ),
         )
         self._requests[request_id] = operation_id
         task = asyncio.create_task(
@@ -2000,9 +2009,12 @@ class ApplicationControlOwner:
                     ),
                     "audio_test": snapshot,
                 }
-            started = await app.start_audio_test()
+            admission_revision = self._operations[operation_id].audio_test_revision
+            started = await app.start_audio_test(admission_revision=admission_revision)
             ready = await app.wait_audio_test_ready() if started else False
             snapshot = app.audio_test_snapshot()
+            if admission_revision != app.audio_test_start_revision():
+                return {"status": "cancelled", "audio_test": snapshot}
             if ready and snapshot["state"] == "ready":
                 return {"status": "applied", "audio_test": snapshot}
             if started and snapshot["state"] in {"off", "stopping"}:
@@ -2076,7 +2088,12 @@ class ApplicationControlOwner:
             settings = app.compatibility_settings()
             if owner is None or settings is None:
                 return {"status": "failed", "error": {"code": "gemma_owner_unavailable"}}
-            activation = await owner.prepare(self.gemma_selection(settings))
+            try:
+                activation = await owner.prepare(self.gemma_selection(settings))
+            except GemmaProvisioningError as error:
+                if error.failure_code != "task_busy":
+                    raise
+                return {"status": "failed", "error": {"code": "task_busy"}}
             await activation.release()
             return {"status": "applied", "gemma": _json(owner.snapshot)}
         if command == "gemma.cancel":
@@ -2791,7 +2808,10 @@ class ApplicationControlOwner:
         }
         if changes.keys() <= provider_fields:
             return await self.application.apply_providers(updated)
-        return await self.application.apply_settings(updated)
+        return await self.application.apply_settings(
+            updated,
+            provider_requested=bool(changes.keys() & provider_fields),
+        )
 
     async def operation(self, operation_id: str) -> dict:
         return dict(self._get(operation_id).receipt)

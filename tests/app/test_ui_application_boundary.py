@@ -96,7 +96,7 @@ class RecordingBackend:
         self.events.append(("peer-retry",))
         return self.peer_retry_result
 
-    async def apply_settings(self, settings: object) -> None:
+    async def apply_settings(self, settings: object, *, provider_requested: bool = False) -> None:
         self.settings = settings
         self.events.append(("settings", settings))
 
@@ -415,7 +415,9 @@ async def test_frozen_boundary_rejects_mutating_intents_but_keeps_stall_diagnost
 @pytest.mark.asyncio
 async def test_boundary_preserves_settings_failure_and_restart_projection() -> None:
     class FailingBackend(RecordingBackend):
-        async def apply_settings(self, settings: object) -> None:
+        async def apply_settings(
+            self, settings: object, *, provider_requested: bool = False
+        ) -> None:
             self.events.append(("settings-failed", settings))
             raise RuntimeError("settings apply failed")
 

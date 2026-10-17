@@ -189,7 +189,12 @@ class UiApplicationPort(Protocol):
         self, settings: AppSettingsVNext
     ) -> AppSettingsVNext: ...
 
-    async def apply_settings(self, settings: AppSettingsVNext) -> object: ...
+    async def apply_settings(
+        self,
+        settings: AppSettingsVNext,
+        *,
+        provider_requested: bool = False,
+    ) -> object: ...
 
     async def apply_providers(
         self,
@@ -204,10 +209,13 @@ class UiApplicationPort(Protocol):
 
     async def ensure_gpu_device_discovery(self) -> None: ...
 
+    def audio_test_start_revision(self) -> int: ...
+
     async def start_audio_test(
         self,
         *,
         observation_callback: Callable[[str, tuple[object, ...]], object] | None = None,
+        admission_revision: int | None = None,
     ) -> bool: ...
 
     def audio_test_snapshot(self) -> dict[str, object]: ...

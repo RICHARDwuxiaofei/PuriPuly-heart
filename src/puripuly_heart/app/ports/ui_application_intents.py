@@ -85,7 +85,12 @@ class UiSettingsRuntimePort(Protocol):
         settings: AppSettingsVNext,
     ) -> AppSettingsVNext: ...
 
-    async def apply_settings(self, settings: AppSettingsVNext) -> object: ...
+    async def apply_settings(
+        self,
+        settings: AppSettingsVNext,
+        *,
+        provider_requested: bool = False,
+    ) -> object: ...
 
     async def apply_telemetry_enabled(self, enabled: bool) -> object | None: ...
 

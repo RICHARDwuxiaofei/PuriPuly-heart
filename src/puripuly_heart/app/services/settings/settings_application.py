@@ -917,6 +917,7 @@ class SettingsApplicationOwner:
         next_settings: AppSettingsVNext,
         *,
         reload_settings_view: bool = True,
+        provider_requested: bool = False,
     ) -> bool:
         current = self.settings.canonical
         if current is not None:
@@ -977,7 +978,8 @@ class SettingsApplicationOwner:
             self.provider_runtime is not None
             and current is not None
             and (
-                settings_view_surface_snapshots(current)[0]
+                provider_requested
+                or settings_view_surface_snapshots(current)[0]
                 != settings_view_surface_snapshots(next_settings)[0]
                 or self.provider_runtime.llm_signature_builder(current)
                 != self.provider_runtime.llm_signature_builder(next_settings)

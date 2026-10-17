@@ -253,6 +253,131 @@ async def test_settings_routes_converge_provider_and_general_effects(
         await app.stop()
 
 
+@pytest.mark.parametrize("retry_route", ("mixed", "provider_only"))
+@pytest.mark.parametrize("failure_mode", ("exception", "unavailable"))
+async def test_failed_mixed_settings_explicit_retry_converges_without_general_only_retry(
+    tmp_path, monkeypatch, retry_route, failure_mode
+):
+    from puripuly_heart.app.wiring import wiring_provider_runtime
+    from puripuly_heart.ui.i18n import get_locale
+
+    monkeypatch.setenv("PURIPULY_HEART_SECRETS_PASSPHRASE", "isolated-test-passphrase")
+    path = tmp_path / "settings.json"
+    isolated_settings(path)
+    app = compose_headless_application(path)
+    try:
+        await app.start()
+        control = app.control()
+        control.bind_instance("mixed-provider-retry")
+        previous = await control.query("settings.current", {})
+        assert control.pipeline.llm_runtime.provider is not None
+        replacement = SimpleNamespace()
+        attempts = []
+        available = False
+
+        def create_backend(**_kwargs):
+            attempts.append(available)
+            if available:
+                return replacement
+            if failure_mode == "exception":
+                raise ValueError("controlled provider construction failure")
+            return None
+
+        monkeypatch.setattr(wiring_provider_runtime, "create_translation_backend", create_backend)
+        provider_changes = {
+            "translation.model": "deepseek_v4_flash_41",
+            "translation.connection": "official_byok",
+        }
+        mixed_changes = {
+            **provider_changes,
+            "locale": "ja",
+            "languages": {"source": "ja", "target": "en"},
+        }
+        expected_code = (
+            "provider_runtime_apply_exception"
+            if failure_mode == "exception"
+            else "provider_runtime_apply_unavailable"
+        )
+        for attempt in range(2):
+            submitted = await control.submit(
+                "settings.apply",
+                {"changes": mixed_changes},
+                request_id=f"mixed-failed-attempt-{attempt}",
+            )
+            result = await control.wait(submitted["operation_id"], timeout=10)
+            assert result["terminal"] is True
+            assert result["status"] == "degraded"
+            assert result["transaction"]["status"] == "settings_commit_success_runtime_degraded"
+            assert result["transaction"]["diagnostics"]["code"] == expected_code
+            assert len(attempts) == attempt + 1
+            assert control.pipeline.llm_runtime.provider is None
+            current = await control.query("settings.current", {})
+            assert current["revision"] == previous["revision"] + (attempt == 0)
+            if attempt == 0:
+                selected = deepcopy(current["settings"])
+            else:
+                assert current["settings"] == selected
+            previous = current
+            assert get_locale() == "ja"
+            config = control.pipeline.translation_runtime_configuration.snapshot().value
+            assert config.source_language == "ja"
+            assert config.target_language == "en"
+            assert control.settings.mutation_depth == 0
+            assert control.settings.rollback_pending is False
+
+        available = True
+        for locale in ("en", "ja"):
+            submitted = await control.submit(
+                "settings.apply",
+                {"changes": {"locale": locale}},
+                request_id=f"general-only-no-provider-retry-{locale}",
+            )
+            general = await control.wait(submitted["operation_id"], timeout=10)
+            assert general["status"] == "applied"
+            assert get_locale() == locale
+            assert len(attempts) == 2
+            assert control.pipeline.llm_runtime.provider is None
+        previous = await control.query("settings.current", {})
+        submitted = await control.submit(
+            "settings.apply",
+            {"changes": mixed_changes if retry_route == "mixed" else provider_changes},
+            request_id="explicit-provider-recovery",
+        )
+        recovered = await control.wait(submitted["operation_id"], timeout=10)
+        assert recovered["terminal"] is True
+        assert recovered["status"] == "applied"
+        assert recovered["transaction"]["status"] == "settings_commit_success_runtime_applied"
+        assert len(attempts) == 3
+        assert control.pipeline.llm_runtime.provider is replacement
+        current = await control.query("settings.current", {})
+        assert current["revision"] == previous["revision"]
+        assert current["settings"] == selected
+        assert get_locale() == "ja"
+
+        submitted = await control.submit(
+            "settings.apply",
+            {"changes": {**provider_changes, "locale": "ko", "languages": {"target": "ja"}}},
+            request_id="healthy-provider-independent-general-effects",
+        )
+        healthy = await control.wait(submitted["operation_id"], timeout=10)
+        assert healthy["status"] == "applied"
+        assert len(attempts) == 3
+        assert control.pipeline.llm_runtime.provider is replacement
+        assert (await control.query("settings.current", {}))["revision"] == current["revision"] + 1
+        assert get_locale() == "ko"
+        config = control.pipeline.translation_runtime_configuration.snapshot().value
+        assert config.source_language == "ja"
+        assert config.target_language == "ja"
+        assert (
+            json.loads(path.read_text(encoding="utf-8"))["intent"]
+            == to_dict(app.compatibility_settings())["intent"]
+        )
+        assert control.settings.mutation_depth == 0
+        assert control.settings.rollback_pending is False
+    finally:
+        await app.stop()
+
+
 @pytest.mark.parametrize(
     ("setup", "changes"),
     (

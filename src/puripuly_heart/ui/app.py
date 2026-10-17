@@ -1488,7 +1488,11 @@ class TranslatorApp:
         self._queue_settings_mutation_task(_task)
 
     def _on_start_audio_test(self) -> None:
+        admission_revision = self.application.audio_test_start_revision()
+
         async def _task():
+            if admission_revision != self.application.audio_test_start_revision():
+                return
             dialog = self._get_audio_test_dialog()
             if dialog.is_open:
                 return
@@ -1499,7 +1503,8 @@ class TranslatorApp:
                 thresholds = read_thresholds()
             dialog.open(thresholds)
             started = await self.application.start_audio_test(
-                observation_callback=dialog.add_samples
+                observation_callback=dialog.add_samples,
+                admission_revision=admission_revision,
             )
             if not started:
                 dialog.show_failure()

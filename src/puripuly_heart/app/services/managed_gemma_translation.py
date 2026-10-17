@@ -128,11 +128,17 @@ class ManagedGemmaTranslationOwner:
         selection: ManagedGemmaTranslationSelection,
     ) -> ManagedGemmaActivation:
         backend = selection.backend
+        if self._asset_task is not None:
+            raise GemmaProvisioningError("Another model task is active", failure_code="task_busy")
         lingering = self._cancel_linger()
         await self._await_cancelled_linger(lingering)
         async with self._lock:
             if self._closed:
                 raise RuntimeError("managed Gemma translation owner is closed")
+            if self._asset_task is not None:
+                raise GemmaProvisioningError(
+                    "Another model task is active", failure_code="task_busy"
+                )
             self._generation += 1
             generation = self._generation
             cancel_event = threading.Event()
@@ -274,21 +280,19 @@ class ManagedGemmaTranslationOwner:
             else None if source == "local" else self._downloader
         )
 
-        async def install() -> InstalledGemmaManifest:
-            async with self._lock:
-                if self._closed:
-                    raise RuntimeError("Model owner closed")
-                return await ensure_gemma_installed(
-                    source=source,
-                    spec=spec,
-                    downloader=downloader,
-                    cancel_event=cancellation,
-                    on_status=on_status,
-                    locale=locale,
-                    verify_existing_checksums=True,
-                )
-
-        task = start_lifecycle_task(self._task_scope, install(), name="install-assets")
+        task = start_lifecycle_task(
+            self._task_scope,
+            ensure_gemma_installed(
+                source=source,
+                spec=spec,
+                downloader=downloader,
+                cancel_event=cancellation,
+                on_status=on_status,
+                locale=locale,
+                verify_existing_checksums=True,
+            ),
+            name="install-assets",
+        )
         self._asset_task = task
         self._asset_cancel_event = cancellation
         self._asset_model_id = spec.model_id
@@ -321,11 +325,17 @@ class ManagedGemmaTranslationOwner:
             remove_model_install_dir,
         )
 
+        if self._asset_task is not None:
+            raise GemmaProvisioningError("Another model task is active", failure_code="task_busy")
         lingering = self._cancel_linger()
         await self._await_cancelled_linger(lingering)
         async with self._lock:
             if self._closed:
                 raise RuntimeError("Model owner closed")
+            if self._asset_task is not None:
+                raise GemmaProvisioningError(
+                    "Another model task is active", failure_code="task_busy"
+                )
             if self._prepare_task is not None and not self._prepare_task.done():
                 raise GemmaProvisioningError(
                     "Another model task is active", failure_code="task_busy"

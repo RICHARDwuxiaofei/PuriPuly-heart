@@ -4207,3 +4207,78 @@ async def test_audio_test_dismiss_preempts_gated_settings_start_and_allows_later
             *(task for task in (starting, stopping) if task is not None), return_exceptions=True
         )
         await harness.owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", ("en", "ko", "ja", "ru", "zh-CN"))
+async def test_audio_open_failures_are_channel_specific_persistent_and_recover(locale) -> None:
+    previous_locale = i18n_module.get_locale()
+    i18n_module.set_locale(locale)
+    snapshot = {
+        "value": _audio_snapshot(
+            "failed",
+            self_={"state": "failed", "failure_reason": "source_open_failed"},
+            peer={"state": "ready"},
+        )
+    }
+
+    async def start(**_kwargs):
+        return True
+
+    controller = SimpleNamespace(
+        start_audio_test=start,
+        stop_audio_test=lambda: None,
+        audio_test_snapshot=lambda: snapshot["value"],
+        audio_test_active=False,
+    )
+    app = _audio_test_app(controller)
+    try:
+        app._on_start_audio_test()
+        await app.page.tasks[0]()
+        dialog = app._audio_test_dialog
+        dialog.refresh()
+        self_failure = dialog.panel("self").status_text.value
+        assert self_failure
+        assert not self_failure.startswith("audio_test.")
+        snapshot["value"]["channels"]["peer"] = {
+            "state": "failed",
+            "failure_reason": "source_open_failed",
+        }
+        dialog.refresh()
+        peer_failure = dialog.panel("peer").status_text.value
+        assert peer_failure
+        assert not peer_failure.startswith("audio_test.")
+        assert peer_failure != self_failure
+        dialog.refresh()
+        dialog.refresh()
+        assert dialog.panel("self").status_text.value == self_failure
+        assert dialog.panel("peer").status_text.value == peer_failure
+        snapshot["value"] = _audio_snapshot(
+            "degraded",
+            self_={"state": "ready"},
+            peer={"state": "failed", "failure_reason": "target_unavailable"},
+        )
+        dialog.refresh()
+        target_failure = dialog.panel("peer").status_text.value
+        assert target_failure
+        assert not target_failure.startswith("audio_test.")
+        assert target_failure not in {self_failure, peer_failure}
+        dialog.refresh()
+        assert dialog.panel("peer").status_text.value == target_failure
+        assert dialog.panel("self").status_text.value not in {self_failure, peer_failure}
+        snapshot["value"] = _audio_snapshot(
+            "failed",
+            self_={"state": "failed", "failure_reason": "vad_unavailable"},
+            peer={"state": "failed", "failure_reason": "vad_unavailable"},
+        )
+        dialog.refresh()
+        assert dialog.panel("self").status_text.value == dialog.panel("peer").status_text.value
+        snapshot["value"] = _audio_snapshot(
+            "ready", self_={"state": "ready"}, peer={"state": "ready"}
+        )
+        dialog.refresh()
+        assert dialog.panel("self").status_text.value not in {self_failure, peer_failure}
+        assert dialog.panel("peer").status_text.value not in {self_failure, peer_failure}
+    finally:
+        app._audio_test_dialog.close()
+        i18n_module.set_locale(previous_locale)

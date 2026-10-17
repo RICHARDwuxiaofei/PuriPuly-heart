@@ -33,7 +33,6 @@ _CHANNEL_TITLE_KEYS = {
 }
 _FAILURE_KEYS = {
     "input_route_unavailable": "audio_test.error.input_route_unavailable",
-    "source_open_failed": "audio_test.error.source_open_failed",
     "no_audio_frames": "audio_test.error.no_audio_frames",
     "target_unavailable": "audio_test.error.target_unavailable",
     "vad_unavailable": "audio_test.error.vad_unavailable",
@@ -71,6 +70,8 @@ class _ChannelPanel:
             size=16,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL_DARK,
+            expand=True,
+            no_wrap=False,
         )
         self.canvas = cv.Canvas(
             shapes=[],
@@ -176,7 +177,12 @@ class _ChannelPanel:
         self.warning_text.visible = fallback
         if state == "failed":
             reason = str(snapshot.get("failure_reason") or "")
-            self.status_text.value = t(_FAILURE_KEYS.get(reason, "audio_test.error.generic"))
+            key = (
+                f"audio_test.error.{self.channel}_source_open_failed"
+                if reason == "source_open_failed"
+                else _FAILURE_KEYS.get(reason, "audio_test.error.generic")
+            )
+            self.status_text.value = t(key)
             self.status_text.color = COLOR_NEUTRAL_DARK
             self.status_dot.bgcolor = COLOR_WARNING
         elif state == "ready" and snapshot.get("speech_detected"):

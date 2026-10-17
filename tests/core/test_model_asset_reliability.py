@@ -407,8 +407,9 @@ async def test_cancel_admitted_asset_before_transfer_keeps_it_cancelled_and_allo
 
 
 @pytest.mark.parametrize("finish", ["success", "cancel", "close"])
+@pytest.mark.parametrize("linger", [False, True])
 async def test_asset_lifetime_survives_demand_off_but_obeys_own_cancel_and_shutdown(
-    tmp_path, monkeypatch, finish
+    tmp_path, monkeypatch, finish, linger
 ):
     spec, contents = _small_gemma(monkeypatch, tmp_path)
     started, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -427,8 +428,9 @@ async def test_asset_lifetime_survives_demand_off_but_obeys_own_cancel_and_shutd
             on_progress(HuggingFaceDownloadProgress(4, 4))
             return path
 
+    runtime = RecordingRuntime(lambda **kwargs: _readiness(str(kwargs["backend"])))
     owner = ManagedGemmaTranslationOwner(
-        runtime=RecordingRuntime(lambda **kwargs: _readiness(str(kwargs["backend"]))),
+        runtime=runtime,
         downloader=Downloader(),
         idle_linger_s=0,
     )
@@ -436,7 +438,9 @@ async def test_asset_lifetime_survives_demand_off_but_obeys_own_cancel_and_shutd
     task = asyncio.create_task(application.download(spec.model_id, source="huggingface"))
     await started.wait()
     try:
-        await owner.deactivate(linger=True)
+        await asyncio.wait_for(owner.deactivate(linger=linger), timeout=1)
+        if not linger:
+            assert runtime.release_count == 1
         assert owner.cancel() is False
         assert owner.cancel_assets(assets.GEMMA_26B_MODEL_ID) is False
         for _ in range(5):
@@ -464,6 +468,59 @@ async def test_asset_lifetime_survives_demand_off_but_obeys_own_cancel_and_shutd
                 assert (
                     await application.download(spec.model_id, source="huggingface")
                 ).status == "installed"
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await owner.close()
+
+
+async def test_asset_conflicts_refuse_prepare_and_delete_then_allow_them_after_settlement(
+    tmp_path, monkeypatch
+):
+    spec, contents = _small_gemma(monkeypatch, tmp_path, assets.GEMMA_26B_MODEL_ID)
+    started, release = asyncio.Event(), asyncio.Event()
+    runtime = RecordingRuntime(lambda **kwargs: _readiness(str(kwargs["backend"])))
+
+    class Downloader:
+        async def download(self, request, **kwargs):
+            started.set()
+            await release.wait()
+            path = request.local_dir / request.remote_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents[request.remote_path])
+            return path
+
+    owner = ManagedGemmaTranslationOwner(runtime=runtime, downloader=Downloader())
+    prior = await owner.prepare(_selection())
+    application = _asset_application(owner, spec)
+    task = asyncio.create_task(application.download(spec.model_id, source="huggingface"))
+    await started.wait()
+    try:
+        for operation in (
+            owner.prepare(replace(_selection("gpu"), model_id=spec.model_id)),
+            owner.delete_assets(spec.model_id),
+        ):
+            with pytest.raises(provisioning.GemmaProvisioningError) as caught:
+                await asyncio.wait_for(operation, timeout=1)
+            assert caught.value.failure_code == "task_busy"
+        assert owner.active_model_id == assets.GEMMA_MODEL_ID
+        assert len(runtime.calls) == 1
+        lease = installer.LocalSTTProvisioningLease.acquire(
+            model_root=assets.default_gemma_install_dir(spec).parent, wait=False
+        )
+        if lease is not None:
+            lease.close()
+        assert lease is None
+        await asyncio.wait_for(prior.release(), timeout=1)
+        assert runtime.release_count == 1
+        assert not task.done() and not release.is_set()
+        release.set()
+        assert (await task).status == "installed"
+        active = await owner.prepare(replace(_selection("gpu"), model_id=spec.model_id))
+        assert len(runtime.calls) == 2
+        await active.release()
+        await owner.delete_assets(spec.model_id)
+        assert owner.install_status(spec.model_id) == "missing"
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
