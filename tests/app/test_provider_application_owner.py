@@ -150,11 +150,10 @@ def _owner(
         apply_order24=apply_order24 or no_order24,
         remember_order22=lambda _settings: events.append("remember"),
         mutation_service_provider=lambda: service,
-        save_failure_sink=lambda message: events.append(("failure", message)),
         results=results,
         sync_memory=lambda _settings: events.append("sync_memory"),
         capture_runtime_signatures=lambda: events.append("capture"),
-        sync_signatures=lambda _settings: events.append("signatures"),
+        sync_stt_signatures=lambda _settings: events.append("signatures"),
         consume_superseded_settings=lambda _settings: False,
         active_local_asr_change=lambda _base, _next: False,
         compensate_local_asr=lambda **_kwargs: SimpleNamespace(),
@@ -291,7 +290,9 @@ async def test_provider_application_owner_force_rebuild_owns_direct_apply_sequen
 
         result = await owner.apply(force_rebuild_llm=True)
 
-        assert result is True
+        assert result is (
+            expected_status == TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+        )
         assert events[:7] == [
             "preserve",
             "begin",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import ssl
 from dataclasses import dataclass, field, replace
 from typing import Any, cast
 from uuid import uuid4
@@ -525,7 +526,7 @@ async def test_successor_begin_failure_drains_predecessor_terminal_from_retiring
 
     assert [(item.outcome, item.text, item.failure_reason) for item in emitted] == [
         ("final", "a-final-text", None),
-        ("failed", "", "provider_begin_failed:RuntimeError"),
+        ("failed", "", "provider_begin_failed"),
     ]
     assert [item.identity for item in emitted] == [
         session.requests[0].identity,
@@ -1202,7 +1203,7 @@ async def test_local_write_timeout_keeps_one_quarantined_resource() -> None:
     terminals = [item for item in emitted if isinstance(item, STTProviderTurnTerminal)]
     assert factory_calls == 1
     assert [item.outcome for item in terminals] == ["failed", "failed"]
-    assert terminals[1].failure_reason == "provider_not_ready:RuntimeError"
+    assert terminals[1].failure_reason == "provider_not_ready"
 
     session.send_gate.set()
     await wait_until(lambda: engine.cleanup_debt == 0)
@@ -1345,8 +1346,8 @@ async def test_cloud_cleanup_quarantines_one_epoch_until_physical_release() -> N
     assert len(terminals) == 3
     assert [item.outcome for item in terminals] == ["failed", "failed", "failed"]
     assert [item.failure_reason for item in terminals[1:]] == [
-        "provider_not_ready:RuntimeError",
-        "provider_not_ready:RuntimeError",
+        "provider_not_ready",
+        "provider_not_ready",
     ]
     assert len(provider_failures) == 1
     assert session.calls.count(("stop",)) == 1
@@ -1448,10 +1449,250 @@ async def test_recovery_is_three_attempts_with_point_eight_and_one_point_six_bac
     assert delays == [0.8, 1.6]
     terminal = next(item for item in emitted if isinstance(item, STTProviderTurnTerminal))
     assert terminal.outcome == "failed"
-    assert terminal.failure_reason == "provider_not_ready:RuntimeError"
+    assert terminal.failure_reason == "provider_not_ready"
     assert len(terminal_failures) == 1
-    assert str(terminal_failures[0]) == "provider_recovery_exhausted"
+    assert terminal_failures[0].diagnostic_id
+    assert terminal_failures[0].channel == engine.channel
+    assert terminal.failure_diagnostics is not None
+    assert terminal.failure_diagnostics.fields["outcome"] == "failed"
     await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", ["timeout", "network", "service_unavailable", "rate_limit"])
+async def test_connection_cooldown_retries_new_audio_after_repeated_outages(cause: str) -> None:
+    class StatusError(RuntimeError):
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+            super().__init__("temporarily unavailable")
+
+    unavailable = {
+        "timeout": TimeoutError("unavailable"),
+        "network": ConnectionError("unavailable"),
+        "service_unavailable": StatusError(503),
+        "rate_limit": StatusError(429),
+    }[cause]
+    clock = ControlledMonotonicClock()
+    emitted: list[object] = []
+    failures: list[object] = []
+    attempts: list[float] = []
+    session = ControlledScopedSession()
+    session.terminal_on_seal = ("final", "recovered speech")
+
+    async def factory(_settings, _epoch):
+        attempts.append(clock.now())
+        if len(attempts) <= 6:
+            raise RuntimeError("connection failed") from unavailable
+        return session
+
+    engine = ScopedRecognitionEngine(
+        session_factory=factory,
+        channel="peer",
+        event_sink=emitted.append,
+        terminal_failure_sink=failures.append,
+        monotonic_clock=clock.now,
+        sleep=lambda _delay: asyncio.sleep(0),
+        watchdog_resolver=lambda _: watchdogs(connect_recovery_cooldown_s=30.0),
+    )
+    ledger = PeerAudioSegmentLedger(activation_generation=1, settings=settings("qwen_audio"))
+    times = (0.0, 29.999, 30.0, 59.999, 60.0)
+    starts: list[OwnedVadEvent] = []
+    try:
+        for index, now in enumerate(times):
+            await clock.advance_to(now)
+            start, chunk, end = segment_events(ledger, start_sample=800 + index * 20, now=now)
+            starts.append(start)
+            await engine.handle_owned_vad_event(start)
+            await engine.handle_owned_vad_event(chunk)
+            await engine.handle_owned_vad_event(end)
+        terminals = [event for event in emitted if isinstance(event, STTProviderTurnTerminal)]
+        assert attempts == [0.0] * 3 + [30.0] * 3 + [60.0]
+        assert [(event.outcome, event.recovery_pending) for event in terminals] == [
+            ("failed", True),
+            ("failed", True),
+            ("failed", True),
+            ("failed", True),
+            ("final", False),
+        ]
+        assert terminals[-1].text == "recovered speech"
+        assert [request.identity.segment for request in session.requests] == [
+            starts[-1].segment.identity
+        ]
+        assert sum(call[3] for call in session.calls if call[0] == "send") == 20
+        failure_diagnostics = [event.failure_diagnostics for event in terminals[:-1]]
+        assert all(diagnostics is not None for diagnostics in failure_diagnostics)
+        assert len({diagnostics.diagnostic_id for diagnostics in failure_diagnostics}) == 4
+        assert len({diagnostics.cause_id for diagnostics in failure_diagnostics}) == 1
+        assert failures == []
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cause", ["auth", "configuration", "quota", "tls", "missing_certificate", "unknown"]
+)
+async def test_connection_cooldown_does_not_reopen_permanent_failures(cause: str) -> None:
+    class StatusError(RuntimeError):
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+            super().__init__("rejected")
+
+    rejection = {
+        "auth": StatusError(401),
+        "configuration": StatusError(400),
+        "quota": StatusError(402),
+        "tls": ssl.SSLCertVerificationError("certificate rejected"),
+        "missing_certificate": FileNotFoundError("certificate file missing"),
+        "unknown": RuntimeError("unclassified failure"),
+    }[cause]
+    clock = ControlledMonotonicClock()
+    emitted: list[object] = []
+    failures: list[object] = []
+    attempts = 0
+    recovered = ControlledScopedSession()
+    recovered.terminal_on_seal = ("final", "must not be admitted")
+
+    async def factory(_settings, _epoch):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 3:
+            raise RuntimeError("connection failed") from rejection
+        return recovered
+
+    engine = ScopedRecognitionEngine(
+        session_factory=factory,
+        event_sink=emitted.append,
+        terminal_failure_sink=failures.append,
+        monotonic_clock=clock.now,
+        sleep=lambda _delay: asyncio.sleep(0),
+        watchdog_resolver=lambda _: watchdogs(connect_recovery_cooldown_s=30.0),
+    )
+    ledger = PeerAudioSegmentLedger(activation_generation=1, settings=settings("qwen_audio"))
+    try:
+        for index, now in enumerate((0.0, 60.0)):
+            await clock.advance_to(now)
+            start, _chunk, end = segment_events(ledger, start_sample=1000 + index * 20, now=now)
+            await engine.handle_owned_vad_event(start)
+            await engine.handle_owned_vad_event(end)
+        terminals = [event for event in emitted if isinstance(event, STTProviderTurnTerminal)]
+        assert [(event.outcome, event.recovery_pending) for event in terminals] == [
+            ("failed", False),
+            ("failed", False),
+        ]
+        assert attempts == 3
+        assert len(failures) == 1
+        assert recovered.requests == []
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_toggle_off_clears_connection_cooldown_for_explicit_reenable() -> None:
+    clock = ControlledMonotonicClock()
+    emitted: list[object] = []
+    failures: list[object] = []
+    attempts = 0
+    recovered = ControlledScopedSession()
+    recovered.terminal_on_seal = ("final", "fresh activation")
+
+    async def factory(_settings, _epoch):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 3:
+            raise TimeoutError("unavailable")
+        return recovered
+
+    engine = ScopedRecognitionEngine(
+        session_factory=factory,
+        event_sink=emitted.append,
+        terminal_failure_sink=failures.append,
+        monotonic_clock=clock.now,
+        sleep=lambda _delay: asyncio.sleep(0),
+        watchdog_resolver=lambda _: watchdogs(connect_recovery_cooldown_s=30.0),
+    )
+    ledger = PeerAudioSegmentLedger(activation_generation=1, settings=settings("qwen_audio"))
+    start, _chunk, end = segment_events(ledger, start_sample=1200, now=0.0)
+    try:
+        await engine.handle_owned_vad_event(start)
+        await engine.handle_owned_vad_event(end)
+        await engine.abort_for_toggle_off()
+        await clock.advance_to(1.0)
+        fresh = PeerAudioSegmentLedger(activation_generation=2, settings=settings("qwen_audio"))
+        start, _chunk, end = segment_events(fresh, start_sample=1300, now=1.0)
+        await engine.handle_owned_vad_event(start)
+        await engine.handle_owned_vad_event(end)
+        terminals = [event for event in emitted if isinstance(event, STTProviderTurnTerminal)]
+        assert [(event.outcome, event.text) for event in terminals] == [
+            ("failed", ""),
+            ("final", "fresh activation"),
+        ]
+        assert terminals[-1].identity.segment.activation_generation == 2
+        assert attempts == 4
+        assert failures == []
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", ["toggle_off", "close_backend"])
+async def test_stopping_cooldown_recovery_reclaims_late_connection(stop: str) -> None:
+    clock = ControlledMonotonicClock()
+    emitted: list[object] = []
+    failures: list[object] = []
+    attempts = 0
+    open_gate = asyncio.Event()
+    late = ControlledScopedSession()
+    late.terminal_on_seal = ("final", "must not publish")
+
+    async def factory(_settings, _epoch):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 3:
+            raise TimeoutError("unavailable")
+        await open_gate.wait()
+        return late
+
+    engine = ScopedRecognitionEngine(
+        session_factory=factory,
+        event_sink=emitted.append,
+        terminal_failure_sink=failures.append,
+        monotonic_clock=clock.now,
+        sleep=lambda _delay: asyncio.sleep(0),
+        watchdog_resolver=lambda _: watchdogs(
+            readiness_timeout_s=1.0, connect_recovery_cooldown_s=30.0
+        ),
+        event_drain_timeout_s=0.01,
+    )
+    ledger = PeerAudioSegmentLedger(activation_generation=1, settings=settings("qwen_audio"))
+    start, _chunk, end = segment_events(ledger, start_sample=1400, now=0.0)
+    pending = None
+    try:
+        await engine.handle_owned_vad_event(start)
+        await engine.handle_owned_vad_event(end)
+        await clock.advance_to(30.0)
+        next_start, _chunk, _end = segment_events(ledger, start_sample=1500, now=30.0)
+        pending = asyncio.create_task(engine.handle_owned_vad_event(next_start))
+        await wait_until(lambda: attempts == 4)
+        if stop == "toggle_off":
+            await engine.abort_for_toggle_off()
+        else:
+            await engine.close_backend()
+        open_gate.set()
+        await pending
+        await wait_until(lambda: engine.cleanup_debt == 0)
+        terminals = [event for event in emitted if isinstance(event, STTProviderTurnTerminal)]
+        assert [(event.outcome, event.recovery_pending) for event in terminals] == [
+            ("failed", True)
+        ]
+        assert late.requests == []
+        assert ("close",) in late.calls
+        assert failures == []
+    finally:
+        open_gate.set()
+        if pending is not None:
+            await asyncio.gather(pending, return_exceptions=True)
+        await engine.close()
 
 
 @pytest.mark.asyncio
@@ -1497,7 +1738,7 @@ async def test_ready_then_failed_epochs_exhaust_one_recovery_episode() -> None:
     assert len(sessions) == 3
     assert [terminal.outcome for terminal in terminals] == ["failed"] * 4
     assert [terminal.failure_reason for terminal in terminals[:3]] == ["ready_then_failed"] * 3
-    assert terminals[3].failure_reason == "provider_not_ready:RuntimeError"
+    assert terminals[3].failure_reason == "provider_not_ready"
     await engine.close()
 
 
@@ -2003,7 +2244,8 @@ async def test_soniox_error_before_configuration_send_prioritizes_structured_fai
                 assert configurations == []
                 assert len(failures) == 1
                 if error and not retryable:
-                    assert str(failures[0]) == "soniox_request_failed"
+                    assert failures[0].code == "stt.soniox_request_failed"
+                    assert failures[0].channel == channel
                 assert delays == ([0.8, 1.6] if retryable else [])
                 assert engine._session is None
                 assert not engine.cleanup_debt
@@ -3660,7 +3902,8 @@ async def test_stream_recovery_connection_failure_exhausts_once_not_on_every_fra
             await engine.handle_stream_input(stream_input(ledger, left, left + 4))
         await wait_until(lambda: len(failures) == 1)
         assert opens == 3
-        assert str(failures[0]) == "provider_recovery_exhausted"
+        assert failures[0].diagnostic_id
+        assert failures[0].channel == engine.channel
     finally:
         await engine.close()
 
@@ -3780,7 +4023,9 @@ async def test_continuous_stream_recovery_waits_for_physical_cleanup_and_stops_i
         await engine.handle_stream_input(stream_input(ledger, 10, 14))
         await engine.handle_stream_input(stream_input(ledger, 14, 18))
         assert opens == 1
-        assert [str(failure) for failure in failures] == ["provider_resource_quarantined"]
+        assert len(failures) == 1
+        assert failures[0].category == "timeout"
+        assert failures[0].code == "stt.provider_stream_write_timeout"
         session.release.set()
         await wait_until(lambda: engine.cleanup_debt == 0)
         await engine.handle_stream_input(stream_input(ledger, 18, 22))
@@ -4221,7 +4466,9 @@ async def test_retired_stream_recovery_exhaustion_faults_once_and_stops_reopenin
         for left in range(6, 46, 4):
             await engine.handle_stream_input(stream_input(ledger, left, left + 4))
         assert opens == 3
-        assert [str(exc) for exc in failures] == ["provider_recovery_exhausted"]
+        assert len(failures) == 1
+        assert failures[0].diagnostic_id
+        assert failures[0].channel == engine.channel
     finally:
         await engine.close()
 

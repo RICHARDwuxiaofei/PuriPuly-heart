@@ -7,6 +7,7 @@ from puripuly_heart.ui.flet_runtime import (
     run_control_method,
     update_control_if_mounted,
 )
+from puripuly_heart.ui.fonts import default_font_family
 from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.theme import (
     COLOR_DISPLAY_SOURCE,
@@ -24,6 +25,7 @@ DISPLAY_SOURCE_WEIGHT = ft.FontWeight.W_500
 DISPLAY_MESSAGE_WEIGHT = ft.FontWeight.BOLD
 
 DISPLAY_CARD_PADDING = 32
+DISPLAY_INPUT_TEXT_SIZE = 20
 
 DISPLAY_TEXT_WIDTH = 526
 DISPLAY_TEXT_HEIGHT = 210
@@ -102,15 +104,6 @@ class DisplayCard(ft.Container):
         self._source_as_message = False
         self._translation_is_visible = False
         self.input_is_focused = False
-        self.on_quick_toggle = None
-        self.quick_toggle = ft.Switch(
-            label=t("quick.toggle"),
-            label_text_style=ft.TextStyle(color=COLOR_NEUTRAL_DARK, size=14),
-            value=False,
-            on_change=lambda event: (
-                self.on_quick_toggle(bool(event.control.value)) if self.on_quick_toggle else None
-            ),
-        )
 
         initial_size, initial_max_lines = _display_layout_for_length(
             _weighted_len(self._source_value)
@@ -144,7 +137,12 @@ class DisplayCard(ft.Container):
                     ft.ControlState.DISABLED,
                 )
             },
-            text_size=20,
+            text_size=DISPLAY_INPUT_TEXT_SIZE,
+            strut_style=ft.StrutStyle(
+                size=DISPLAY_INPUT_TEXT_SIZE,
+                font_family=default_font_family(),
+                force_strut_height=True,
+            ),
             color=COLOR_NEUTRAL_DARK,
             hint_style=ft.TextStyle(color=COLOR_SECONDARY, italic=True),
             expand=True,
@@ -177,7 +175,7 @@ class DisplayCard(ft.Container):
                     padding=ft.Padding.only(bottom=4),
                 ),
                 ft.Row(
-                    [self._input_field, self.quick_toggle],
+                    [self._input_field],
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
             ],
@@ -328,7 +326,6 @@ class DisplayCard(ft.Container):
         input_font_family: str | None = None,
     ) -> None:
         self._input_field.hint_text = t("display.input_hint")
-        self.quick_toggle.label = t("quick.toggle")
 
         # Explicitly set hint font to UI font (Display font)
         self._input_field.hint_style = ft.TextStyle(

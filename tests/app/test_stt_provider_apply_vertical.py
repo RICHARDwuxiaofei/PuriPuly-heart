@@ -239,6 +239,7 @@ class _ChannelReset:
 
 
 class _Peer:
+    runtime = None
     last_provider_signature = None
     last_runtime_signature = None
     last_intent_enabled = False
@@ -529,7 +530,7 @@ async def test_provider_apply_intent_full_vertical_rolling_gemini_soniox_reverse
         success_sink=lambda _message: None,
         additional_signature_sink=lambda _settings: None,
     )
-    components.sync_signatures(settings_owner.canonical)
+    components.sync_stt_signatures(settings_owner.canonical)
 
     results = SettingsTransactionResultOwner()
     provider_application = ProviderApplicationOwner(
@@ -542,11 +543,10 @@ async def test_provider_apply_intent_full_vertical_rolling_gemini_soniox_reverse
         apply_order24=lambda _value: _false(),
         remember_order22=lambda _value: None,
         mutation_service_provider=lambda: None,
-        save_failure_sink=lambda _message: None,
         results=results,
         sync_memory=lambda _value: None,
         capture_runtime_signatures=components.capture_signatures_before_canonical_mutation,
-        sync_signatures=components.sync_signatures,
+        sync_stt_signatures=components.sync_stt_signatures,
         consume_superseded_settings=lambda _value: False,
         active_local_asr_change=lambda _base, _next: False,
         compensate_local_asr=lambda **_kwargs: _noop(),
@@ -708,12 +708,7 @@ async def test_provider_apply_intent_full_vertical_rolling_gemini_soniox_reverse
             ),
         ),
     )
-    unrelated_plan = components.runtime.build_plan(
-        unrelated_settings,
-        force_rebuild_llm=False,
-    )
-    assert unrelated_plan.should_refresh_self_stt is False
-    await components.runtime.apply(unrelated_settings, unrelated_plan)
+    await provider_application.apply(unrelated_settings, persist_settings=False)
     assert len(harness_factory.provider_factory.providers) == provider_count_before_disable
     assert runtime.snapshot.channel_for("self").provider_id == detached_channel.provider_id
     assert capture_owner.snapshot.desired_active is False

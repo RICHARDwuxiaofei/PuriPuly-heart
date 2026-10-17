@@ -21,8 +21,6 @@ from tests.helpers.flet_page import DialogTrackingPage
     [
         ("ModelDownload", "download", "download_timeout"),
         ("ModelDownload", "verifying", "checksum_failed"),
-        ("QuickTranslate", "submission", "backend_not_ready"),
-        ("QuickTranslate", "translation", "translation_failed"),
         ("AudioTest", "device_open", "source_open_failed"),
         ("AudioTest", "playback", "playback_failed"),
     ],

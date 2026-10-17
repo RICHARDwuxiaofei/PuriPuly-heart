@@ -13,6 +13,7 @@ from puripuly_heart.config.paths import default_models_dir
 GEMMA_MODEL_ID = "gemma-4-e4b-it-qat-ud-q4-k-xl"
 GEMMA_REPO_ID = "unsloth/gemma-4-E4B-it-qat-GGUF"
 GEMMA_REVISION = "8c5a9e4fd5482e2be20fe0bf013b4c262a8f4265"
+GEMMA_MODELSCOPE_REVISION = "b6fb3d3c190d41c1b92d6e9f1e03f34c5b49a134"
 GEMMA_MODEL_FILENAME = "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf"
 GEMMA_DRAFT_FILENAME = "mtp-gemma-4-E4B-it.gguf"
 GEMMA_INSTALL_DIRNAME = GEMMA_MODEL_ID
@@ -21,6 +22,11 @@ GEMMA_INSTALLED_MANIFEST_VERSION = 1
 GEMMA_UPSTREAM_REPO_ID = "google/gemma-4-E4B-it"
 GEMMA_LICENSE = "Apache-2.0"
 GEMMA_LICENSE_URL = "https://www.apache.org/licenses/LICENSE-2.0"
+GEMMA_26B_MODEL_ID = "gemma-4-26b-a4b-it-qat-ud-q4-k-xl"
+GEMMA_26B_REPO_ID = "unsloth/gemma-4-26B-A4B-it-qat-GGUF"
+GEMMA_26B_REVISION = "7b92b5b28818151e8669af2e45e88d6086f490dd"
+GEMMA_26B_MODELSCOPE_REVISION = "f5f82bed79bc0bc49b01e0e577bb3dc949ebc564"
+GEMMA_26B_MODEL_FILENAME = "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf"
 
 
 class GemmaAssetError(RuntimeError):
@@ -43,6 +49,14 @@ class GemmaAsset:
 
 
 @dataclass(frozen=True, slots=True)
+class GemmaAssetSource:
+    name: str
+    revision: str
+    repo_id: str = ""
+    download_url_template: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class GemmaModelSpec:
     model_id: str
     repo_id: str
@@ -54,6 +68,7 @@ class GemmaModelSpec:
     license: str
     license_url: str
     assets: tuple[GemmaAsset, ...]
+    sources: dict[str, GemmaAssetSource]
 
 
 GEMMA_ASSETS = (
@@ -82,12 +97,67 @@ def e4b_gemma_spec() -> GemmaModelSpec:
         license=GEMMA_LICENSE,
         license_url=GEMMA_LICENSE_URL,
         assets=GEMMA_ASSETS,
+        sources={
+            "huggingface": GemmaAssetSource(
+                name="huggingface",
+                repo_id=GEMMA_REPO_ID,
+                revision=GEMMA_REVISION,
+            ),
+            "modelscope": GemmaAssetSource(
+                name="modelscope",
+                repo_id=GEMMA_REPO_ID,
+                revision=GEMMA_MODELSCOPE_REVISION,
+                download_url_template=(
+                    f"https://www.modelscope.cn/api/v1/models/{GEMMA_REPO_ID}/repo"
+                    f"?Revision={GEMMA_MODELSCOPE_REVISION}&FilePath={{path}}"
+                ),
+            ),
+        },
+    )
+
+
+def gemma_26b_spec() -> GemmaModelSpec:
+    return GemmaModelSpec(
+        model_id=GEMMA_26B_MODEL_ID,
+        repo_id=GEMMA_26B_REPO_ID,
+        revision=GEMMA_26B_REVISION,
+        model_filename=GEMMA_26B_MODEL_FILENAME,
+        draft_filename=None,
+        install_dirname=GEMMA_26B_MODEL_ID,
+        upstream_repo_id="google/gemma-4-26B-A4B-it",
+        license=GEMMA_LICENSE,
+        license_url=GEMMA_LICENSE_URL,
+        assets=(
+            GemmaAsset(
+                filename=GEMMA_26B_MODEL_FILENAME,
+                size_bytes=14_249_047_104,
+                sha256="a7c5bc715f5ff8e99a3e8901ce7d2b42b402c669bf24f7c5250747633d0f5891",
+            ),
+        ),
+        sources={
+            "huggingface": GemmaAssetSource(
+                name="huggingface",
+                repo_id=GEMMA_26B_REPO_ID,
+                revision=GEMMA_26B_REVISION,
+            ),
+            "modelscope": GemmaAssetSource(
+                name="modelscope",
+                repo_id=GEMMA_26B_REPO_ID,
+                revision=GEMMA_26B_MODELSCOPE_REVISION,
+                download_url_template=(
+                    f"https://www.modelscope.cn/api/v1/models/{GEMMA_26B_REPO_ID}/repo"
+                    f"?Revision={GEMMA_26B_MODELSCOPE_REVISION}&FilePath={{path}}"
+                ),
+            ),
+        },
     )
 
 
 def resolve_gemma_spec(model_id: str | None = None) -> GemmaModelSpec:
     if model_id is None or model_id == GEMMA_MODEL_ID:
         return e4b_gemma_spec()
+    if model_id == GEMMA_26B_MODEL_ID:
+        return gemma_26b_spec()
     raise ValueError(f"unsupported Gemma model id: {model_id}")
 
 
@@ -317,6 +387,11 @@ def _remove_path(path: Path) -> None:
 
 
 __all__ = [
+    "GEMMA_26B_MODEL_ID",
+    "GEMMA_26B_REPO_ID",
+    "GEMMA_26B_REVISION",
+    "GEMMA_26B_MODELSCOPE_REVISION",
+    "GEMMA_26B_MODEL_FILENAME",
     "GEMMA_ASSETS",
     "GEMMA_DRAFT_FILENAME",
     "GEMMA_INSTALL_DIRNAME",
@@ -325,11 +400,13 @@ __all__ = [
     "GEMMA_MODEL_ID",
     "GEMMA_REPO_ID",
     "GEMMA_REVISION",
+    "GEMMA_MODELSCOPE_REVISION",
     "GEMMA_UPSTREAM_REPO_ID",
     "GEMMA_LICENSE",
     "GEMMA_LICENSE_URL",
     "RETIRED_MANAGED_GEMMA_INSTALLS",
     "GemmaAsset",
+    "GemmaAssetSource",
     "GemmaAssetError",
     "GemmaInstallInvalidError",
     "GemmaInstallMissingError",
@@ -338,6 +415,7 @@ __all__ = [
     "InstalledGemmaManifest",
     "default_gemma_install_dir",
     "e4b_gemma_spec",
+    "gemma_26b_spec",
     "inspect_gemma_install",
     "remove_retired_managed_gemma_installs",
     "resolve_gemma_spec",

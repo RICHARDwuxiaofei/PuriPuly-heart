@@ -1042,7 +1042,7 @@ def _create_rolling_stt_backend(
                 build=build_deepgram,
             )
         )
-    return RollingSTTBackend(providers=tuple(definitions))
+    return RollingSTTBackend(providers=tuple(definitions), channel=config.channel)
 
 
 def _resolved_qwen_audio_language_hints(config: ResolvedSTTConfig) -> tuple[str, ...]:
@@ -1195,6 +1195,7 @@ def create_stt_backend_from_resolved_config(
             language_hints=_resolved_qwen_audio_language_hints(config),
             sample_rate_hz=config.sample_rate_hz,
             hotwords=keyterms,
+            channel=config.channel,
         )
 
     if config.provider == STT_PROVIDER_SONIOX:

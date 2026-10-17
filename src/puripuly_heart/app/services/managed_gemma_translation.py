@@ -26,7 +26,9 @@ from puripuly_heart.core.local_translation.provisioning import (
 from puripuly_heart.core.local_translation.runtime import (
     ManagedGemmaReadiness,
     ManagedGemmaRuntimeError,
+    ManagedGemmaRuntimeMissingError,
     ManagedGemmaRuntimeOwner,
+    ManagedGemmaRuntimeVersionError,
 )
 from puripuly_heart.core.observability import DiagnosticEvent
 
@@ -43,6 +45,7 @@ class ManagedGemmaTranslationSnapshot:
     worker_exit_code: int | None = None
     status_code: int | None = None
     os_error_code: int | None = None
+    model_id: str | None = None
 
 
 ManagedGemmaTranslationStatusSink = Callable[[ManagedGemmaTranslationSnapshot], None]
@@ -91,6 +94,7 @@ class ManagedGemmaTranslationOwner:
         self._prepare_task: asyncio.Task[ManagedGemmaReadiness] | None = None
         self._linger_task: asyncio.Task[None] | None = None
         self._active_generation: int | None = None
+        self._selected_model_id: str | None = None
         self._closed = False
 
     @property
@@ -115,6 +119,7 @@ class ManagedGemmaTranslationOwner:
             generation = self._generation
             cancel_event = threading.Event()
             self._cancel_event = cancel_event
+            self._selected_model_id = selection.model_id
             self._publish("checking", backend=backend, progress_percent=None)
 
             def on_status(update: GemmaProvisioningUpdate) -> None:
@@ -143,6 +148,7 @@ class ManagedGemmaTranslationOwner:
                         "on_status": on_status,
                         "spec": spec,
                         "source": selection.download_source,
+                        "locale": selection.locale,
                     },
                 ),
                 name=f"prepare-{generation}",
@@ -216,26 +222,26 @@ class ManagedGemmaTranslationOwner:
             task.cancel()
         return True
 
-    async def install_assets(self, *, source: str, files: tuple[Path, ...] = (), on_status=None):
+    async def install_assets(
+        self,
+        *,
+        source: str,
+        model_id: str | None = None,
+        files: tuple[Path, ...] = (),
+        on_status=None,
+    ):
         from puripuly_heart.core.feature_diagnostics import log_feature
-        from puripuly_heart.core.local_translation.assets import inspect_gemma_install
 
         async with self._lock:
             if self._closed:
                 raise RuntimeError("Model owner closed")
-            spec = resolve_gemma_spec()
-            if (
-                source == "local"
-                and not files
-                and inspect_gemma_install(spec=spec).status != "ready"
-            ):
-                raise GemmaProvisioningError(
-                    "Import the two pinned files first", failure_code="missing_file"
-                )
+            spec = resolve_gemma_spec(model_id)
             cancellation = threading.Event()
             self._cancel_event = cancellation
             downloader = (
-                LocalGemmaDownloadAdapter(files, spec) if source == "local" else self._downloader
+                LocalGemmaDownloadAdapter(files, spec)
+                if source == "local" and files
+                else None if source == "local" else self._downloader
             )
             task = start_lifecycle_task(
                 self._task_scope,
@@ -364,12 +370,13 @@ class ManagedGemmaTranslationOwner:
                 self._publish("idle", backend=None, progress_percent=None)
 
     async def _release_generation(self, generation: int) -> None:
-        if self._active_generation != generation:
-            return
-        self._active_generation = None
-        await self._runtime.release()
-        if not self._closed:
-            self._publish("idle", backend=None, progress_percent=None)
+        async with self._lock:
+            if self._active_generation != generation:
+                return
+            self._active_generation = None
+            await self._runtime.release()
+            if not self._closed:
+                self._publish("idle", backend=None, progress_percent=None)
 
     def _publish(
         self,
@@ -396,6 +403,7 @@ class ManagedGemmaTranslationOwner:
             worker_exit_code=worker_exit_code,
             status_code=status_code,
             os_error_code=os_error_code,
+            model_id=self._selected_model_id if backend is not None else None,
         )
         self._snapshot = snapshot
         if self._status_sink is not None:
@@ -446,6 +454,27 @@ def _failure_metadata(exception: BaseException) -> dict[str, str | int | None]:
             "worker_exit_code": download_failure.worker_exit_code,
             "status_code": download_failure.status_code,
             "os_error_code": download_failure.os_error_code,
+        }
+    runtime_files_failure = next(
+        (
+            item
+            for item in chain
+            if isinstance(item, ManagedGemmaRuntimeMissingError | ManagedGemmaRuntimeVersionError)
+        ),
+        None,
+    )
+    if runtime_files_failure is not None:
+        return {
+            "phase": "runtime_files",
+            "code": (
+                "runtime_missing"
+                if isinstance(runtime_files_failure, ManagedGemmaRuntimeMissingError)
+                else "runtime_incompatible"
+            ),
+            "cause_type": type(runtime_files_failure).__name__,
+            "worker_exit_code": None,
+            "status_code": None,
+            "os_error_code": None,
         }
     if isinstance(exception, GemmaProvisioningError):
         phase = "provisioning"

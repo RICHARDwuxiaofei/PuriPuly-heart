@@ -6,6 +6,7 @@ import flet as ft
 from puripuly_heart.app.language_selection import LanguageSelectionChange
 from puripuly_heart.app.ports.ui_models import (
     ManagedGemmaDashboardNotice,
+    ManagedGemmaNoticeAction,
     OscControlPresentationState,
 )
 from puripuly_heart.config.runtime_resolution import stt_supports_peer_auto_detection
@@ -132,6 +133,9 @@ class DashboardView(ft.Column):
         self.on_toggle_peer_translation = None
         self.on_retry_peer_process_capture = None
         self.on_gpu_notice_action: Callable[[GpuNoticeAction], object] | None = None
+        self.on_managed_gemma_notice_action: Callable[[ManagedGemmaNoticeAction], object] | None = (
+            None
+        )
         self.on_language_change: Callable[[LanguageSelectionChange], None] | None = None
         self.on_message_input_activity = None
 
@@ -197,15 +201,6 @@ class DashboardView(ft.Column):
     def stt_button(self) -> ft.Control:
         return self._capture_controls.self_capture_control()
 
-    def bind_quick_window_toggle(self, callback):
-        self.display_card.on_quick_toggle = callback
-
-    def set_quick_window_visible(self, visible):
-        from puripuly_heart.ui.flet_runtime import update_control_if_mounted
-
-        self.display_card.quick_toggle.value = bool(visible)
-        update_control_if_mounted(self.display_card.quick_toggle)
-
     @property
     def peer_button(self) -> ft.Control:
         return self._capture_controls.peer_capture_control()
@@ -238,6 +233,7 @@ class DashboardView(ft.Column):
         self.on_toggle_overlay = capture.toggle_overlay
         self.on_retry_peer_process_capture = capture.retry_peer_process_capture
         self.on_gpu_notice_action = capture.run_gpu_notice_action
+        self.on_managed_gemma_notice_action = capture.run_managed_gemma_notice_action
 
     def _toggle_overlay(self) -> None:
         enabled = True
@@ -864,7 +860,7 @@ class DashboardView(ft.Column):
             candidates["managed_gemma"] = (
                 managed_gemma_notice.text,
                 managed_gemma_notice.tone,
-                self._managed_gemma_notice.action,
+                None,
             )
         if self._overlay_session_fallback_notice_active:
             candidates["overlay_fallback"] = (
@@ -912,7 +908,7 @@ class DashboardView(ft.Column):
         if selected is None:
             self.display_card.set_notice(None, None)
             return
-        text, tone, _action = candidates[selected]
+        text, tone, _ = candidates[selected]
         gpu_action = None if self._gpu_notice is None else self._gpu_notice.action
         action_label = gpu_capture_action_label(gpu_action if selected == "gpu" else None)
         on_action = (

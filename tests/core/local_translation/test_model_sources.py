@@ -11,6 +11,7 @@ from puripuly_heart.core.local_asr.local_stt_download_port import LocalSTTDownlo
 from puripuly_heart.core.local_translation.assets import (
     GemmaAsset,
     e4b_gemma_spec,
+    gemma_26b_spec,
     validate_gemma_install,
 )
 from puripuly_heart.core.local_translation.provisioning import (
@@ -270,3 +271,78 @@ async def test_cancel_verification_joins_worker_before_staging_cleanup(monkeypat
     assert exited.is_set() and cancellation.is_set()
     assert (install / "keep").read_bytes() == b"old"
     assert not list(tmp_path.glob("*.staging-*"))
+
+
+@pytest.mark.parametrize("spec_factory", [e4b_gemma_spec, gemma_26b_spec])
+async def test_local_import_uses_selected_models_current_manifest(tmp_path, spec_factory):
+    pinned = spec_factory()
+    contents = {asset.filename: f"asset-{index}".encode() for index, asset in enumerate(pinned.assets)}
+    spec = replace(
+        pinned,
+        assets=tuple(
+            GemmaAsset(name, len(data), hashlib.sha256(data).hexdigest())
+            for name, data in contents.items()
+        ),
+    )
+    files = tuple(tmp_path / name for name in contents)
+    for path in files:
+        path.write_bytes(contents[path.name])
+    install_dir = tmp_path / "installed"
+
+    manifest = await ensure_gemma_installed(
+        source="local",
+        spec=spec,
+        install_dir=install_dir,
+        downloader=LocalGemmaDownloadAdapter(files, spec),
+    )
+
+    assert manifest.model_id == pinned.model_id
+    assert manifest.revision == pinned.revision
+    assert set(manifest.files) == set(contents)
+    assert validate_gemma_install(install_dir, spec=spec) == manifest
+    assert {path.name for path in install_dir.iterdir()} == {
+        *contents,
+        "installed-manifest.json",
+    }
+    assert not tuple(tmp_path.glob("*.staging-*"))
+
+
+@pytest.mark.parametrize(
+    "source,endpoint",
+    [("official", "https://huggingface.co"), ("mirror", "https://hf-mirror.com")],
+)
+async def test_explicit_gemma_source_preserves_endpoint_and_never_falls_back(
+    tmp_path, monkeypatch, source, endpoint
+):
+    import puripuly_heart.core.local_translation.provisioning as provisioning
+
+    requests = []
+
+    class Downloader:
+        async def download(self, request, **kwargs):
+            requests.append(request)
+            raise LocalSTTDownloadPortError("signed-url-secret", status_code=503)
+
+    def unexpected_fallback(*args, **kwargs):
+        raise AssertionError("An explicit task source must not fall back")
+
+    monkeypatch.setattr(provisioning.network_clients, "external_client", unexpected_fallback)
+    spec = small_spec()
+    install_dir = tmp_path / "installed"
+    with pytest.raises(GemmaProvisioningError) as caught:
+        await ensure_gemma_installed(
+            source=source,
+            spec=spec,
+            install_dir=install_dir,
+            downloader=Downloader(),
+            locale="zh-CN",
+        )
+
+    assert len(requests) == 1
+    assert requests[0].endpoint == endpoint
+    assert requests[0].repo_id == spec.sources["huggingface"].repo_id
+    assert requests[0].revision == spec.sources["huggingface"].revision
+    assert caught.value.failure_code == "download_failed"
+    assert "signed-url-secret" not in str(caught.value)
+    assert not install_dir.exists()
+    assert not tuple(tmp_path.glob("*.staging-*"))

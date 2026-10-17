@@ -81,6 +81,7 @@ from puripuly_heart.core.http_extensions import (
     http_extension_secret_key_prefix,
 )
 from puripuly_heart.core.local_translation.devices import list_llama_vulkan_devices
+from puripuly_heart.core.orchestrator.self_translation_channel import TextSubmissionAdmission
 from puripuly_heart.core.telemetry import (
     AppActiveDayTelemetryResult,
     AppActiveDayTelemetryService,
@@ -115,50 +116,13 @@ class UiInputRuntimeAdapter:
             snapshot.generation if snapshot else None,
         )
 
-    async def submit_text(self, text: str) -> None:
+    async def submit_text(self, text: str) -> TextSubmissionAdmission | None:
         owner = self.pipeline.self_translation_channel
         submit = None if owner is None else lambda: owner.submit_text(text, source="You")
-        await self.manual_typing.submit(submit)
-
-    async def submit_quick_text(self, text: str) -> tuple[str, str]:
-        owner = self.pipeline.self_translation_channel
-        if owner is None:
-            raise RuntimeError("backend_not_ready")
-        enabled = owner.config_snapshot().value.translation_enabled
-        if not enabled:
-            identity = await self.manual_typing.submit(
-                lambda: owner.submit_text(text, source="You"), strict=True
-            )
-            return str(identity), ""
-        if not owner.translation_requests.provider_available:
-            raise RuntimeError("backend_not_ready")
-
-        def result(utterance_id):
-            bundle = owner.runtime.utterances.get(utterance_id)
-            return None if bundle is None else bundle.translation
-
-        return await self.manual_typing.submit_for_result(
-            lambda: owner.submit_text(text, source="You"),
-            completion=lambda identity: owner.runtime.translation_tasks.get(identity),
-            result=result,
-        )
+        return await self.manual_typing.submit(submit)
 
     def set_manual_input_activity(self, has_text: bool) -> None:
         self.manual_typing.set_input_activity(has_text)
-
-    def quick_window_context(self) -> dict:
-        owner = self.pipeline.self_translation_channel
-        if owner is None:
-            return dict(translation_enabled=False, peer_translation_enabled=False)
-        config = owner.config_snapshot().value
-        return dict(
-            translation_enabled=config.translation_enabled,
-            peer_translation_enabled=config.translation_enabled and config.peer_translation_enabled,
-            source_language=config.source_language,
-            target_language=config.target_language,
-            peer_source_language=config.peer_source_language or config.target_language,
-            peer_target_language=config.peer_target_language or config.source_language,
-        )
 
     async def set_translation_enabled(
         self, enabled: bool, *, allow_authorization: bool = True
@@ -550,7 +514,7 @@ class UiProviderRuntimeAdapter:
     def selected_model_asset_ids(self) -> tuple[str, ...]:
         from puripuly_heart.app.services.local_asr_selection import required_local_asr_model_ids
         from puripuly_heart.core.local_stt_assets import LOCAL_QWEN_GPU_MODEL_ID
-        from puripuly_heart.core.local_translation.assets import GEMMA_MODEL_ID
+        from puripuly_heart.core.local_translation.assets import GEMMA_26B_MODEL_ID, GEMMA_MODEL_ID
 
         intent = self.settings.require_canonical().intent
         ids = []
@@ -560,6 +524,8 @@ class UiProviderRuntimeAdapter:
                 ids.append(LOCAL_QWEN_GPU_MODEL_ID)
         if intent.translation.model == "managed_gemma":
             ids.append(GEMMA_MODEL_ID)
+        elif intent.translation.model == "managed_gemma_26b":
+            ids.append(GEMMA_26B_MODEL_ID)
         return tuple(dict.fromkeys(ids))
 
     async def provision_asr_assets(self, *, model_id: str, source: str, on_status=None):
@@ -736,17 +702,24 @@ class UiProviderRuntimeAdapter:
         current = self.settings.canonical
         if succeeded and current is not None:
             translation = current.intent.translation
-            active_provider = provider_llm_for_translation(
-                translation.model, translation.connection
-            )
-            active_llm_key = {
-                "deepseek": "deepseek_api_key",
-                "openai": "openai_api_key",
-                "gemini": "google_api_key",
-                "openrouter": "openrouter_api_key",
-            }.get(active_provider)
-            if translation.connection in {"official_byok", "openrouter"} and key == active_llm_key:
-                await self.apply_providers(force_rebuild_llm=True, persist_settings=False)
+            active_secret = None
+            if translation.connection == "official_byok":
+                active_secret = {
+                    "gemini": "google_api_key",
+                    "openai": "openai_api_key",
+                    "deepseek": "deepseek_api_key",
+                }.get(provider_llm_for_translation(translation.model, translation.connection))
+            elif (
+                translation.connection == "openrouter"
+                and translation.openrouter_selected_source == "byok"
+            ):
+                active_secret = "openrouter_api_key"
+            if key == active_secret:
+                await self.apply_providers(
+                    force_rebuild_llm=True,
+                    persist_settings=False,
+                )
+                return succeeded
         http_extension_id = (
             None if current is None else current.intent.translation.http_extension_id
         )
@@ -779,7 +752,7 @@ class UiProviderRuntimeAdapter:
         raise ValueError(f"unsupported managed Gemma notice action: {action}")
 
     def gemma_download_source(self) -> str:
-        return self.settings.require_canonical().intent.translation.download_source
+        return self.settings.require_canonical().intent.translation.download_source or "official"
 
     async def configure_gemma_source(self, source: str) -> None:
         if source not in {"official", "mirror", "local"}:
@@ -799,62 +772,13 @@ class UiProviderRuntimeAdapter:
             self.settings.rollback()
             raise
 
-    def quick_window_preferences(self) -> dict:
-        ui = self.settings.require_canonical().intent.ui
-        return dict(
-            always_on_top=ui.quick_translate_always_on_top,
-            width=ui.quick_translate_width,
-            height=ui.quick_translate_height,
-            left=ui.quick_translate_left,
-            top=ui.quick_translate_top,
-            peer_display_mode=ui.quick_translate_peer_display_mode,
-            opacity_percent=ui.quick_translate_opacity_percent,
-        )
-
-    async def configure_quick_window(self, values: dict) -> None:
-        current = self.settings.require_canonical()
-        mode = values.get("peer_display_mode", current.intent.ui.quick_translate_peer_display_mode)
-        if mode not in {"both", "translation", "original"}:
-            raise ValueError("Unsupported chat display mode")
-        updated = replace(
-            current.intent.ui,
-            quick_translate_peer_display_mode=mode,
-            quick_translate_opacity_percent=max(
-                40,
-                min(
-                    100,
-                    int(
-                        values.get(
-                            "opacity_percent", current.intent.ui.quick_translate_opacity_percent
-                        )
-                    ),
-                ),
-            ),
-            quick_translate_always_on_top=bool(
-                values.get("always_on_top", current.intent.ui.quick_translate_always_on_top)
-            ),
-            quick_translate_width=max(
-                360, min(1000, int(values.get("width", current.intent.ui.quick_translate_width)))
-            ),
-            quick_translate_height=max(
-                300, min(1000, int(values.get("height", current.intent.ui.quick_translate_height)))
-            ),
-            quick_translate_left=int(values.get("left", current.intent.ui.quick_translate_left)),
-            quick_translate_top=int(values.get("top", current.intent.ui.quick_translate_top)),
-        )
-        self.settings.begin()
-        try:
-            self.settings.canonical = replace(current, intent=replace(current.intent, ui=updated))
-            await self.settings.persist_async()
-        except BaseException:
-            self.settings.rollback()
-            raise
-
-    async def provision_gemma_assets(self, *, source: str, files=(), on_status=None):
+    async def provision_gemma_assets(
+        self, *, model_id: str | None = None, source: str, files=(), on_status=None
+    ):
         if self.managed_gemma is None:
             raise RuntimeError("Managed model owner unavailable")
         return await self.managed_gemma.install_assets(
-            source=source, files=files, on_status=on_status
+            model_id=model_id, source=source, files=files, on_status=on_status
         )
 
 

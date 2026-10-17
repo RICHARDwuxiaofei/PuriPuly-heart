@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import contextlib
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -32,9 +32,8 @@ from puripuly_heart.config.provider_values import (
     normalize_owned_referral_id,
 )
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
-from puripuly_heart.config.translation_values import (
-    TranslationModel,
-)
+from puripuly_heart.config.translation_values import MANAGED_GEMMA_MODELS
+from puripuly_heart.core.diagnostics import emit_failure, safe_exception_fields
 from puripuly_heart.core.hardware_fingerprint import get_raw_hardware_fingerprint
 from puripuly_heart.core.managed_openrouter_broker_client import (
     HttpManagedOpenRouterBrokerClient,
@@ -43,13 +42,17 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseService,
     UnavailableManagedOpenRouterReleaseClient,
 )
-from puripuly_heart.core.openrouter_credentials import resolve_openrouter_credentials
+from puripuly_heart.core.messages import ErrorDiagnostics
+from puripuly_heart.core.openrouter_credentials import (
+    OpenRouterCredentialResolution,
+    resolve_openrouter_credentials,
+)
 from puripuly_heart.core.openrouter_handoff import should_auto_show_founder_letter
 from puripuly_heart.core.openrouter_pkce import OpenRouterPKCEClient
 from puripuly_heart.core.orchestrator.configuration import (
     TranslationRuntimeConfigurationPort,
 )
-from puripuly_heart.core.runtime_logging import emit_basic_log
+from puripuly_heart.core.owned_thread import run_owned_thread_call
 
 from .wiring_managed_auth_factory import (
     ManagedAuthRuntimeAdapter,
@@ -66,6 +69,33 @@ from .wiring_translation_runtime_configuration import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _record_managed_account_failure(
+    phase: str, exception: BaseException, code: str
+) -> ErrorDiagnostics:
+    diagnostics = getattr(exception, "diagnostics", None)
+    if not isinstance(diagnostics, ErrorDiagnostics):
+        diagnostics = ErrorDiagnostics(
+            component="managed_account",
+            operation=phase,
+            code=code,
+            category="lifecycle",
+            visibility="basic",
+            content_policy="metadata_only",
+            status_code=None,
+            retry_after_ms=None,
+            fields={"phase": phase, **safe_exception_fields(exception)},
+        )
+        if type(exception).__module__ == "builtins":
+            exception.diagnostics = diagnostics
+    emit_failure(
+        logger,
+        diagnostics,
+        severity="warning",
+        disposition="cancelled" if isinstance(exception, asyncio.CancelledError) else "degraded",
+    )
+    return diagnostics
 
 
 class ManagedTranslationContextPort(Protocol):
@@ -126,10 +156,6 @@ class ManagedOpenRouterReleaseRuntime:
     settings: SettingsOwner
     config_path: Path
     callback_received: Callable[[], None]
-    diagnostic_sink: Callable[[str, BaseException], None] = field(
-        default=lambda _message, _exception: None,
-        repr=False,
-    )
     service: ManagedOpenRouterReleaseService | None = field(default=None, repr=False)
     _retired_services: list[ManagedOpenRouterReleaseService] = field(
         default_factory=list,
@@ -154,11 +180,9 @@ class ManagedOpenRouterReleaseRuntime:
                 await previous.close()
             except BaseException as exc:
                 self._retired_services.append(previous)
-                with contextlib.suppress(Exception):
-                    self.diagnostic_sink(
-                        "[Managed OpenRouter] Retired release service close failed",
-                        exc,
-                    )
+                _record_managed_account_failure(
+                    "managed_release_close", exc, "managed_release_cleanup_failed"
+                )
                 raise
         return replacement
 
@@ -171,11 +195,9 @@ class ManagedOpenRouterReleaseRuntime:
             except BaseException as exc:
                 remaining.append(service)
                 failures.append(exc)
-                with contextlib.suppress(Exception):
-                    self.diagnostic_sink(
-                        "[Managed OpenRouter] Retired release service retry failed",
-                        exc,
-                    )
+                _record_managed_account_failure(
+                    "managed_release_close", exc, "managed_release_cleanup_failed"
+                )
         self._retired_services = remaining
         if failures:
             raise BaseExceptionGroup(
@@ -200,12 +222,9 @@ class ManagedOpenRouterReleaseRuntime:
             client = HttpManagedOpenRouterBrokerClient(
                 base_url=broker_base_url,
             )
-        except ValueError:
-            emit_basic_log(
-                logger,
-                "[Managed OpenRouter] The managed translation broker configuration is invalid; "
-                "the service is unavailable.",
-                level=logging.WARNING,
+        except ValueError as exc:
+            _record_managed_account_failure(
+                "managed_release_create", exc, "managed_release_create_failed"
             )
             client = UnavailableManagedOpenRouterReleaseClient()
 
@@ -227,11 +246,9 @@ class ManagedOpenRouterReleaseRuntime:
                 await service.close()
             except BaseException as exc:
                 failures.append(exc)
-                with contextlib.suppress(Exception):
-                    self.diagnostic_sink(
-                        "[Managed OpenRouter] Active release service close failed",
-                        exc,
-                    )
+                _record_managed_account_failure(
+                    "managed_release_close", exc, "managed_release_cleanup_failed"
+                )
             else:
                 if self.service is service:
                     self.service = None
@@ -286,16 +303,25 @@ class ManagedUsageRuntimeAdapter:
         release_settings = self.release.release_settings()
         if current is None or release_settings is None:
             return ManagedUsageMetadataResult(key_available=False, metadata=None)
-        try:
+
+        def resolve_credentials() -> OpenRouterCredentialResolution:
             secrets = create_secret_store(
                 release_settings.intent.secrets,
                 config_path=self.config_path,
             )
-            resolution = resolve_openrouter_credentials(
+            return resolve_openrouter_credentials(
                 build_openrouter_credential_runtime_config_from_vnext(release_settings),
                 secrets=secrets,
             )
-        except Exception:
+
+        try:
+            resolution = await run_owned_thread_call(resolve_credentials)
+        except Exception as exc:
+            _record_managed_account_failure(
+                "secret_observation", exc, "managed_account_observation_failed"
+            )
+            return ManagedUsageMetadataResult(key_available=False, metadata=None)
+        if self.ingress_provider() or self.settings.canonical is not current:
             return ManagedUsageMetadataResult(key_available=False, metadata=None)
         if not resolution.api_key:
             return ManagedUsageMetadataResult(key_available=False, metadata=None)
@@ -360,7 +386,6 @@ def compose_managed_account(
         settings=settings,
         config_path=config_path,
         callback_received=callback_received,
-        diagnostic_sink=diagnostic_warning_sink,
     )
     auth_adapter = ManagedAuthRuntimeAdapter(
         config_path=config_path,
@@ -372,7 +397,6 @@ def compose_managed_account(
                 base_settings=base,
                 committed_settings=committed,
                 surface=surface,
-                save_failure_sink=log_error,
             )
         ),
         runtime_presence_provider=runtime.presence,
@@ -411,10 +435,18 @@ def compose_managed_account(
     )
 
     def warning_sink(message: str, exception: BaseException | None) -> None:
+        if exception is not None:
+            return
         if message.startswith("[ManagedAuth] Background refresh failed"):
             diagnostic_warning_sink(message, exception)
             return
         basic_warning_sink(message)
+
+    def persist_settings() -> bool:
+        saved = settings.save_current()
+        if not saved and settings.last_failure is not None:
+            emit_failure(logger, settings.last_failure)
+        return saved
 
     translation_adapter = ManagedTranslationRuntimeAdapter(
         auth=auth_adapter,
@@ -423,9 +455,7 @@ def compose_managed_account(
         runtime_snapshot_provider=runtime.snapshot,
         ingress_provider=ingress_provider,
         founder_dialog=founder_dialog,
-        persist_settings=lambda: settings.save_current(
-            failure_sink=lambda exc: log_error(f"Failed to save settings: {exc}")
-        ),
+        persist_settings=persist_settings,
     )
     translation_owner: TranslationEnableOwner | None = None
 
@@ -433,7 +463,7 @@ def compose_managed_account(
         current = settings.canonical
         if (
             current is not None
-            and current.intent.translation.model == TranslationModel.MANAGED_GEMMA.value
+            and current.intent.translation.model in MANAGED_GEMMA_MODELS
             and managed_gemma is not None
         ):
             if sync_local_translation_demand is not None:

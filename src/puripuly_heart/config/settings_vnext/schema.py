@@ -330,11 +330,17 @@ class TranslationIntent:
     deepseek: DeepSeekTranslationIntent = field(default_factory=DeepSeekTranslationIntent)
     qwen: QwenTranslationIntent = field(default_factory=QwenTranslationIntent)
     gpu_device_id: str = "auto"
-    download_source: str = "official"
+    download_source: str | None = None
 
     def __post_init__(self) -> None:
-        if self.download_source not in {"official", "mirror", "local"}:
-            object.__setattr__(self, "download_source", "official")
+        if self.download_source not in {None, "official", "mirror", "local"}:
+            object.__setattr__(self, "download_source", None)
+        if self.model == "managed_gemma_26b":
+            object.__setattr__(self, "connection", "gpu")
+        history = dict(self.connection_history)
+        if "managed_gemma_26b" in history:
+            history["managed_gemma_26b"] = "gpu"
+        object.__setattr__(self, "connection_history", history)
         device_id = self.gpu_device_id if isinstance(self.gpu_device_id, str) else "auto"
         object.__setattr__(self, "gpu_device_id", device_id.strip() or "auto")
 
@@ -729,13 +735,6 @@ class SecretsIntent:
 @dataclass(frozen=True, slots=True)
 class UiIntent:
     locale: str = "en"
-    quick_translate_always_on_top: bool = True
-    quick_translate_width: int = 420
-    quick_translate_height: int = 680
-    quick_translate_left: int = 100
-    quick_translate_top: int = 100
-    quick_translate_peer_display_mode: str = "both"
-    quick_translate_opacity_percent: int = 100
 
 
 @dataclass(frozen=True, slots=True)

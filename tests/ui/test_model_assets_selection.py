@@ -32,19 +32,6 @@ def make_dialog(selected=(LOCAL_STT_MODEL_ID,)):
     return dialog, application
 
 
-def test_model_names_and_sources_use_readable_explicit_foreground():
-    from puripuly_heart.ui.theme import COLOR_NEUTRAL_DARK
-
-    dialog, _ = make_dialog()
-    assert all(
-        control.label_style.color == COLOR_NEUTRAL_DARK for control in dialog.checkboxes.values()
-    )
-    assert all(
-        control.text_style.color == COLOR_NEUTRAL_DARK for control in dialog.sources.values()
-    )
-    assert dialog.dialog.title.color == COLOR_NEUTRAL_DARK
-
-
 async def test_qwen_notice_selection_downloads_qwen_not_gemma():
     dialog, application = make_dialog()
     assert dialog.checkboxes[LOCAL_STT_MODEL_ID].value
@@ -144,3 +131,52 @@ async def test_failed_row_keeps_safe_details_and_other_selected_model_can_finish
         assert "超时" in dialog.status.value
     finally:
         set_locale(locale)
+
+
+async def test_shared_import_files_install_both_gemma_profiles(tmp_path, monkeypatch):
+    import hashlib
+    from dataclasses import replace
+
+    from puripuly_heart.core.local_translation.assets import (
+        GemmaAsset,
+        e4b_gemma_spec,
+        gemma_26b_spec,
+        validate_gemma_install,
+    )
+    from puripuly_heart.core.local_translation.provisioning import (
+        LocalGemmaDownloadAdapter,
+        ensure_gemma_installed,
+    )
+    from puripuly_heart.ui.components import model_assets_dialog
+
+    specs = {}
+    files = []
+    for original in (e4b_gemma_spec(), gemma_26b_spec()):
+        assets = []
+        for asset in original.assets:
+            data = asset.filename.encode()
+            path = tmp_path / asset.filename
+            path.write_bytes(data)
+            files.append(path)
+            assets.append(GemmaAsset(asset.filename, len(data), hashlib.sha256(data).hexdigest()))
+        specs[original.model_id] = replace(original, assets=tuple(assets))
+    monkeypatch.setattr(model_assets_dialog, "resolve_gemma_spec", specs.__getitem__)
+    dialog, application = make_dialog(tuple(specs))
+    dialog.files = tuple(files)
+    for model_id in specs:
+        dialog.sources[model_id].value = "local"
+
+    async def install(*, model_id, source, files, on_status):
+        spec = specs[model_id]
+        await ensure_gemma_installed(
+            source=source,
+            spec=spec,
+            downloader=LocalGemmaDownloadAdapter(files, spec),
+            install_dir=tmp_path / model_id,
+            on_status=on_status,
+        )
+
+    application.provision_gemma_assets.side_effect = install
+    await dialog.install()
+    for model_id, spec in specs.items():
+        validate_gemma_install(tmp_path / model_id, spec=spec)

@@ -8,7 +8,7 @@ from puripuly_heart.core.local_stt_runtime_installer import LocalSTTRuntimeInsta
 
 from puripuly_heart.app.services.model_assets_catalog import model_asset_choices
 from puripuly_heart.core.feature_diagnostics import log_feature
-from puripuly_heart.core.local_translation.assets import GEMMA_MODEL_ID, e4b_gemma_spec
+from puripuly_heart.core.local_translation.assets import GEMMA_MODEL_ID, resolve_gemma_spec
 from puripuly_heart.core.local_translation.provisioning import GemmaProvisioningCancelled
 from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.theme import COLOR_NEUTRAL_DARK, COLOR_SURFACE
@@ -96,7 +96,12 @@ class ModelAssetsDialog:
         controls.extend(
             [
                 ft.Text(
-                    "\n".join(a.filename for a in e4b_gemma_spec().assets),
+                    "\n".join(
+                        asset.filename
+                        for choice in self.choices
+                        if choice.purpose == "translation"
+                        for asset in resolve_gemma_spec(choice.model_id).assets
+                    ),
                     selectable=True,
                     color=COLOR_NEUTRAL_DARK,
                 ),
@@ -152,7 +157,10 @@ class ModelAssetsDialog:
 
     async def cancel(self):
         self.cancel_requested = True
-        if self.active_model_id == GEMMA_MODEL_ID:
+        if any(
+            choice.model_id == self.active_model_id and choice.purpose == "translation"
+            for choice in self.choices
+        ):
             await self.application.handle_managed_gemma_notice_action("cancel")
         elif self.active_model_id is not None:
             await self.application.cancel_asr_assets(model_id=self.active_model_id)
@@ -168,8 +176,7 @@ class ModelAssetsDialog:
             )
             if selected:
                 self.files = tuple(Path(file.path) for file in selected if file.path)
-                self.source.value = "local"
-                self.checkboxes[GEMMA_MODEL_ID].value = True
+                self._select_import_models()
                 self.status.value = "\n".join(path.name for path in self.files)
                 self.page.update()
         except Exception as error:
@@ -183,17 +190,33 @@ class ModelAssetsDialog:
         try:
             selected = await self.picker.get_directory_path()
             if selected:
+                directory = Path(selected)
                 self.files = tuple(
-                    Path(selected) / asset.filename for asset in e4b_gemma_spec().assets
+                    directory / asset.filename
+                    for choice in self.choices
+                    if choice.purpose == "translation"
+                    for asset in resolve_gemma_spec(choice.model_id).assets
+                    if (directory / asset.filename).is_file()
                 )
-                self.source.value = "local"
-                self.checkboxes[GEMMA_MODEL_ID].value = True
+                self._select_import_models()
                 self.status.value = "\n".join(path.name for path in self.files)
                 self.page.update()
         except Exception as error:
             log_feature("ModelDownload", "preflight", "file_picker_failed", error=error)
             self.status.value = t("model_assets.error.unknown")
             self.page.update()
+
+    def _select_import_models(self):
+        filenames = {path.name for path in self.files}
+        model_ids = [
+            choice.model_id
+            for choice in self.choices
+            if choice.purpose == "translation"
+            and resolve_gemma_spec(choice.model_id).model_filename in filenames
+        ]
+        for model_id in model_ids or [GEMMA_MODEL_ID]:
+            self.sources[model_id].value = "local"
+            self.checkboxes[model_id].value = True
 
     async def install(self):
         if self.busy or self.closed:
@@ -237,12 +260,20 @@ class ModelAssetsDialog:
                 self.status.value = choice.name + " · " + t("model_assets.connecting")
                 self.page.update()
                 try:
-                    if choice.model_id == GEMMA_MODEL_ID:
+                    if choice.purpose == "translation":
                         await self.application.configure_gemma_source(source)
                         if self.closed or self.cancel_requested:
                             raise GemmaProvisioningCancelled("Model task cancelled")
+                        required_filenames = {
+                            asset.filename for asset in resolve_gemma_spec(choice.model_id).assets
+                        }
                         await self.application.provision_gemma_assets(
-                            source=source, files=self.files, on_status=update
+                            model_id=choice.model_id,
+                            source=source,
+                            files=tuple(
+                                path for path in self.files if path.name in required_filenames
+                            ),
+                            on_status=update,
                         )
                     else:
                         await self.application.provision_asr_assets(

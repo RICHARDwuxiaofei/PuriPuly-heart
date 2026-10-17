@@ -12,13 +12,21 @@ from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
+from urllib.parse import quote
 from uuid import uuid4
 
+import httpx
+
+from puripuly_heart.core import network_clients
 from puripuly_heart.core.feature_diagnostics import log_feature
+from puripuly_heart.core.local_asr.local_stt_assets import default_local_stt_source_for_locale
 from puripuly_heart.core.local_asr.local_stt_download_port import (
     HuggingFaceDownloadPort,
+    HuggingFaceDownloadProgress,
     HuggingFaceDownloadRequest,
     LocalSTTDownloadPortCancelled,
+    LocalSTTDownloadPortError,
 )
 from puripuly_heart.core.local_asr.local_stt_runtime_installer import (
     LocalSTTProvisioningLease,
@@ -27,6 +35,7 @@ from puripuly_heart.core.local_asr.local_stt_runtime_installer import (
 from puripuly_heart.core.local_translation.assets import (
     GEMMA_INSTALLED_MANIFEST_FILENAME,
     GemmaAsset,
+    GemmaAssetSource,
     GemmaInstallInvalidError,
     GemmaModelSpec,
     InstalledGemmaManifest,
@@ -45,6 +54,79 @@ class GemmaProvisioningError(RuntimeError):
 
 class GemmaProvisioningCancelled(GemmaProvisioningError):
     pass
+
+
+class _GemmaSourceError(GemmaProvisioningError):
+    pass
+
+
+_WorkerResult = TypeVar("_WorkerResult")
+
+
+class _HTTPDownloadAdapter:
+    def __init__(self, source: GemmaAssetSource) -> None:
+        self._source = source
+
+    async def download(
+        self,
+        request: HuggingFaceDownloadRequest,
+        *,
+        cancel_event: threading.Event | None,
+        on_progress: Callable[[HuggingFaceDownloadProgress], None] | None,
+    ) -> Path:
+        return await asyncio.to_thread(
+            self._download,
+            request,
+            cancel_event=cancel_event,
+            on_progress=on_progress,
+        )
+
+    def _download(
+        self,
+        request: HuggingFaceDownloadRequest,
+        *,
+        cancel_event: threading.Event | None,
+        on_progress: Callable[[HuggingFaceDownloadProgress], None] | None,
+    ) -> Path:
+        _raise_if_cancelled(cancel_event)
+        destination = request.local_dir / request.remote_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        url = self._source.download_url_template.format(path=quote(request.remote_path, safe="/"))
+        downloaded_bytes = 0
+        reported_percent = -1
+        try:
+            with network_clients.external_client(timeout=30.0, follow_redirects=True) as client:
+                with client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    with destination.open("wb") as handle:
+                        for chunk in response.iter_bytes():
+                            _raise_if_cancelled(cancel_event)
+                            if not chunk:
+                                continue
+                            handle.write(chunk)
+                            downloaded_bytes += len(chunk)
+                            if on_progress is not None:
+                                percent = (
+                                    min(100, downloaded_bytes * 100 // request.expected_size_bytes)
+                                    if request.expected_size_bytes
+                                    else None
+                                )
+                                if percent is None or percent != reported_percent:
+                                    reported_percent = percent
+                                    on_progress(
+                                        HuggingFaceDownloadProgress(
+                                            downloaded_bytes, request.expected_size_bytes
+                                        )
+                                    )
+        except httpx.HTTPError as exc:
+            response = getattr(exc, "response", None)
+            raise LocalSTTDownloadPortError(
+                "Gemma model download failed",
+                cause_type=type(exc).__name__,
+                status_code=response.status_code if response is not None else None,
+            ) from exc
+        _raise_if_cancelled(cancel_event)
+        return destination
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,10 +188,10 @@ def _remove_owned_staging(
 
 
 async def _await_download_cleanup(
-    download: Awaitable[Path],
+    download: Awaitable[_WorkerResult],
     *,
     cancel_event: threading.Event | None,
-) -> Path:
+) -> _WorkerResult:
     task = asyncio.create_task(download)
     settled = asyncio.Event()
     task.add_done_callback(lambda _task: settled.set())
@@ -130,11 +212,16 @@ async def _await_download_cleanup(
                 continue
         try:
             task.result()
-        except asyncio.CancelledError, LocalSTTDownloadPortCancelled:
+        except (
+            asyncio.CancelledError,
+            LocalSTTDownloadPortCancelled,
+            LocalSTTRuntimeInstallCancelled,
+            GemmaProvisioningCancelled,
+        ):
             pass
         except BaseException as cleanup_failure:
             raise BaseExceptionGroup(
-                "Gemma download cancellation and cleanup failed",
+                "Gemma provisioning cancellation and cleanup failed",
                 (cancellation, cleanup_failure),
             ) from None
         raise cancellation
@@ -142,28 +229,16 @@ async def _await_download_cleanup(
 
 
 async def _owned_io(function, *args, cancel_event=None, **kwargs):
-    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        if cancel_event is not None:
-            cancel_event.set()
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
-        if not task.cancelled():
-            task.exception()
-        raise
+    return await _await_download_cleanup(
+        asyncio.to_thread(function, *args, **kwargs),
+        cancel_event=cancel_event,
+    )
 
 
 async def _download_asset(
     *,
     downloader: HuggingFaceDownloadPort,
-    spec: GemmaModelSpec,
+    source: GemmaAssetSource,
     asset: GemmaAsset,
     staging_dir: Path,
     completed_bytes: int,
@@ -207,25 +282,31 @@ async def _download_asset(
             *(asyncio.wrap_future(future) for future in pending),
             return_exceptions=True,
         )
-        try:
-            results = await asyncio.shield(gathered)
-        except asyncio.CancelledError as cancellation:
-            results = await gathered
-            failures = tuple(result for result in results if isinstance(result, BaseException))
+        cancellation = None
+        while not gathered.done():
+            try:
+                await asyncio.shield(gathered)
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+                if cancel_event is not None:
+                    cancel_event.set()
+        results = gathered.result()
+        failures = tuple(result for result in results if isinstance(result, BaseException))
+        if cancellation is not None:
             if failures:
                 raise BaseExceptionGroup(
                     "Gemma progress drain cancelled with callback failures",
                     (cancellation, *failures),
                 )
-            raise
-        return tuple(result for result in results if isinstance(result, BaseException))
+            raise cancellation
+        return failures
 
     try:
         downloaded_path = await _await_download_cleanup(
             downloader.download(
                 HuggingFaceDownloadRequest(
-                    repo_id=spec.repo_id,
-                    revision=spec.revision,
+                    repo_id=source.repo_id,
+                    revision=source.revision,
                     remote_path=asset.filename,
                     local_dir=staging_dir,
                     expected_size_bytes=asset.size_bytes,
@@ -243,6 +324,16 @@ async def _download_asset(
                 "Gemma download and progress callbacks failed",
                 (download_failure, *progress_failures),
             )
+        if isinstance(download_failure, httpx.HTTPError) or (
+            isinstance(download_failure, LocalSTTDownloadPortError)
+            and not isinstance(download_failure, LocalSTTDownloadPortCancelled)
+            and download_failure.failure_code == "download_failed"
+        ):
+            _raise_if_cancelled(cancel_event)
+            raise _GemmaSourceError(
+                str(download_failure),
+                failure_code=getattr(download_failure, "failure_code", "download_failed"),
+            ) from download_failure
         raise
     progress_failures = await drain_progress()
     if len(progress_failures) == 1:
@@ -274,6 +365,18 @@ def _promote(staging_dir: Path, install_dir: Path) -> None:
         shutil.rmtree(backup_dir, ignore_errors=True)
 
 
+def _source_order(
+    spec: GemmaModelSpec,
+    *,
+    preferred_source: str | None,
+    locale: str | None,
+) -> tuple[str, ...]:
+    selected = preferred_source or default_local_stt_source_for_locale(locale)
+    if selected not in spec.sources:
+        return tuple(spec.sources)
+    return (selected, *(name for name in spec.sources if name != selected))
+
+
 async def ensure_gemma_installed(
     *,
     downloader: HuggingFaceDownloadPort | None = None,
@@ -281,48 +384,66 @@ async def ensure_gemma_installed(
     cancel_event: threading.Event | None = None,
     on_status: GemmaProvisioningCallback | None = None,
     spec: GemmaModelSpec | None = None,
-    source: str = "official",
+    source: str | None = None,
+    locale: str | None = None,
+    preferred_source: str | None = None,
 ) -> InstalledGemmaManifest:
     if cancel_event is None:
         cancel_event = threading.Event()
     resolved_spec = spec or e4b_gemma_spec()
     resolved = (install_dir or default_gemma_install_dir(resolved_spec)).resolve()
-    _raise_if_cancelled(cancel_event)
-    try:
+    cancellation = cancel_event if cancel_event is not None else threading.Event()
+    _raise_if_cancelled(cancellation)
+    lease = None
+
+    async def acquire_lease() -> LocalSTTProvisioningLease | None:
+        nonlocal lease
         lease = await asyncio.to_thread(
             LocalSTTProvisioningLease.acquire,
             model_root=resolved.parent,
             wait=True,
-            cancel_event=cancel_event,
+            cancel_event=cancellation,
         )
-    except LocalSTTRuntimeInstallCancelled as exc:
-        raise GemmaProvisioningCancelled("Gemma model provisioning cancelled") from exc
-    if lease is None:
-        raise GemmaProvisioningError("Gemma model provisioning lease is unavailable")
+        return lease
+
     try:
+        try:
+            await _await_download_cleanup(acquire_lease(), cancel_event=cancellation)
+        except LocalSTTRuntimeInstallCancelled as exc:
+            raise GemmaProvisioningCancelled("Gemma model provisioning cancelled") from exc
+        if lease is None:
+            raise GemmaProvisioningError("Gemma model provisioning lease is unavailable")
         return await _ensure_gemma_installed_with_lease(
             downloader=downloader,
             install_dir=resolved,
-            cancel_event=cancel_event,
+            cancel_event=cancellation,
             on_status=on_status,
             spec=resolved_spec,
             source=source,
+            locale=locale,
+            preferred_source=preferred_source,
         )
     finally:
-        await asyncio.to_thread(lease.close)
+        if lease is not None:
+            await _await_download_cleanup(
+                asyncio.to_thread(lease.close),
+                cancel_event=cancellation,
+            )
 
 
 async def _ensure_gemma_installed_with_lease(
     *,
     downloader: HuggingFaceDownloadPort | None,
     install_dir: Path,
-    cancel_event: threading.Event | None,
+    cancel_event: threading.Event,
     on_status: GemmaProvisioningCallback | None,
     spec: GemmaModelSpec,
-    source: str = "official",
+    source: str | None,
+    locale: str | None,
+    preferred_source: str | None,
 ) -> InstalledGemmaManifest:
     resolved = install_dir
-    if source not in {"official", "mirror", "local"}:
+    if source is not None and source not in {"official", "mirror", "local"}:
         raise ValueError("Unsupported model source")
     total_bytes = sum(asset.size_bytes for asset in spec.assets)
     _raise_if_cancelled(cancel_event)
@@ -359,138 +480,184 @@ async def _ensure_gemma_installed_with_lease(
         )
         return state.manifest
 
-    if downloader is None:
-        if source == "local":
-            log_feature("ModelDownload", "preflight", "missing_file")
+    if source == "local" and not isinstance(downloader, LocalGemmaDownloadAdapter):
+        log_feature("ModelDownload", "preflight", "missing_file")
+        raise GemmaProvisioningError("Import the pinned files first", failure_code="missing_file")
+    if source == "local":
+        source_names = ("local",)
+    elif source is not None:
+        if "huggingface" not in spec.sources:
             raise GemmaProvisioningError(
-                "Import the pinned files first", failure_code="missing_file"
+                "Selected source is unsupported", failure_code="unsupported_source"
             )
-        from puripuly_heart.core.local_asr.local_stt_huggingface_xet_adapter import (
-            HuggingFaceXetDownloadAdapter,
-        )
+        source_names = ("huggingface",)
+    else:
+        source_names = _source_order(spec, preferred_source=preferred_source, locale=locale)
+    if not source_names:
+        raise GemmaProvisioningError("Gemma model has no registered download sources")
 
-        downloader = HuggingFaceXetDownloadAdapter()
-
-    staging_dir = resolved.with_name(f"{resolved.name}.staging-{uuid4().hex}")
-    staging_dir.mkdir(parents=True, exist_ok=False)
+    staging_dir = None
     completed_bytes = 0
+    failures: list[_GemmaSourceError] = []
     stage = "preflight"
     try:
-        if shutil.disk_usage(staging_dir).free < total_bytes + 64 * 1024 * 1024:
-            raise OSError(errno.ENOSPC, "Not enough space for verified model installation")
-        await _emit(
-            on_status,
-            state="downloading",
-            downloaded_bytes=0,
-            total_bytes=total_bytes,
-        )
-        for asset in spec.assets:
+        for source_name in source_names:
             _raise_if_cancelled(cancel_event)
-            stage = "download"
-            completed_bytes = await _download_asset(
-                downloader=downloader,
-                spec=spec,
-                asset=asset,
-                staging_dir=staging_dir,
-                completed_bytes=completed_bytes,
-                total_bytes=total_bytes,
-                cancel_event=cancel_event,
-                on_status=on_status,
-                endpoint=(
-                    "https://hf-mirror.com"
-                    if source == "mirror"
-                    else "https://huggingface.co" if source == "official" else None
-                ),
+            asset_source = (
+                GemmaAssetSource(name="local", repo_id=spec.repo_id, revision=spec.revision)
+                if source_name == "local"
+                else spec.sources[source_name]
             )
+            source_downloader: HuggingFaceDownloadPort
+            if source_name in {"huggingface", "local"}:
+                if downloader is None:
+                    from puripuly_heart.core.local_asr.local_stt_huggingface_xet_adapter import (
+                        HuggingFaceXetDownloadAdapter,
+                    )
+
+                    downloader = HuggingFaceXetDownloadAdapter()
+                source_downloader = downloader
+            else:
+                source_downloader = _HTTPDownloadAdapter(asset_source)
+            candidate = resolved.with_name(f"{resolved.name}.staging-{uuid4().hex}")
+            candidate.mkdir(parents=True, exist_ok=False)
+            staging_dir = candidate
+            completed_bytes = 0
+            stage = "preflight"
+            if shutil.disk_usage(staging_dir).free < total_bytes + 64 * 1024**2:
+                raise OSError(errno.ENOSPC, "Not enough space for verified model installation")
             await _emit(
                 on_status,
                 state="downloading",
+                downloaded_bytes=0,
+                total_bytes=total_bytes,
+            )
+            try:
+                for asset in spec.assets:
+                    _raise_if_cancelled(cancel_event)
+                    stage = "download"
+                    completed_bytes = await _download_asset(
+                        downloader=source_downloader,
+                        source=asset_source,
+                        asset=asset,
+                        staging_dir=staging_dir,
+                        completed_bytes=completed_bytes,
+                        total_bytes=total_bytes,
+                        cancel_event=cancel_event,
+                        on_status=on_status,
+                        endpoint={
+                            "official": "https://huggingface.co",
+                            "mirror": "https://hf-mirror.com",
+                        }.get(source),
+                    )
+                    await _emit(
+                        on_status,
+                        state="downloading",
+                        downloaded_bytes=completed_bytes,
+                        total_bytes=total_bytes,
+                    )
+                _raise_if_cancelled(cancel_event)
+                manifest = InstalledGemmaManifest.expected(spec)
+                stage = "verifying"
+                await _emit(
+                    on_status,
+                    state="verifying",
+                    downloaded_bytes=completed_bytes,
+                    total_bytes=total_bytes,
+                )
+                (staging_dir / GEMMA_INSTALLED_MANIFEST_FILENAME).write_text(
+                    json.dumps(manifest.to_dict(), indent=2),
+                    encoding="utf-8",
+                )
+                try:
+                    await _owned_io(
+                        validate_gemma_install,
+                        staging_dir,
+                        spec=spec,
+                        check_cancelled=lambda: _raise_if_cancelled(cancel_event),
+                        cancel_event=cancel_event,
+                    )
+                except GemmaInstallInvalidError as exc:
+                    raise _GemmaSourceError(str(exc), failure_code="checksum_failed") from exc
+            except _GemmaSourceError as exc:
+                _raise_if_cancelled(cancel_event)
+                if source is not None:
+                    raise
+                failed_staging = staging_dir
+                staging_dir = None
+                _remove_owned_staging(failed_staging, primary_failure=exc)
+                failures.append(exc)
+                continue
+            _raise_if_cancelled(cancel_event)
+            stage = "installation"
+            await _emit(
+                on_status,
+                state="installing",
                 downloaded_bytes=completed_bytes,
                 total_bytes=total_bytes,
             )
-        _raise_if_cancelled(cancel_event)
-        manifest = InstalledGemmaManifest.expected(spec)
-        stage = "verifying"
-        await _emit(
-            on_status, state="verifying", downloaded_bytes=completed_bytes, total_bytes=total_bytes
-        )
-        (staging_dir / GEMMA_INSTALLED_MANIFEST_FILENAME).write_text(
-            json.dumps(manifest.to_dict(), indent=2),
-            encoding="utf-8",
-        )
-        await _owned_io(
-            validate_gemma_install,
-            staging_dir,
-            spec=spec,
-            check_cancelled=lambda: _raise_if_cancelled(cancel_event),
-            cancel_event=cancel_event,
-        )
-        _raise_if_cancelled(cancel_event)
-        stage = "installation"
-        await _emit(
-            on_status, state="installing", downloaded_bytes=completed_bytes, total_bytes=total_bytes
-        )
-        await _owned_io(_promote, staging_dir, resolved, cancel_event=cancel_event)
-        await _emit(
-            on_status,
-            state="ready",
-            downloaded_bytes=total_bytes,
-            total_bytes=total_bytes,
-        )
-        return manifest
-    except asyncio.CancelledError as exc:
-        _remove_owned_staging(staging_dir, primary_failure=exc)
-        raise
-    except LocalSTTDownloadPortCancelled as exc:
-        cancellation = GemmaProvisioningCancelled("Gemma model provisioning cancelled")
-        cancellation.__cause__ = exc
-        _remove_owned_staging(staging_dir, primary_failure=cancellation)
-        raise cancellation
-    except GemmaProvisioningCancelled as exc:
-        _remove_owned_staging(staging_dir, primary_failure=exc)
-        raise
-    except Exception as exc:
-        code = (
-            "checksum_failed"
-            if isinstance(exc, GemmaInstallInvalidError)
-            else (
-                "disk_full"
-                if isinstance(exc, OSError) and exc.errno == errno.ENOSPC
-                else getattr(exc, "failure_code", "install_failed")
+            await _owned_io(_promote, staging_dir, resolved, cancel_event=cancel_event)
+            await _emit(
+                on_status,
+                state="ready",
+                downloaded_bytes=total_bytes,
+                total_bytes=total_bytes,
             )
-        )
-        log_feature(
-            "ModelDownload",
-            "verifying" if code == "checksum_failed" else stage,
-            code,
-            error=exc,
-            http_status=getattr(exc, "status_code", None),
-        )
-        failure = (
-            exc
-            if isinstance(exc, GemmaProvisioningError)
-            else GemmaProvisioningError(
-                (
-                    "Gemma model provisioning failed: size mismatch"
-                    if isinstance(exc, GemmaInstallInvalidError) and "size mismatch" in str(exc)
-                    else f"Gemma model provisioning failed ({code})"
-                ),
-                failure_code=code,
-            )
-        )
-        if failure is not exc:
+            return manifest
+        raise GemmaProvisioningError(
+            "Gemma model provisioning failed for all sources: "
+            + "; ".join(str(failure) for failure in failures),
+            failure_code=failures[-1].failure_code,
+        ) from failures[-1]
+    except BaseException as exc:
+        if isinstance(exc, LocalSTTDownloadPortCancelled):
+            failure = GemmaProvisioningCancelled("Gemma model provisioning cancelled")
             failure.__cause__ = exc
-        _remove_owned_staging(staging_dir, primary_failure=failure)
-        await _emit(
-            on_status,
-            state="failed",
-            downloaded_bytes=completed_bytes,
-            total_bytes=total_bytes,
-        )
+        elif isinstance(exc, Exception) and not isinstance(
+            exc, (GemmaProvisioningCancelled, BaseExceptionGroup)
+        ):
+            code = (
+                "checksum_failed"
+                if isinstance(exc, GemmaInstallInvalidError)
+                else (
+                    "disk_full"
+                    if isinstance(exc, OSError) and exc.errno == errno.ENOSPC
+                    else getattr(exc, "failure_code", "install_failed")
+                )
+            )
+            log_feature(
+                "ModelDownload",
+                "verifying" if code == "checksum_failed" else stage,
+                code,
+                error=exc,
+                http_status=getattr(exc, "status_code", None),
+            )
+            failure = (
+                exc
+                if isinstance(exc, GemmaProvisioningError)
+                and not (source is not None and isinstance(exc, _GemmaSourceError))
+                else GemmaProvisioningError(
+                    f"Gemma model provisioning failed ({code})", failure_code=code
+                )
+            )
+            if failure is not exc:
+                failure.__cause__ = exc
+        else:
+            failure = exc
+        if staging_dir is not None:
+            _remove_owned_staging(staging_dir, primary_failure=failure)
+        if isinstance(failure, Exception) and not isinstance(
+            failure, (GemmaProvisioningCancelled, BaseExceptionGroup)
+        ):
+            await _emit(
+                on_status,
+                state="failed",
+                downloaded_bytes=completed_bytes,
+                total_bytes=total_bytes,
+            )
+        if failure is exc:
+            raise
         raise failure
-    except BaseExceptionGroup as exc:
-        _remove_owned_staging(staging_dir, primary_failure=exc)
-        raise
 
 
 __all__ = [

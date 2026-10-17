@@ -1159,6 +1159,22 @@ async def test_dashboard_gpu_action_runs_as_page_task(
     assert actions == ["install"]
 
 
+@pytest.mark.parametrize("status", ["checking", "downloading", "preparing"])
+def test_dashboard_managed_gemma_progress_notice_has_no_cancel_action(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    from puripuly_heart.app.ports.ui_models import ManagedGemmaDashboardNotice
+
+    view = _make_dashboard(monkeypatch)
+    view.set_managed_gemma_notice(
+        ManagedGemmaDashboardNotice(status=status, progress_percent=37, action="cancel")
+    )
+    label, callback = view.display_card.notice_actions[-1]
+    assert label is None
+    assert callback is None
+
+
 def test_dashboard_steamvr_overlay_failure_notice_uses_actionable_reason_without_status_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1468,6 +1484,7 @@ def test_dashboard_bound_intents_receive_every_owned_interaction(
         "overlay": [],
         "retry_peer": [],
         "gpu": [],
+        "managed_gemma": [],
     }
     view.bind_dashboard_intents(
         translation=DashboardTranslationIntents(
@@ -1482,6 +1499,7 @@ def test_dashboard_bound_intents_receive_every_owned_interaction(
             toggle_overlay=lambda enabled: calls["overlay"].append(enabled),
             retry_peer_process_capture=lambda: calls["retry_peer"].append(True),
             run_gpu_notice_action=lambda action: calls["gpu"].append(action),
+            run_managed_gemma_notice_action=lambda action: calls["managed_gemma"].append(action),
         ),
     )
 
@@ -1502,6 +1520,7 @@ def test_dashboard_bound_intents_receive_every_owned_interaction(
     assert [change.source_code for change in calls["language"]] == ["ja"]
     assert calls["retry_peer"] == []
     assert calls["gpu"] == []
+    assert calls["managed_gemma"] == []
 
 
 def test_dashboard_secondary_target_dialog_offers_none_and_blocks_the_primary(

@@ -680,6 +680,24 @@ def test_input_font_and_locale_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _visible_text(card) == display_card_module.t("display.stopping")
 
 
+def test_input_line_metrics_do_not_follow_the_source_language_font(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    card = DisplayCard(on_submit=lambda _text: None)
+    monkeypatch.setattr(type(card._input_field), "update", lambda self: None)
+
+    strut_styles = []
+    for font_family in ("NanumSquareRound", "MPLUSRounded1c", "ResourceHanRoundedCN", None):
+        card.set_input_font(font_family)
+        strut_styles.append(card._input_field.strut_style)
+
+    strut = strut_styles[0]
+    assert all(style == strut for style in strut_styles)
+    assert strut.force_strut_height is True
+    assert strut.size == card._input_field.text_size
+    assert strut.font_family == display_card_module.default_font_family()
+
+
 def test_input_footer_stays_outside_the_expanding_display_region() -> None:
     card = DisplayCard(on_submit=lambda _text: None)
 

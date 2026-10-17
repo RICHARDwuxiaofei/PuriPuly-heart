@@ -249,6 +249,13 @@ def _source_order(
             )
         return (selected,)
     selected = preferred_source or default_local_stt_source_for_locale(locale)
+    if (
+        preferred_source is None
+        and selected == "modelscope"
+        and selected not in manifest.sources
+        and "hf_mirror" in manifest.sources
+    ):
+        selected = "hf_mirror"
     names: list[str] = []
     if selected in manifest.sources:
         names.append(selected)
@@ -452,7 +459,12 @@ async def _download_huggingface_xet_source_into_staging(
             json.dumps(installed.to_dict(), indent=2),
             encoding="utf-8",
         )
-        await asyncio.to_thread(validate_local_stt_install, staging_dir, manifest=manifest)
+        await _owned_io(
+            validate_local_stt_install,
+            model_dir=staging_dir,
+            manifest=manifest,
+            io_cancel_event=cancel_event or threading.Event(),
+        )
         return installed
     except LocalSTTDownloadPortCancelled as exc:
         shutil.rmtree(staging_dir, ignore_errors=True)
@@ -538,15 +550,22 @@ async def ensure_local_stt_installed(
     huggingface_downloader: HuggingFaceDownloadPort | None = None,
 ) -> InstalledLocalSTTManifest:
     resolved_root = (model_root or default_local_stt_model_root()).resolve()
-    lease = await asyncio.to_thread(
-        LocalSTTProvisioningLease.acquire,
-        model_root=resolved_root,
-        wait=True,
-        cancel_event=cancel_event,
-    )
-    if lease is None:
-        raise LocalSTTRuntimeInstallError("local STT provisioning lease is unavailable")
+    cancellation = cancel_event or threading.Event()
+    _raise_if_cancelled(cancellation)
+    lease = None
+
+    def acquire_lease() -> None:
+        nonlocal lease
+        lease = LocalSTTProvisioningLease.acquire(
+            model_root=resolved_root,
+            wait=True,
+            cancel_event=cancellation,
+        )
+
     try:
+        await _owned_io(acquire_lease, io_cancel_event=cancellation)
+        if lease is None:
+            raise LocalSTTRuntimeInstallError("local STT provisioning lease is unavailable")
         return await _ensure_local_stt_installed_with_lease(
             model_id=model_id,
             preferred_source=preferred_source,
@@ -554,11 +573,12 @@ async def ensure_local_stt_installed(
             model_root=resolved_root,
             manifest=manifest,
             on_status=on_status,
-            cancel_event=cancel_event,
+            cancel_event=cancellation,
             huggingface_downloader=huggingface_downloader,
         )
     finally:
-        await asyncio.to_thread(lease.close)
+        if lease is not None:
+            await _owned_io(lease.close, io_cancel_event=cancellation)
 
 
 async def _ensure_local_stt_installed_with_lease(
@@ -585,10 +605,11 @@ async def _ensure_local_stt_installed_with_lease(
     state = inspect_local_stt_install_state(install_dir, manifest=resolved_manifest)
     if state.status == "ready" and state.installed_manifest is not None:
         try:
-            return await asyncio.to_thread(
+            return await _owned_io(
                 validate_local_stt_install,
-                install_dir,
+                model_dir=install_dir,
                 manifest=resolved_manifest,
+                io_cancel_event=cancel_event or threading.Event(),
             )
         except LocalSTTAssetError:
             # Cheap runtime inspection is allowed to say "ready" without checksums.
@@ -598,6 +619,8 @@ async def _ensure_local_stt_installed_with_lease(
     _raise_if_cancelled(cancel_event)
     if total_bytes and shutil.disk_usage(resolved_root).free < total_bytes + 64 * 1024**2:
         raise LocalSTTRuntimeInstallError("Insufficient staging space", failure_code="disk_full")
+    failures: list[str] = []
+    first_error: Exception | None = None
     last_progress_percent: int | None = None
     last_error: Exception | None = None
 
@@ -655,11 +678,12 @@ async def _ensure_local_stt_installed_with_lease(
             if current_percent != last_progress_percent:
                 last_progress_percent = current_percent
                 await _emit_status(on_status, "downloading", percent=current_percent)
-            await asyncio.to_thread(
+            await _owned_io(
                 _promote_staging_install,
                 staging_dir=staging_dir,
                 install_dir=install_dir,
                 cancel_event=cancel_event,
+                io_cancel_event=cancel_event or threading.Event(),
             )
             await _emit_status(on_status, "ready", percent=None)
             return installed
@@ -675,6 +699,9 @@ async def _ensure_local_stt_installed_with_lease(
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise
         except Exception as exc:
+            if first_error is None:
+                first_error = exc
+            failures.append(f"{source_name}: {exc}")
             last_error = exc
             shutil.rmtree(staging_dir, ignore_errors=True)
 
@@ -693,8 +720,13 @@ async def _ensure_local_stt_installed_with_lease(
     status_code = getattr(last_error, "status_code", None)
     if isinstance(last_error, httpx.HTTPStatusError):
         status_code = last_error.response.status_code
+    explicit_source = preferred_source in {"official", "mirror", "modelscope_only"}
+    if explicit_source:
+        message = "checksum mismatch" if code == "checksum_failed" else "Model installation failed"
+    else:
+        message = "; ".join(failures) or "runtime local STT install failed"
     raise LocalSTTRuntimeInstallError(
-        "checksum mismatch" if code == "checksum_failed" else "Model installation failed",
+        message,
         failure_code=code,
         status_code=status_code,
-    ) from last_error
+    ) from first_error

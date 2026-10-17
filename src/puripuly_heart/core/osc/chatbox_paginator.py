@@ -13,6 +13,8 @@ from puripuly_heart.core.diagnostic_validation import (
     DIAGNOSTIC_VALIDATION_STATUS_ACCEPTED,
     redact_text_for_sink,
 )
+from puripuly_heart.core.diagnostics import emit_failure, safe_exception_fields
+from puripuly_heart.core.messages import ErrorDiagnostics
 from puripuly_heart.core.osc.sender import OscSender
 from puripuly_heart.core.output.chatbox import SelfUtterancePublication, SystemDisclosurePublication
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
@@ -142,20 +144,24 @@ class ChatboxPaginator:
         self._active_page_count = 0
         self._drain_pending_messages()
 
-    def send_immediate(self, text: str) -> bool:
-        """Send a single chatbox packet immediately without changing pagination state."""
+    def send_immediate(self, text: str) -> tuple[bool, ErrorDiagnostics | None]:
+        """Return local send outcome and safe cause without changing pagination."""
         text = text.strip()
         if not text:
-            return False
-        return self._send_page(mode="immediate", text=text, remaining_parts=0)
+            return False, None
+        try:
+            self.sender.send_chatbox(text)
+        except OSError as exc:
+            return False, self._local_send_diagnostics(exc)
+        return True, None
 
     def send_typing(self, is_typing: bool) -> None:
         """Forward typing indicator to the OSC sender."""
         self._legacy_typing_active = bool(is_typing)
         if not is_typing and self._typing_reasons:
-            self._apply_typing_state()
+            self._apply_typing_state(operation="typing_state")
             return
-        self._send_typing_state(self._is_typing_active())
+        self._send_typing_state(self._is_typing_active(), operation="typing_state")
 
     def set_typing_reason(self, reason: str, active: bool) -> None:
         reason = reason.strip()
@@ -172,25 +178,25 @@ class ChatboxPaginator:
         if not self._typing_reasons and self._last_typing_state == self._is_typing_active():
             return
         self._typing_reasons.clear()
-        self._apply_typing_state()
+        self._apply_typing_state(operation="typing_clear")
 
     def _is_typing_active(self) -> bool:
         return self._legacy_typing_active or bool(self._typing_reasons)
 
-    def _apply_typing_state(self, *, was_typing: bool | None = None) -> None:
+    def _apply_typing_state(
+        self, *, was_typing: bool | None = None, operation: str = "typing_reason"
+    ) -> None:
         is_typing = self._is_typing_active()
         previous = self._last_typing_state if was_typing is None else was_typing
         if is_typing != previous or is_typing != self._last_typing_state:
-            self._send_typing_state(is_typing)
+            self._send_typing_state(is_typing, operation=operation)
 
-    def _send_typing_state(self, is_typing: bool) -> None:
+    def _send_typing_state(self, is_typing: bool, *, operation: str) -> None:
         try:
             self.sender.send_typing(is_typing)
             self._last_typing_state = bool(is_typing)
         except OSError as exc:
-            self._emit_basic(
-                f"[Basic][OSC] typing status=failed error={exc}", level=logging.WARNING
-            )
+            self._emit_local_send_failure("typing_state", exc, operation=operation)
 
     def drop_pending(self) -> None:
         """Drop queued chatbox pages/messages during output runtime shutdown."""
@@ -216,10 +222,11 @@ class ChatboxPaginator:
         self._active_message = None
         self._active_page_index = 0
         self._active_page_count = 0
-        self._emit_basic(
-            "[Basic][OSC] chatbox backlog dropped on output shutdown "
-            f"pages={dropped_pages} messages={dropped_messages}"
-        )
+        if dropped_pages or dropped_messages:
+            self._emit_basic(
+                "[Basic][OSC] chatbox backlog dropped on output shutdown "
+                f"pages={dropped_pages} messages={dropped_messages}"
+            )
 
     def _is_paginating(self) -> bool:
         return bool(self._pending_pages)
@@ -486,9 +493,48 @@ class ChatboxPaginator:
         )
 
     def _emit_send_failure(self, *, mode: str, exc: OSError) -> None:
-        self._emit_basic(
-            f"[Basic][OSC] send failed mode={mode} cause={type(exc).__name__}",
-            level=logging.WARNING,
+        self._emit_local_send_failure(
+            "chatbox_page", exc, message=self._active_message if mode == "queued" else None
+        )
+
+    def _emit_local_send_failure(
+        self,
+        stage: str,
+        exception: OSError,
+        *,
+        message: OSCMessage | None = None,
+        operation: str = "publish",
+    ) -> None:
+        diagnostics = self._local_send_diagnostics(exception, message=message, operation=operation)
+        emit_failure(logger, diagnostics, severity="warning", disposition="degraded", stage=stage)
+
+    @staticmethod
+    def _local_send_diagnostics(
+        exception: OSError, *, message: OSCMessage | None = None, operation: str = "publish"
+    ) -> ErrorDiagnostics:
+        active = message
+        fields = {
+            "destination": "self_chatbox",
+            "remote_delivery": "unacknowledged",
+            **safe_exception_fields(exception),
+        }
+        if active is not None:
+            fields["publication_id"] = str(active.utterance_id)
+        return ErrorDiagnostics(
+            component="osc_control",
+            operation=operation,
+            code="osc_local_send_failed",
+            category="network",
+            visibility="basic",
+            content_policy="metadata_only",
+            status_code=None,
+            retry_after_ms=None,
+            fields=fields,
+            channel="self" if active is not None else None,
+            turn_id=str(active.utterance_id) if active is not None else None,
+            generation=active.turn_generation if active is not None else None,
+            operation_id=active.operation_id if active is not None else None,
+            request_id=active.request_id if active is not None else None,
         )
 
     def _emit_basic(self, message: str, *, level: int = logging.INFO) -> None:

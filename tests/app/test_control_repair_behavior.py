@@ -623,9 +623,14 @@ async def test_manual_output_wait_allows_safe_mutations_but_orders_provider_tran
     release = asyncio.Event()
     translated = []
 
+    from uuid import uuid4
+
+    from puripuly_heart.core.orchestrator.self_translation_channel import TextSubmissionAdmission
+
     async def slow_output(_text):
         entered.set()
         await release.wait()
+        return TextSubmissionAdmission("admitted", uuid4(), ())
 
     async def translation(enabled, **_kwargs):
         translated.append(enabled)
@@ -702,9 +707,14 @@ async def test_long_output_wait_orders_cli_overlay_audio_and_gui_settings_captur
     entered = asyncio.Event()
     release = asyncio.Event()
 
+    from uuid import uuid4
+
+    from puripuly_heart.core.orchestrator.self_translation_channel import TextSubmissionAdmission
+
     async def slow_output(_text):
         entered.set()
         await release.wait()
+        return TextSubmissionAdmission("admitted", uuid4(), ())
 
     async def no_audio_effects(_settings):
         pass
@@ -1330,3 +1340,869 @@ async def test_auth_login_keeps_other_existing_outcomes(
     assert result["status"] == expected_status
     assert result.get("reason") == expected_reason
     assert result["provider"] == provider
+
+
+@pytest.mark.asyncio
+async def test_settings_failure_is_joinable_after_event_retention_and_state_inspection(
+    offline, monkeypatch
+):
+    from uuid import uuid4
+
+    monkeypatch.setenv("LOCALAPPDATA", str(offline.parent / "isolated-diagnostics-data"))
+    app = compose_headless_application(offline)
+    try:
+        await app.start()
+        control = app.control()
+        control.bind_instance(str(uuid4()))
+        before = await control.query("settings.current", {})
+
+        def denied(_self, *_args):
+            raise PermissionError(13, "FORBIDDEN_SETTINGS_EXCEPTION_SENTINEL")
+
+        monkeypatch.setattr(type(control.settings.persistence), "persist", denied)
+        accepted = await control.submit(
+            "settings.apply",
+            {"changes": {"locale": "ja"}},
+            request_id=uuid4().hex,
+        )
+        receipt = await control.wait(accepted["operation_id"], timeout=5)
+        assert receipt["status"] == "persistence_failed"
+        cause = receipt["transaction"]["diagnostics"]
+        assert cause["code"] == "settings_save_failed"
+        assert cause["operation_id"] == receipt["operation_id"]
+        assert cause["instance_id"] == receipt["instance_id"]
+        assert (await control.query("settings.current", {}))["revision"] == before["revision"]
+        retained = await control.query(
+            "diagnostics.history", {"operation_id": receipt["operation_id"]}
+        )
+        assert any(item["diagnostic_id"] == cause["diagnostic_id"] for item in retained["records"])
+        stream = control.subscribe(topics=["logs", "operation"], after=0)
+        async with asyncio.timeout(5):
+            while True:
+                event = await anext(stream)
+                if event.get("diagnostic", {}).get("diagnostic_id") == cause["diagnostic_id"]:
+                    assert event["diagnostic"] == cause
+                    break
+        await stream.aclose()
+        operation_event = next(
+            item
+            for item in control.events.history
+            if item["topic"] == "operation" and item["operation_id"] == receipt["operation_id"]
+        )
+        assert operation_event["diagnostic_id"] == cause["diagnostic_id"]
+        assert "FORBIDDEN" not in json.dumps(retained)
+    finally:
+        await app.stop()
+
+
+@pytest.mark.parametrize("exception_type", [ValueError, TypeError, KeyError])
+@pytest.mark.asyncio
+async def test_execution_defects_are_not_argument_rejections_and_keep_safe_causes(
+    offline, monkeypatch, exception_type
+):
+    from uuid import uuid4
+
+    monkeypatch.setenv("LOCALAPPDATA", str(offline.parent / "isolated-control-errors"))
+    app = compose_headless_application(offline)
+    try:
+        await app.start()
+        control = app.control()
+        control.bind_instance(str(uuid4()))
+        invalid = await control.submit(
+            "translation.set", {"enabled": "wrong"}, request_id=uuid4().hex
+        )
+        rejected = await control.wait(invalid["operation_id"], timeout=5)
+        assert rejected["status"] == "rejected" and rejected["error"]["code"] == "invalid_arguments"
+
+        async def broken(_self, _command, _arguments, **_kwargs):
+            try:
+                raise PermissionError(13, "FORBIDDEN_NATIVE_SENTINEL")
+            except PermissionError as native:
+                raise exception_type("FORBIDDEN_INTERNAL_SENTINEL") from native
+
+        monkeypatch.setattr(type(control), "_dispatch", broken)
+        accepted = await control.submit(
+            "translation.set", {"enabled": False}, request_id=uuid4().hex
+        )
+        receipt = await control.wait(accepted["operation_id"], timeout=5)
+        assert (
+            receipt["status"] == "failed"
+            and receipt["error"]["code"] == "application_operation_failed"
+        )
+        record = receipt["diagnostics"]
+        assert record["operation_id"] == receipt["operation_id"]
+        assert record["stage"] == "dispatch" and record["category"] == "unknown"
+        assert record["fields"]["exception_class"] == exception_type.__name__
+        assert record["fields"]["cause_class_1"] == "PermissionError"
+        assert record["fields"]["errno"] == 13
+        assert "FORBIDDEN" not in json.dumps(receipt)
+        assert (
+            await control.query("diagnostics.history", {"diagnostic_id": record["diagnostic_id"]})
+        )["records"] == [record]
+    finally:
+        await app.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_error_report_crosses_composed_event_bridge_with_source_identity(
+    offline, monkeypatch
+):
+    from uuid import uuid4
+
+    from puripuly_heart.core.messages import ErrorDiagnostics, UserErrorReport, UserMessageRef
+    from puripuly_heart.domain.events import UIEvent, UIEventType
+
+    monkeypatch.setenv("LOCALAPPDATA", str(offline.parent / "isolated-report-bridge"))
+    app = compose_headless_application(offline)
+    try:
+        await app.start()
+        control = app.control()
+        control.bind_instance(str(uuid4()))
+        turn = uuid4()
+        cause = ErrorDiagnostics(
+            component="provider.stt",
+            operation="receive",
+            code="provider_receive_failed",
+            category="network",
+            visibility="basic",
+            content_policy="metadata_only",
+            status_code=503,
+            retry_after_ms=None,
+            fields={"message": "FORBIDDEN_PROVIDER_BODY_SENTINEL", "provider": "soniox"},
+            channel="self",
+            turn_id=str(turn),
+            generation=5,
+        )
+        report = UserErrorReport(UserMessageRef("stt.failure", {}, "error"), cause)
+        stream = control.subscribe(topics=["error"], after=control.events.sequence)
+        pending = asyncio.create_task(anext(stream))
+        await asyncio.sleep(0)
+        await control.pipeline.ui_events.put(
+            UIEvent(
+                UIEventType.ERROR, payload=report, channel="self", source="stt", utterance_id=turn
+            )
+        )
+        event = await asyncio.wait_for(pending, 5)
+        await stream.aclose()
+        record = event["error"]["diagnostics"]
+        assert record["diagnostic_id"] == cause.diagnostic_id
+        assert record["code"] == "provider_receive_failed"
+        assert record["turn_id"] == str(turn) and record["generation"] == 5
+        assert record["operation_id"] is None
+        assert record["detail"]["state"] == "rejected"
+        assert "FORBIDDEN" not in json.dumps(event)
+        assert (await control.query("diagnostics.history", {"diagnostic_id": cause.diagnostic_id}))[
+            "records"
+        ] == [record]
+    finally:
+        await app.stop()
+
+
+def test_native_manual_admission_preserves_ids_without_output_ack():
+    from uuid import uuid4
+
+    from puripuly_heart.app.services.application_control import ApplicationControlOwner
+    from puripuly_heart.core.orchestrator.self_translation_channel import TextSubmissionAdmission
+
+    turn, child = uuid4(), uuid4()
+    result = ApplicationControlOwner._text_admission_data(
+        TextSubmissionAdmission("admitted", turn, (child,))
+    )
+    assert result == {
+        "status": "applied",
+        "admission": "admitted",
+        "turn_id": str(turn),
+        "child_turn_ids": [str(child)],
+        "output_delivery": "unobserved",
+    }
+    rejected = ApplicationControlOwner._text_admission_data(None)
+    assert rejected["status"] == "rejected" and rejected["turn_id"] is None
+    with pytest.raises(TypeError):
+        ApplicationControlOwner._text_admission_data(True)
+
+
+def test_unknown_account_observation_preserves_owning_diagnostic():
+    from puripuly_heart.app.services.application_control import _chatgpt_status
+    from puripuly_heart.core.messages import ErrorDiagnostics
+
+    cause = ErrorDiagnostics(
+        component="chatgpt_account",
+        operation="read",
+        code="chatgpt_secret_store_failed",
+        category="auth",
+        visibility="basic",
+        content_policy="metadata_only",
+        status_code=None,
+        retry_after_ms=None,
+        fields={},
+    )
+    observed = []
+
+    def retain(diagnostic, **_):
+        observed.append(diagnostic)
+        return {"diagnostic_id": diagnostic.diagnostic_id}
+
+    app = SimpleNamespace(
+        chatgpt_account_snapshot=lambda: SimpleNamespace(
+            signed_in=None, in_progress=False, diagnostics=cause
+        )
+    )
+    result = _chatgpt_status(app, retain)
+    assert result["signed_in"] is None and result["sign_in_required"] is None
+    assert result["diagnostic_id"] == cause.diagnostic_id and observed == [cause]
+
+
+@pytest.mark.asyncio
+async def test_real_peer_fault_queries_project_safe_original_cause(offline):
+    from uuid import uuid4
+
+    from puripuly_heart.core.messages import ErrorDiagnostics
+    from puripuly_heart.core.peer_capture import (
+        PeerCaptureFailureReason,
+        PeerCaptureLanguageFacts,
+        PeerCaptureSessionConfig,
+        PeerCaptureSessionState,
+        PeerCaptureTargetIntent,
+    )
+
+    app = compose_headless_application(offline)
+    try:
+        await app.start()
+        control = app.control()
+        control.bind_instance(str(uuid4()))
+        owner = control.pipeline.current.peer_capture
+        config = PeerCaptureSessionConfig(
+            provider_id="soniox",
+            provider_signature=("soniox",),
+            runtime_signature=("soniox",),
+            capture_signature=("fixture",),
+            capture_target=PeerCaptureTargetIntent(kind="default_output_device"),
+            language=PeerCaptureLanguageFacts(source_mode="manual", source_language="en"),
+            target_sample_rate_hz=16000,
+            vad_speech_threshold=0.4,
+            vad_hangover_ms=500,
+            vad_pre_roll_ms=500,
+        )
+        cause = ErrorDiagnostics(
+            component="capture.peer",
+            operation="receive",
+            code="capture.peer.provider_failed",
+            category="network",
+            visibility="diagnostic_only",
+            content_policy="metadata_only",
+            status_code=999,
+            retry_after_ms=-1,
+            fields={"errno": 13, "body": "PRIVATE_PEER_FIELD_SENTINEL"},
+            channel="PRIVATE_PEER_CHANNEL_SENTINEL",
+            generation=-1,
+        )
+        await owner._fault_current_generation(
+            owner.snapshot.generation,
+            config=config,
+            reason=PeerCaptureFailureReason.PROVIDER_FAILED,
+            exception=cause,
+        )
+        assert owner.snapshot.state is PeerCaptureSessionState.FAULTED
+        assert owner.snapshot.failure_diagnostics.diagnostic_id == cause.diagnostic_id
+        for query in ("capture.channels", "providers.status", "app.status"):
+            result = await control.query(query, {})
+            text = json.dumps(result)
+            assert cause.diagnostic_id in text and "PRIVATE_PEER" not in text
+        retained = (
+            await control.query("diagnostics.history", {"diagnostic_id": cause.diagnostic_id})
+        )["records"][0]
+        assert retained["code"] == cause.code
+        assert retained["channel"] is None and retained["generation"] is None
+        assert retained["status_code"] is None and retained["retry_after_ms"] is None
+        assert retained["detail"]["rejected_fields"] == 5
+        self_snapshot = replace(control.pipeline.self_capture.snapshot, failure_diagnostics=cause)
+        safe_self = control._snapshot_json(self_snapshot)["failure_diagnostics"]
+        assert safe_self["diagnostic_id"] == cause.diagnostic_id
+        assert safe_self["detail"]["rejected_fields"] == 5
+        assert "PRIVATE_PEER" not in json.dumps(safe_self)
+    finally:
+        await app.stop()
+
+
+def test_transaction_receipt_reports_owner_secondary_omissions():
+    from puripuly_heart.app.services.application_control import ApplicationControlOwner
+    from puripuly_heart.core.messages import ErrorDiagnostics, TransactionResult
+
+    causes = tuple(
+        ErrorDiagnostics(
+            component="settings_repository",
+            operation="save",
+            code="settings_save_failed",
+            category="transaction",
+            visibility="diagnostic_only",
+            content_policy="metadata_only",
+            status_code=None,
+            retry_after_ms=None,
+            fields={},
+        )
+        for _ in range(6)
+    )
+    transaction = TransactionResult(
+        "settings_commit_failed",
+        None,
+        causes[0],
+        secondary_diagnostics=causes,
+        secondary_omitted_count=2,
+    )
+    owner = SimpleNamespace(
+        _retain_diagnostic=lambda diagnostic, **_: {"diagnostic_id": diagnostic.diagnostic_id}
+    )
+    receipt = ApplicationControlOwner._transaction_receipt(owner, transaction, "persistence_failed")
+    assert [item["diagnostic_id"] for item in receipt["secondary_diagnostics"]] == [
+        cause.diagnostic_id for cause in causes[:4]
+    ]
+    assert receipt["secondary_omitted_count"] == 4 and receipt["secondary_truncated"] is True
+
+
+@pytest.mark.parametrize("carrier", ["provider_convergence", "self_runtime", "legacy_diagnostics"])
+@pytest.mark.asyncio
+async def test_execution_receipt_preserves_approved_native_failure_carrier(
+    offline, monkeypatch, carrier
+):
+    from uuid import uuid4
+
+    from puripuly_heart.app.services.capture.self_capture_application import (
+        SelfCaptureRuntimeApplyError,
+    )
+    from puripuly_heart.app.services.provider.provider_runtime_apply import (
+        ProviderRuntimeConvergenceError,
+    )
+    from puripuly_heart.core.messages import ErrorDiagnostics
+
+    app = compose_headless_application(offline)
+    request_id = uuid4().hex
+    native = []
+    try:
+        await app.start()
+        control = app.control()
+        control.bind_instance(str(uuid4()))
+
+        async def fail_dispatch(_self, _command, _arguments, *, operation_id):
+            cause = ErrorDiagnostics(
+                component="capture.peer",
+                operation="provider_build",
+                code="capture.peer.provider_failed",
+                category="lifecycle",
+                visibility="diagnostic_only",
+                content_policy="metadata_only",
+                status_code=None,
+                retry_after_ms=None,
+                fields={"errno": 13},
+                channel="peer",
+                generation=1,
+                operation_id=operation_id,
+                request_id=request_id,
+            )
+            native.append(cause)
+            control._retain_diagnostic(cause, disposition="failed")
+            if carrier == "provider_convergence":
+                error = ProviderRuntimeConvergenceError(
+                    "PRIVATE_WRAPPER_MARKER", failure_diagnostics=cause
+                )
+                error.diagnostics = replace(cause, diagnostic_id=uuid4().hex)
+            elif carrier == "self_runtime":
+                error = SelfCaptureRuntimeApplyError(
+                    "PRIVATE_WRAPPER_MARKER", failure_diagnostics=cause
+                )
+            else:
+                error = RuntimeError("PRIVATE_WRAPPER_MARKER")
+                error.failure_diagnostics = "PRIVATE_NON_TYPED_MARKER"
+                error.diagnostics = cause
+            raise error
+
+        monkeypatch.setattr(type(control), "_dispatch", fail_dispatch)
+        admitted = await control.submit(
+            "translation.set", {"enabled": False}, request_id=request_id
+        )
+        receipt = await control.wait(admitted["operation_id"], timeout=5)
+        cause = native[0]
+        assert (
+            receipt["status"] == "failed"
+            and receipt["error"]["code"] == "application_operation_failed"
+        )
+        assert receipt["cause_diagnostics"]["diagnostic_id"] == cause.diagnostic_id
+        assert receipt["diagnostics"]["cause_id"] == cause.diagnostic_id
+        assert receipt["diagnostics"]["diagnostic_id"] != cause.diagnostic_id
+        assert receipt["cause_diagnostics"]["operation_id"] == admitted["operation_id"]
+        assert receipt["cause_diagnostics"]["request_id"] == request_id
+        assert receipt["cause_diagnostics"]["category"] == "lifecycle"
+        assert "PRIVATE_" not in json.dumps(receipt)
+        records = (
+            await control.query("diagnostics.history", {"operation_id": admitted["operation_id"]})
+        )["records"]
+        assert receipt["cause_diagnostics"] in records and receipt["diagnostics"] in records
+    finally:
+        await app.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["cancelled", "failed", "interrupted"])
+@pytest.mark.parametrize("command", ["gemma.prepare", "translation.set"])
+async def test_gemma_prepare_cancellation_receipt_tracks_settled_provisioning(
+    offline, monkeypatch, outcome, command
+):
+    import socket
+
+    from puripuly_heart.core.local_asr.local_stt_download_port import (
+        HuggingFaceDownloadProgress,
+        LocalSTTDownloadPortCancelled,
+    )
+    from puripuly_heart.core.local_translation import assets
+    from puripuly_heart.core.local_translation.provisioning import ensure_gemma_installed
+    from puripuly_heart.core.local_translation.runtime import ManagedGemmaRuntimeOwner
+
+    monkeypatch.setenv("LOCALAPPDATA", str(offline.parent / "isolated-gemma-data"))
+    monkeypatch.setenv("APPDATA", str(offline.parent / "isolated-gemma-roaming"))
+    settings = json.loads(offline.read_text(encoding="utf-8"))
+    settings["intent"]["translation"].update(model="managed_gemma_26b", connection="gpu")
+    settings["intent"]["stt"]["provider"] = "soniox"
+    settings["intent"]["peer_stt"]["provider"] = "soniox"
+    settings["intent"]["telemetry"]["enabled"] = False
+    settings["intent"]["integrated_context"]["enabled"] = False
+    sink = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sink.bind(("127.0.0.1", 0))
+    settings["intent"]["osc"].update(
+        host="127.0.0.1",
+        port=sink.getsockname()[1],
+        send_port=sink.getsockname()[1],
+        activation_notice_enabled=False,
+    )
+    offline.write_text(json.dumps(settings), encoding="utf-8")
+    spec = assets.resolve_gemma_spec(assets.GEMMA_26B_MODEL_ID)
+    spec = replace(
+        spec,
+        assets=(replace(spec.assets[0], size_bytes=100, sha256="0" * 64),),
+    )
+    monkeypatch.setattr(assets, "gemma_26b_spec", lambda: spec)
+    entered = asyncio.Event()
+    settled = asyncio.Event()
+    staging_paths = []
+
+    class Downloader:
+        async def download(self, request, *, cancel_event, on_progress):
+            staging_paths.append(request.local_dir)
+            (request.local_dir / request.remote_path).write_bytes(b"partial synthetic target")
+            on_progress(HuggingFaceDownloadProgress(24, 100))
+            entered.set()
+            await asyncio.to_thread(cancel_event.wait)
+            settled.set()
+            if outcome == "failed":
+                raise PermissionError(5, "PRIVATE_DOWNLOAD_CLEANUP_FAILURE")
+            raise LocalSTTDownloadPortCancelled("synthetic download cancelled")
+
+    def reject_launch(*_args, **_kwargs):
+        raise AssertionError("cancelled provisioning must not launch a model process")
+
+    async def provision(**kwargs):
+        kwargs["downloader"] = Downloader()
+        return await ensure_gemma_installed(**kwargs)
+
+    install_dir = offline.parent / "gemma-models" / spec.install_dirname
+    runtime = ManagedGemmaRuntimeOwner(
+        install_dir=install_dir,
+        provisioner=provision,
+        process_factory=reject_launch,
+        transport_factory=reject_launch,
+    )
+    monkeypatch.setattr(
+        application_runtime, "create_managed_gemma_runtime", lambda **_kwargs: runtime
+    )
+    app = compose_headless_application(offline)
+    try:
+        await app.start()
+        control = app.control()
+        control.bind_instance(f"isolated-gemma-{outcome}")
+        owner = control.gemma()
+        arguments = {"enabled": True} if command == "translation.set" else {}
+        admitted = await control.submit(command, arguments, request_id="prepare-cancel")
+        await asyncio.wait_for(entered.wait(), 5)
+        assert owner.snapshot.state == "downloading"
+        assert staging_paths and staging_paths[0].is_dir()
+        assert (await control.operation(admitted["operation_id"]))["terminal"] is False
+
+        if outcome == "interrupted":
+            await asyncio.wait_for(app.stop(), 5)
+        else:
+            cancellation = await control.submit("gemma.cancel", {}, request_id="cancel-preparation")
+            cancel_receipt = await control.wait(cancellation["operation_id"], timeout=5)
+            assert cancel_receipt["status"] == "cancelled"
+            assert cancel_receipt["terminal"] is True
+        receipt = await control.wait(admitted["operation_id"], timeout=5)
+        assert receipt["status"] == outcome
+        assert receipt["terminal"] is True
+        if command == "translation.set" and outcome != "interrupted":
+            status = await control.query("app.status", {})
+            assert status["translation_enabled"] is False
+            assert status["translation_runtime_ready"] is True
+            assert (
+                control.pipeline.translation_runtime_configuration.snapshot().value.translation_enabled
+                is False
+            )
+        assert settled.is_set()
+        assert not install_dir.exists()
+        assert all(not path.exists() for path in staging_paths)
+        if outcome == "interrupted":
+            assert owner.snapshot.state == "closed"
+            assert runtime.readiness is None
+            assert control.pipeline.llm_runtime is None
+        if outcome == "failed":
+            assert owner.snapshot.state == "failed"
+            assert owner.snapshot.failure_code == "filesystem_failed"
+            assert owner.snapshot.cause_type == "PermissionError"
+            assert receipt["error"]["code"] == "application_operation_failed"
+            assert "diagnostics" in receipt
+            assert "PRIVATE_DOWNLOAD_CLEANUP_FAILURE" not in json.dumps(receipt)
+        elif outcome == "cancelled":
+            assert owner.snapshot.state == "cancelled"
+            assert "error" not in receipt
+            assert "diagnostics" not in receipt
+        if outcome != "interrupted":
+            next_operation = await control.submit(
+                "settings.apply", {"changes": {"locale": "ja"}}, request_id="after-cancel"
+            )
+            next_receipt = await control.wait(next_operation["operation_id"], timeout=5)
+            assert next_receipt["terminal"] is True
+            assert next_receipt["status"] == "degraded"
+            assert (
+                next_receipt["transaction"]["status"] == "settings_commit_success_runtime_degraded"
+            )
+            assert (await control.query("settings.current", {}))["settings"]["intent"]["ui"][
+                "locale"
+            ] == "ja"
+    finally:
+        await runtime.close()
+        await app.stop()
+        sink.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "backend", "gpu_only", "failure_phase", "failure_key"),
+    [
+        ("managed_gemma", "cpu", False, "runtime", "dashboard.managed_gemma_notice.failed"),
+        ("managed_gemma", "gpu", False, "runtime", "dashboard.managed_gemma_notice.failed"),
+        (
+            "managed_gemma_26b",
+            "gpu",
+            True,
+            "runtime",
+            "dashboard.managed_gemma_notice.gpu_only_failed",
+        ),
+        ("managed_gemma_26b", "gpu", True, "download", "dashboard.managed_gemma_notice.failed"),
+    ],
+)
+async def test_composed_gemma_notices_carry_presentation_policy_without_backend_identity(
+    offline, monkeypatch, model, backend, gpu_only, failure_phase, failure_key
+):
+    import socket
+
+    from puripuly_heart.app.ports.ui_models import ManagedGemmaDashboardNotice
+    from puripuly_heart.composition import headless_application
+    from puripuly_heart.core.local_asr.local_stt_download_port import LocalSTTDownloadPortError
+    from puripuly_heart.core.local_translation.provisioning import GemmaProvisioningUpdate
+    from puripuly_heart.core.local_translation.runtime import ManagedGemmaRuntimeError
+    from puripuly_heart.ui.dashboard.capture_notices import managed_gemma_capture_notice
+    from puripuly_heart.ui.i18n import t
+
+    monkeypatch.setenv("LOCALAPPDATA", str(offline.parent / "isolated-notice-data"))
+    monkeypatch.setenv("APPDATA", str(offline.parent / "isolated-notice-roaming"))
+    settings = json.loads(offline.read_text(encoding="utf-8"))
+    settings["intent"]["translation"].update(model=model, connection=backend)
+    settings["intent"]["stt"]["provider"] = "soniox"
+    settings["intent"]["peer_stt"]["provider"] = "soniox"
+    settings["intent"]["telemetry"]["enabled"] = False
+    settings["intent"]["integrated_context"]["enabled"] = False
+    sink = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sink.bind(("127.0.0.1", 0))
+    settings["intent"]["osc"].update(
+        host="127.0.0.1",
+        port=sink.getsockname()[1],
+        send_port=sink.getsockname()[1],
+        activation_notice_enabled=False,
+    )
+    offline.write_text(json.dumps(settings), encoding="utf-8")
+    presentation = headless_application.HeadlessApplicationPresentation()
+    monkeypatch.setattr(
+        headless_application, "HeadlessApplicationPresentation", lambda: presentation
+    )
+    progress_notices = []
+    terminal_error = (
+        ManagedGemmaRuntimeError("controlled runtime failure")
+        if failure_phase == "runtime"
+        else LocalSTTDownloadPortError("controlled download failure")
+    )
+
+    class Runtime:
+        async def prepare(self, **kwargs):
+            kwargs["provision_kwargs"]["on_status"](
+                GemmaProvisioningUpdate("downloading", 25, 100, 25)
+            )
+            progress_notices.append(presentation.projections["managed_gemma"])
+            raise terminal_error
+
+        async def release(self):
+            return None
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(
+        application_runtime, "create_managed_gemma_runtime", lambda **_kwargs: Runtime()
+    )
+    app = compose_headless_application(offline)
+    try:
+        await app.start()
+        control = app.control()
+        owner = control.gemma()
+        with pytest.raises(type(terminal_error)):
+            await owner.prepare(control.gemma_selection(app.compatibility_settings()))
+        progress = progress_notices[-1]
+        assert isinstance(progress, ManagedGemmaDashboardNotice)
+        assert progress.gpu_only is gpu_only
+        assert progress.progress_percent == 25
+        assert progress.action is None
+        assert managed_gemma_capture_notice(progress).text == t(
+            "dashboard.managed_gemma_notice.downloading", percent=25
+        )
+        failure = presentation.projections["managed_gemma"]
+        assert isinstance(failure, ManagedGemmaDashboardNotice)
+        assert failure.gpu_only is gpu_only
+        assert failure.failure_phase == failure_phase
+        assert failure.action is None
+        rendered = managed_gemma_capture_notice(failure)
+        assert rendered.tone == "error"
+        assert rendered.text == t(failure_key)
+    finally:
+        await app.stop()
+        sink.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_26b_enable_stays_off_without_implicit_retry_and_recovers_explicitly(
+    offline, monkeypatch
+):
+    import hashlib
+
+    from puripuly_heart.composition import headless_application
+    from puripuly_heart.core.local_asr.local_stt_download_port import HuggingFaceDownloadProgress
+    from puripuly_heart.core.local_translation import assets
+    from puripuly_heart.core.local_translation.provisioning import ensure_gemma_installed
+    from puripuly_heart.core.local_translation.runtime import (
+        ManagedGemmaMetrics,
+        ManagedGemmaResponse,
+        ManagedGemmaRuntimeOwner,
+    )
+    from puripuly_heart.core.local_translation.runtime_profile import GemmaRuntimePaths
+
+    monkeypatch.setenv("LOCALAPPDATA", str(offline.parent / "isolated-enable-data"))
+    monkeypatch.setenv("APPDATA", str(offline.parent / "isolated-enable-roaming"))
+    settings = json.loads(offline.read_text(encoding="utf-8"))
+    settings["intent"]["translation"].update(model="managed_gemma_26b", connection="gpu")
+    settings["intent"]["stt"]["provider"] = "soniox"
+    settings["intent"]["peer_stt"]["provider"] = "soniox"
+    settings["intent"]["telemetry"]["enabled"] = False
+    settings["intent"]["integrated_context"]["enabled"] = False
+    offline.write_text(json.dumps(settings), encoding="utf-8")
+    presentation = headless_application.HeadlessApplicationPresentation()
+    monkeypatch.setattr(
+        headless_application, "HeadlessApplicationPresentation", lambda: presentation
+    )
+    content = b"synthetic 26B asset"
+    spec = assets.resolve_gemma_spec(assets.GEMMA_26B_MODEL_ID)
+    spec = replace(
+        spec,
+        assets=(
+            replace(
+                spec.assets[0],
+                size_bytes=len(content),
+                sha256=hashlib.sha256(content).hexdigest(),
+            ),
+        ),
+    )
+    monkeypatch.setattr(assets, "gemma_26b_spec", lambda: spec)
+    downloads = []
+
+    class Downloader:
+        async def download(self, request, *, cancel_event, on_progress):
+            downloads.append(request.remote_path)
+            destination = request.local_dir / request.remote_path
+            destination.write_bytes(content)
+            on_progress(HuggingFaceDownloadProgress(len(content), len(content)))
+            return destination
+
+    async def provision(**kwargs):
+        kwargs["downloader"] = Downloader()
+        return await ensure_gemma_installed(**kwargs)
+
+    class Process:
+        def __init__(self):
+            self.returncode = None
+            self.exited = asyncio.Event()
+
+        def terminate(self):
+            self.returncode = 0
+            self.exited.set()
+
+        def kill(self):
+            self.returncode = -9
+            self.exited.set()
+
+        async def wait(self):
+            await self.exited.wait()
+            return self.returncode
+
+    commands = []
+    processes = []
+    translations = []
+    prefixes = []
+    closed = []
+    failure = OSError(5, "PRIVATE_CONTROLLED_VULKAN_FAILURE")
+
+    async def spawn(command, _cwd):
+        commands.append(command)
+        if len(commands) == 1:
+            raise failure
+        process = Process()
+        processes.append(process)
+        return process
+
+    class Transport:
+        async def wait_until_ready(self, *, timeout_s):
+            assert timeout_s > 0
+
+        async def prepare_prefix(self, *, system_prompt, slot_id):
+            prefixes.append((system_prompt, slot_id))
+
+        async def wait_slot_idle(self, *, slot_id):
+            assert slot_id in range(3)
+
+        async def translate(self, **kwargs):
+            translations.append(kwargs)
+            return ManagedGemmaResponse(
+                text="controlled recovered translation",
+                metrics=ManagedGemmaMetrics(24, 20, 4, 5.0, 100.0, 40.0),
+            )
+
+        async def close(self):
+            closed.append(True)
+
+    executable = offline.parent / "controlled-llama-server.exe"
+    executable.write_bytes(b"never executed")
+
+    async def validate_version(path):
+        assert path == executable
+
+    runtime = ManagedGemmaRuntimeOwner(
+        install_dir=offline.parent / "models" / spec.install_dirname,
+        runtime_paths=GemmaRuntimePaths(executable, executable),
+        provisioner=provision,
+        process_factory=spawn,
+        transport_factory=lambda _url: Transport(),
+        version_validator=validate_version,
+    )
+    monkeypatch.setattr(
+        application_runtime, "create_managed_gemma_runtime", lambda **_kwargs: runtime
+    )
+    app = compose_headless_application(offline)
+    try:
+        await app.start()
+        control = app.control()
+        control.bind_instance("controlled-failed-26b-enable")
+        before = await control.query("app.status", {})
+        assert before["translation_enabled"] is False
+        assert before["translation_runtime_ready"] is True
+        presentation.set_dashboard_translation_enabled(True)
+        enabled = await control.submit(
+            "translation.set", {"enabled": True}, request_id="first-enable"
+        )
+        receipt = await control.wait(enabled["operation_id"], timeout=5)
+        assert receipt["terminal"] is True
+        assert receipt["status"] == "failed"
+        assert receipt["error"]["code"] == "application_operation_failed"
+        assert "PRIVATE_" not in json.dumps(receipt)
+        status = await control.query("app.status", {})
+        assert status["translation_enabled"] is False
+        assert status["translation_runtime_ready"] is True
+        assert (
+            control.pipeline.translation_runtime_configuration.snapshot().value.translation_enabled
+            is False
+        )
+        assert presentation.dashboard_translation_enabled() is False
+        assert presentation.projections["translation_starting"] is False
+        snapshot = (await control.query("models.status", {}))["gemma"]
+        assert snapshot["state"] == "failed"
+        assert snapshot["model_id"] == spec.model_id
+        assert snapshot["backend"] == "gpu"
+        assert snapshot["failure_code"] == "filesystem_failed"
+        assert snapshot["cause_type"] == "OSError"
+        assert runtime.readiness is None
+        assert len(commands) == 1
+        assert not processes
+
+        disabled_text = await control.submit(
+            "text.submit", {"text": "synthetic input while disabled"}, request_id="off-text"
+        )
+        disabled_receipt = await control.wait(disabled_text["operation_id"], timeout=5)
+        assert disabled_receipt["terminal"] is True
+        assert disabled_receipt["admission"] == "admitted"
+        await asyncio.wait_for(control.pipeline.translation_turns.wait_for_idle(), 5)
+        assert len(commands) == 1
+        assert translations == []
+        assert (await control.query("models.status", {}))["gemma"] == snapshot
+
+        recovery = await control.submit(
+            "translation.set", {"enabled": True}, request_id="explicit-retry"
+        )
+        recovered = await control.wait(recovery["operation_id"], timeout=5)
+        assert recovered["terminal"] is True
+        assert recovered["status"] == "applied"
+        assert (await control.query("app.status", {}))["translation_enabled"] is True
+        ready = (await control.query("models.status", {}))["gemma"]
+        assert ready["state"] == "ready"
+        assert ready["model_id"] == snapshot["model_id"]
+        assert ready["backend"] == "gpu"
+        assert runtime.readiness.effective_backend == "vulkan"
+        assert len(commands) == 2
+        assert len(processes) == 1
+        assert downloads == [spec.assets[0].filename]
+        for command in commands:
+            assert command[command.index("--alias") + 1] == "puripuly-gemma-4-26b-a4b-q4"
+            assert command[command.index("--device") + 1].startswith("Vulkan")
+            assert command[command.index("--model") + 1].endswith(spec.assets[0].filename)
+        selected = (await control.query("settings.current", {}))["settings"]["intent"][
+            "translation"
+        ]
+        assert selected["model"] == "managed_gemma_26b"
+        assert selected["connection"] == "gpu"
+        stream = control.subscribe(topics=["translation"], include_translations=True)
+
+        async def translated_event():
+            async for event in stream:
+                return event
+
+        observed = asyncio.create_task(translated_event())
+        await asyncio.sleep(0)
+        text = await control.submit(
+            "text.submit", {"text": "synthetic recovered input"}, request_id="on-text"
+        )
+        text_receipt = await control.wait(text["operation_id"], timeout=5)
+        assert text_receipt["admission"] == "admitted"
+        event = await asyncio.wait_for(observed, 5)
+        await stream.aclose()
+        await asyncio.wait_for(control.pipeline.translation_turns.wait_for_idle(), 5)
+        assert event["utterance_id"] in [text_receipt["turn_id"], *text_receipt["child_turn_ids"]]
+        assert event["channel"] == "self"
+        assert event["text"] == "controlled recovered translation"
+        assert len(translations) == 1
+        assert prefixes
+        assert len(commands) == 2
+    finally:
+        await app.stop()
+        await runtime.close()
+    assert all(process.returncode == 0 for process in processes)
+    assert closed == [True]

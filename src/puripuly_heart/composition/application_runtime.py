@@ -249,6 +249,7 @@ from puripuly_heart.core.local_asr_provisioning import (
     LocalASRProvisioningSnapshot,
 )
 from puripuly_heart.core.local_gpu_assets import local_gpu_model_path
+from puripuly_heart.core.local_translation.assets import GEMMA_26B_MODEL_ID
 from puripuly_heart.core.observability import DiagnosticEvent
 from puripuly_heart.core.orchestrator.configuration import (
     TranslationRuntimeConfigurationOwner,
@@ -570,6 +571,7 @@ def compose_application_runtime(
         sinks=runtime_logging_sinks,
     )
     runtime_logging.control_event_sink = control_events.publish
+    control_events.diagnostic_recorder = runtime_logging.emit_failure
     settings = compose_settings_owner(
         config_path,
         retired_asset_cleanup_logging=runtime_logging,
@@ -611,6 +613,8 @@ def compose_application_runtime(
                 status=snapshot.state,
                 backend=snapshot.backend,
                 progress_percent=snapshot.progress_percent,
+                gpu_only=snapshot.model_id == GEMMA_26B_MODEL_ID,
+                failure_phase=snapshot.failure_phase,
             )
         )
 
@@ -1274,7 +1278,6 @@ def compose_application_runtime(
                 output_provider=output_provider,
                 completion_provider=completion_provider,
                 log_diagnostic=log_diagnostic,
-                log_error=log_error,
                 idle_timeout_seconds=MANUAL_INPUT_TYPING_IDLE_TIMEOUT_S,
                 submit_timeout_seconds=MANUAL_SUBMIT_TYPING_TIMEOUT_S,
             )
@@ -1447,7 +1450,6 @@ def compose_application_runtime(
                 mutation_service_provider=lambda: None,
                 consume_superseded_settings=signatures.consume_superseded,
                 active_local_asr_change=active_local_asr_change,
-                failure_sink=log_error,
                 success_sink=log_basic,
             )
         return settings_application
@@ -1510,13 +1512,20 @@ def compose_application_runtime(
             microphone_audio_settings()
         )
 
-    def sync_signature_caches(value) -> None:
-        signatures.sync(
+    def sync_stt_signature_caches(value) -> None:
+        signatures.sync_stt(
             value,
             canonical=canonical_settings(value),
             peer=require_peer().owner,
             peer_translation_enabled=settings.peer_translation_enabled(),
         )
+        sync_non_provider_signatures()
+
+    def record_initial_llm_binding(value: AppSettingsVNext, provider: object | None) -> None:
+        if provider is None:
+            signatures.mark_llm_retry()
+        else:
+            signatures.sync_llm(value)
         sync_non_provider_signatures()
 
     def require_provider_verifier() -> ProviderVerifierPort:
@@ -1547,7 +1556,6 @@ def compose_application_runtime(
                     value.intent.secrets,
                     config_path=config_path,
                 ).get(secret_key),
-                save_failure_sink=log_error,
                 results=require_settings_application().results,
             )
         return provider_settings
@@ -1568,21 +1576,6 @@ def compose_application_runtime(
                     ),
                 ),
                 low_latency=(FIXED_TRANSLATION_POLICY.fast_translation_enabled),
-                diagnostics_sink=lambda event, metadata, exception: (
-                    log_error(str(metadata["report"]))
-                    if metadata.get("provider") == "openrouter" and "report" in metadata
-                    else log_diagnostic(
-                        "[ProviderVerification] Credential verification "
-                        f"failed event={event} "
-                        f"provider={metadata.get('provider')} "
-                        f"error_type={metadata.get('error_type')}",
-                        level=logging.WARNING,
-                        exception=exception,
-                    )
-                ),
-                error_sink=lambda provider, error_text: log_error(
-                    f"Verification error for {provider}: {error_text}"
-                ),
             )
         return credential_verification
 
@@ -1860,6 +1853,25 @@ def compose_application_runtime(
     )
 
     def on_llm_availability_changed(needs_key: bool) -> None:
+        current = settings.canonical
+        if current is not None:
+            translation = current.intent.translation
+            provider = provider_llm_for_translation(translation.model, translation.connection)
+            verification_provider = None
+            if translation.connection == "official_byok":
+                verification_provider = {
+                    "gemini": "google",
+                    "openai": "openai",
+                    "deepseek": "deepseek",
+                }.get(provider)
+            elif (
+                translation.connection == "openrouter"
+                and translation.openrouter_selected_source == "byok"
+            ):
+                verification_provider = "openrouter"
+            if verification_provider is not None:
+                entry = getattr(current.state.provider_verification, verification_provider)
+                needs_key = needs_key or entry.status != "verified"
         presentation.set_dashboard_translation_needs_key(needs_key)
         llm_connection_readiness.sync()
 
@@ -1982,11 +1994,10 @@ def compose_application_runtime(
         apply_order24=(require_settings_application().apply_ui_prompt_clipboard_state),
         remember_order22=require_projection().remember_order22,
         mutation_service_provider=lambda: None,
-        save_failure_sink=log_error,
         results=require_settings_application().results,
         sync_memory=(require_settings_application().runtime_effects.restore_memory),
         capture_runtime_signatures=capture_runtime_signatures_before_mutation,
-        sync_signatures=sync_signature_caches,
+        sync_stt_signatures=sync_stt_signature_caches,
         consume_superseded_settings=signatures.consume_superseded,
         active_local_asr_change=active_local_asr_change,
         compensate_local_asr=(
@@ -2095,13 +2106,12 @@ def compose_application_runtime(
         provisioning=require_provisioning(),
         gpu_state=gpu_state,
         manual_fallback=manual_fallback,
-        save_failure_sink=lambda exc: log_error(f"Failed to save settings: {exc}"),
         calibration=require_calibration(),
         presentation=presentation,
         sync_presentation=sync_ui_from_settings,
         notify_fallback=require_settings_application().notify_fallback,
         runtime_logging=runtime_logging,
-        sync_runtime_signatures=sync_signature_caches,
+        initial_llm_binding_sink=record_initial_llm_binding,
         pipeline_launcher=pipeline_launcher,
         pipeline=pipeline,
         sync_local_asr_notice=lambda: require_local_asr().adapters.notice.sync(),
@@ -2254,6 +2264,11 @@ def compose_application_runtime(
             },
             "osc": require_vrc_mic_sync().output_snapshot(),
         },
+        scene_observation_provider=lambda: (
+            pipeline_launcher.vrchat_scene.lifecycle_owner_snapshot()
+            if pipeline_launcher.vrchat_scene is not None
+            else None
+        ),
         http_extension_registry=HttpExtensionRegistryService(
             http_extensions,
             SystemDirectoryOpener(),
@@ -2305,8 +2320,7 @@ def compose_application_runtime(
         settings.canonical = value
         canonical = settings.project(value, authoritative=True)
         require_provisioning()
-        sync_signature_caches(value)
-        await pipeline_launcher.launch(
+        components = await pipeline_launcher.launch(
             runtime_pipeline_inputs_from_vnext(
                 canonical,
                 peer_translation_enabled=settings.peer_translation_enabled(),
@@ -2316,6 +2330,7 @@ def compose_application_runtime(
             vrc_mic_audio_gate=pipeline.vrc_mic_audio_gate,
             receiver_active=require_vrc_mic_sync().receiver is not None,
         )
+        record_initial_llm_binding(canonical, components.llm_runtime.provider)
 
     if local_asr_evidence_sink is not None:
         local_asr_evidence_sink(

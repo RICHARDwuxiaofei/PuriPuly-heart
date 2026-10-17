@@ -47,6 +47,26 @@ class OscPublishedValue:
         return f"{OSC_PARAMETER_ADDRESS_PREFIX}{self.parameter}"
 
 
+class OscStatePublicationError(RuntimeError):
+    """A failed local send with the successful prefix retained in the cache."""
+
+    def __init__(
+        self,
+        *,
+        requested: int,
+        completed: int,
+        parameter: str,
+        completed_parameters: tuple[str, ...],
+        pending_parameters: tuple[str, ...],
+    ) -> None:
+        super().__init__("OSC state local send failed")
+        self.requested = requested
+        self.completed = completed
+        self.parameter = parameter
+        self.completed_parameters = completed_parameters
+        self.pending_parameters = pending_parameters
+
+
 class OscStatePublisher:
     def __init__(
         self,
@@ -96,8 +116,7 @@ class OscStatePublisher:
     def publish_full(self, state: OscCanonicalState) -> tuple[OscPublishedValue, ...]:
         values = self._values_for_state(state)
         published = tuple(OscPublishedValue(name, value) for name, value in values.items())
-        for item in published:
-            self._send(item)
+        self._send_batch(published)
         return published
 
     def publish_delta(self, state: OscCanonicalState) -> tuple[OscPublishedValue, ...]:
@@ -107,8 +126,7 @@ class OscStatePublisher:
             for name, value in values.items()
             if self._last_published.get(name) != value
         )
-        for item in changed:
-            self._send(item)
+        self._send_batch(changed)
         return changed
 
     def publish_state(
@@ -131,6 +149,19 @@ class OscStatePublisher:
     def _send(self, item: OscPublishedValue) -> None:
         self._sender.send_message(item.address, item.value)
         self._last_published[item.parameter] = item.value
+
+    def _send_batch(self, items: tuple[OscPublishedValue, ...]) -> None:
+        for completed, item in enumerate(items):
+            try:
+                self._send(item)
+            except Exception as exc:
+                raise OscStatePublicationError(
+                    requested=len(items),
+                    completed=completed,
+                    parameter=item.parameter,
+                    completed_parameters=tuple(value.parameter for value in items[:completed]),
+                    pending_parameters=tuple(value.parameter for value in items[completed:]),
+                ) from exc
 
     def _require_state(self) -> OscCanonicalState:
         if self._state_provider is None:

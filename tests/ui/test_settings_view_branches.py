@@ -1023,7 +1023,8 @@ def test_load_secrets_failure_is_ignored(monkeypatch: pytest.MonkeyPatch) -> Non
     assert view._google_key.value == ""
     assert view._deepgram_key.value == ""
     assert view._soniox_key.value == ""
-    assert basic_messages == ["Failed to load secrets: boom"]
+    assert len(basic_messages) == 1
+    assert "boom" not in repr(basic_messages)
 
 
 def test_load_secrets_projects_the_same_prefix_before_read_failure(
@@ -1043,8 +1044,7 @@ def test_load_secrets_projects_the_same_prefix_before_read_failure(
     view._soniox_key.value = "unchanged-soniox"
 
     provider, _general, _prompt, _overlay = settings_view_surface_snapshots(_vnext(settings))
-    with pytest.raises(OSError, match="unavailable"):
-        view._load_secrets(provider, Path("settings.json"))
+    view._load_secrets(provider, Path("settings.json"))
 
     assert view._google_key.value == "google-secret"
     assert view._openrouter_key.value == "openrouter-secret"
@@ -1854,6 +1854,44 @@ def test_managed_gemma_selection_auto_applies_and_exposes_only_cpu_gpu(
     pending = view.build_provider_apply_settings()
     assert pending is not None
     assert pending.intent.translation.connection == TranslationConnection.GPU.value
+    assert applies == [True, True]
+
+
+def test_gemma_26b_selection_applies_gpu_only_and_preserves_e4b_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _vnext(model="managed_gemma", connection="cpu")
+    view, _ = _make_settings_view(monkeypatch, settings=settings)
+    applies: list[bool] = []
+    discoveries: list[bool] = []
+    view.on_providers_changed = lambda: applies.append(True)
+    view.on_gpu_discovery_requested = lambda: discoveries.append(True)
+
+    view._on_llm_selected("managed_gemma_26b")
+
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.intent.translation.model == "managed_gemma_26b"
+    assert pending.intent.translation.connection == "gpu"
+    assert _llm(pending) == LLMProviderName.MANAGED_GEMMA.value
+    assert view._translation_connection_row.visible is False
+    assert view._gpu_device_row.visible is True
+    assert view._get_llm_modal_value(view._provider_draft) == "managed_gemma_26b"
+    assert view._llm_text.content.value == t("provider.managed_gemma_26b")
+    assert applies == [True]
+    assert discoveries == [True]
+
+    view._on_translation_connection_selected("cpu")
+    pending = view.build_provider_apply_settings()
+    assert pending.intent.translation.model == "managed_gemma_26b"
+    assert pending.intent.translation.connection == "gpu"
+    assert applies == [True]
+
+    view._on_llm_selected("managed_gemma_cpu")
+    pending = view.build_provider_apply_settings()
+    assert pending.intent.translation.model == "managed_gemma"
+    assert pending.intent.translation.connection == "cpu"
+    assert pending.intent.translation.connection_history["managed_gemma_26b"] == "gpu"
     assert applies == [True, True]
 
 

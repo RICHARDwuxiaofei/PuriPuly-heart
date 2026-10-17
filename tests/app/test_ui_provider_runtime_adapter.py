@@ -39,10 +39,16 @@ def test_model_manager_preselects_configured_asr_and_not_cloud_translation():
     assert adapter.selected_model_asset_ids() == (LOCAL_STT_MODEL_ID,)
 
 
-def test_model_manager_preselects_complete_cpu_auto_and_local_gemma():
+@pytest.mark.parametrize(
+    "model,connection,asset_id",
+    [
+        ("managed_gemma", "cpu", "gemma-4-e4b-it-qat-ud-q4-k-xl"),
+        ("managed_gemma", "gpu", "gemma-4-e4b-it-qat-ud-q4-k-xl"),
+        ("managed_gemma_26b", "gpu", "gemma-4-26b-a4b-it-qat-ud-q4-k-xl"),
+    ],
+)
+def test_model_manager_preselects_complete_cpu_auto_and_local_gemma(model, connection, asset_id):
     from puripuly_heart.core.local_stt_assets import REQUIRED_CPU_LOCAL_STT_MODEL_IDS
-
-    from puripuly_heart.core.local_translation.assets import GEMMA_MODEL_ID
 
     settings = AppSettingsVNext()
     settings = replace(
@@ -50,16 +56,14 @@ def test_model_manager_preselects_complete_cpu_auto_and_local_gemma():
         intent=replace(
             settings.intent,
             stt=replace(settings.intent.stt, provider="local_cpu_auto"),
-            translation=replace(
-                settings.intent.translation, model="managed_gemma", connection="cpu"
-            ),
+            translation=replace(settings.intent.translation, model=model, connection=connection),
         ),
     )
     adapter = _adapter(settings, change_secret=AsyncMock(), apply=AsyncMock())
     adapter.settings.require_canonical = lambda: settings
     assert set(adapter.selected_model_asset_ids()) == {
         *REQUIRED_CPU_LOCAL_STT_MODEL_IDS,
-        GEMMA_MODEL_ID,
+        asset_id,
     }
 
 
@@ -115,69 +119,6 @@ def _adapter(
         build_byok_target_settings=lambda _settings: None,
         managed_gemma=managed_gemma,
     )
-
-
-@pytest.mark.parametrize(
-    "model,connection,key",
-    [
-        ("deepseek_v4_flash_41", "official_byok", "deepseek_api_key"),
-        ("gpt_6_luna", "official_byok", "openai_api_key"),
-        ("gemini_flash", "official_byok", "google_api_key"),
-        ("gemma4_26b_31b", "openrouter", "openrouter_api_key"),
-    ],
-)
-async def test_active_llm_secret_save_rebuilds_runtime_without_restart(model, connection, key):
-    settings = AppSettingsVNext()
-    settings = replace(
-        settings,
-        intent=replace(
-            settings.intent,
-            translation=replace(settings.intent.translation, model=model, connection=connection),
-        ),
-    )
-    runtime = SimpleNamespace(llm=None)
-
-    async def rebuild(*args, **kwargs):
-        assert kwargs["force_rebuild_llm"] and not kwargs["persist_settings"]
-        runtime.llm = object()
-        return True
-
-    apply = AsyncMock(side_effect=rebuild)
-    adapter = _adapter(settings, change_secret=AsyncMock(return_value=True), apply=apply)
-    assert await adapter.persist_provider_secret_change(key, "test-only-key")
-    assert runtime.llm is not None
-    apply.assert_awaited_once_with(
-        None, force_rebuild_llm=True, persist_settings=False, refresh_ui=True
-    )
-
-
-@pytest.mark.parametrize(
-    "succeeded,key", [(False, "deepseek_api_key"), (True, "openrouter_api_key")]
-)
-async def test_failed_or_inactive_llm_secret_save_does_not_rebuild(succeeded, key):
-    settings = AppSettingsVNext()
-    settings = replace(
-        settings,
-        intent=replace(
-            settings.intent,
-            translation=replace(
-                settings.intent.translation,
-                model="deepseek_v4_flash_41",
-                connection="official_byok",
-            ),
-        ),
-    )
-    apply = AsyncMock()
-    adapter = _adapter(settings, change_secret=AsyncMock(return_value=succeeded), apply=apply)
-    assert await adapter.persist_provider_secret_change(key, "test-only-key") is succeeded
-    apply.assert_not_awaited()
-
-
-async def test_managed_openrouter_ignores_inactive_byok_key_update():
-    apply = AsyncMock()
-    adapter = _adapter(AppSettingsVNext(), change_secret=AsyncMock(return_value=True), apply=apply)
-    await adapter.persist_provider_secret_change("openrouter_api_key", "test-only-key")
-    apply.assert_not_awaited()
 
 
 @pytest.mark.asyncio

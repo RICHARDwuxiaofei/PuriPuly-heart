@@ -772,6 +772,7 @@ class ConstructionDummyDashboardView(ft.Container):
         self.on_toggle_overlay = capture.toggle_overlay
         self.on_retry_peer_process_capture = capture.retry_peer_process_capture
         self.on_gpu_notice_action = capture.run_gpu_notice_action
+        self.on_managed_gemma_notice_action = capture.run_managed_gemma_notice_action
 
     def set_overlay_peer_contract(self, contract) -> None:
         self.overlay_peer_contract = contract
@@ -937,6 +938,10 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert app.view_dashboard.on_message_input_activity == app._on_message_input_activity
     assert app.view_dashboard.on_toggle_overlay == app._on_overlay_toggle
     assert app.view_dashboard.on_toggle_peer_translation == app._on_peer_translation_toggle
+    assert (
+        app.view_dashboard.on_managed_gemma_notice_action
+        == app.application.handle_managed_gemma_notice_action
+    )
     assert app.view_settings.on_verify_api_key == app._on_verify_api_key
     assert app.view_settings.on_prompt_apply_settings == app._on_prompt_apply_settings
     assert app.view_settings.on_start_microphone_test == app._on_start_microphone_test
@@ -3597,7 +3602,7 @@ def test_toggle_handlers_do_not_log_click_requests() -> None:
     assert controller.detailed_messages == []
 
 
-def test_on_overlay_state_changed_routes_runtime_logs() -> None:
+def test_on_overlay_state_changed_synchronizes_every_notification_without_duplicate_logs() -> None:
     controller = RuntimeLoggingController()
     app = TranslatorApp.__new__(TranslatorApp)
     app._ui_application = compose_test_ui_application_boundary(controller)
@@ -3615,12 +3620,16 @@ def test_on_overlay_state_changed_routes_runtime_logs() -> None:
     )
 
     app.on_overlay_state_changed(state="failed", failure_reason="runtime_crashed")
+    app.on_overlay_state_changed(state="failed", failure_reason="runtime_crashed")
 
-    assert controller.basic_messages == ["[Overlay] State changed: off -> failed"]
-    assert controller.detailed_messages == [
-        "[Overlay] State detail: overlay_state=failed failure_reason=runtime_crashed"
+    assert controller.basic_messages == []
+    assert controller.detailed_messages == []
+    assert app.overlay_state == "failed"
+    assert app.overlay_failure_reason == "runtime_crashed"
+    assert seen == [
+        ("failed", "runtime_crashed", None, False),
+        ("failed", "runtime_crashed", None, False),
     ]
-    assert seen == [("failed", "runtime_crashed", None, False)]
 
 
 @pytest.mark.asyncio

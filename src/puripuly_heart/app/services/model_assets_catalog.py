@@ -7,7 +7,7 @@ from puripuly_heart.core.local_stt_assets import (
     PARAKEET_V3_MODEL_ID,
     load_local_stt_asset_manifest,
 )
-from puripuly_heart.core.local_translation.assets import GEMMA_MODEL_ID, e4b_gemma_spec
+from puripuly_heart.core.local_translation.assets import e4b_gemma_spec, gemma_26b_spec
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,16 +44,19 @@ def model_asset_choices() -> tuple[ModelAssetChoice, ...]:
                 sources[0],
             )
         )
-    spec = e4b_gemma_spec()
-    choices.append(
-        ModelAssetChoice(
-            GEMMA_MODEL_ID,
-            "Gemma E4B + MTP · GGUF",
-            "model_assets.description.gemma",
-            "translation",
-            sum(a.size_bytes for a in spec.assets),
-            ("official", "mirror", "local"),
-            "official",
+    for spec, name in (
+        (e4b_gemma_spec(), "Gemma E4B + MTP · GGUF"),
+        (gemma_26b_spec(), "Gemma 26B A4B · GGUF"),
+    ):
+        choices.append(
+            ModelAssetChoice(
+                spec.model_id,
+                name,
+                "model_assets.description.gemma",
+                "translation",
+                sum(a.size_bytes for a in spec.assets),
+                ("official", "mirror", "local"),
+                "official",
+            )
         )
-    )
     return tuple(choices)

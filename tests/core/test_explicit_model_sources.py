@@ -1,10 +1,15 @@
 import asyncio
 import hashlib
+import threading
 from dataclasses import replace
 
 import pytest
 from puripuly_heart.core.local_asr_provisioning import LocalASRInstallRequest
-from puripuly_heart.core.local_stt_assets import LOCAL_STT_MODEL_ID, load_local_stt_asset_manifest
+from puripuly_heart.core.local_stt_assets import (
+    LOCAL_QWEN_GPU_MODEL_ID,
+    LOCAL_STT_MODEL_ID,
+    load_local_stt_asset_manifest,
+)
 from puripuly_heart.core.local_stt_download_port import LocalSTTDownloadPortError
 from puripuly_heart.core.local_stt_runtime_installer import (
     LocalSTTRuntimeInstallError,
@@ -142,3 +147,52 @@ async def test_cancel_origin_does_not_cancel_other_owners_task(tmp_path):
         assert not (await task).cancelled
     finally:
         await owner.close()
+
+
+def test_default_gpu_source_strategy_retains_registered_mirror_fallback():
+    manifest = load_local_stt_asset_manifest(LOCAL_QWEN_GPU_MODEL_ID)
+
+    assert _source_order(manifest, preferred_source=None, locale="zh-CN") == (
+        "hf_mirror",
+        "huggingface",
+    )
+    assert _source_order(manifest, preferred_source=None, locale="en") == (
+        "huggingface",
+        "hf_mirror",
+    )
+
+
+async def test_cancelled_lease_acquisition_waits_and_releases_acquired_lease(
+    tmp_path, monkeypatch
+):
+    import puripuly_heart.core.local_asr.local_stt_runtime_installer as installer
+
+    entered, release, closed = threading.Event(), threading.Event(), threading.Event()
+    cancellation = threading.Event()
+
+    class Lease:
+        def close(self):
+            closed.set()
+
+    def acquire(**kwargs):
+        entered.set()
+        assert release.wait(5)
+        return Lease()
+
+    monkeypatch.setattr(installer.LocalSTTProvisioningLease, "acquire", acquire)
+    task = asyncio.create_task(
+        ensure_local_stt_installed(model_root=tmp_path, cancel_event=cancellation)
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert not closed.is_set()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert cancellation.is_set()
+    assert closed.is_set()
