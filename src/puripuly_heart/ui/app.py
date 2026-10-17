@@ -1493,34 +1493,18 @@ class TranslatorApp:
     def _on_start_microphone_test(self) -> None:
         async def _task():
             dialog = self._get_microphone_test_dialog()
-            if dialog.is_open and self.application.state().microphone_test_active:
-                return
             dialog.reset()
             dialog.open()
-            try:
-                started = await self.application.start_microphone_test(
-                    meter_callback=dialog.set_level, recording_seconds=10
-                )
-            except Exception as error:
-                from puripuly_heart.core.feature_diagnostics import log_feature
-
-                log_feature("AudioTest", "preflight", "capture_start_failed", error=error)
-                dialog.show_failure()
-                return
+            started = await self.application.start_microphone_test(meter_callback=dialog.set_level)
             if not started:
-                from puripuly_heart.core.feature_diagnostics import log_feature
-
-                log_feature("AudioTest", "preflight", "capture_not_started")
                 dialog.show_failure()
                 return
-            if "has_recording" in self.application.microphone_test_snapshot():
-                self._start_audio_test_watch(dialog)
 
         self._queue_settings_mutation_task(_task)
 
     def _on_stop_microphone_test(self) -> None:
         async def _task() -> None:
-            await self.application.clear_microphone_recording()
+            await self.application.stop_microphone_test()
             self._close_microphone_test_dialog()
 
         self._queue_settings_mutation_task(_task)
@@ -1531,10 +1515,6 @@ class TranslatorApp:
             dialog = MicrophoneTestDialog(
                 self.page,
                 on_close=self._on_microphone_test_dialog_dismiss,
-                on_record=self._on_start_microphone_test,
-                on_stop=self._on_stop_audio_recording,
-                on_play=self._on_play_audio_recording,
-                on_stop_playback=self._on_stop_audio_playback,
             )
             self._microphone_test_dialog = dialog
         return dialog
@@ -1549,42 +1529,7 @@ class TranslatorApp:
     def _on_microphone_test_dialog_dismiss(self) -> None:
         self._on_stop_microphone_test()
 
-    def _start_audio_test_watch(self, dialog) -> None:
-        previous = getattr(self, "_audio_test_watch", None)
-        if previous is not None and not previous.done():
-            return
-
-        async def watch():
-            while dialog.is_open and not getattr(self, "_shutting_down", False):
-                snapshot = self.application.microphone_test_snapshot()
-                dialog.set_snapshot(snapshot)
-                if snapshot.get("failure_reason"):
-                    dialog.show_failure(snapshot["failure_reason"])
-                await asyncio.sleep(0.3)
-
-        self._audio_test_watch = self._run_page_task(watch)
-
-    def _on_stop_audio_recording(self) -> None:
-        self._run_page_task(self.application.stop_microphone_test)
-
-    def _on_play_audio_recording(self, processed: bool) -> None:
-        async def play():
-            try:
-                await self.application.play_microphone_recording(processed=processed)
-            except Exception as error:
-                from puripuly_heart.core.feature_diagnostics import log_feature
-
-                log_feature("AudioTest", "playback", "playback_failed", error=error)
-                self._get_microphone_test_dialog().show_failure("playback_failed")
-
-        self._run_page_task(play)
-
-    def _on_stop_audio_playback(self) -> None:
-        self._run_page_task(self.application.stop_microphone_playback)
-
     def _sync_microphone_test_dialog_if_inactive(self) -> None:
-        if self.application.microphone_test_snapshot().get("has_recording"):
-            return
         if self.application.state().microphone_test_active:
             return
         self._close_microphone_test_dialog()

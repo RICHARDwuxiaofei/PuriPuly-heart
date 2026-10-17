@@ -53,11 +53,6 @@ TASK_CREATION_REVIEWS = (
         family=ASYNCIO_TASK,
     ),
     *_reviews(
-        "app/adapters/audio_test_playback.py",
-        {"play_recording": 1},
-        "The playback call shield-awaits its output worker; cancellation signals the stream and gathers the worker before releasing the adapter boundary",
-    ),
-    *_reviews(
         "app/adapters/gpu_worker_process.py",
         {"_DefaultGpuWorkerClient.close": 1, "_DefaultGpuWorkerClient._close_writer_resource": 1},
         "GPU worker client retains close and writer-close tasks; shielded close or force-close owns terminal resource cleanup",
@@ -92,11 +87,6 @@ TASK_CREATION_REVIEWS = (
         {"ManualTypingOwner._reschedule_idle_timeout": 1},
         "ManualTypingOwner owns its bounded idle timeout task and cancels it on input transitions and application shutdown",
         family=LOOP_CREATE_TASK,
-    ),
-    *_reviews(
-        "app/services/microphone_test.py",
-        {"MicrophoneTestSessionOwner.play_recording": 1},
-        "MicrophoneTestSessionOwner retains one playback task; stop_playback signals cancellation and gathers it, while clear_recording and close drain playback before releasing PCM",
     ),
     *_reviews(
         "app/services/overlay/overlay_application.py",
