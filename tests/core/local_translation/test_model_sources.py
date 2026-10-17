@@ -111,6 +111,52 @@ def test_mirror_rejects_external_redirect_without_contacting_it(tmp_path):
     assert "do-not-log" not in str(error.value)
 
 
+def test_project_mirror_resumes_through_same_origin_redirect(tmp_path):
+    (tmp_path / "a.gguf.partial").write_bytes(b"aa")
+    request_payload = payload(tmp_path)
+    request_payload["endpoint"] = "https://hf-mirror.net"
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        assert "authorization" not in request.headers
+        assert request.headers["range"] == "bytes=2-"
+        if request.url.path == "/repo/model/resolve/pin/a.gguf":
+            return httpx.Response(302, headers={"Location": "/cached/a.gguf"})
+        assert request.url.path == "/cached/a.gguf"
+        return httpx.Response(206, headers={"content-range": "bytes 2-3/4"}, content=b"aa")
+
+    def factory(**kwargs):
+        return httpx.Client(transport=httpx.MockTransport(respond), **kwargs)
+
+    installed = download_public_file(
+        request_payload, on_progress=lambda _: None, client_factory=factory
+    )
+    assert installed.read_bytes() == b"aaaa"
+    assert len(requests) == 2
+    assert not (tmp_path / "a.gguf.partial").exists()
+
+
+@pytest.mark.parametrize("destination", ["https://hf-mirror.com/file", "http://hf-mirror.net/file"])
+def test_project_mirror_rejects_cross_mirror_or_insecure_redirect(tmp_path, destination):
+    request_payload = payload(tmp_path)
+    request_payload["endpoint"] = "https://hf-mirror.net"
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(302, headers={"Location": destination})
+
+    def factory(**kwargs):
+        return httpx.Client(transport=httpx.MockTransport(respond), **kwargs)
+
+    with pytest.raises(LocalSTTDownloadPortError) as error:
+        download_public_file(request_payload, on_progress=lambda _: None, client_factory=factory)
+    assert error.value.failure_code == "mirror_redirect_external"
+    assert len(requests) == 1
+    assert not (tmp_path / "a.gguf").exists()
+
+
 @pytest.mark.parametrize(
     "response",
     [
@@ -276,7 +322,9 @@ async def test_cancel_verification_joins_worker_before_staging_cleanup(monkeypat
 @pytest.mark.parametrize("spec_factory", [e4b_gemma_spec, gemma_26b_spec])
 async def test_local_import_uses_selected_models_current_manifest(tmp_path, spec_factory):
     pinned = spec_factory()
-    contents = {asset.filename: f"asset-{index}".encode() for index, asset in enumerate(pinned.assets)}
+    contents = {
+        asset.filename: f"asset-{index}".encode() for index, asset in enumerate(pinned.assets)
+    }
     spec = replace(
         pinned,
         assets=tuple(
@@ -309,7 +357,7 @@ async def test_local_import_uses_selected_models_current_manifest(tmp_path, spec
 
 @pytest.mark.parametrize(
     "source,endpoint",
-    [("official", "https://huggingface.co"), ("mirror", "https://hf-mirror.com")],
+    [("official", "https://huggingface.co"), ("mirror", "https://hf-mirror.net")],
 )
 async def test_explicit_gemma_source_preserves_endpoint_and_never_falls_back(
     tmp_path, monkeypatch, source, endpoint

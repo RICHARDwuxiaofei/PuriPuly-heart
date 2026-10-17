@@ -13,8 +13,9 @@ from puripuly_heart.core.network_clients import external_client
 
 def download_public_file(payload: dict, *, on_progress, client_factory=external_client) -> Path:
     endpoint = payload["endpoint"]
-    if endpoint != "https://hf-mirror.com":
+    if endpoint not in {"https://hf-mirror.net", "https://hf-mirror.com"}:
         raise ValueError("Unsupported mirror")
+    mirror_hostname = urlsplit(endpoint).hostname
     url = f"{endpoint}/{payload['repo_id']}/resolve/{payload['revision']}/{payload['remote_path']}"
     target = Path(payload["local_dir"]) / payload["remote_path"]
     expected = int(payload["expected_size_bytes"])
@@ -36,7 +37,7 @@ def download_public_file(payload: dict, *, on_progress, client_factory=external_
                 for hop in range(6):
                     if (
                         urlsplit(next_url).scheme != "https"
-                        or urlsplit(next_url).hostname != "hf-mirror.com"
+                        or urlsplit(next_url).hostname != mirror_hostname
                     ):
                         raise LocalSTTDownloadPortError(
                             "Mirror redirected overseas; change source or import locally",

@@ -41,7 +41,7 @@ def test_unsupported_modelscope_does_not_fall_back_to_hf():
 
 
 @pytest.mark.parametrize(
-    "source,endpoint", [("official", "https://huggingface.co"), ("mirror", "https://hf-mirror.com")]
+    "source,endpoint", [("official", "https://huggingface.co"), ("mirror", "https://hf-mirror.net")]
 )
 async def test_endpoint_reaches_downloader_and_pinned_checksum_is_enforced(
     tmp_path, source, endpoint
@@ -162,9 +162,7 @@ def test_default_gpu_source_strategy_retains_registered_mirror_fallback():
     )
 
 
-async def test_cancelled_lease_acquisition_waits_and_releases_acquired_lease(
-    tmp_path, monkeypatch
-):
+async def test_cancelled_lease_acquisition_waits_and_releases_acquired_lease(tmp_path, monkeypatch):
     import puripuly_heart.core.local_asr.local_stt_runtime_installer as installer
 
     entered, release, closed = threading.Event(), threading.Event(), threading.Event()

@@ -201,13 +201,17 @@ class HuggingFaceXetDownloadAdapter:
             try:
                 environment = _worker_environment(disable_xet=False)
                 if request.endpoint is not None:
-                    if request.endpoint not in {"https://huggingface.co", "https://hf-mirror.com"}:
+                    if request.endpoint not in {
+                        "https://huggingface.co",
+                        "https://hf-mirror.net",
+                        "https://hf-mirror.com",
+                    }:
                         raise ValueError("Unsupported public model endpoint")
                     environment["HF_ENDPOINT"] = request.endpoint
                     environment["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
                     environment["HF_HUB_ETAG_TIMEOUT"] = "15"
                     environment["HF_HUB_DOWNLOAD_TIMEOUT"] = "30"
-                    if request.endpoint == "https://hf-mirror.com":
+                    if request.endpoint != "https://huggingface.co":
                         environment["HF_HUB_DISABLE_XET"] = "1"
                     huggingface_tokens = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")
                     for name in huggingface_tokens:
@@ -465,7 +469,7 @@ def run_huggingface_xet_worker(*, request_path: Path, event_path: Path) -> int:
                 os.environ.pop(name)
         os.environ.update(environment)
         failure_code = "worker_import_failed"
-        if payload.get("endpoint") == "https://hf-mirror.com":
+        if payload.get("endpoint") in {"https://hf-mirror.net", "https://hf-mirror.com"}:
             from puripuly_heart.core.local_translation.public_download import download_public_file
 
             downloaded_path = download_public_file(payload, on_progress=_write_worker_message)

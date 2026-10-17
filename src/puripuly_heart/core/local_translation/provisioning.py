@@ -547,7 +547,7 @@ async def _ensure_gemma_installed_with_lease(
                         on_status=on_status,
                         endpoint={
                             "official": "https://huggingface.co",
-                            "mirror": "https://hf-mirror.com",
+                            "mirror": "https://hf-mirror.net",
                         }.get(source),
                     )
                     await _emit(

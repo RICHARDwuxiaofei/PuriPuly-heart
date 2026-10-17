@@ -650,7 +650,7 @@ async def _ensure_local_stt_installed_with_lease(
                     huggingface_downloader=huggingface_downloader,
                     endpoint={
                         "official": "https://huggingface.co",
-                        "mirror": "https://hf-mirror.com",
+                        "mirror": "https://hf-mirror.net",
                     }.get(preferred_source),
                 )
             )
