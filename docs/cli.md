@@ -173,23 +173,19 @@ puripuly.exe models status
 
 ### Model management
 
-The same operations as the desktop model manager work on one model at a time. Take model IDs from `models status`, which lists every local ASR and Gemma model under `assets` with `status` (`installed`, `missing`, `invalid`, `downloading`, `importing`, or `deleting`), `progress_percent`, the last `failure_code`, `size_bytes`, and the `required_files` of importable models.
+Use the `assets` entries in `models status` for model IDs, state and import requirements.
 
 ```powershell
-puripuly.exe models download --model-id parakeet-tdt-0.6b-v3-int8-sherpa
-puripuly.exe models download --model-id gemma-4-e4b-it-qat-ud-q4-k-xl --source hf-mirror
-puripuly.exe models import --model-id gemma-4-e4b-it-qat-ud-q4-k-xl --dir D:\models
-puripuly.exe models cancel --model-id parakeet-tdt-0.6b-v3-int8-sherpa
-puripuly.exe models delete --model-id gemma-4-26b-a4b-it-qat-ud-q4-k-xl
+puripuly.exe models download --model-id <model-id>
+puripuly.exe models import --model-id <gemma-model-id> --dir <folder>
+puripuly.exe models cancel --model-id <model-id>
+puripuly.exe models delete --model-id <model-id>
 ```
 
-- Only one model task runs at a time. A second task returns `failed` with `task_busy`.
-- A download, import, or delete does not change settings or provider selection.
-- Explicit Gemma download/repair verifies installed checksums before reusing files. Same-size corruption triggers a verified replacement; passive status and ordinary on-demand reuse do not hash every installed file.
-- `delete` refuses a model that running recognition or translation is using (`model_in_use`). It renames the install before removing it, so files in use are never partially deleted. Cancellation or shutdown keeps its provisioning lease until the filesystem worker settles.
-- `import` is available for Gemma models and needs the pinned file names listed in `required_files`. Files are verified before installation.
-- These commands do not hold the settings command queue, so other commands keep working during a long download.
-- Explicit Gemma asset work has a separate cancellation lifetime from runtime preparation. Turning translation demand off, starting an audio test or selecting a non-Gemma provider neither waits for nor cancels an asset transfer; `models cancel` targets that asset, while shutdown cancels and drains both lifetimes. Conflicting `gemma.prepare` or deletion returns `failed` with `task_busy` promptly. Explicitly retry after the asset settles; preparation is not automatically queued.
+- Operations preserve settings and provider selection without blocking unrelated commands.
+- Gemma imports verify the required files before replacement. Explicit Gemma download/repair also checks installed file integrity.
+- Only one model task runs at a time. Conflicts, including `gemma.prepare`, return `failed` with `task_busy`; deleting an in-use model returns `model_in_use`.
+- `models cancel` requests cancellation; wait for the original operation to settle before retrying conflicts. Runtime demand changes do not cancel transfers; shutdown drains owned work.
 
 ### Peer capture and consent
 
@@ -286,20 +282,11 @@ Numeric CLI values are sent as JSON numbers. The application owner validates fie
 
 ### Audio test
 
-`audio test on|off` runs the voice-activity check for both inputs at once: the selected microphone (`self`) and the current loopback target (`peer`, an output device or process). The test applies each channel's saved VAD threshold through the same gating parameters as normal capture. Speech is observed only; it is not sent to recognition or translation.
+`audio test on|off` checks VAD for the Self microphone and Peer loopback target without recognition or translation.
 
-- `audio test on` stays in progress until every channel is settled. The microphone is ready after its first input frame. The loopback channel is ready once its source opens, because an idle output can deliver no frames.
-- Opening the desktop test view can attach live graphs to a CLI-started test without restarting its inputs.
-- `app status` returns an `audio_test` object with:
-  - Overall `state` (`off`, `pending`, `ready`, `degraded`, `failed`, or `stopping`), `desired_active`, and `effective_active`.
-  - `channels.self` and `channels.peer`, each with `state`, `failure_reason`, `failure_type`, `device`, normalized `meter_level` (0–1), `speech_probability`, `speech_detected`, and the applied `speech_threshold`.
-  - `effective_active` can remain true after cleanup fails while an open input is still owned. A failed or stopping snapshot is not proof of release.
-  - `restore_capture`: the translation inputs that the test paused and will turn back on.
-- `applied` means both channels are ready. `degraded` means one channel is ready and the other failed. `action_required` (`select_available_audio_devices`) means no channel could start.
-- No audio content is returned.
-- While the test runs, Self and Peer capture are paused. Stopping the test restores only the inputs that were on before it started and have not had an explicit capture choice or owner replacement. VAD tuning and failed retries do not discard valid restoration intent. Turning Self or Peer capture on explicitly stops the test; shutdown does not restore capture.
-- `audio test off` and GUI dismissal invalidate earlier start requests even while they wait for application ordering. Those requests cannot open inputs after stop completes; a later new on request can start normally. Successful off waits for all owned inputs and tasks to settle. Cleanup failure stays visible and blocks conflicting restart until a later stop can finish it.
-- Changing the input device, Host API, output device, or loopback target stops a running test before applying the new target.
+- Inspect `audio_test` in `app status` for state, channel failures and VAD readings. `applied` means both inputs are ready; `degraded` means one; `action_required` means neither.
+- The test pauses normal capture and restores only still-valid prior capture intent. Explicit capture-on or source changes stop it.
+- `off` revokes pending starts and waits for input release. Failed cleanup stays visible and blocks restart; shutdown does not restore capture.
 
 ### Manual text
 
@@ -334,8 +321,7 @@ A direct JSON file rewrite is not a settings operation.
 - Revisions and settings events follow successfully committed changes, including GUI-only edits.
 - Queries return the committed snapshot without advancing its revision.
 - Staged preparation and failed persistence are not reported as persisted settings.
-- One request may combine provider choices with locale, language, audio and output changes. Provider-affecting mixed changes commit together before applying both runtime boundaries. Missing credentials or runtime failures report `degraded` without undoing saved intent or claiming that an old provider matches the new selection. Inspect the terminal receipt and effective runtime state.
-- Resubmitting the same provider fields explicitly retries pending provider application even when the saved values already match. It stays `degraded` while attachment still fails. Ordinary locale/language-only edits do not trigger that retry, and an unchanged saved snapshot does not advance the revision.
+- Mixed provider/general changes commit together. Explicit provider fields retry pending application; general-only edits do not. Runtime failure returns `degraded` without reverting saved intent.
 
 ### Activation notice
 
@@ -430,7 +416,7 @@ Apply model and connection together through `settings apply`. The normal setting
 
 Models download on demand with progress, cancellation, checksum validation and atomic installation. No weights are bundled with the installer. The 26B target is `unsloth/gemma-4-26B-A4B-it-qat-GGUF` revision `7b92b5b28818151e8669af2e45e88d6086f490dd`, file `gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf`, 14249047104 bytes, SHA-256 `a7c5bc715f5ff8e99a3e8901ce7d2b42b402c669bf24f7c5250747633d0f5891`. ModelScope serves that file at revision `f5f82bed79bc0bc49b01e0e577bb3dc949ebc564`. The installed manifest keeps the Hugging Face revision. It has no draft model or multimodal projector. E4B retains its existing pinned target and CPU MTP drafter.
 
-Local ASR and Gemma downloads try their sources in a fixed order and move to the next source only after the current one fails: Chinese UI locales use ModelScope, then `https://hf-mirror.net`, then Hugging Face; other locales use Hugging Face, then ModelScope, then `hf-mirror.net`. Sources a model does not publish are skipped. The same order applies to on-demand downloads and to `models download` without `--source`. `--source` selects one source and never falls back. Every source keeps pinned revisions, sizes and SHA-256 validation. The mirror uses anonymous downloads with Range resume and rejects redirects outside its HTTPS host. Each attempt is logged as `[ModelDownload]` with the source; the GUI shows only progress.
+Local ASR and Gemma downloads try sources in UI-locale order: Chinese locales use ModelScope → `hf-mirror.net` → Hugging Face; others use Hugging Face → ModelScope → `hf-mirror.net`. Unsupported sources are skipped. `--source` selects one source without fallback. Downloads verify pinned assets; mirror transfers are anonymous, resumable and confined to their HTTPS host.
 
 The managed runtime is pinned to llama.cpp **b11537 / `8e2d31e0eb658d0382d3106a61369dff81f0c080`**. Source runtime files live under `build/llama.cpp/llama.cpp-b11537/{cpu,vulkan}`; installed files live under `_runtime/llama.cpp-b11537/{cpu,vulkan}`. `PURIPULY_HEART_LLAMA_CPP_ROOT` may select a compatible root with those backend subdirectories, but an incompatible executable build/commit is rejected. A missing or incompatible executable fails before launch; `models status` reports `failure_phase: runtime_files` with `failure_code` `runtime_missing` or `runtime_incompatible`, distinct from a native load failure (`runtime`). Distribution archive identities are in [the runtime notice](../third_party/llama.cpp/README.md).
 
