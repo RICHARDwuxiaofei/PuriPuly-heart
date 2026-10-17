@@ -104,7 +104,7 @@ PuriPuly 是一款实时翻译你和对方语音的 Windows 双向语音翻译�
 
 | LLM \ ASR | 本地 ASR | 云免费档 | Soniox | Qwen Audio |
 |---|---|---|---|---|
-| **Gemma 4 E4B (本地)** | 无限制 | 无限制 | 5,000 次 | 7,260 次 |
+| **Index-Translate 35B A3B** | 无限制 | 无限制 | 5,000 次 | 7,260 次 |
 | **Gemma 4 26B A4B + 31B** | 13,940 次 | 13,940 次 | 3,680 次 | 4,770 次 |
 | **DeepSeek V4.1 Flash** | 16,800 次 | 16,800 次 | 3,860 次 | 5,070 次 |
 | **GPT 6 Luna** | 8,680 次 | 8,680 次 | 3,170 次 | 3,950 次 |
@@ -113,6 +113,7 @@ PuriPuly 是一款实时翻译你和对方语音的 Windows 双向语音翻译�
 
 | LLM \ ASR | 本地 ASR | 云免费档 | Soniox | Qwen Audio |
 |---|---|---|---|---|
+| **Gemma 4 E4B & 26B (本地)** | 无限制 | 无限制 | 5,000 次 | 7,260 次 |
 | **DeepSeek V4 Flash (OpenRouter)** | 17,020 次 | 17,020 次 | 3,860 次 | 5,090 次 |
 | **Gemini 3.8 Flash** | 1,160 次 | 1,160 次 | 940 次 | 1,000 次 |
 | **Qwen 3.8 Flash** | 7,460 次 | 7,460 次 | 2,990 次 | 3,680 次 |
@@ -123,7 +124,7 @@ PuriPuly 是一款实时翻译你和对方语音的 Windows 双向语音翻译�
 
 | LLM \ ASR | 本地 ASR | 云免费档 | Soniox | Qwen Audio |
 |---|---|---|---|---|
-| **Gemma 4 E4B (本地)** | 0 元 | 0 元 | ~0.001 元 | ~0.001 元 |
+| **Index-Translate 35B A3B** | 0 元 | 0 元 | ~0.001 元 | ~0.001 元 |
 | **Gemma 4 26B A4B + 31B** | ~0.0005 元 | ~0.0005 元 | ~0.002 元 | ~0.0015 元 |
 | **DeepSeek V4.1 Flash** | ~0.0004 元 | ~0.0004 元 | ~0.002 元 | ~0.0014 元 |
 | **GPT 6 Luna** | ~0.0008 元 | ~0.0008 元 | ~0.002 元 | ~0.0018 元 |
@@ -132,6 +133,7 @@ PuriPuly 是一款实时翻译你和对方语音的 Windows 双向语音翻译�
 
 | LLM \ ASR | 本地 ASR | 云免费档 | Soniox | Qwen Audio |
 |---|---|---|---|---|
+| **Gemma 4 E4B & 26B (本地)** | 0 元 | 0 元 | ~0.001 元 | ~0.001 元 |
 | **DeepSeek V4 Flash (OpenRouter)** | ~0.0004 元 | ~0.0004 元 | ~0.002 元 | ~0.0014 元 |
 | **Gemini 3.8 Flash** | ~0.006 元 | ~0.006 元 | ~0.008 元 | ~0.007 元 |
 | **Qwen 3.8 Flash** | ~0.001 元 | ~0.001 元 | ~0.002 元 | ~0.002 元 |
@@ -142,7 +144,7 @@ PuriPuly 是一款实时翻译你和对方语音的 Windows 双向语音翻译�
 *   *DeepSeek V4.1 Flash 假设缓存命中率为 70%，V4 Flash（OpenRouter）为 60%*
 *   *GPT 6 Luna 按 OpenAI API 价格计算，假设无缓存折扣；通过 ChatGPT 连接时不产生 API 费用，而是使用 Codex 额度*
 *   *Qwen API 计费以北京区域为准*
-*   *资费标准截至：2026 年 9 月 25 日*
+*   *资费标准截至：2026 年 10 月 17 日*
 *   *1 美元 ≈ 7.2 元人民币*
 
 ### 免费额度
@@ -191,7 +193,7 @@ GPU 推理基于 Vulkan。无论是 Radeon 还是 Arc，都不受厂商限制。
 1. 从[下载页面](https://github.com/kapitalismho/PuriPuly-heart/releases/latest)下载最新版本
 2. 安装 PuriPuly
 3. 点击 **TALK** 按钮
-4. 点击 **TRANS** 按钮后通过 Discord 验证
+4. 点击 **TRANS**。新安装默认使用无需 API 密钥的 Index；如有提示，请完成认证或设置。
 5. 点击 **CAPTIONS** 按钮开启 VR 字幕
 6. （可选）点击 **LISTEN** 按钮开启对方语音翻译
 

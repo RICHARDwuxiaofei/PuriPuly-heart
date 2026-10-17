@@ -134,7 +134,7 @@ def test_success_callback_delivers_result_even_when_browser_disconnects() -> Non
 @pytest.mark.parametrize(
     ("locale", "expected_text", "expected_font"),
     [
-        ("en", "We received your authentication", "system-ui"),
+        ("en", "Authentication received", "system-ui"),
         ("ko", "인증 정보를 받았어요", "NanumSquareRound"),
         ("ja", "認証情報を受け取りました", "M PLUS Rounded 1c"),
         ("zh-CN", "已收到认证信息", "ResourceHanRoundedCN"),

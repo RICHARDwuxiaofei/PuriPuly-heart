@@ -77,6 +77,11 @@ TASK_CREATION_REVIEWS = (
         "SettingsOwner locally shield-awaits the thread persistence task, including after cancellation, before releasing the call boundary",
     ),
     *_reviews(
+        "app/services/index_selection.py",
+        {"IndexSelectionOwner._schedule": 1, "IndexSelectionOwner._run_owned": 1},
+        "IndexSelectionOwner shares one bounded selection result, fences and cancels timed-out work while retaining its owned blocking cleanup, and drains supervisor plus worker tasks on close",
+    ),
+    *_reviews(
         "app/services/llm_connection_readiness.py",
         {"LlmConnectionReadinessOwner._start_mode": 1},
         "LlmConnectionReadinessOwner retains mode transition tasks and gathers the remaining set on close",
@@ -404,6 +409,11 @@ TASK_CREATION_REVIEWS = (
             "ChatGptPlanLLMProvider._current_token_generation": 1,
         },
         "ChatGPT plan provider retains maintenance, opening, request and auth tasks; shielded close drains those sets before closing the connection pool",
+    ),
+    *_reviews(
+        "providers/llm/index_translate.py",
+        {"IndexTranslateProvider.close": 1},
+        "Index provider retains one client-close task, shields and drains it despite repeated caller cancellation, and releases its client reference only after terminal cleanup",
     ),
     *_reviews(
         "providers/stt/custom.py",
