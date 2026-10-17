@@ -5,6 +5,7 @@ import errno
 import hashlib
 import inspect
 import json
+import logging
 import os
 import shutil
 import threading
@@ -17,6 +18,11 @@ from uuid import uuid4
 import httpx
 
 from puripuly_heart.core import network_clients
+from puripuly_heart.core.model_download_sources import (
+    HF_MIRROR_ENDPOINT,
+    model_download_source_candidates,
+)
+from puripuly_heart.core.runtime_logging import emit_basic_log
 
 from .local_stt_assets import (
     LOCAL_QWEN_GPU_MODEL_ID,
@@ -25,7 +31,6 @@ from .local_stt_assets import (
     LocalSTTAssetError,
     LocalSTTAssetManifest,
     default_local_stt_model_root,
-    default_local_stt_source_for_locale,
     inspect_local_stt_install_state,
     load_local_stt_asset_manifest,
     validate_local_stt_install,
@@ -37,6 +42,7 @@ from .local_stt_download_port import (
 )
 
 RuntimeLocalSTTStatus = Literal["downloading", "ready", "download_failed"]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -234,35 +240,29 @@ class _DownloadProgress:
             return self._downloaded_bytes
 
 
-def _source_order(
+def _source_plans(
     manifest: LocalSTTAssetManifest,
     *,
     preferred_source: str | None,
     locale: str | None,
-) -> tuple[str, ...]:
-    explicit = {"official": "huggingface", "mirror": "huggingface", "modelscope_only": "modelscope"}
-    if preferred_source in explicit:
-        selected = explicit[preferred_source]
-        if selected not in manifest.sources:
-            raise LocalSTTRuntimeInstallError(
-                "Selected source is unsupported", failure_code="unsupported_source"
-            )
-        return (selected,)
-    selected = preferred_source or default_local_stt_source_for_locale(locale)
-    if (
-        preferred_source is None
-        and selected == "modelscope"
-        and selected not in manifest.sources
-        and "hf_mirror" in manifest.sources
-    ):
-        selected = "hf_mirror"
-    names: list[str] = []
-    if selected in manifest.sources:
-        names.append(selected)
-    for name in manifest.sources:
-        if name not in names:
-            names.append(name)
-    return tuple(names[:2])
+) -> tuple[tuple[str, str | None, str], ...]:
+    names = model_download_source_candidates(
+        tuple(manifest.sources),
+        locale=locale,
+        explicit=preferred_source,
+    )
+    if not names:
+        raise LocalSTTRuntimeInstallError(
+            "Selected source is unsupported", failure_code="unsupported_source"
+        )
+    return tuple(
+        (
+            ("huggingface", HF_MIRROR_ENDPOINT, name)
+            if name == "hf_mirror" and name not in manifest.sources
+            else (name, None, name)
+        )
+        for name in names
+    )
 
 
 def _raise_if_cancelled(cancel_event: threading.Event | None) -> None:
@@ -624,12 +624,18 @@ async def _ensure_local_stt_installed_with_lease(
     last_progress_percent: int | None = None
     last_error: Exception | None = None
 
-    for source_name in _source_order(
+    for source_name, endpoint, source_label in _source_plans(
         resolved_manifest,
         preferred_source=preferred_source,
         locale=locale,
     ):
         _raise_if_cancelled(cancel_event)
+        emit_basic_log(
+            logger,
+            f"[ModelDownload] source_attempt model={resolved_manifest.model_id} "
+            f"source={source_label}",
+            level=logging.INFO,
+        )
         staging_dir = resolved_root / f"{resolved_manifest.install_dirname}.staging-{uuid4().hex}"
         shutil.rmtree(staging_dir, ignore_errors=True)
         progress = _DownloadProgress(total_bytes)
@@ -648,10 +654,7 @@ async def _ensure_local_stt_installed_with_lease(
                     cancel_event=cancel_event,
                     progress=progress,
                     huggingface_downloader=huggingface_downloader,
-                    endpoint={
-                        "official": "https://huggingface.co",
-                        "mirror": "https://hf-mirror.net",
-                    }.get(preferred_source),
+                    endpoint=endpoint,
                 )
             )
             last_report = 0.0
@@ -685,6 +688,12 @@ async def _ensure_local_stt_installed_with_lease(
                 cancel_event=cancel_event,
                 io_cancel_event=cancel_event or threading.Event(),
             )
+            emit_basic_log(
+                logger,
+                f"[ModelDownload] source_completed model={resolved_manifest.model_id} "
+                f"source={source_label}",
+                level=logging.INFO,
+            )
             await _emit_status(on_status, "ready", percent=None)
             return installed
         except asyncio.CancelledError:
@@ -701,8 +710,14 @@ async def _ensure_local_stt_installed_with_lease(
         except Exception as exc:
             if first_error is None:
                 first_error = exc
-            failures.append(f"{source_name}: {exc}")
+            failures.append(f"{source_label}: {exc}")
             last_error = exc
+            emit_basic_log(
+                logger,
+                f"[ModelDownload] source_failed model={resolved_manifest.model_id} "
+                f"source={source_label} cause={type(exc).__name__}",
+                level=logging.WARNING,
+            )
             shutil.rmtree(staging_dir, ignore_errors=True)
 
     await _emit_status(on_status, "download_failed", percent=None)
@@ -720,8 +735,7 @@ async def _ensure_local_stt_installed_with_lease(
     status_code = getattr(last_error, "status_code", None)
     if isinstance(last_error, httpx.HTTPStatusError):
         status_code = last_error.response.status_code
-    explicit_source = preferred_source in {"official", "mirror", "modelscope_only"}
-    if explicit_source:
+    if preferred_source is not None:
         message = "checksum mismatch" if code == "checksum_failed" else "Model installation failed"
     else:
         message = "; ".join(failures) or "runtime local STT install failed"

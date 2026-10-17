@@ -35,6 +35,7 @@ from puripuly_heart.core.local_stt_assets import (
     LocalSTTAssetManifest,
     LocalSTTInstallState,
     LocalSTTManifestInvalidError,
+    default_local_stt_model_root,
     load_local_stt_asset_manifest,
 )
 from puripuly_heart.core.local_stt_catalog import (
@@ -44,6 +45,7 @@ from puripuly_heart.core.local_stt_catalog import (
 )
 from puripuly_heart.core.local_stt_download_port import HuggingFaceDownloadPort
 from puripuly_heart.core.local_stt_runtime_installer import (
+    LocalSTTProvisioningLease,
     LocalSTTRuntimeInstallCancelled,
     LocalSTTRuntimeInstallError,
     RuntimeLocalSTTStatusUpdate,
@@ -51,6 +53,7 @@ from puripuly_heart.core.local_stt_runtime_installer import (
     cleanup_local_stt_install_residue,
     ensure_local_stt_installed,
 )
+from puripuly_heart.core.model_install_removal import remove_model_install_dir
 from puripuly_heart.core.runtime.local_stt_download import LocalSTTDownloadRuntime
 
 ProvisioningStateChanged = Callable[
@@ -298,6 +301,33 @@ class LocalASRProvisioningOwner:
         )
         await self._publish_state()
         return self.snapshot
+
+    async def delete_model(self, model_id: str) -> LocalASRProvisioningSnapshot:
+        self._require_open("delete model assets")
+        current = self._models.get(model_id)
+        if current is None:
+            raise ValueError(f"unsupported local ASR model: {model_id}")
+        backend = current.backend
+        if self._activities.get(backend) is not None or current.operation == "downloading":
+            raise LocalSTTRuntimeInstallError(
+                "Another model task is active", failure_code="task_busy"
+            )
+        manifest = self._manifest_for(backend, model_id)
+        root = (self._model_root or default_local_stt_model_root()).resolve()
+        lease = await asyncio.to_thread(
+            LocalSTTProvisioningLease.acquire, model_root=root, wait=False
+        )
+        if lease is None:
+            raise LocalSTTRuntimeInstallError(
+                "Another model task is active", failure_code="task_busy"
+            )
+        try:
+            await asyncio.to_thread(remove_model_install_dir, root / manifest.install_dirname)
+        finally:
+            await asyncio.to_thread(lease.close)
+        if backend == "gpu":
+            return await self.inspect_gpu(explicit_intent=True)
+        return await self.inspect_cpu((model_id,))
 
     async def cancel_install(
         self, backend: LocalASRProvisioningBackend, *, origin: str | None = None

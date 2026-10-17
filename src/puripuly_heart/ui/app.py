@@ -280,6 +280,7 @@ class TranslatorApp:
                 local_llm_secret_changed=self._on_local_llm_secret_changed,
                 custom_stt_secret_changed=self._on_custom_stt_secret_changed,
                 gpu_discovery_requested=self._on_gpu_discovery_requested,
+                open_model_assets=self._open_model_assets,
                 settings_secrets=self.application.settings_secrets(),
                 chatgpt=SettingsChatGptIntents(
                     account_snapshot=self.application.chatgpt_account_snapshot,
@@ -504,12 +505,7 @@ class TranslatorApp:
         self.view_settings.set_overlay_runtime_state(self.overlay_state)
 
         # Custom title bar
-        self.title_bar = TitleBar(
-            self.page,
-            on_close=self._request_window_close,
-            on_model_assets=self._open_model_assets,
-        )
-        self._model_assets_dialog = None
+        self.title_bar = TitleBar(self.page, on_close=self._request_window_close)
 
         # Bottom navigation (order: Home, Settings, Logs, About)
         self.bottom_nav = BottomNavBar(on_change=self._on_nav_change)
@@ -531,7 +527,7 @@ class TranslatorApp:
         self.page.add(shell.root)
 
     def _open_model_assets(self) -> None:
-        if self._model_assets_dialog is None:
+        if getattr(self, "_model_assets_dialog", None) is None:
             self._model_assets_dialog = ModelAssetsDialog(
                 self.page, self.application, self._run_page_task
             )

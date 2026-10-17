@@ -400,7 +400,7 @@ async def test_ensure_local_stt_installed_downloads_preferred_source_successfull
 
 
 @pytest.mark.asyncio
-async def test_ensure_local_stt_installed_falls_back_once_when_preferred_source_fails(
+async def test_ensure_local_stt_installed_falls_back_to_next_source_in_locale_order(
     temp_dir: Path,
     file_server,
 ) -> None:
@@ -419,7 +419,7 @@ async def test_ensure_local_stt_installed_falls_back_once_when_preferred_source_
     )
 
     installed = await ensure_local_stt_installed(
-        preferred_source="huggingface",
+        locale="en",
         model_root=temp_dir / "appdata" / "models",
         manifest=manifest,
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Literal
 
 from puripuly_heart.app.language_selection import LanguageSelectionChange
@@ -43,6 +44,7 @@ from puripuly_heart.app.services.managed_gemma_translation import (
     ManagedGemmaTranslationOwner,
 )
 from puripuly_heart.app.services.manual_typing import ManualTypingOwner
+from puripuly_heart.app.services.model_assets import ModelAssetsApplication
 from puripuly_heart.app.services.overlay_application import OverlayApplicationOwner
 from puripuly_heart.app.services.overlay_calibration_application import (
     OverlayCalibrationApplicationOwner,
@@ -397,6 +399,7 @@ class UiProviderRuntimeAdapter:
     llm_devices_sink: Callable[[tuple[GpuDeviceOption, ...]], None] | None = None
     chatgpt: ChatGptAccountOwner | None = None
     connection_readiness: LlmConnectionReadinessOwner | None = None
+    model_assets: ModelAssetsApplication | None = None
     _alibaba_workspace: AlibabaWorkspaceOwner | None = field(default=None, init=False)
 
     def alibaba_workspace(self) -> AlibabaWorkspaceOwner:
@@ -482,64 +485,6 @@ class UiProviderRuntimeAdapter:
 
     async def install_selected_gpu_model_if_needed(self) -> None:
         await self.gpu.install_selected_model_if_needed()
-
-    def selected_model_asset_ids(self) -> tuple[str, ...]:
-        from puripuly_heart.app.services.local_asr_selection import required_local_asr_model_ids
-        from puripuly_heart.core.local_stt_assets import LOCAL_QWEN_GPU_MODEL_ID
-        from puripuly_heart.core.local_translation.assets import GEMMA_26B_MODEL_ID, GEMMA_MODEL_ID
-
-        intent = self.settings.require_canonical().intent
-        ids = []
-        for provider in (intent.stt.provider, intent.peer_stt.provider):
-            ids.extend(required_local_asr_model_ids(provider))
-            if provider == "local_qwen_gpu":
-                ids.append(LOCAL_QWEN_GPU_MODEL_ID)
-        if intent.translation.model == "managed_gemma":
-            ids.append(GEMMA_MODEL_ID)
-        elif intent.translation.model == "managed_gemma_26b":
-            ids.append(GEMMA_26B_MODEL_ID)
-        return tuple(dict.fromkeys(ids))
-
-    async def provision_asr_assets(self, *, model_id: str, source: str, on_status=None):
-        from puripuly_heart.core.local_asr_provisioning import LocalASRInstallRequest
-        from puripuly_heart.core.local_stt_assets import LOCAL_QWEN_GPU_MODEL_ID
-        from puripuly_heart.core.local_stt_runtime_installer import (
-            LocalSTTRuntimeInstallCancelled,
-            LocalSTTRuntimeInstallError,
-        )
-
-        backend = "gpu" if model_id == LOCAL_QWEN_GPU_MODEL_ID else "cpu"
-        provisioning = self.gpu.provisioning_provider()
-        if provisioning.snapshot.activity_for(backend) is not None:
-            raise LocalSTTRuntimeInstallError(
-                "Another model task is active", failure_code="task_busy"
-            )
-        result = await provisioning.start_install(
-            LocalASRInstallRequest(
-                backend=backend,
-                model_ids=(model_id,),
-                locale=None,
-                origin="model_assets_dialog",
-                explicit_gpu_intent=backend == "gpu",
-                preferred_source=source,
-            ),
-            on_status=on_status,
-        )
-        if result.cancelled:
-            raise LocalSTTRuntimeInstallCancelled("Model task cancelled")
-        if result.failed_model_ids:
-            raise LocalSTTRuntimeInstallError(
-                "Model installation failed",
-                failure_code=result.failure_codes[0] if result.failure_codes else "unknown",
-            )
-        return result
-
-    async def cancel_asr_assets(self, *, model_id: str) -> None:
-        from puripuly_heart.core.local_stt_assets import LOCAL_QWEN_GPU_MODEL_ID
-
-        backend = "gpu" if model_id == LOCAL_QWEN_GPU_MODEL_ID else "cpu"
-        provisioning = self.gpu.provisioning_provider()
-        await provisioning.cancel_install(backend, origin="model_assets_dialog")
 
     async def ensure_gpu_device_discovery(self) -> None:
         await self.gpu.ensure_device_discovery(
@@ -723,35 +668,30 @@ class UiProviderRuntimeAdapter:
             return False if self.managed_gemma is None else self.managed_gemma.cancel()
         raise ValueError(f"unsupported managed Gemma notice action: {action}")
 
-    def gemma_download_source(self) -> str:
-        return self.settings.require_canonical().intent.translation.download_source or "official"
+    def model_asset_entries(self) -> tuple[object, ...]:
+        return self.model_assets.entries() if self.model_assets is not None else ()
 
-    async def configure_gemma_source(self, source: str) -> None:
-        if source not in {"official", "mirror", "local"}:
-            raise ValueError("Unsupported model source")
-        current = self.settings.require_canonical()
-        self.settings.begin()
-        try:
-            self.settings.canonical = replace(
-                current,
-                intent=replace(
-                    current.intent,
-                    translation=replace(current.intent.translation, download_source=source),
-                ),
-            )
-            await self.settings.persist_async()
-        except BaseException:
-            self.settings.rollback()
-            raise
+    async def refresh_model_assets(self) -> tuple[object, ...]:
+        if self.model_assets is None:
+            return ()
+        return await self.model_assets.refresh()
 
-    async def provision_gemma_assets(
-        self, *, model_id: str | None = None, source: str, files=(), on_status=None
-    ):
-        if self.managed_gemma is None:
-            raise RuntimeError("Managed model owner unavailable")
-        return await self.managed_gemma.install_assets(
-            model_id=model_id, source=source, files=files, on_status=on_status
-        )
+    async def download_model_asset(self, model_id: str, *, source: str | None = None) -> object:
+        return await self._require_model_assets().download(model_id, source=source)
+
+    async def import_model_asset(self, model_id: str, directory: Path) -> object:
+        return await self._require_model_assets().import_directory(model_id, directory)
+
+    async def cancel_model_asset(self, model_id: str) -> bool:
+        return await self._require_model_assets().cancel(model_id)
+
+    async def delete_model_asset(self, model_id: str) -> object:
+        return await self._require_model_assets().delete(model_id)
+
+    def _require_model_assets(self) -> ModelAssetsApplication:
+        if self.model_assets is None:
+            raise RuntimeError("Model assets are unavailable")
+        return self.model_assets
 
 
 @dataclass(slots=True)

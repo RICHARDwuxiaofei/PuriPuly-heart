@@ -5,6 +5,7 @@ import errno
 import hashlib
 import inspect
 import json
+import logging
 import shutil
 import threading
 import time
@@ -20,7 +21,6 @@ import httpx
 
 from puripuly_heart.core import network_clients
 from puripuly_heart.core.feature_diagnostics import log_feature
-from puripuly_heart.core.local_asr.local_stt_assets import default_local_stt_source_for_locale
 from puripuly_heart.core.local_asr.local_stt_download_port import (
     HuggingFaceDownloadPort,
     HuggingFaceDownloadProgress,
@@ -43,6 +43,11 @@ from puripuly_heart.core.local_translation.assets import (
     e4b_gemma_spec,
     inspect_gemma_install,
     validate_gemma_install,
+)
+from puripuly_heart.core.model_download_sources import (
+    HF_MIRROR_ENDPOINT,
+    MODEL_DOWNLOAD_SOURCES,
+    model_download_source_candidates,
 )
 
 
@@ -365,16 +370,27 @@ def _promote(staging_dir: Path, install_dir: Path) -> None:
         shutil.rmtree(backup_dir, ignore_errors=True)
 
 
-def _source_order(
+def _source_plans(
     spec: GemmaModelSpec,
     *,
-    preferred_source: str | None,
+    source: str | None,
     locale: str | None,
-) -> tuple[str, ...]:
-    selected = preferred_source or default_local_stt_source_for_locale(locale)
-    if selected not in spec.sources:
-        return tuple(spec.sources)
-    return (selected, *(name for name in spec.sources if name != selected))
+) -> tuple[tuple[str, str | None, str], ...]:
+    if source == "local":
+        return (("local", None, "local"),)
+    names = model_download_source_candidates(tuple(spec.sources), locale=locale, explicit=source)
+    if source is not None and not names:
+        raise GemmaProvisioningError(
+            "Selected source is unsupported", failure_code="unsupported_source"
+        )
+    return tuple(
+        (
+            ("huggingface", HF_MIRROR_ENDPOINT, name)
+            if name == "hf_mirror" and name not in spec.sources
+            else (name, None, name)
+        )
+        for name in names
+    )
 
 
 async def ensure_gemma_installed(
@@ -386,7 +402,6 @@ async def ensure_gemma_installed(
     spec: GemmaModelSpec | None = None,
     source: str | None = None,
     locale: str | None = None,
-    preferred_source: str | None = None,
 ) -> InstalledGemmaManifest:
     if cancel_event is None:
         cancel_event = threading.Event()
@@ -421,7 +436,6 @@ async def ensure_gemma_installed(
             spec=resolved_spec,
             source=source,
             locale=locale,
-            preferred_source=preferred_source,
         )
     finally:
         if lease is not None:
@@ -440,10 +454,9 @@ async def _ensure_gemma_installed_with_lease(
     spec: GemmaModelSpec,
     source: str | None,
     locale: str | None,
-    preferred_source: str | None,
 ) -> InstalledGemmaManifest:
     resolved = install_dir
-    if source is not None and source not in {"official", "mirror", "local"}:
+    if source is not None and source not in {*MODEL_DOWNLOAD_SOURCES, "local"}:
         raise ValueError("Unsupported model source")
     total_bytes = sum(asset.size_bytes for asset in spec.assets)
     _raise_if_cancelled(cancel_event)
@@ -483,17 +496,8 @@ async def _ensure_gemma_installed_with_lease(
     if source == "local" and not isinstance(downloader, LocalGemmaDownloadAdapter):
         log_feature("ModelDownload", "preflight", "missing_file")
         raise GemmaProvisioningError("Import the pinned files first", failure_code="missing_file")
-    if source == "local":
-        source_names = ("local",)
-    elif source is not None:
-        if "huggingface" not in spec.sources:
-            raise GemmaProvisioningError(
-                "Selected source is unsupported", failure_code="unsupported_source"
-            )
-        source_names = ("huggingface",)
-    else:
-        source_names = _source_order(spec, preferred_source=preferred_source, locale=locale)
-    if not source_names:
+    source_plans = _source_plans(spec, source=source, locale=locale)
+    if not source_plans:
         raise GemmaProvisioningError("Gemma model has no registered download sources")
 
     staging_dir = None
@@ -501,8 +505,9 @@ async def _ensure_gemma_installed_with_lease(
     failures: list[_GemmaSourceError] = []
     stage = "preflight"
     try:
-        for source_name in source_names:
+        for source_name, endpoint, source_label in source_plans:
             _raise_if_cancelled(cancel_event)
+            log_feature("ModelDownload", "source", "attempt_" + source_label, level=logging.INFO)
             asset_source = (
                 GemmaAssetSource(name="local", repo_id=spec.repo_id, revision=spec.revision)
                 if source_name == "local"
@@ -545,10 +550,7 @@ async def _ensure_gemma_installed_with_lease(
                         total_bytes=total_bytes,
                         cancel_event=cancel_event,
                         on_status=on_status,
-                        endpoint={
-                            "official": "https://huggingface.co",
-                            "mirror": "https://hf-mirror.net",
-                        }.get(source),
+                        endpoint=endpoint,
                     )
                     await _emit(
                         on_status,
@@ -587,6 +589,13 @@ async def _ensure_gemma_installed_with_lease(
                 staging_dir = None
                 _remove_owned_staging(failed_staging, primary_failure=exc)
                 failures.append(exc)
+                log_feature(
+                    "ModelDownload",
+                    "source",
+                    "failed_" + source_label,
+                    error=exc,
+                    level=logging.WARNING,
+                )
                 continue
             _raise_if_cancelled(cancel_event)
             stage = "installation"
@@ -597,6 +606,7 @@ async def _ensure_gemma_installed_with_lease(
                 total_bytes=total_bytes,
             )
             await _owned_io(_promote, staging_dir, resolved, cancel_event=cancel_event)
+            log_feature("ModelDownload", "source", "completed_" + source_label, level=logging.INFO)
             await _emit(
                 on_status,
                 state="ready",

@@ -7,6 +7,7 @@ import logging
 import os
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -111,8 +112,11 @@ UI_APPLICATION_USER_INTENT_METHODS = frozenset(
         "handle_gpu_notice_action",
         "handle_managed_gemma_notice_action",
         "install_selected_gpu_model_if_needed",
-        "provision_asr_assets",
-        "cancel_asr_assets",
+        "download_model_asset",
+        "import_model_asset",
+        "cancel_model_asset",
+        "delete_model_asset",
+        "refresh_model_assets",
         "edit_alibaba_connection_draft",
         "on_dashboard_language_change",
         "persist_api_key_verification",
@@ -144,8 +148,6 @@ UI_APPLICATION_USER_INTENT_METHODS = frozenset(
         "start_qq_managed_auth_from_dialog",
         "stop_audio_test",
         "submit_text",
-        "configure_gemma_source",
-        "provision_gemma_assets",
         "verify_alibaba_connection_draft",
         "verify_api_key",
     }
@@ -154,7 +156,6 @@ UI_APPLICATION_USER_INTENT_METHODS = frozenset(
 
 _ORDERED_INTENTS = frozenset(
     {
-        "configure_gemma_source",
         "apply_loopback_capture_option",
         "apply_providers",
         "apply_settings",
@@ -1127,29 +1128,23 @@ class UiApplicationBoundary:
     ) -> object:
         return await self._provider.handle_managed_gemma_notice_action(action)
 
-    def gemma_download_source(self) -> str:
-        return self._provider.gemma_download_source()
+    def model_asset_entries(self) -> tuple[object, ...]:
+        return self._provider.model_asset_entries()
 
-    def selected_model_asset_ids(self) -> tuple[str, ...]:
-        return self._provider.selected_model_asset_ids()
+    async def refresh_model_assets(self) -> tuple[object, ...]:
+        return await self._provider.refresh_model_assets()
 
-    async def provision_asr_assets(self, *, model_id: str, source: str, on_status=None):
-        return await self._provider.provision_asr_assets(
-            model_id=model_id, source=source, on_status=on_status
-        )
+    async def download_model_asset(self, model_id: str, *, source: str | None = None) -> object:
+        return await self._provider.download_model_asset(model_id, source=source)
 
-    async def cancel_asr_assets(self, *, model_id: str) -> None:
-        await self._provider.cancel_asr_assets(model_id=model_id)
+    async def import_model_asset(self, model_id: str, directory: Path) -> object:
+        return await self._provider.import_model_asset(model_id, directory)
 
-    async def configure_gemma_source(self, source: str) -> None:
-        await self._provider.configure_gemma_source(source)
+    async def cancel_model_asset(self, model_id: str) -> bool:
+        return await self._provider.cancel_model_asset(model_id)
 
-    async def provision_gemma_assets(
-        self, *, model_id: str | None = None, source: str, files=(), on_status=None
-    ):
-        return await self._provider.provision_gemma_assets(
-            model_id=model_id, source=source, files=files, on_status=on_status
-        )
+    async def delete_model_asset(self, model_id: str) -> object:
+        return await self._provider.delete_model_asset(model_id)
 
 
 for _intent_method_name in UI_APPLICATION_USER_INTENT_METHODS:

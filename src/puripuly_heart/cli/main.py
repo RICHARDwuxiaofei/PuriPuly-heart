@@ -191,7 +191,8 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--file", type=Path, help="Read UTF-8 content from a file")
     submit.add_argument("--no-wait", action="store_true")
     models = sub.add_parser(
-        "models", help="Inspect, prepare, install, retry or cancel local models"
+        "models",
+        help="Inspect, download, import, delete, install, retry or cancel local models",
     )
     models_sub = models.add_subparsers(dest="action", required=True)
     models_sub.add_parser("status")
@@ -205,8 +206,22 @@ def build_parser() -> argparse.ArgumentParser:
         model_action.add_argument("--no-wait", action="store_true")
         if action == "install":
             model_action.add_argument("--model-id", action="append", default=[])
+        if action == "cancel":
+            model_action.add_argument("--model-id")
         if action == "prepare":
             model_action.add_argument("--verify-checksums", action="store_true")
+    for action in ("download", "import", "delete"):
+        asset_action = models_sub.add_parser(action)
+        asset_action.add_argument("--model-id", required=True)
+        asset_action.add_argument("--no-wait", action="store_true")
+        if action == "download":
+            asset_action.add_argument(
+                "--source",
+                choices=("auto", "huggingface", "modelscope", "hf-mirror"),
+                default="auto",
+            )
+        if action == "import":
+            asset_action.add_argument("--dir", type=Path, required=True)
     gemma = sub.add_parser("gemma", help="Prepare or cancel managed Gemma assets")
     gemma_sub = gemma.add_subparsers(dest="action", required=True)
     for action in ("prepare", "cancel"):
@@ -769,10 +784,18 @@ async def _run(args: argparse.Namespace) -> int:
                 name, values = "audio.test", {"enabled": args.state == "on"}
             else:
                 name, values = "audio.retry", {}
+        elif args.domain == "models" and args.action in ("download", "import", "delete"):
+            name, values = f"models.{args.action}", {"model_id": args.model_id}
+            if args.action == "download":
+                values["source"] = args.source
+            if args.action == "import":
+                values["directory"] = str(args.dir.resolve())
         elif args.domain == "models":
             name, values = f"models.{args.action}", {"backend": args.backend}
             if args.action == "install" and args.model_id:
                 values["model_ids"] = args.model_id
+            if args.action == "cancel" and args.model_id:
+                values["model_id"] = args.model_id
             if args.action == "prepare":
                 values["verify_checksums"] = args.verify_checksums
         elif args.domain == "gemma":

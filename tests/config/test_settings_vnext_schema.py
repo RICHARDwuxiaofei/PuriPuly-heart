@@ -72,15 +72,6 @@ def test_vnext_schema_defaults_match_current_persisted_settings_defaults() -> No
     )
 
 
-@pytest.mark.parametrize("source", [None, "official", "mirror", "local"])
-def test_translation_download_source_preserves_explicit_choice_or_default(source) -> None:
-    schema = _load_schema_module()
-
-    assert schema.TranslationIntent().download_source is None
-    assert schema.TranslationIntent(download_source=source).download_source == source
-    assert schema.TranslationIntent(download_source="unsupported").download_source is None
-
-
 def test_ui_settings_persist_only_locale() -> None:
     schema = _load_schema_module()
 
@@ -164,7 +155,6 @@ def test_vnext_schema_represents_current_intent_and_state_leaves() -> None:
         "intent.translation.concurrency_limit",
         "intent.translation.connection",
         "intent.translation.connection_history",
-        "intent.translation.download_source",
         "intent.translation.gpu_device_id",
         "intent.translation.http_extension_id",
         "intent.translation.model",

@@ -8,6 +8,7 @@ import os
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
@@ -115,7 +116,10 @@ COMMANDS = {
     "provider.apply": "Apply self and peer STT changes together",
     "models.install": "Install or repair selected CPU/GPU ASR assets",
     "models.prepare": "Inspect CPU or GPU model readiness and integrity",
-    "models.cancel": "Cancel an active CPU/GPU model installation",
+    "models.cancel": "Cancel an active CPU/GPU model installation or one model download",
+    "models.download": "Download or repair one local model (ASR or Gemma)",
+    "models.import": "Import one Gemma model from a folder with the pinned files",
+    "models.delete": "Delete one installed local model",
     "gemma.prepare": "Prepare managed local Gemma model assets",
     "gemma.cancel": "Cancel managed local Gemma preparation",
     "models.retry": "Retry GPU activation after installation",
@@ -199,7 +203,19 @@ COMMAND_ARGUMENTS = {
         "open_browser": "optional boolean, default false (OAuth only)",
     },
     "auth.logout": {"provider": ["qq", "discord", "openrouter", "chatgpt"]},
-    "models.cancel": {"backend": "cpu or gpu (optional; default gpu)"},
+    "models.cancel": {
+        "backend": "cpu or gpu (optional; default gpu)",
+        "model_id": "optional models.status assets ID; cancels that model's download instead",
+    },
+    "models.download": {
+        "model_id": "models.status assets ID",
+        "source": "optional auto, huggingface, modelscope or hf-mirror (default auto)",
+    },
+    "models.import": {
+        "model_id": "importable models.status assets ID",
+        "directory": "folder that contains the model's required_files",
+    },
+    "models.delete": {"model_id": "models.status assets ID"},
     "gemma.prepare": {},
     "gemma.cancel": {},
     "overlay.position.reset": {},
@@ -1205,10 +1221,12 @@ class ApplicationControlOwner:
         if name == "models.status":
             owner = self.provisioning()
             gemma = self.gemma()
+            assets = await self.application.refresh_model_assets()
             return {
                 **base,
                 "state": _json(getattr(owner, "snapshot", None)) if owner is not None else None,
                 "gemma": _json(gemma.snapshot) if gemma is not None else None,
+                "assets": [entry.to_dict() for entry in assets],
             }
         if name == "overlay.status":
             output = self.application.output_status()
@@ -1516,9 +1534,14 @@ class ApplicationControlOwner:
                 and len(changes) == 1
                 and "locale" in changes
             )
-            independent_stop = command in {"app.stop", "models.cancel", "gemma.cancel"} or (
-                command == "audio.test" and arguments.get("enabled") is False
-            )
+            independent_stop = command in {
+                "app.stop",
+                "models.cancel",
+                "gemma.cancel",
+                "models.download",
+                "models.import",
+                "models.delete",
+            } or (command == "audio.test" and arguments.get("enabled") is False)
             resource_lock = (
                 None
                 if independent_stop
@@ -1776,6 +1799,33 @@ class ApplicationControlOwner:
             if acquired:
                 resource_lock.release()
 
+    async def _model_asset_command(self, command: str, args: dict) -> dict:
+        from puripuly_heart.app.services.model_assets import ModelAssetsError
+
+        app = self.application
+        model_id = args["model_id"]
+        try:
+            if command == "models.download":
+                source = args.get("source", "auto")
+                entry = await app.download_model_asset(
+                    model_id,
+                    source=None if source == "auto" else source.replace("-", "_"),
+                )
+            elif command == "models.import":
+                entry = await app.import_model_asset(model_id, Path(args["directory"]))
+            else:
+                entry = await app.delete_model_asset(model_id)
+        except ModelAssetsError as error:
+            current = next(
+                (item for item in app.model_asset_entries() if item.model_id == model_id), None
+            )
+            return {
+                "status": "cancelled" if error.failure_code == "cancelled" else "failed",
+                "error": {"code": error.failure_code},
+                "asset": current.to_dict() if current is not None else None,
+            }
+        return {"status": "applied", "asset": entry.to_dict()}
+
     def _start_model_install(self, args: dict, operation_id: str) -> asyncio.Task:
         from puripuly_heart.core.local_asr_provisioning import LocalASRInstallRequest
 
@@ -1997,6 +2047,15 @@ class ApplicationControlOwner:
             else:
                 raise InvalidArgumentsError("unsupported model backend")
             return {"status": "applied", "models": _json(snapshot)}
+        if command in {"models.download", "models.import", "models.delete"}:
+            return await self._model_asset_command(command, args)
+        if command == "models.cancel" and "model_id" in args:
+            cancelled = await app.cancel_model_asset(args["model_id"])
+            return {
+                "status": "cancelled" if cancelled else "rejected",
+                "model_id": args["model_id"],
+                "reason": None if cancelled else "no_active_download",
+            }
         if command == "models.cancel":
             owner = self.provisioning()
             if owner is None:
@@ -2857,9 +2916,26 @@ def _validate_command_args(command: str, args: dict, *, locale_choices: tuple[st
         "overlay.calibrate": {"action"},
         "auth.login": {"provider"},
         "auth.logout": {"provider"},
+        "models.download": {"model_id"},
+        "models.import": {"model_id", "directory"},
+        "models.delete": {"model_id"},
     }.get(command, set())
     if required - args.keys():
         raise InvalidArgumentsError("missing command arguments")
+    if command in {"models.download", "models.import", "models.delete", "models.cancel"}:
+        if "model_id" in args and (type(args["model_id"]) is not str or not args["model_id"]):
+            raise InvalidArgumentsError("model_id must be a non-empty string")
+    if command == "models.download" and args.get("source", "auto") not in {
+        "auto",
+        "huggingface",
+        "modelscope",
+        "hf-mirror",
+    }:
+        raise InvalidArgumentsError("unsupported model source")
+    if command == "models.import" and (
+        type(args["directory"]) is not str or not args["directory"].strip()
+    ):
+        raise InvalidArgumentsError("directory must be a non-empty string")
 
     if command == "capture.set":
         if type(args["channel"]) is not str or args["channel"] not in {"self", "peer"}:

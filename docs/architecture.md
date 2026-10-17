@@ -62,6 +62,7 @@ Broker is a control-plane dependency, not part of the normal utterance data path
 | Audio test owner        | Test-only microphone and loopback capture, VAD observation, Self/Peer capture pause and restore | `app/services/audio_test.py`, `core/runtime/audio_test.py` |
 | Local ASR runtime       | Local recognition channels and backend transitions         | `core/runtime/local_asr_provider_runtime.py`         |
 | Managed local translation | Local model provisioning and runtime lifecycle | `app/services/managed_gemma_translation.py` and `core/local_translation/runtime.py` |
+| Model assets application | One-at-a-time download, import, cancel and delete of local ASR and Gemma models through their provisioning owners | `app/services/model_assets.py` |
 | Translation turn owner  | Request lifecycle, cancellation, stale-result rejection    | `core/orchestrator/translation_turn.py`                 |
 | Index selection owner | Availability checks and persisted fallback selection | `app/services/index_selection.py`, `app/wiring/wiring_index_selection.py` |
 | Output runtime          | Routing, delivery tasks, destinations, delivery history    | `core/runtime/output.py`                              |

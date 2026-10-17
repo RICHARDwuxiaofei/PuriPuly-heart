@@ -1,331 +1,422 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import flet as ft
-from puripuly_heart.core.local_stt_runtime_installer import LocalSTTRuntimeInstallCancelled
 
-from puripuly_heart.app.services.model_assets_catalog import model_asset_choices
-from puripuly_heart.core.feature_diagnostics import log_feature
-from puripuly_heart.core.local_translation.assets import GEMMA_MODEL_ID, resolve_gemma_spec
-from puripuly_heart.core.local_translation.provisioning import GemmaProvisioningCancelled
+from puripuly_heart.ui.flet_runtime import is_hover_active, update_control_if_mounted
 from puripuly_heart.ui.i18n import t
-from puripuly_heart.ui.theme import COLOR_NEUTRAL_DARK, COLOR_SURFACE
+from puripuly_heart.ui.theme import (
+    COLOR_BACKGROUND,
+    COLOR_NEUTRAL_DARK,
+    COLOR_ON_BACKGROUND,
+    COLOR_PRIMARY,
+    COLOR_SECONDARY,
+    COLOR_SURFACE,
+    COLOR_WARNING,
+)
+
+logger = logging.getLogger(__name__)
+
+RENDER_INTERVAL_S = 0.25
+_MODEL_CARD_HEIGHT = 84
+_ACTION_CARD_HEIGHT = 96
+_ERROR_KEYS = frozenset(
+    {
+        "connection_failed",
+        "proxy_failed",
+        "download_timeout",
+        "disk_full",
+        "checksum_failed",
+        "file_size_mismatch",
+        "missing_file",
+        "model_in_use",
+        "task_busy",
+    }
+)
+_BUSY_STATUSES = frozenset({"downloading", "importing", "deleting"})
+
+ModelAssetsRunTask = Callable[[Callable[[], Awaitable[None]]], object]
+
+
+def _status_label(entry: object) -> str:
+    status = str(getattr(entry, "status", "missing"))
+    percent = getattr(entry, "progress_percent", None) or 0
+    if status in {"downloading", "importing"}:
+        return t(f"model_assets.status.{status}", percent=percent)
+    return t(f"model_assets.status.{status}")
+
+
+def _size_label(entry: object) -> str:
+    size = int(getattr(entry, "size_bytes", 0) or 0)
+    return f"{size / 1024**3:.1f} GB"
+
+
+def _failure_label(entry: object) -> str | None:
+    code = getattr(entry, "failure_code", None)
+    if not code:
+        return None
+    return t("model_assets.error." + (code if code in _ERROR_KEYS else "download_failed"))
 
 
 class ModelAssetsDialog:
-    def __init__(self, page, application, run_task):
+    """Two-column model manager: models on the left, actions for the selection on the right."""
+
+    def __init__(
+        self,
+        page: ft.Page,
+        application,
+        run_task: ModelAssetsRunTask,
+        *,
+        picker_factory: Callable[[], object] = ft.FilePicker,
+    ) -> None:
         self.page = page
         self.application = application
         self.run_task = run_task
-        self.busy = False
-        self.closed = True
-        self.files = ()
-        self.cancel_requested = False
-        self.active_model_id = None
-        self.choices = model_asset_choices()
-        self.checkboxes = {}
-        self.sources = {}
-        self.results = {}
-        self.source = ft.Dropdown(
-            value=application.gemma_download_source(),
-            options=[
-                ft.DropdownOption("official", t("model_assets.official")),
-                ft.DropdownOption("mirror", t("model_assets.mirror")),
-                ft.DropdownOption("local", t("model_assets.local")),
-            ],
-            label=t("model_assets.source"),
-            text_style=ft.TextStyle(color=COLOR_NEUTRAL_DARK),
+        self._picker_factory = picker_factory
+        self._picker = None
+        self._selected: str | None = None
+        self._confirm_delete: str | None = None
+        self._is_open = False
+        self._dialog: ft.AlertDialog | None = None
+        self._content: ft.Container | None = None
+        self._cards: dict[str, tuple[ft.Container, ft.Text, ft.Text]] = {}
+        self._actions = ft.Column(spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+        self._description = ft.Text("", size=16, color=COLOR_NEUTRAL_DARK)
+        self._failure = ft.Text("", size=14, color=COLOR_WARNING, visible=False)
+        self._progress_text: ft.Text | None = None
+        self._action_signature: tuple | None = None
+
+    @property
+    def dialog(self) -> ft.AlertDialog | None:
+        return self._dialog
+
+    @property
+    def is_open(self) -> bool:
+        return self._is_open
+
+    @property
+    def selected_model_id(self) -> str | None:
+        return self._selected
+
+    def open(self) -> None:
+        if self._is_open:
+            return
+        entries = self.application.model_asset_entries()
+        if self._selected is None and entries:
+            self._selected = entries[0].model_id
+        self._confirm_delete = None
+        self._action_signature = None
+        self._dialog = self._build_dialog(entries)
+        self._is_open = True
+        self.render()
+        self.page.show_dialog(self._dialog)
+        self.run_task(self._refresh_and_watch)
+
+    def close(self) -> None:
+        if not self._is_open:
+            return
+        self._is_open = False
+        self.page.pop_dialog()
+
+    def select(self, model_id: str) -> None:
+        if self._selected != model_id:
+            self._confirm_delete = None
+        self._selected = model_id
+        self.render()
+
+    def render(self) -> None:
+        entries = {entry.model_id: entry for entry in self.application.model_asset_entries()}
+        busy = any(entry.status in _BUSY_STATUSES for entry in entries.values())
+        for model_id, (card, name, meta) in self._cards.items():
+            entry = entries.get(model_id)
+            if entry is None:
+                continue
+            selected = model_id == self._selected
+            card.bgcolor = COLOR_PRIMARY if selected else COLOR_BACKGROUND
+            name.color = ft.Colors.WHITE if selected else COLOR_ON_BACKGROUND
+            meta.color = ft.Colors.WHITE if selected else COLOR_NEUTRAL_DARK
+            meta.value = f"{_size_label(entry)} · {_status_label(entry)}"
+        entry = entries.get(self._selected) if self._selected else None
+        if entry is not None:
+            self._render_actions(entry, busy)
+        if self._content is not None:
+            update_control_if_mounted(self._content)
+
+    def _render_actions(self, entry: object, busy: bool) -> None:
+        status = entry.status
+        failure = _failure_label(entry)
+        self._description.value = t(entry.description_key)
+        self._failure.value = failure or ""
+        self._failure.visible = failure is not None and status not in _BUSY_STATUSES
+        signature = (
+            entry.model_id,
+            status,
+            busy,
+            self._confirm_delete == entry.model_id,
         )
-        self.status = ft.Text(t("model_assets.hint"), selectable=True, color=COLOR_NEUTRAL_DARK)
-        self.progress = ft.ProgressBar(value=0)
-        self.start_button = ft.Button(
-            t("model_assets.start"), on_click=lambda _: self.run_task(self.install)
-        )
-        self.picker = ft.FilePicker()
-        controls = [ft.Text(t("model_assets.selection_hint"), color=COLOR_NEUTRAL_DARK)]
-        source_labels = {
-            "official": t("model_assets.official"),
-            "mirror": t("model_assets.mirror"),
-            "modelscope_only": t("model_assets.modelscope"),
-            "local": t("model_assets.local"),
-        }
-        for purpose in ("asr", "translation"):
+        if signature == self._action_signature:
+            if self._progress_text is not None:
+                self._progress_text.value = _status_label(entry)
+            return
+        self._action_signature = signature
+        self._progress_text = None
+        controls: list[ft.Control] = []
+        if status in _BUSY_STATUSES:
+            self._progress_text = ft.Text(
+                _status_label(entry),
+                size=22,
+                weight=ft.FontWeight.BOLD,
+                color=COLOR_PRIMARY,
+                text_align=ft.TextAlign.CENTER,
+            )
             controls.append(
+                ft.Container(
+                    content=self._progress_text,
+                    height=_ACTION_CARD_HEIGHT,
+                    alignment=ft.Alignment.CENTER,
+                    bgcolor=COLOR_BACKGROUND,
+                    border_radius=16,
+                )
+            )
+            if status != "deleting":
+                controls.append(self._action_card(t("model_assets.action.cancel"), self._on_cancel))
+        else:
+            enabled = not busy
+            controls.append(
+                self._action_card(
+                    t(
+                        "model_assets.action.redownload"
+                        if status == "installed"
+                        else "model_assets.action.download"
+                    ),
+                    self._on_download,
+                    enabled=enabled,
+                )
+            )
+            if entry.importable:
+                controls.append(
+                    self._action_card(
+                        t("model_assets.action.import"),
+                        self._on_import,
+                        enabled=enabled,
+                        detail=t(
+                            "model_assets.import_files",
+                            files=", ".join(entry.required_files),
+                        ),
+                    )
+                )
+            if status in {"installed", "invalid"}:
+                confirming = self._confirm_delete == entry.model_id
+                controls.append(
+                    self._action_card(
+                        t(
+                            "model_assets.action.delete_confirm"
+                            if confirming
+                            else "model_assets.action.delete"
+                        ),
+                        self._on_delete,
+                        enabled=enabled,
+                        emphasis=confirming,
+                    )
+                )
+            if busy:
+                controls.append(
+                    ft.Text(t("model_assets.busy_other"), size=14, color=COLOR_NEUTRAL_DARK)
+                )
+        self._actions.controls = controls
+
+    def _action_card(
+        self,
+        label: str,
+        handler: Callable[[], None],
+        *,
+        enabled: bool = True,
+        detail: str | None = None,
+        emphasis: bool = False,
+    ) -> ft.Container:
+        text = ft.Text(
+            label,
+            size=20,
+            weight=ft.FontWeight.BOLD,
+            color=(
+                ft.Colors.WHITE
+                if emphasis
+                else COLOR_ON_BACKGROUND if enabled else COLOR_NEUTRAL_DARK
+            ),
+            text_align=ft.TextAlign.CENTER,
+        )
+        content: ft.Control = text
+        if detail is not None:
+            content = ft.Column(
+                controls=[
+                    text,
+                    ft.Text(
+                        detail,
+                        size=12,
+                        color=ft.Colors.WHITE if emphasis else COLOR_NEUTRAL_DARK,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                ],
+                spacing=4,
+                alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+        return ft.Container(
+            content=content,
+            height=_ACTION_CARD_HEIGHT,
+            padding=ft.Padding.symmetric(horizontal=16, vertical=8),
+            alignment=ft.Alignment.CENTER,
+            bgcolor=COLOR_PRIMARY if emphasis else COLOR_BACKGROUND,
+            border_radius=16,
+            opacity=1.0 if enabled else 0.5,
+            disabled=not enabled,
+            on_click=lambda _event: handler(),
+            on_hover=None if emphasis else lambda event: self._on_hover(event, text),
+            animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
+        )
+
+    @staticmethod
+    def _on_hover(event, text: ft.Text) -> None:
+        text.color = COLOR_PRIMARY if is_hover_active(event) else COLOR_ON_BACKGROUND
+        update_control_if_mounted(event.control)
+
+    def _build_dialog(self, entries) -> ft.AlertDialog:
+        self._cards = {}
+        model_list = ft.ListView(spacing=10, expand=True)
+        for purpose in ("asr", "translation"):
+            model_list.controls.append(
                 ft.Text(
                     t("model_assets.group." + purpose),
+                    size=18,
                     weight=ft.FontWeight.BOLD,
-                    color=COLOR_NEUTRAL_DARK,
+                    color=COLOR_SECONDARY,
                 )
             )
-            for choice in (c for c in self.choices if c.purpose == purpose):
-                checkbox = ft.Checkbox(
-                    label=choice.name,
-                    value=False,
-                    label_style=ft.TextStyle(color=COLOR_NEUTRAL_DARK),
-                )
-                source = (
-                    self.source
-                    if choice.model_id == GEMMA_MODEL_ID
-                    else ft.Dropdown(
-                        value=choice.default_source,
-                        options=[
-                            ft.DropdownOption(value, source_labels[value])
-                            for value in choice.sources
-                        ],
-                        label=t("model_assets.source"),
-                        text_style=ft.TextStyle(color=COLOR_NEUTRAL_DARK),
-                    )
-                )
-                result = ft.Text("", color=COLOR_NEUTRAL_DARK, selectable=True)
-                self.checkboxes[choice.model_id] = checkbox
-                self.sources[choice.model_id] = source
-                self.results[choice.model_id] = result
-                controls.extend(
-                    [
-                        checkbox,
-                        ft.Text(
-                            t(choice.description_key) + f" · {choice.size_bytes / 1024**3:.2f} GiB",
-                            color=COLOR_NEUTRAL_DARK,
-                        ),
-                        source,
-                        result,
-                    ]
-                )
-        controls.extend(
-            [
-                ft.Text(
-                    "\n".join(
-                        asset.filename
-                        for choice in self.choices
-                        if choice.purpose == "translation"
-                        for asset in resolve_gemma_spec(choice.model_id).assets
+            for entry in (item for item in entries if item.purpose == purpose):
+                name = ft.Text(entry.name, size=18, weight=ft.FontWeight.BOLD)
+                meta = ft.Text("", size=14)
+                card = ft.Container(
+                    content=ft.Column(
+                        controls=[name, meta],
+                        spacing=4,
+                        alignment=ft.MainAxisAlignment.CENTER,
                     ),
-                    selectable=True,
-                    color=COLOR_NEUTRAL_DARK,
-                ),
-                ft.Text(t("model_assets.gemma_import"), color=COLOR_NEUTRAL_DARK),
-                ft.Button(t("model_assets.choose"), on_click=lambda _: self.run_task(self.choose)),
-                ft.Button(
-                    t("model_assets.choose_directory"),
-                    on_click=lambda _: self.run_task(self.choose_directory),
-                ),
-            ]
-        )
-        self.dialog = ft.AlertDialog(
-            title=ft.Text(t("model_assets.title"), color=COLOR_NEUTRAL_DARK),
-            bgcolor=COLOR_SURFACE,
-            content=ft.Column(
-                [
-                    ft.Column(controls, height=350, scroll=ft.ScrollMode.AUTO),
-                    self.status,
-                    self.progress,
-                ],
-                width=620,
-                tight=True,
-            ),
-            actions=[
-                self.start_button,
-                ft.TextButton(
-                    t("model_assets.cancel"), on_click=lambda _: self.run_task(self.cancel)
-                ),
-                ft.TextButton(t("model_assets.close"), on_click=lambda _: self.close()),
-            ],
-            on_dismiss=lambda _: self.close(pop=False),
-        )
-
-    def open(self):
-        if not self.closed:
-            return
-        self.closed = False
-        if not self.busy:
-            selected = self.application.selected_model_asset_ids()
-            for model_id, checkbox in self.checkboxes.items():
-                checkbox.value = model_id in selected
-        self.page.show_dialog(self.dialog)
-
-    def close(self, *, pop=True):
-        if self.closed:
-            return
-        self.closed = True
-        if self.busy:
-            self.cancel_requested = True
-            self.run_task(self.cancel)
-        if pop:
-            self.page.pop_dialog()
-
-    async def cancel(self):
-        self.cancel_requested = True
-        if any(
-            choice.model_id == self.active_model_id and choice.purpose == "translation"
-            for choice in self.choices
-        ):
-            await self.application.handle_managed_gemma_notice_action("cancel")
-        elif self.active_model_id is not None:
-            await self.application.cancel_asr_assets(model_id=self.active_model_id)
-
-    async def choose(self):
-        if self.busy:
-            return
-        try:
-            selected = await self.picker.pick_files(
-                allow_multiple=True,
-                allowed_extensions=["gguf"],
-                file_type=ft.FilePickerFileType.CUSTOM,
-            )
-            if selected:
-                self.files = tuple(Path(file.path) for file in selected if file.path)
-                self._select_import_models()
-                self.status.value = "\n".join(path.name for path in self.files)
-                self.page.update()
-        except Exception as error:
-            log_feature("ModelDownload", "preflight", "file_picker_failed", error=error)
-            self.status.value = t("model_assets.error.unknown")
-            self.page.update()
-
-    async def choose_directory(self):
-        if self.busy:
-            return
-        try:
-            selected = await self.picker.get_directory_path()
-            if selected:
-                directory = Path(selected)
-                self.files = tuple(
-                    directory / asset.filename
-                    for choice in self.choices
-                    if choice.purpose == "translation"
-                    for asset in resolve_gemma_spec(choice.model_id).assets
-                    if (directory / asset.filename).is_file()
+                    height=_MODEL_CARD_HEIGHT,
+                    padding=ft.Padding.symmetric(horizontal=20, vertical=10),
+                    border_radius=16,
+                    bgcolor=COLOR_BACKGROUND,
+                    on_click=lambda _event, model_id=entry.model_id: self.select(model_id),
+                    animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
                 )
-                self._select_import_models()
-                self.status.value = "\n".join(path.name for path in self.files)
-                self.page.update()
-        except Exception as error:
-            log_feature("ModelDownload", "preflight", "file_picker_failed", error=error)
-            self.status.value = t("model_assets.error.unknown")
-            self.page.update()
-
-    def _select_import_models(self):
-        filenames = {path.name for path in self.files}
-        model_ids = [
-            choice.model_id
-            for choice in self.choices
-            if choice.purpose == "translation"
-            and resolve_gemma_spec(choice.model_id).model_filename in filenames
-        ]
-        for model_id in model_ids or [GEMMA_MODEL_ID]:
-            self.sources[model_id].value = "local"
-            self.checkboxes[model_id].value = True
-
-    async def install(self):
-        if self.busy or self.closed:
-            return
-        selected = tuple(
-            choice for choice in self.choices if self.checkboxes[choice.model_id].value
+                self._cards[entry.model_id] = (card, name, meta)
+                model_list.controls.append(card)
+        actions = ft.Column(
+            controls=[self._description, self._failure, self._actions],
+            spacing=16,
+            expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
-        if not selected:
-            self.status.value = t("model_assets.select_required")
-            self.page.update()
-            return
-        self.busy = True
-        self.cancel_requested = False
-        self.start_button.disabled = True
-        for control in (*self.sources.values(), *self.checkboxes.values()):
-            control.disabled = True
-        self.status.value = t("model_assets.connecting")
-        self.page.update()
+        self._content = ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Text(
+                        t("settings.model_assets"),
+                        size=24,
+                        weight=ft.FontWeight.BOLD,
+                        color=COLOR_SECONDARY,
+                    ),
+                    ft.Container(height=16),
+                    ft.Row(
+                        controls=[model_list, actions],
+                        spacing=32,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                        expand=True,
+                    ),
+                ],
+                spacing=8,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            ),
+            width=880,
+            height=700,
+            padding=ft.Padding.symmetric(horizontal=32, vertical=32),
+            bgcolor=COLOR_SURFACE,
+            border_radius=28,
+        )
+        return ft.AlertDialog(
+            modal=False,
+            content=self._content,
+            content_padding=0,
+            bgcolor=ft.Colors.TRANSPARENT,
+            semantics_label=t("settings.model_assets"),
+            on_dismiss=self._handle_dismiss,
+        )
 
-        def update(status):
-            if self.closed:
-                return
-            self.progress.value = (
-                status.downloaded_bytes / status.total_bytes if status.total_bytes else 0
-            )
-            phase = getattr(status, "state", getattr(status, "status", "downloading"))
-            self.status.value = f"{choice.name} · {t('model_assets.phase.' + phase)}\n{status.downloaded_bytes / 1024**2:.1f} / {status.total_bytes / 1024**2:.1f} MiB"
-            if getattr(status, "filename", None):
-                self.status.value += "\n" + status.filename
-            self.page.update()
+    def _handle_dismiss(self, _event) -> None:  # noqa: ANN001
+        self._is_open = False
 
+    async def _refresh_and_watch(self) -> None:
         try:
-            failures = False
-            failure_message = ""
-            for choice in selected:
-                if self.closed or self.cancel_requested:
-                    raise GemmaProvisioningCancelled("Model task cancelled")
-                self.active_model_id = choice.model_id
-                source = self.sources[choice.model_id].value
-                self.progress.value = 0
-                self.status.value = choice.name + " · " + t("model_assets.connecting")
-                self.page.update()
-                try:
-                    if choice.purpose == "translation":
-                        await self.application.configure_gemma_source(source)
-                        if self.closed or self.cancel_requested:
-                            raise GemmaProvisioningCancelled("Model task cancelled")
-                        required_filenames = {
-                            asset.filename for asset in resolve_gemma_spec(choice.model_id).assets
-                        }
-                        await self.application.provision_gemma_assets(
-                            model_id=choice.model_id,
-                            source=source,
-                            files=tuple(
-                                path for path in self.files if path.name in required_filenames
-                            ),
-                            on_status=update,
-                        )
-                    else:
-                        await self.application.provision_asr_assets(
-                            model_id=choice.model_id, source=source, on_status=update
-                        )
-                    self.results[choice.model_id].value = t("model_assets.phase.ready")
-                except (
-                    GemmaProvisioningCancelled,
-                    LocalSTTRuntimeInstallCancelled,
-                    asyncio.CancelledError,
-                ):
-                    raise
-                except Exception as error:
-                    failures = True
-                    code = getattr(error, "failure_code", "unknown")
-                    if (
-                        not isinstance(code, str)
-                        or not code.isascii()
-                        or not code.replace("_", "").isalnum()
-                    ):
-                        code = "unknown"
-                    log_feature(
-                        "ModelDownload",
-                        "installation",
-                        code,
-                        error=error,
-                        http_status=getattr(error, "status_code", None),
-                    )
-                    self.results[choice.model_id].value = t(
-                        "model_assets.error." + code, default=t("model_assets.error.unknown")
-                    )
-                    failure_message = choice.name + " · " + self.results[choice.model_id].value
-                finally:
-                    self.active_model_id = None
-            self.status.value = t(
-                "model_assets.partial_failure" if failures else "model_assets.complete"
-            )
-            if failures:
-                self.status.value += "\n" + failure_message
-        except GemmaProvisioningCancelled, LocalSTTRuntimeInstallCancelled, asyncio.CancelledError:
-            self.status.value = t("model_assets.cancelled")
-        except Exception as error:
-            code = getattr(error, "failure_code", "unknown")
-            log_feature("ModelDownload", "installation", code, error=error)
-            self.status.value = t(
-                "model_assets.error." + code, default=t("model_assets.error.unknown")
-            )
-        finally:
-            self.busy = False
-            self.active_model_id = None
-            self.start_button.disabled = False
-            for control in (*self.sources.values(), *self.checkboxes.values()):
-                control.disabled = False
-            if not self.closed:
-                self.page.update()
+            await self.application.refresh_model_assets()
+        except Exception:
+            logger.debug("Model asset refresh failed", exc_info=True)
+        while self._is_open:
+            self.render()
+            await asyncio.sleep(RENDER_INTERVAL_S)
+
+    def _on_download(self) -> None:
+        model_id = self._selected
+        if model_id is None:
+            return
+        self._confirm_delete = None
+        self._run(lambda: self.application.download_model_asset(model_id))
+
+    def _on_cancel(self) -> None:
+        model_id = self._selected
+        if model_id is not None:
+            self._run(lambda: self.application.cancel_model_asset(model_id))
+
+    def _on_delete(self) -> None:
+        model_id = self._selected
+        if model_id is None:
+            return
+        if self._confirm_delete != model_id:
+            self._confirm_delete = model_id
+            self.render()
+            return
+        self._confirm_delete = None
+        self._run(lambda: self.application.delete_model_asset(model_id))
+
+    def _on_import(self) -> None:
+        model_id = self._selected
+        if model_id is None:
+            return
+        self._confirm_delete = None
+
+        async def choose() -> None:
+            if self._picker is None:
+                self._picker = self._picker_factory()
+            directory = await self._picker.get_directory_path()
+            if directory:
+                await self.application.import_model_asset(model_id, Path(directory))
+
+        self._run(choose)
+
+    def _run(self, operation: Callable[[], Awaitable[object]]) -> None:
+        async def task() -> None:
+            try:
+                await operation()
+            except Exception:
+                logger.debug("Model asset operation ended with a failure", exc_info=True)
+            finally:
+                if self._is_open:
+                    self.render()
+
+        self.run_task(task)
+        self.render()
+
+
+__all__ = ["ModelAssetsDialog"]

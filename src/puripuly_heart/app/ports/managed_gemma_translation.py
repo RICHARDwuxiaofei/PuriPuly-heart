@@ -17,7 +17,6 @@ class ManagedGemmaTranslationSelection:
     locale: str
     model_id: str = GEMMA_MODEL_ID
     vulkan_device: str = "Vulkan0"
-    download_source: str | None = None
 
     def __post_init__(self) -> None:
         if self.backend not in {"cpu", "gpu"}:
@@ -30,8 +29,6 @@ class ManagedGemmaTranslationSelection:
             raise ValueError("managed Gemma model id must be non-empty")
         if not self.vulkan_device.strip():
             raise ValueError("managed Gemma vulkan device must be non-empty")
-        if self.download_source not in {None, "official", "mirror", "local"}:
-            raise ValueError("unsupported managed Gemma download source")
 
 
 __all__ = ["ManagedGemmaBackend", "ManagedGemmaTranslationSelection"]

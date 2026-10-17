@@ -862,3 +862,126 @@ async def test_activation_notice_cli_catalog_apply_and_durable_reload(
         ] is False
     finally:
         await restarted.stop()
+
+
+@pytest.mark.asyncio
+async def test_control_model_commands_download_import_delete_cancel_and_report_assets(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from puripuly_heart.app.services.model_assets import ModelAssetsApplication
+    from puripuly_heart.app.services.model_assets_catalog import ModelAssetChoice
+
+    monkeypatch.setenv("PURIPULY_HEART_SECRETS_PASSPHRASE", "isolated-test-passphrase")
+    monkeypatch.setattr(
+        application_runtime, "default_http_extensions_dir", lambda: tmp_path / "extensions"
+    )
+    path = tmp_path / "settings.json"
+    isolated_settings(path)
+
+    class Provisioning:
+        def __init__(self):
+            self.requests = []
+            self.release = asyncio.Event()
+            self.started = asyncio.Event()
+            self.cancelled = False
+            self.snapshot = SimpleNamespace(activity_for=lambda backend: None)
+
+        async def start_install(self, request, *, on_status=None):
+            self.requests.append(request)
+            self.started.set()
+            await self.release.wait()
+            return SimpleNamespace(cancelled=self.cancelled, failed_model_ids=(), failure_codes=())
+
+        async def cancel_install(self, backend, *, origin=None):
+            self.cancelled = True
+            self.release.set()
+
+        async def delete_model(self, model_id):
+            return None
+
+    class Gemma:
+        status = "missing"
+
+        def install_status(self, model_id):
+            return self.status
+
+        async def install_assets(self, **kwargs):
+            self.kwargs = kwargs
+            self.status = "ready"
+
+        async def delete_assets(self, model_id):
+            self.status = "missing"
+
+    provisioning, gemma = Provisioning(), Gemma()
+    app = compose_headless_application(path)
+    try:
+        await app.start()
+        control = app.control()
+        control.bind_instance("isolated-models")
+        app._provider.model_assets = ModelAssetsApplication(
+            provisioning=lambda: provisioning,
+            gemma=lambda: gemma,
+            locale=lambda: "en",
+            model_root=tmp_path / "models",
+            choices=(
+                ModelAssetChoice("qwen3-asr-0.6b-int8-sherpa", "Qwen", "d", "asr", 1),
+                ModelAssetChoice("gemma-x", "Gemma", "d", "translation", 2, True, ("model.gguf",)),
+            ),
+        )
+
+        status = await control.query("models.status", {})
+        assert [item["status"] for item in status["assets"]] == ["missing", "missing"]
+
+        download = await control.submit(
+            "models.download",
+            {"model_id": "qwen3-asr-0.6b-int8-sherpa", "source": "hf-mirror"},
+            request_id="download",
+        )
+        await provisioning.started.wait()
+        assert (await control.query("models.status", {}))["assets"][0]["status"] == "downloading"
+        cancel = await control.submit(
+            "models.cancel",
+            {"model_id": "qwen3-asr-0.6b-int8-sherpa"},
+            request_id="cancel",
+        )
+        assert (await control.wait(cancel["operation_id"], timeout=5))["status"] == "cancelled"
+        cancelled = await control.wait(download["operation_id"], timeout=5)
+        assert cancelled["status"] == "cancelled"
+        assert provisioning.requests[0].preferred_source == "hf_mirror"
+
+        missing = await control.submit(
+            "models.import",
+            {"model_id": "gemma-x", "directory": str(tmp_path)},
+            request_id="import-missing",
+        )
+        failed = await control.wait(missing["operation_id"], timeout=5)
+        assert failed["status"] == "failed" and failed["error"]["code"] == "missing_file"
+
+        (tmp_path / "model.gguf").write_bytes(b"x")
+        imported = await control.submit(
+            "models.import",
+            {"model_id": "gemma-x", "directory": str(tmp_path)},
+            request_id="import",
+        )
+        done = await control.wait(imported["operation_id"], timeout=5)
+        assert done["status"] == "applied" and done["asset"]["status"] == "installed"
+        assert gemma.kwargs["source"] == "local"
+
+        deleted = await control.submit(
+            "models.delete", {"model_id": "gemma-x"}, request_id="delete"
+        )
+        removed = await control.wait(deleted["operation_id"], timeout=5)
+        assert removed["status"] == "applied" and removed["asset"]["status"] == "missing"
+
+        bad = await control.submit(
+            "models.download",
+            {"model_id": "gemma-x", "source": "mirror"},
+            request_id="bad-source",
+        )
+        rejected = await control.wait(bad["operation_id"], timeout=5)
+        assert rejected["status"] != "applied"
+        assert rejected["error"]["code"] == "invalid_arguments"
+    finally:
+        await app.stop()

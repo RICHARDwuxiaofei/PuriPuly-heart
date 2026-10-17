@@ -247,7 +247,7 @@ async def test_insufficient_disk_does_not_replace_existing_install(monkeypatch, 
     install.mkdir()
     (install / "keep").write_bytes(b"old")
     with pytest.raises(GemmaProvisioningError) as error:
-        await ensure_gemma_installed(source="mirror", spec=small_spec(), install_dir=install)
+        await ensure_gemma_installed(source="hf_mirror", spec=small_spec(), install_dir=install)
     assert error.value.failure_code == "disk_full"
     assert error.value.__cause__.errno == errno.ENOSPC
     assert (install / "keep").read_bytes() == b"old"
@@ -357,7 +357,7 @@ async def test_local_import_uses_selected_models_current_manifest(tmp_path, spec
 
 @pytest.mark.parametrize(
     "source,endpoint",
-    [("official", "https://huggingface.co"), ("mirror", "https://hf-mirror.net")],
+    [("huggingface", None), ("hf_mirror", "https://hf-mirror.net")],
 )
 async def test_explicit_gemma_source_preserves_endpoint_and_never_falls_back(
     tmp_path, monkeypatch, source, endpoint

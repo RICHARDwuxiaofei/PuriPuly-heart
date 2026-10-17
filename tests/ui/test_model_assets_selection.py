@@ -1,182 +1,217 @@
-import asyncio
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from __future__ import annotations
 
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+import flet as ft
 import pytest
-from puripuly_heart.core.local_stt_assets import LOCAL_STT_MODEL_ID, PARAKEET_V3_MODEL_ID
-from puripuly_heart.core.local_stt_runtime_installer import (
-    LocalSTTRuntimeInstallCancelled,
-    LocalSTTRuntimeInstallError,
-)
 
-from puripuly_heart.core.local_translation.assets import GEMMA_MODEL_ID
 from puripuly_heart.ui.components.model_assets_dialog import ModelAssetsDialog
-from puripuly_heart.ui.i18n import get_locale, set_locale
-from tests.helpers.flet_page import DialogTrackingPage
+from puripuly_heart.ui.i18n import t
 
 
-def make_dialog(selected=(LOCAL_STT_MODEL_ID,)):
-    application = SimpleNamespace(
-        selected_model_asset_ids=lambda: selected,
-        gemma_download_source=lambda: "mirror",
-        configure_gemma_source=AsyncMock(),
-        provision_gemma_assets=AsyncMock(),
-        provision_asr_assets=AsyncMock(),
-        cancel_asr_assets=AsyncMock(),
-        handle_managed_gemma_notice_action=AsyncMock(),
-    )
-    page = DialogTrackingPage()
-    page.update = lambda: None
-    dialog = ModelAssetsDialog(page, application, lambda f: None)
-    dialog.open()
-    return dialog, application
+@dataclass(frozen=True)
+class Entry:
+    model_id: str
+    name: str
+    description_key: str
+    purpose: str
+    size_bytes: int
+    status: str = "missing"
+    progress_percent: int | None = None
+    failure_code: str | None = None
+    importable: bool = False
+    required_files: tuple[str, ...] = ()
 
 
-async def test_qwen_notice_selection_downloads_qwen_not_gemma():
-    dialog, application = make_dialog()
-    assert dialog.checkboxes[LOCAL_STT_MODEL_ID].value
-    assert not dialog.checkboxes[GEMMA_MODEL_ID].value
-    await dialog.install()
-    application.provision_asr_assets.assert_awaited_once()
-    kwargs = application.provision_asr_assets.call_args.kwargs
-    assert kwargs["model_id"] == LOCAL_STT_MODEL_ID
-    assert kwargs["source"] == "modelscope_only"
-    application.configure_gemma_source.assert_not_awaited()
-    application.provision_gemma_assets.assert_not_awaited()
+class Page:
+    def __init__(self) -> None:
+        self.shown: list[object] = []
+        self.popped = 0
+
+    def show_dialog(self, dialog) -> None:
+        self.shown.append(dialog)
+
+    def pop_dialog(self) -> None:
+        self.popped += 1
 
 
-async def test_nothing_checked_never_downloads():
-    dialog, application = make_dialog(())
-    await dialog.install()
-    application.provision_asr_assets.assert_not_awaited()
-    application.provision_gemma_assets.assert_not_awaited()
-
-
-@pytest.mark.parametrize("source", ["official", "mirror", "modelscope_only"])
-async def test_per_model_source_is_forwarded_without_settings_change(source):
-    dialog, application = make_dialog()
-    dialog.sources[LOCAL_STT_MODEL_ID].value = source
-    await dialog.install()
-    assert application.provision_asr_assets.call_args.kwargs["source"] == source
-    application.configure_gemma_source.assert_not_awaited()
-
-
-async def test_modelscope_not_offered_for_gemma_or_other_asr_models():
-    dialog, _ = make_dialog()
-    for model_id, source in dialog.sources.items():
-        values = [o.key for o in source.options]
-        assert ("modelscope_only" in values) == (model_id == LOCAL_STT_MODEL_ID)
-
-
-async def test_cancelled_first_download_does_not_start_second():
-    dialog, application = make_dialog((LOCAL_STT_MODEL_ID, GEMMA_MODEL_ID))
-    application.provision_asr_assets.side_effect = LocalSTTRuntimeInstallCancelled("cancelled")
-    await dialog.install()
-    application.provision_asr_assets.assert_awaited_once()
-    application.provision_gemma_assets.assert_not_awaited()
-    assert not dialog.busy
-
-
-async def test_close_stops_queue_even_if_current_install_committed():
-    dialog, application = make_dialog((LOCAL_STT_MODEL_ID, GEMMA_MODEL_ID))
-
-    async def finish(**kwargs):
-        dialog.close()
-
-    application.provision_asr_assets.side_effect = finish
-    await dialog.install()
-    application.provision_gemma_assets.assert_not_awaited()
-    assert dialog.closed and dialog.cancel_requested
-
-
-async def test_duplicate_click_is_ignored_and_only_owned_asr_cancelled():
-    dialog, application = make_dialog((LOCAL_STT_MODEL_ID, GEMMA_MODEL_ID))
-    entered, release = asyncio.Event(), asyncio.Event()
-
-    async def hold(**kwargs):
-        entered.set()
-        await release.wait()
-        raise LocalSTTRuntimeInstallCancelled("cancelled")
-
-    application.provision_asr_assets.side_effect = hold
-    task = asyncio.create_task(dialog.install())
-    await entered.wait()
-    await dialog.install()
-    await dialog.cancel()
-    application.cancel_asr_assets.assert_awaited_once_with(model_id=LOCAL_STT_MODEL_ID)
-    application.handle_managed_gemma_notice_action.assert_not_awaited()
-    release.set()
-    await task
-    application.provision_asr_assets.assert_awaited_once()
-    application.provision_gemma_assets.assert_not_awaited()
-
-
-async def test_failed_row_keeps_safe_details_and_other_selected_model_can_finish(caplog):
-    locale = get_locale()
-    set_locale("zh-CN")
-    try:
-        dialog, application = make_dialog((LOCAL_STT_MODEL_ID, PARAKEET_V3_MODEL_ID))
-        application.provision_asr_assets.side_effect = [
-            LocalSTTRuntimeInstallError(
-                "secret-token-and-signed-url", failure_code="download_timeout", status_code=503
+class Application:
+    def __init__(self) -> None:
+        self.entries = [
+            Entry("asr", "Qwen CPU", "model_assets.description.qwen_cpu", "asr", 2 * 1024**3),
+            Entry(
+                "gemma",
+                "Gemma E4B",
+                "model_assets.description.gemma_e4b",
+                "translation",
+                4 * 1024**3,
+                importable=True,
+                required_files=("model.gguf", "draft.gguf"),
             ),
-            None,
         ]
-        await dialog.install()
-        assert "超时" in dialog.results[LOCAL_STT_MODEL_ID].value
-        assert dialog.results[PARAKEET_V3_MODEL_ID].value == "完成"
-        dialog.close()
-        assert "code=download_timeout" in caplog.text and "http_status=503" in caplog.text
-        assert "secret-token" not in caplog.text
-        assert "超时" in dialog.status.value
-    finally:
-        set_locale(locale)
+        self.calls: list[tuple] = []
+
+    def model_asset_entries(self):
+        return tuple(self.entries)
+
+    async def refresh_model_assets(self):
+        self.calls.append(("refresh",))
+        return tuple(self.entries)
+
+    async def download_model_asset(self, model_id, *, source=None):
+        self.calls.append(("download", model_id, source))
+
+    async def import_model_asset(self, model_id, directory):
+        self.calls.append(("import", model_id, directory))
+
+    async def cancel_model_asset(self, model_id):
+        self.calls.append(("cancel", model_id))
+        return True
+
+    async def delete_model_asset(self, model_id):
+        self.calls.append(("delete", model_id))
+
+    def set(self, model_id: str, **changes) -> None:
+        self.entries = [
+            replace(entry, **changes) if entry.model_id == model_id else entry
+            for entry in self.entries
+        ]
 
 
-async def test_shared_import_files_install_both_gemma_profiles(tmp_path, monkeypatch):
-    import hashlib
-    from dataclasses import replace
+def _texts(control) -> list[str]:
+    found: list[str] = []
 
-    from puripuly_heart.core.local_translation.assets import (
-        GemmaAsset,
-        e4b_gemma_spec,
-        gemma_26b_spec,
-        validate_gemma_install,
-    )
-    from puripuly_heart.core.local_translation.provisioning import (
-        LocalGemmaDownloadAdapter,
-        ensure_gemma_installed,
-    )
-    from puripuly_heart.ui.components import model_assets_dialog
+    def walk(node) -> None:
+        if isinstance(node, ft.Text) and node.value and getattr(node, "visible", True):
+            found.append(node.value)
+        for name in ("content", "controls"):
+            child = getattr(node, name, None)
+            if isinstance(child, list):
+                for item in child:
+                    walk(item)
+            elif child is not None and hasattr(child, "__dict__"):
+                walk(child)
 
-    specs = {}
-    files = []
-    for original in (e4b_gemma_spec(), gemma_26b_spec()):
-        assets = []
-        for asset in original.assets:
-            data = asset.filename.encode()
-            path = tmp_path / asset.filename
-            path.write_bytes(data)
-            files.append(path)
-            assets.append(GemmaAsset(asset.filename, len(data), hashlib.sha256(data).hexdigest()))
-        specs[original.model_id] = replace(original, assets=tuple(assets))
-    monkeypatch.setattr(model_assets_dialog, "resolve_gemma_spec", specs.__getitem__)
-    dialog, application = make_dialog(tuple(specs))
-    dialog.files = tuple(files)
-    for model_id in specs:
-        dialog.sources[model_id].value = "local"
+    walk(control)
+    return found
 
-    async def install(*, model_id, source, files, on_status):
-        spec = specs[model_id]
-        await ensure_gemma_installed(
-            source=source,
-            spec=spec,
-            downloader=LocalGemmaDownloadAdapter(files, spec),
-            install_dir=tmp_path / model_id,
-            on_status=on_status,
-        )
 
-    application.provision_gemma_assets.side_effect = install
-    await dialog.install()
-    for model_id, spec in specs.items():
-        validate_gemma_install(tmp_path / model_id, spec=spec)
+def _action(dialog: ModelAssetsDialog, label: str) -> ft.Container:
+    for card in dialog._actions.controls:
+        if label in _texts(card):
+            return card
+    raise AssertionError(f"missing action {label}: {_texts(dialog._actions)}")
+
+
+def _dialog(app: Application, tasks: list, **kwargs) -> ModelAssetsDialog:
+    return ModelAssetsDialog(Page(), app, tasks.append, **kwargs)
+
+
+async def _run(tasks: list) -> None:
+    while tasks:
+        task = tasks.pop(0)
+        if task.__name__ == "_refresh_and_watch":
+            continue
+        await task()
+
+
+@pytest.mark.asyncio
+async def test_modal_lists_models_by_purpose_and_shows_actions_for_the_selection() -> None:
+    app = Application()
+    tasks: list = []
+    dialog = _dialog(app, tasks)
+
+    dialog.open()
+
+    texts = _texts(dialog.dialog.content)
+    assert t("settings.model_assets") in texts
+    assert t("model_assets.group.asr") in texts
+    assert t("model_assets.group.translation") in texts
+    assert f"2.0 GB · {t('model_assets.status.missing')}" in texts
+    assert dialog.selected_model_id == "asr"
+    assert t("model_assets.description.qwen_cpu") in texts
+    assert texts.count("Qwen CPU") == 1
+    assert [label for card in dialog._actions.controls for label in _texts(card)] == [
+        t("model_assets.action.download")
+    ]
+
+    dialog.select("gemma")
+    actions = _texts(dialog._actions)
+    assert t("model_assets.action.import") in actions
+    assert t("model_assets.import_files", files="model.gguf, draft.gguf") in actions
+
+
+@pytest.mark.asyncio
+async def test_download_and_two_step_delete_call_the_application() -> None:
+    app = Application()
+    app.set("asr", status="installed")
+    tasks: list = []
+    dialog = _dialog(app, tasks)
+    dialog.open()
+
+    _action(dialog, t("model_assets.action.redownload")).on_click(None)
+    await _run(tasks)
+    assert ("download", "asr", None) in app.calls
+
+    _action(dialog, t("model_assets.action.delete")).on_click(None)
+    await _run(tasks)
+    assert not any(call[0] == "delete" for call in app.calls)
+    _action(dialog, t("model_assets.action.delete_confirm")).on_click(None)
+    await _run(tasks)
+    assert ("delete", "asr") in app.calls
+
+
+@pytest.mark.asyncio
+async def test_progress_replaces_actions_and_other_models_wait_for_the_running_task() -> None:
+    app = Application()
+    app.set("asr", status="downloading", progress_percent=42)
+    tasks: list = []
+    dialog = _dialog(app, tasks)
+    dialog.open()
+
+    assert t("model_assets.status.downloading", percent=42) in _texts(dialog._actions)
+    _action(dialog, t("model_assets.action.cancel")).on_click(None)
+    await _run(tasks)
+    assert ("cancel", "asr") in app.calls
+
+    dialog.select("gemma")
+    download = _action(dialog, t("model_assets.action.download"))
+    assert download.disabled is True
+    assert t("model_assets.busy_other") in _texts(dialog._actions)
+
+
+@pytest.mark.asyncio
+async def test_failure_is_shown_with_a_known_reason_or_the_generic_one() -> None:
+    app = Application()
+    app.set("asr", failure_code="model_in_use")
+    dialog = _dialog(app, [])
+    dialog.open()
+    assert dialog._failure.value == t("model_assets.error.model_in_use")
+    assert dialog._failure.visible is True
+
+    app.set("asr", failure_code="mirror_redirect_external")
+    dialog.render()
+    assert dialog._failure.value == t("model_assets.error.download_failed")
+
+
+@pytest.mark.asyncio
+async def test_import_picks_a_folder_and_closing_never_cancels_work() -> None:
+    app = Application()
+    tasks: list = []
+
+    class Picker:
+        async def get_directory_path(self):
+            return "C:/models"
+
+    dialog = _dialog(app, tasks, picker_factory=Picker)
+    dialog.open()
+    dialog.select("gemma")
+
+    _action(dialog, t("model_assets.action.import")).on_click(None)
+    await _run(tasks)
+    assert ("import", "gemma", Path("C:/models")) in app.calls
+
+    dialog.close()
+    assert dialog.is_open is False
+    assert not any(call[0] == "cancel" for call in app.calls)

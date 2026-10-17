@@ -35,6 +35,7 @@ G14_PROVIDER_INTENT_FIELDS = (
     "settings_secrets",
     "custom_stt_secret_changed",
     "chatgpt",
+    "open_model_assets",
 )
 G14_OWNED_VIEW_CALLBACKS = (
     "on_settings_changed",
@@ -45,6 +46,7 @@ G14_OWNED_VIEW_CALLBACKS = (
     "on_secret_cleared",
     "on_local_llm_secret_changed",
     "on_gpu_discovery_requested",
+    "on_open_model_assets",
     "on_custom_stt_secret_changed",
 )
 G14_OWNED_VIEW_SINKS = (
@@ -140,7 +142,7 @@ def test_settings_view_implements_the_explicit_contract() -> None:
         "soniox_speaker_diarization_control",
         "gpu_device_control",
         "gpu_llm_control",
-        "gpu_refresh_control",
+        "model_assets_control",
         "local_llm_connection_control",
         "custom_stt_connection_control",
         "managed_key_control",

@@ -330,11 +330,8 @@ class TranslationIntent:
     deepseek: DeepSeekTranslationIntent = field(default_factory=DeepSeekTranslationIntent)
     qwen: QwenTranslationIntent = field(default_factory=QwenTranslationIntent)
     gpu_device_id: str = "auto"
-    download_source: str | None = None
 
     def __post_init__(self) -> None:
-        if self.download_source not in {None, "official", "mirror", "local"}:
-            object.__setattr__(self, "download_source", None)
         if self.model == "managed_gemma_26b":
             object.__setattr__(self, "connection", "gpu")
         history = dict(self.connection_history)

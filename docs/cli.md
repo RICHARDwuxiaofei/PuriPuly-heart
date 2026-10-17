@@ -171,6 +171,24 @@ puripuly.exe models status
 - Installation reports progress through the normal application owner.
 - It publishes `ready` only after validation and staged replacement complete.
 
+### Model management
+
+The same operations as the desktop model manager work on one model at a time. Take model IDs from `models status`, which lists every local ASR and Gemma model under `assets` with `status` (`installed`, `missing`, `invalid`, `downloading`, `importing`, or `deleting`), `progress_percent`, the last `failure_code`, `size_bytes`, and the `required_files` of importable models.
+
+```powershell
+puripuly.exe models download --model-id parakeet-tdt-0.6b-v3-int8-sherpa
+puripuly.exe models download --model-id gemma-4-e4b-it-qat-ud-q4-k-xl --source hf-mirror
+puripuly.exe models import --model-id gemma-4-e4b-it-qat-ud-q4-k-xl --dir D:\models
+puripuly.exe models cancel --model-id parakeet-tdt-0.6b-v3-int8-sherpa
+puripuly.exe models delete --model-id gemma-4-26b-a4b-it-qat-ud-q4-k-xl
+```
+
+- Only one model task runs at a time. A second task returns `failed` with `task_busy`.
+- A download, import, or delete does not change settings or provider selection.
+- `delete` refuses a model that running recognition or translation is using (`model_in_use`). It renames the install before removing it, so files in use are never partially deleted.
+- `import` is available for Gemma models and needs the pinned file names listed in `required_files`. Files are verified before installation.
+- These commands do not hold the settings command queue, so other commands keep working during a long download.
+
 ### Peer capture and consent
 
 Peer capture requires informed, explicit acceptance of the existing terms:
@@ -404,9 +422,9 @@ Discover current values with `settings choices` before applying them:
 
 Apply model and connection together through `settings apply`. The normal settings owner persists the selection; observe it again after a fresh process restart. `gemma.prepare` prepares the selected model, and `gemma.cancel` cancels ongoing preparation. Use `models status` for the managed Gemma owner, not ASR-specific `gpu status`. A completed preparation is not evidence of a completed translation; correlate `text submit` admission with the translation events.
 
-Models download on demand with progress, cancellation, checksum validation and atomic installation. No weights are bundled with the installer. The 26B target is `unsloth/gemma-4-26B-A4B-it-qat-GGUF` revision `7b92b5b28818151e8669af2e45e88d6086f490dd`, file `gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf`, 14249047104 bytes, SHA-256 `a7c5bc715f5ff8e99a3e8901ce7d2b42b402c669bf24f7c5250747633d0f5891`. Chinese UI locales download that file from ModelScope revision `f5f82bed79bc0bc49b01e0e577bb3dc949ebc564` first. Other locales try that mirror after Hugging Face fails. The installed manifest keeps the Hugging Face revision. It has no draft model or multimodal projector. E4B retains its existing pinned target and CPU MTP drafter.
+Models download on demand with progress, cancellation, checksum validation and atomic installation. No weights are bundled with the installer. The 26B target is `unsloth/gemma-4-26B-A4B-it-qat-GGUF` revision `7b92b5b28818151e8669af2e45e88d6086f490dd`, file `gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf`, 14249047104 bytes, SHA-256 `a7c5bc715f5ff8e99a3e8901ce7d2b42b402c669bf24f7c5250747633d0f5891`. ModelScope serves that file at revision `f5f82bed79bc0bc49b01e0e577bb3dc949ebc564`. The installed manifest keeps the Hugging Face revision. It has no draft model or multimodal projector. E4B retains its existing pinned target and CPU MTP drafter.
 
-The desktop model manager's explicit Mirror source uses `https://hf-mirror.net` for ASR and Gemma. It keeps pinned revisions, sizes and SHA-256 validation, uses anonymous downloads with Range resume, and rejects redirects outside the selected HTTPS mirror host without falling back. The public downloader also accepts `https://hf-mirror.com`. Ordinary on-demand source ordering is unchanged.
+Local ASR and Gemma downloads try their sources in a fixed order and move to the next source only after the current one fails: Chinese UI locales use ModelScope, then `https://hf-mirror.net`, then Hugging Face; other locales use Hugging Face, then ModelScope, then `hf-mirror.net`. Sources a model does not publish are skipped. The same order applies to on-demand downloads and to `models download` without `--source`. `--source` selects one source and never falls back. Every source keeps pinned revisions, sizes and SHA-256 validation. The mirror uses anonymous downloads with Range resume and rejects redirects outside its HTTPS host. Each attempt is logged as `[ModelDownload]` with the source; the GUI shows only progress.
 
 The managed runtime is pinned to llama.cpp **b11537 / `8e2d31e0eb658d0382d3106a61369dff81f0c080`**. Source runtime files live under `build/llama.cpp/llama.cpp-b11537/{cpu,vulkan}`; installed files live under `_runtime/llama.cpp-b11537/{cpu,vulkan}`. `PURIPULY_HEART_LLAMA_CPP_ROOT` may select a compatible root with those backend subdirectories, but an incompatible executable build/commit is rejected. A missing or incompatible executable fails before launch; `models status` reports `failure_phase: runtime_files` with `failure_code` `runtime_missing` or `runtime_incompatible`, distinct from a native load failure (`runtime`). Distribution archive identities are in [the runtime notice](../third_party/llama.cpp/README.md).
 

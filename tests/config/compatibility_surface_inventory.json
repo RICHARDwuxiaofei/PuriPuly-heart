@@ -1150,6 +1150,15 @@
       "rationale": "These modules define the internal Local STT download port and its subprocess-backed Hugging Face Xet adapter. Their explicit exports are stable production wiring contracts, but they are not external package compatibility facades."
     },
     {
+      "surface": "local model download source order and install removal helpers",
+      "classification": "internal_local_stt_download_boundary",
+      "modules": [
+        "puripuly_heart.core.model_download_sources",
+        "puripuly_heart.core.model_install_removal"
+      ],
+      "rationale": "These modules define the locale-based download source order shared by local ASR and Gemma provisioning and the guarded removal of installed model directories. They are internal provisioning contracts, not external package compatibility facades."
+    },
+    {
       "surface": "provider LLM internal error-detail helpers",
       "classification": "internal_provider_implementation_modules",
       "modules": [

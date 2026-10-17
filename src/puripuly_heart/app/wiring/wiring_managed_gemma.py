@@ -54,7 +54,6 @@ def managed_gemma_selection(
         locale=settings.intent.ui.locale,
         model_id=model_id,
         vulkan_device=resolve_llama_vulkan_device(translation.gpu_device_id),
-        download_source=translation.download_source,
     )
 
 

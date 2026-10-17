@@ -445,7 +445,12 @@ async def test_modelscope_http_failure_preserves_download_status_metadata(
 ) -> None:
     class FailedDownloader:
         async def download(self, request, *, cancel_event, on_progress):
-            raise LocalSTTDownloadPortError("primary download unavailable")
+            failed = httpx.Request("GET", "https://example.invalid/model.gguf")
+            raise LocalSTTDownloadPortError("primary download unavailable", status_code=503) from (
+                httpx.HTTPStatusError(
+                    "unavailable", request=failed, response=httpx.Response(503, request=failed)
+                )
+            )
 
     monkeypatch.setattr(
         provisioning.network_clients,
@@ -585,10 +590,7 @@ def test_26b_application_selection_rejects_cpu_without_substitution() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source", [None, "official", "mirror", "local"])
-async def test_26b_selection_forwards_scoped_source_and_locale_without_changing_profile(
-    source,
-) -> None:
+async def test_26b_selection_forwards_locale_without_a_persisted_source() -> None:
     settings = AppSettingsVNext()
     settings = replace(
         settings,
@@ -599,7 +601,6 @@ async def test_26b_selection_forwards_scoped_source_and_locale_without_changing_
                 settings.intent.translation,
                 model="managed_gemma_26b",
                 connection="gpu",
-                download_source=source,
             ),
         ),
     )
@@ -609,9 +610,8 @@ async def test_26b_selection_forwards_scoped_source_and_locale_without_changing_
     try:
         await owner.prepare(selection)
 
-        assert selection.download_source == source
         assert selection.model_id == assets.GEMMA_26B_MODEL_ID
-        assert runtime.calls[0]["provision_kwargs"]["source"] == source
+        assert "source" not in runtime.calls[0]["provision_kwargs"]
         assert runtime.calls[0]["provision_kwargs"]["locale"] == "zh-CN"
         assert runtime.calls[0]["spec"] == assets.gemma_26b_spec()
         assert runtime.calls[0]["backend"] == "gpu"
@@ -685,4 +685,37 @@ def test_model_manager_catalog_includes_current_translation_profiles() -> None:
     assert set(choices) == {spec.model_id for spec in specs}
     for spec in specs:
         assert choices[spec.model_id].size_bytes == sum(asset.size_bytes for asset in spec.assets)
-        assert choices[spec.model_id].sources == ("official", "mirror", "local")
+        assert choices[spec.model_id].importable is True
+        assert choices[spec.model_id].required_files == tuple(
+            asset.filename for asset in spec.assets
+        )
+
+
+@pytest.mark.asyncio
+async def test_delete_assets_removes_an_idle_install_but_not_the_loaded_model(
+    tmp_path, monkeypatch
+) -> None:
+    from puripuly_heart.core.model_install_removal import ModelInstallInUseError
+
+    monkeypatch.setattr(assets, "default_models_dir", lambda: tmp_path / "models")
+    selection = _selection()
+    install_dir = assets.default_gemma_install_dir(assets.resolve_gemma_spec(selection.model_id))
+    install_dir.mkdir(parents=True)
+    (install_dir / "weights.gguf").write_bytes(b"x")
+    runtime = RecordingRuntime(lambda **kwargs: _readiness(str(kwargs["backend"])))
+    owner = ManagedGemmaTranslationOwner(runtime=runtime)
+    try:
+        await owner.prepare(selection)
+        assert owner.active_model_id == selection.model_id
+
+        with pytest.raises(ModelInstallInUseError):
+            await owner.delete_assets(selection.model_id)
+        assert install_dir.exists()
+
+        await owner.deactivate()
+        await owner.delete_assets(selection.model_id)
+
+        assert not install_dir.exists()
+        assert owner.install_status(selection.model_id) == "missing"
+    finally:
+        await owner.close()

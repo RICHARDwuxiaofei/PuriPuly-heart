@@ -108,6 +108,7 @@ from puripuly_heart.app.services.manual_local_asr_fallback import (
     ManualLocalASRFallbackOwner,
 )
 from puripuly_heart.app.services.manual_typing import ManualTypingOwner
+from puripuly_heart.app.services.model_assets import ModelAssetsApplication
 from puripuly_heart.app.services.osc.control_runtime import OscControlIntegrationOwner
 from puripuly_heart.app.services.osc.state_publisher import state_from_settings
 from puripuly_heart.app.services.overlay_application import (
@@ -2266,6 +2267,32 @@ def compose_application_runtime(
         local_asr_provisioning=lambda: provisioning,
     )
 
+    def model_assets_active_ids() -> frozenset[str]:
+        from puripuly_heart.core.local_stt_assets import LOCAL_QWEN_GPU_MODEL_ID
+
+        active: set[str] = set()
+        runtime = pipeline.local_asr_runtime
+        snapshot = getattr(runtime, "snapshot", None) if runtime is not None else None
+        if snapshot is not None:
+            active.update(
+                channel.model_id
+                for channel in snapshot.channels
+                if channel.model_id and channel.has_resources
+            )
+            if snapshot.gpu.model_resident:
+                active.add(LOCAL_QWEN_GPU_MODEL_ID)
+        if managed_gemma.active_model_id is not None:
+            active.add(managed_gemma.active_model_id)
+        return frozenset(active)
+
+    model_assets = ModelAssetsApplication(
+        provisioning=lambda: provisioning,
+        gemma=lambda: managed_gemma,
+        locale=lambda: (
+            settings.canonical.intent.ui.locale if settings.canonical is not None else None
+        ),
+        active_model_ids=model_assets_active_ids,
+    )
     overlay_owner = require_overlay()
     peer_runtime = require_peer()
     audio_test_runtime = require_audio_test()
@@ -2308,6 +2335,7 @@ def compose_application_runtime(
             managed_gemma=managed_gemma,
             chatgpt=chatgpt_account,
             connection_readiness=llm_connection_readiness,
+            model_assets=model_assets,
             llm_devices_sink=lambda devices: presentation.set_dashboard_llm_gpu_devices(
                 devices=devices
             ),

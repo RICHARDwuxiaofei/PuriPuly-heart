@@ -3,7 +3,6 @@ from collections.abc import Callable
 import flet as ft
 
 from puripuly_heart.ui.flet_runtime import is_hover_active
-from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.theme import (
     COLOR_BACKGROUND,
     COLOR_DIVIDER,
@@ -16,13 +15,7 @@ from puripuly_heart.ui.theme import (
 class TitleBar(ft.Container):
     """Custom draggable title bar with window controls."""
 
-    def __init__(
-        self,
-        page: ft.Page,
-        *,
-        on_close: Callable[[], None],
-        on_model_assets: Callable[[], None] | None = None,
-    ):
+    def __init__(self, page: ft.Page, *, on_close: Callable[[], None]):
         self._page = page
         self._on_close = on_close
 
@@ -49,15 +42,6 @@ class TitleBar(ft.Container):
             [minimize_btn, self._close_btn],
             spacing=0,
         )
-        if on_model_assets is not None:
-            window_controls.controls.insert(
-                0,
-                ft.IconButton(
-                    icon=ft.Icons.DOWNLOAD,
-                    tooltip=t("model_assets.title"),
-                    on_click=lambda _: on_model_assets(),
-                ),
-            )
 
         drag_area = ft.WindowDragArea(
             content=ft.Container(expand=True, height=48),

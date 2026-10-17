@@ -17,8 +17,8 @@ class ModelAssetChoice:
     description_key: str
     purpose: str
     size_bytes: int
-    sources: tuple[str, ...]
-    default_source: str
+    importable: bool = False
+    required_files: tuple[str, ...] = ()
 
 
 def model_asset_choices() -> tuple[ModelAssetChoice, ...]:
@@ -30,9 +30,6 @@ def model_asset_choices() -> tuple[ModelAssetChoice, ...]:
         (LOCAL_QWEN_GPU_MODEL_ID, "Qwen3 ASR 1.7B Q6_K · GPU", "qwen_gpu"),
     ):
         manifest = load_local_stt_asset_manifest(model_id)
-        sources = ("official", "mirror")
-        if "modelscope" in manifest.sources:
-            sources = ("modelscope_only",) + sources
         choices.append(
             ModelAssetChoice(
                 model_id,
@@ -40,23 +37,21 @@ def model_asset_choices() -> tuple[ModelAssetChoice, ...]:
                 "model_assets.description." + key,
                 "asr",
                 sum(a.size_bytes or 0 for a in manifest.files),
-                sources,
-                sources[0],
             )
         )
-    for spec, name in (
-        (e4b_gemma_spec(), "Gemma E4B + MTP · GGUF"),
-        (gemma_26b_spec(), "Gemma 26B A4B · GGUF"),
+    for spec, name, key in (
+        (e4b_gemma_spec(), "Gemma 4 E4B + MTP", "gemma_e4b"),
+        (gemma_26b_spec(), "Gemma 4 26B A4B", "gemma_26b"),
     ):
         choices.append(
             ModelAssetChoice(
                 spec.model_id,
                 name,
-                "model_assets.description.gemma",
+                "model_assets.description." + key,
                 "translation",
                 sum(a.size_bytes for a in spec.assets),
-                ("official", "mirror", "local"),
-                "official",
+                importable=True,
+                required_files=tuple(asset.filename for asset in spec.assets),
             )
         )
     return tuple(choices)

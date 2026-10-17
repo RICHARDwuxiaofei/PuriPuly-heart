@@ -15,7 +15,12 @@ from puripuly_heart.core.local_asr.local_stt_download_port import (
     HuggingFaceDownloadPort,
     LocalSTTDownloadPortError,
 )
-from puripuly_heart.core.local_translation.assets import resolve_gemma_spec
+from puripuly_heart.core.local_asr.local_stt_runtime_installer import LocalSTTProvisioningLease
+from puripuly_heart.core.local_translation.assets import (
+    default_gemma_install_dir,
+    inspect_gemma_install,
+    resolve_gemma_spec,
+)
 from puripuly_heart.core.local_translation.provisioning import (
     GemmaProvisioningCancelled,
     GemmaProvisioningError,
@@ -105,6 +110,13 @@ class ManagedGemmaTranslationOwner:
     def snapshot(self) -> ManagedGemmaTranslationSnapshot:
         return self._snapshot
 
+    @property
+    def active_model_id(self) -> str | None:
+        return self._selected_model_id if self._active_generation is not None else None
+
+    def install_status(self, model_id: str) -> str:
+        return inspect_gemma_install(spec=resolve_gemma_spec(model_id)).status
+
     async def prepare(
         self,
         selection: ManagedGemmaTranslationSelection,
@@ -147,7 +159,6 @@ class ManagedGemmaTranslationOwner:
                         "cancel_event": cancel_event,
                         "on_status": on_status,
                         "spec": spec,
-                        "source": selection.download_source,
                         "locale": selection.locale,
                     },
                 ),
@@ -225,10 +236,11 @@ class ManagedGemmaTranslationOwner:
     async def install_assets(
         self,
         *,
-        source: str,
+        source: str | None = None,
         model_id: str | None = None,
         files: tuple[Path, ...] = (),
         on_status=None,
+        locale: str | None = None,
     ):
         from puripuly_heart.core.feature_diagnostics import log_feature
 
@@ -251,6 +263,7 @@ class ManagedGemmaTranslationOwner:
                     downloader=downloader,
                     cancel_event=cancellation,
                     on_status=on_status,
+                    locale=locale,
                 ),
                 name="install-assets",
             )
@@ -271,6 +284,40 @@ class ManagedGemmaTranslationOwner:
                 if self._prepare_task is task:
                     self._prepare_task = None
                     self._cancel_event = None
+
+    async def delete_assets(self, model_id: str) -> None:
+        from puripuly_heart.core.model_install_removal import (
+            ModelInstallInUseError,
+            remove_model_install_dir,
+        )
+
+        lingering = self._cancel_linger()
+        await self._await_cancelled_linger(lingering)
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("Model owner closed")
+            if self._prepare_task is not None and not self._prepare_task.done():
+                raise GemmaProvisioningError(
+                    "Another model task is active", failure_code="task_busy"
+                )
+            if self.active_model_id == model_id:
+                raise ModelInstallInUseError("Model is loaded for translation")
+            if self._active_generation is None:
+                await self._runtime.release()
+            install_dir = default_gemma_install_dir(resolve_gemma_spec(model_id))
+            lease = await asyncio.to_thread(
+                LocalSTTProvisioningLease.acquire,
+                model_root=install_dir.parent,
+                wait=False,
+            )
+            if lease is None:
+                raise GemmaProvisioningError(
+                    "Another model task is active", failure_code="task_busy"
+                )
+            try:
+                await asyncio.to_thread(remove_model_install_dir, install_dir)
+            finally:
+                await asyncio.to_thread(lease.close)
 
     def schedule_demand_sync(
         self,

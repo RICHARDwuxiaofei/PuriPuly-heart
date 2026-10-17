@@ -13,10 +13,11 @@ from puripuly_heart.core.local_stt_assets import (
 from puripuly_heart.core.local_stt_download_port import LocalSTTDownloadPortError
 from puripuly_heart.core.local_stt_runtime_installer import (
     LocalSTTRuntimeInstallError,
-    _source_order,
+    _source_plans,
     ensure_local_stt_installed,
 )
 
+from puripuly_heart.core.model_download_sources import HF_MIRROR_ENDPOINT
 from tests.core.runtime.test_local_asr_provisioning import (
     MutableProvisioningBackend,
     _all_states,
@@ -26,23 +27,25 @@ from tests.core.runtime.test_local_asr_provisioning import (
 
 @pytest.mark.parametrize(
     "selected,expected",
-    [("official", "huggingface"), ("mirror", "huggingface"), ("modelscope_only", "modelscope")],
+    [
+        ("huggingface", ("huggingface", None, "huggingface")),
+        ("hf_mirror", ("huggingface", HF_MIRROR_ENDPOINT, "hf_mirror")),
+        ("modelscope", ("modelscope", None, "modelscope")),
+    ],
 )
 def test_explicit_source_never_falls_back(selected, expected):
     manifest = load_local_stt_asset_manifest(LOCAL_STT_MODEL_ID)
-    assert _source_order(manifest, preferred_source=selected, locale="zh-CN") == (expected,)
+    assert _source_plans(manifest, preferred_source=selected, locale="zh-CN") == (expected,)
 
 
 def test_unsupported_modelscope_does_not_fall_back_to_hf():
     manifest = load_local_stt_asset_manifest("parakeet-tdt-0.6b-v3-int8-sherpa")
     with pytest.raises(LocalSTTRuntimeInstallError) as caught:
-        _source_order(manifest, preferred_source="modelscope_only", locale=None)
+        _source_plans(manifest, preferred_source="modelscope", locale=None)
     assert caught.value.failure_code == "unsupported_source"
 
 
-@pytest.mark.parametrize(
-    "source,endpoint", [("official", "https://huggingface.co"), ("mirror", "https://hf-mirror.net")]
-)
+@pytest.mark.parametrize("source,endpoint", [("hf_mirror", "https://hf-mirror.net")])
 async def test_endpoint_reaches_downloader_and_pinned_checksum_is_enforced(
     tmp_path, source, endpoint
 ):
@@ -95,7 +98,7 @@ async def test_source_error_retains_code_http_status_and_never_falls_back(tmp_pa
         await ensure_local_stt_installed(
             model_root=tmp_path,
             manifest=manifest,
-            preferred_source="mirror",
+            preferred_source="hf_mirror",
             huggingface_downloader=Downloader(),
         )
     assert len(requests) == 1
@@ -122,12 +125,12 @@ async def test_owner_forwards_selected_source_and_byte_status(tmp_path):
                 "cpu",
                 (LOCAL_STT_MODEL_ID,),
                 None,
-                "model_assets_dialog",
-                preferred_source="modelscope_only",
+                "model_assets",
+                preferred_source="modelscope",
             ),
             on_status=statuses.append,
         )
-        assert calls == ["modelscope_only"] and not result.failed_model_ids
+        assert calls == ["modelscope"] and not result.failed_model_ids
         assert statuses[0].percent == 37 and statuses[-1].status == "ready"
     finally:
         await owner.close()
@@ -141,7 +144,7 @@ async def test_cancel_origin_does_not_cancel_other_owners_task(tmp_path):
             LocalASRInstallRequest("cpu", (LOCAL_STT_MODEL_ID,), None, "activation")
         )
         await backend.install_started.wait()
-        await owner.cancel_install("cpu", origin="model_assets_dialog")
+        await owner.cancel_install("cpu", origin="model_assets")
         assert not task.done()
         backend.release_install.set()
         assert not (await task).cancelled
@@ -149,17 +152,18 @@ async def test_cancel_origin_does_not_cancel_other_owners_task(tmp_path):
         await owner.close()
 
 
-def test_default_gpu_source_strategy_retains_registered_mirror_fallback():
-    manifest = load_local_stt_asset_manifest(LOCAL_QWEN_GPU_MODEL_ID)
+def _labels(manifest, locale):
+    return tuple(plan[2] for plan in _source_plans(manifest, preferred_source=None, locale=locale))
 
-    assert _source_order(manifest, preferred_source=None, locale="zh-CN") == (
-        "hf_mirror",
-        "huggingface",
-    )
-    assert _source_order(manifest, preferred_source=None, locale="en") == (
-        "huggingface",
-        "hf_mirror",
-    )
+
+def test_automatic_source_order_follows_locale_and_skips_unregistered_sources():
+    qwen = load_local_stt_asset_manifest(LOCAL_STT_MODEL_ID)
+    gpu = load_local_stt_asset_manifest(LOCAL_QWEN_GPU_MODEL_ID)
+
+    assert _labels(qwen, "zh-CN") == ("modelscope", "hf_mirror", "huggingface")
+    assert _labels(qwen, "ko") == ("huggingface", "modelscope", "hf_mirror")
+    assert _labels(gpu, "zh-CN") == ("hf_mirror", "huggingface")
+    assert _labels(gpu, "en") == ("huggingface", "hf_mirror")
 
 
 async def test_cancelled_lease_acquisition_waits_and_releases_acquired_lease(tmp_path, monkeypatch):
