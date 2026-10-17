@@ -484,10 +484,3 @@ Existing narrow lifetime debt is recorded at the exact creation identities, with
 - The evidence runner's `local_asr_production_composition._run_stage` cancels/gathers on timeout, but not on caller cancellation.
 
 These exceptions permit only their reviewed existing identities and caps. The Flet application shutdown driver is separately retained and excluded from cancelling itself; that is not a claim that ordinary page callback cleanup drains the driver.
-
-## Desktop diagnostic surfaces
-
-- Gemma source selection belongs to translation settings. The managed Gemma owner retains provisioning lifecycle ownership; mirror endpoint and anonymous authentication policy are applied only to its downloader child before SDK import. Local import uses the same pinned asset contract, staging lease, checksum validation, and atomic promotion. A rejected import cannot replace a working installation.
-- Model management separates recognition assets from translation assets and admits only explicitly checked models through the UI application boundary. ASR installs reuse `LocalASRProvisioningOwner`; per-task source selection cannot change active recognition providers or Gemma/network settings. Explicit sources do not silently fall back. The pinned manifest determines whether ModelScope is supported; mirror routing reaches the owned anonymous downloader child. Origin-scoped cancellation cannot cancel another surface's install.
-- Microphone recordings belong to `MicrophoneTestSessionOwner`. The existing capture adapter taps actual opened PCM and shares mono/resampling primitives with formal SELF capture. In-memory playback pauses capture through the application boundary; generation and user-intent checks prevent restoring switches the user has since changed.
-- These surfaces emit bounded, static diagnostics through existing normal and rotating file logs. They never log conversation content, audio, credentials, signed URLs, or proxy authentication.
