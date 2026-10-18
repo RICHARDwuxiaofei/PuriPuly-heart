@@ -127,6 +127,8 @@ class SettingsProviderStateSink(Protocol):
         remember_referral_id: bool = True,
     ) -> None: ...
 
+    def set_managed_usage_status(self, status: str) -> None: ...
+
     def set_managed_trial_usage_state(
         self,
         *,

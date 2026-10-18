@@ -295,8 +295,13 @@ class ManagedUsageRuntimeAdapter:
                 build_openrouter_credential_runtime_config_from_vnext(release_settings),
                 secrets=secrets,
             )
-        except Exception:
-            return ManagedUsageMetadataResult(key_available=False, metadata=None)
+        except Exception as exc:
+            return ManagedUsageMetadataResult(
+                key_available=False,
+                metadata=None,
+                failure_code="storage_unavailable",
+                failure_type=type(exc).__name__,
+            )
         if not resolution.api_key:
             return ManagedUsageMetadataResult(key_available=False, metadata=None)
         metadata = await self.verifier.fetch_openrouter_key_metadata(resolution.api_key)

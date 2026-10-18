@@ -1912,6 +1912,7 @@ def compose_application_runtime(
             remaining_percent=state.remaining_percent,
             referral_id=state.referral_id,
             pass_status=state.pass_status,
+            usage_status=state.usage_status,
         )
 
     def maybe_show_founder_letter(launch_source: str) -> None:
@@ -2203,6 +2204,9 @@ def compose_application_runtime(
             connection_readiness=llm_connection_readiness,
             llm_devices_sink=lambda devices: presentation.set_dashboard_llm_gpu_devices(
                 devices=devices
+            ),
+            runtime_warning_sink=lambda: show_short_message(
+                "settings.mutation.runtime_apply_failed", is_error=True, phase="runtime_apply"
             ),
         ),
         microphone=UiMicrophoneRuntimeAdapter(

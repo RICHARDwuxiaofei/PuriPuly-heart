@@ -284,7 +284,9 @@ class LocalASRNoticeProjector:
                 SelfCaptureSessionState.ADMISSION_PENDING,
             }
         )
-        if self_starting and self_local_asr:
+        if getattr(self.peer(), "activation_failed", False) and peer_local_asr:
+            status = "start_failed"
+        elif self_starting and self_local_asr:
             status = "self_loading"
         elif (self.peer().activation_starting or self.peer().model_loading) and peer_local_asr:
             status = "peer_loading"

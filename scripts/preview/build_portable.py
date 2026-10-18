@@ -106,7 +106,14 @@ def main():
     parser.add_argument("--beta", action="store_true")
     parser.add_argument("--wrist-development", action="store_true")
     parser.add_argument("--vc-runtime", type=Path)
+    parser.add_argument("--isolated-profile")
     args = parser.parse_args()
+    if args.isolated_profile and (
+        not args.isolated_profile.isascii()
+        or not args.isolated_profile.replace("-", "").isalnum()
+        or len(args.isolated_profile) > 64
+    ):
+        raise SystemExit("Invalid isolated preview profile")
     if args.wrist_development and not args.beta:
         raise SystemExit("Wrist development requires the complete --beta native runtime payload")
     repo = Path(__file__).resolve().parents[2]
@@ -142,6 +149,21 @@ def main():
         with executable.open("rb") as stream:
             wrist_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
     output.mkdir(parents=True)
+    if args.isolated_profile:
+        (output / "ISOLATED-PROFILE.json").write_text(
+            json.dumps({"name": args.isolated_profile}), encoding="utf-8"
+        )
+        (output / "README-FIRST.txt").write_text(
+            "独立候选测试包：请先阅读本说明。\n"
+            "双击 PuriPulyHeartPreview.exe；程序、runtime、app、flet目录须放在一起。\n"
+            "本包配置、模型和日志使用包旁 isolated-data，不读取正式版或原Beta配置。\n"
+            f"独立密钥库：puripuly-heart.test.{args.isolated_profile}\n"
+            "首次使用请自行设置后端和BYOK密钥；不要重复领取已有QQ免费资格。\n"
+            "本包未附带模型；不会自动迁移原配置、原密钥或模型目录。\n"
+            "本说明的路径优先于其他通用Beta/Wrist说明。版本见BUILD.json。\n"
+            "只有自动化/Mock和组件测试通过，不代表客户音频/模型/VR场景验收通过。\n",
+            encoding="utf-8",
+        )
     shutil.copy2(
         repo
         / "scripts"
@@ -268,18 +290,26 @@ def main():
                 packaging="portable bundled CPython + locked Flet desktop (not native release)",
                 python=sys.version,
                 isolated_keyring=(
-                    "puripuly-heart.test.desktop-wrist-vision"
-                    if args.wrist_development
+                    f"puripuly-heart.test.{args.isolated_profile}"
+                    if args.isolated_profile
                     else (
-                        "puripuly-heart.test.desktop-beta"
-                        if args.beta
-                        else "puripuly-heart.test.desktop-preview"
+                        "puripuly-heart.test.desktop-wrist-vision"
+                        if args.wrist_development
+                        else (
+                            "puripuly-heart.test.desktop-beta"
+                            if args.beta
+                            else "puripuly-heart.test.desktop-preview"
+                        )
                     )
                 ),
                 data_directory=(
-                    "wrist-development-data"
-                    if args.wrist_development
-                    else "%LOCALAPPDATA%/PuriPulyHeartBeta" if args.beta else "preview-data"
+                    "isolated-data"
+                    if args.isolated_profile
+                    else (
+                        "wrist-development-data"
+                        if args.wrist_development
+                        else "%LOCALAPPDATA%/PuriPulyHeartBeta" if args.beta else "preview-data"
+                    )
                 ),
                 wrist_sha256=wrist_sha256,
                 wrist_development=args.wrist_development,

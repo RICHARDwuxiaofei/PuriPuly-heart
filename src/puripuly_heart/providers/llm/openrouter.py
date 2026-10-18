@@ -393,7 +393,11 @@ class OpenRouterLLMProvider:
         )
 
     @staticmethod
-    async def fetch_key_metadata(api_key: str) -> OpenRouterKeyMetadata | None:
+    async def fetch_key_metadata(
+        api_key: str, *, strict: bool = False
+    ) -> OpenRouterKeyMetadata | None:
+        from puripuly_heart.core.openrouter_metadata import OpenRouterMetadataError
+
         if not api_key:
             return None
         try:
@@ -403,14 +407,25 @@ class OpenRouterLLMProvider:
                     headers={"Authorization": f"Bearer {api_key}"},
                 )
                 response.raise_for_status()
-                payload = response.json()
-        except Exception:
+                try:
+                    payload = response.json()
+                except ValueError:
+                    raise OpenRouterMetadataError("response_invalid") from None
+        except Exception as exc:
+            if strict:
+                if isinstance(exc, OpenRouterMetadataError):
+                    raise
+                raise OpenRouterMetadataError.from_exception(exc) from None
             return None
 
         if not isinstance(payload, dict):
+            if strict:
+                raise OpenRouterMetadataError("response_invalid")
             return None
         data = payload.get("data")
         if not isinstance(data, dict):
+            if strict:
+                raise OpenRouterMetadataError("response_invalid")
             return None
         return OpenRouterKeyMetadata(
             limit_usd=_optional_number(data.get("limit")),

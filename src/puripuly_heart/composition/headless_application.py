@@ -236,12 +236,14 @@ class HeadlessApplicationPresentation:
         remaining_percent: int | None,
         referral_id: str | None,
         pass_status: object | None,
+        usage_status: str | None = None,
     ) -> None:
         self._remember(
             "managed_key",
             {
                 "visible": visible,
                 "remaining_percent": remaining_percent,
+                "usage_status": usage_status,
                 "pass_status": pass_status,
             },
         )

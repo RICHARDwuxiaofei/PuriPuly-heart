@@ -205,7 +205,9 @@ async def test_refresh_discards_metadata_after_entitlement_changes() -> None:
     assert routed is False
     assert disabled == []
     assert owner.usage_metadata is None
-    assert views == []
+    assert views[-1].remaining_percent is None
+    assert views[-1].usage_status == "unavailable"
+    assert not any(view.usage_status == "ready" for view in views)
     await owner.close()
 
 

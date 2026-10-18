@@ -25,6 +25,7 @@ def _update_control_if_mounted(control: ft.Control) -> None:
 class ManagedTrialUsageBar(ft.Row):
     def __init__(self, percent: int | None = None) -> None:
         self._percent: int | None = None
+        self._status = "unavailable"
         self._fill_segment = ft.Container(
             height=_FIELD_HEIGHT,
             bgcolor=COLOR_PRIMARY_CONTAINER,
@@ -114,6 +115,23 @@ class ManagedTrialUsageBar(ft.Row):
     def apply_locale(self) -> None:
         self._sync()
 
+    def set_status(self, status: str) -> None:
+        self._status = (
+            status
+            if status
+            in {
+                "checking",
+                "ready",
+                "unavailable",
+                "key_missing",
+                "storage_unavailable",
+                "request_failed",
+                "metadata_unavailable",
+            }
+            else "unavailable"
+        )
+        self._sync()
+
     def repaint_dynamic_controls(self) -> None:
         for control in (
             self._fill_segments,
@@ -125,8 +143,8 @@ class ManagedTrialUsageBar(ft.Row):
 
     def _sync(self) -> None:
         self._sync_fill_segments()
-        if self._percent is None:
-            self._remaining_text.value = t("settings.managed_trial_usage.remaining_placeholder")
+        if self._status not in {"ready", "unavailable"} or self._percent is None:
+            self._remaining_text.value = t("settings.managed_trial_usage.status." + self._status)
         else:
             self._remaining_text.value = t(
                 "settings.managed_trial_usage.remaining",

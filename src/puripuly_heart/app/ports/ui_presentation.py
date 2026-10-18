@@ -147,6 +147,7 @@ class UiPresentationPort(Protocol):
         remaining_percent: int | None,
         referral_id: str | None,
         pass_status: object | None,
+        usage_status: str | None = None,
     ) -> None: ...
 
     def add_history_entry(self, *args: Any, **kwargs: Any) -> None: ...

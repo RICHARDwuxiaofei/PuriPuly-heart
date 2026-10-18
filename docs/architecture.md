@@ -45,6 +45,8 @@ core runtime and domain contracts
 
 Broker is a control-plane dependency, not part of the normal utterance data path.
 
+Managed usage queries have a presentation lifecycle separate from authentication: only an active query is checking, and missing credentials, storage failures and unavailable metadata are terminal states. The usage owner rejects superseded results; referral-status refreshes cannot restore an older usage percentage. Diagnostic records use normal bounded logging and never include credential values or raw responses.
+
 ## Runtime Ownership
 
 | Owner                   | Owns                                                       | Key path                                                                  |

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
@@ -124,6 +125,8 @@ class PeerApplicationOwner:
     _last_activation_requested: bool | None = field(init=False, default=None, repr=False)
     _activation_generation: int = field(init=False, default=0, repr=False)
     _activation_starting: bool = field(init=False, default=False, repr=False)
+    _activation_request: object | None = field(init=False, default=None, repr=False)
+    activation_failed: bool = field(init=False, default=False)
     _model_loading: bool = field(init=False, default=False, repr=False)
     _model_loading_generation: int | None = field(init=False, default=None, repr=False)
     _runtime_refresh_hold_generation: int | None = field(
@@ -395,6 +398,36 @@ class PeerApplicationOwner:
             raise
 
     async def set_enabled(self, enabled: bool) -> None:
+        request = object()
+        self._activation_request = request
+        self.activation_failed = False
+        started = time.monotonic()
+        generation = self._activation_generation + 1
+        try:
+            await self._set_enabled(enabled)
+        except BaseException as exc:
+            if self._activation_request is request:
+                self._activation_starting = False
+                self._model_loading = False
+                self._model_loading_generation = None
+                self._runtime_refresh_hold_generation = None
+                self.activation_failed = enabled and not isinstance(exc, asyncio.CancelledError)
+                self.sync_local_notice()
+                self.presentation_changed()
+            message = (
+                "[PeerCapture] stage=activation "
+                f"request={generation} "
+                f"code={'cancelled' if isinstance(exc, asyncio.CancelledError) else 'activation_failed'} "
+                f"exception_type={type(exc).__name__} "
+                f"elapsed_ms={int((time.monotonic() - started) * 1000)}"
+            )
+            if isinstance(exc, asyncio.CancelledError):
+                self.log_basic(message)
+            else:
+                self.log_failure(message)
+            raise
+
+    async def _set_enabled(self, enabled: bool) -> None:
         state = self.state_provider()
         if not state.settings_available or self._ingress_stopped or state.ingress_frozen:
             return
@@ -665,6 +698,7 @@ class PeerApplicationOwner:
 
     def on_runtime_state_changed(self, snapshot: PeerCaptureSessionSnapshot) -> None:
         if snapshot.state.value == "running":
+            self.activation_failed = False
             self._process_warning_reason = None
         summary = (
             snapshot.state,
@@ -746,6 +780,8 @@ class PeerApplicationOwner:
 
     def stop_ingress(self) -> None:
         self._ingress_stopped = True
+        self._activation_request = None
+        self.activation_failed = False
         self.invalidate_activation()
         self._activation_starting = False
 

@@ -19,7 +19,7 @@ def test_managed_trial_usage_bar_renders_inline_placeholder_when_percent_unknown
     assert bar.spacing == 0
     assert bar.controls[0] is bar._track
     assert not hasattr(bar, "_status_icon")
-    assert bar._remaining_text.value == t("settings.managed_trial_usage.remaining_placeholder")
+    assert bar._remaining_text.value == t("settings.managed_trial_usage.status.unavailable")
 
 
 @pytest.mark.parametrize(
@@ -71,7 +71,7 @@ def test_managed_trial_usage_bar_apply_locale_refreshes_overlay_text() -> None:
 
         bar.set_percent(None)
         bar.apply_locale()
-        assert bar._remaining_text.value == t("settings.managed_trial_usage.remaining_placeholder")
+        assert bar._remaining_text.value == t("settings.managed_trial_usage.status.unavailable")
     finally:
         set_locale(previous_locale)
 

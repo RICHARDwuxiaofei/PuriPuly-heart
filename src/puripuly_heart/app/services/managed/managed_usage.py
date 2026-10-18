@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
+import math
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 
@@ -10,7 +13,10 @@ from puripuly_heart.core.managed_openrouter_release import (
     TalkTogetherPassStatus,
 )
 from puripuly_heart.core.openrouter_handoff import is_effectively_exhausted
-from puripuly_heart.core.openrouter_metadata import OpenRouterKeyMetadata
+from puripuly_heart.core.openrouter_metadata import OpenRouterKeyMetadata, OpenRouterMetadataError
+from puripuly_heart.core.runtime_logging import emit_basic_log
+
+logger = logging.getLogger(__name__)
 
 from .managed_status_refresh import ManagedStatusRefreshOwner
 
@@ -45,12 +51,15 @@ class ManagedUsageViewState:
     remaining_percent: int | None
     referral_id: str | None
     pass_status: TalkTogetherPassStatus | None
+    usage_status: str = "unavailable"
 
 
 @dataclass(frozen=True, slots=True)
 class ManagedUsageMetadataResult:
     key_available: bool
     metadata: OpenRouterKeyMetadata | None
+    failure_code: str | None = None
+    failure_type: str | None = None
 
 
 @dataclass(slots=True)
@@ -69,8 +78,13 @@ class ManagedUsageOwner:
     pass_status: TalkTogetherPassStatus | None = None
     pass_status_key: tuple[str | None, str | None, str | None, str | None] | None = None
     refresh_owner: ManagedStatusRefreshOwner = field(init=False, repr=False)
+    metadata_timeout_s: float = 15.0
+    usage_status: str = "unavailable"
+    _refresh_generation: int = field(init=False, default=0, repr=False)
 
     def __post_init__(self) -> None:
+        if self.metadata_timeout_s <= 0:
+            raise ValueError("Managed usage timeout must be positive")
         self.refresh_owner = ManagedStatusRefreshOwner(
             diagnostics_sink=self._on_refresh_diagnostic,
         )
@@ -90,6 +104,8 @@ class ManagedUsageOwner:
             or metadata.limit_usd is None
             or metadata.remaining_usd is None
             or metadata.limit_usd <= 0
+            or not math.isfinite(metadata.limit_usd)
+            or not math.isfinite(metadata.remaining_usd)
         ):
             return None
         return max(0, min(100, round((metadata.remaining_usd / metadata.limit_usd) * 100)))
@@ -143,7 +159,10 @@ class ManagedUsageOwner:
         remaining_percent: int | None,
         referral_id: str | None,
         pass_status: TalkTogetherPassStatus | None | object = _PASS_STATUS_UNSET,
+        usage_status: str | None = None,
     ) -> None:
+        if usage_status is not None:
+            self.usage_status = usage_status
         normalized = self.normalize_referral_id(referral_id)
         if not visible or normalized is None:
             self.clear_pass_status()
@@ -160,6 +179,7 @@ class ManagedUsageOwner:
                 remaining_percent=remaining_percent,
                 referral_id=normalized,
                 pass_status=self.cached_pass_status_for(normalized),
+                usage_status=self.usage_status,
             )
         )
 
@@ -211,6 +231,7 @@ class ManagedUsageOwner:
             return False
         scheduled_scope = self.identity_scope(current_referral_id, state=state)
         scheduled_base = scheduled_scope[:3] if scheduled_scope is not None else None
+        generation = self._refresh_generation
 
         async def run() -> None:
             try:
@@ -218,6 +239,7 @@ class ManagedUsageOwner:
                 current = self.state_provider()
                 if (
                     current.ingress_frozen
+                    or generation != self._refresh_generation
                     or service is not self.release_service_provider()
                     or not current.settings_available
                     or not current.release_settings_available
@@ -235,7 +257,7 @@ class ManagedUsageOwner:
                     return
                 self.set_view_state(
                     visible=True,
-                    remaining_percent=remaining_percent,
+                    remaining_percent=self.remaining_percent,
                     referral_id=refreshed_referral_id,
                     pass_status=(result.pass_status if result.succeeded else _PASS_STATUS_UNSET),
                 )
@@ -264,6 +286,8 @@ class ManagedUsageOwner:
             self._warn("[ManagedAuth] Usage refresh failed", exc)
 
     async def refresh(self, *, auto_show_founder_letter: bool = True) -> None:
+        self._refresh_generation += 1
+        generation = self._refresh_generation
         state = self.state_provider()
         if state.ingress_frozen:
             return
@@ -283,31 +307,103 @@ class ManagedUsageOwner:
                 visible=True,
                 remaining_percent=None,
                 referral_id=state.referral_id,
+                usage_status="unavailable",
             )
             return
         entitlement_ref = self.sync_usage_metadata_scope(state)
-        metadata_result = await self.metadata_fetcher()
+        scope = self.identity_scope(self.current_referral_id, state=state)
+        self.set_view_state(
+            visible=True,
+            remaining_percent=self.remaining_percent,
+            referral_id=self.current_referral_id,
+            usage_status="checking",
+        )
+        started = time.monotonic()
+        self._log_usage(generation, "started", "checking", started)
+        failure = None
+        try:
+            async with asyncio.timeout(self.metadata_timeout_s):
+                metadata_result = await self.metadata_fetcher()
+        except asyncio.CancelledError:
+            cancelled_state = self.state_provider()
+            if (
+                generation == self._refresh_generation
+                and not cancelled_state.ingress_frozen
+                and self.identity_scope(self.current_referral_id, state=cancelled_state) == scope
+            ):
+                self.set_view_state(
+                    visible=True,
+                    remaining_percent=self.remaining_percent,
+                    referral_id=self.current_referral_id,
+                    usage_status="unavailable",
+                )
+            self._log_usage(generation, "cancelled", "cancelled", started)
+            raise
+        except Exception as exc:
+            failure = (
+                exc
+                if isinstance(exc, OpenRouterMetadataError)
+                else OpenRouterMetadataError.from_exception(exc)
+            )
+            metadata_result = ManagedUsageMetadataResult(
+                key_available=False, metadata=None, failure_code=failure.code
+            )
         current = self.state_provider()
         if (
             current.ingress_frozen
+            or generation != self._refresh_generation
+            or self.identity_scope(self.current_referral_id, state=current) != scope
             or not current.settings_available
             or not current.managed_key_visible
             or not current.release_settings_available
             or current.installation_id != state.installation_id
             or current.entitlement_ref != entitlement_ref
         ):
-            self.clear_usage_metadata()
+            if generation == self._refresh_generation and not current.ingress_frozen:
+                self.clear_usage_metadata()
+                self.set_view_state(
+                    visible=current.managed_key_visible,
+                    remaining_percent=None,
+                    referral_id=current.referral_id,
+                    usage_status="unavailable",
+                )
+            self._log_usage(generation, "discarded", "superseded", started)
             return
         if metadata_result.key_available:
             self.pending_sink(False)
         metadata = metadata_result.metadata
-        self.usage_metadata = metadata
+        code = metadata_result.failure_code
+        if code is None:
+            code = (
+                "key_missing"
+                if not metadata_result.key_available
+                else (
+                    "metadata_unavailable"
+                    if self.remaining_percent_for(metadata) is None
+                    else "ready"
+                )
+            )
+        self._log_usage(
+            generation,
+            "success" if code == "ready" else "failed",
+            code,
+            started,
+            failure,
+            metadata_result.failure_type,
+        )
+        if metadata is not None or code == "key_missing":
+            self.usage_metadata = metadata
         self.usage_metadata_entitlement_ref = entitlement_ref
         referral_id = self.current_referral_id
         self.set_view_state(
             visible=True,
             remaining_percent=self.remaining_percent,
             referral_id=referral_id,
+            usage_status=(
+                code
+                if code in {"ready", "key_missing", "storage_unavailable", "metadata_unavailable"}
+                else "request_failed"
+            ),
         )
         if (
             auto_show_founder_letter
@@ -318,6 +414,61 @@ class ManagedUsageOwner:
         self.schedule_status_refresh(
             remaining_percent=self.remaining_percent,
             current_referral_id=referral_id,
+        )
+
+    def _log_usage(
+        self, generation, result, code, started, failure=None, failure_type=None
+    ) -> None:
+        allowed = {
+            "checking",
+            "ready",
+            "key_missing",
+            "storage_unavailable",
+            "metadata_unavailable",
+            "http_error",
+            "timeout",
+            "dns",
+            "tls",
+            "proxy",
+            "network",
+            "unknown_error",
+            "response_invalid",
+            "cancelled",
+            "superseded",
+        }
+        code = code if code in allowed else "unknown_error"
+        fields = [
+            "[ManagedUsage]",
+            (
+                "stage=secret_storage"
+                if code in {"storage_unavailable", "key_missing"}
+                else "stage=metadata_query"
+            ),
+            f"request={generation}",
+            f"result={result}",
+            f"code={code}",
+            f"elapsed_ms={int((time.monotonic() - started) * 1000)}",
+        ]
+        if failure is not None:
+            failure_type = failure.fields.get("error_type", failure_type)
+            if type(failure.http_status) is int and 100 <= failure.http_status <= 599:
+                fields.append(f"http_status={failure.http_status}")
+            proxy = failure.fields.get("proxy_source")
+            if proxy in {"env", "system", "direct", "bypass", "explicit", "unknown"}:
+                fields.append(f"proxy_source={proxy}")
+            for name in ("os_errno", "winerror", "tls_verify_code"):
+                value = failure.fields.get(name)
+                if type(value) is int:
+                    fields.append(f"{name}={value}")
+        if (
+            isinstance(failure_type, str)
+            and failure_type.isascii()
+            and failure_type.replace("_", "").isalnum()
+            and len(failure_type) <= 80
+        ):
+            fields.append(f"exception_type={failure_type}")
+        emit_basic_log(
+            logger, " ".join(fields), level=logging.WARNING if result == "failed" else logging.INFO
         )
 
     async def should_route_to_founder_letter(self) -> bool:

@@ -22,12 +22,15 @@ from puripuly_heart.core.local_qwen_runtime import (
 )
 from puripuly_heart.core.local_stt_assets import (
     LOCAL_STT_MODEL_ID,
+    PARAKEET_JAPANESE_MODEL_ID,
+    PARAKEET_V3_MODEL_ID,
     LocalQwenSherpaLoadError,
     load_local_stt_asset_manifest,
     validate_local_stt_runtime_ready,
 )
 from puripuly_heart.core.owned_thread import run_owned_thread_call
 from puripuly_heart.core.runtime.local_asr_transition import LocalASRSessionOptions
+from puripuly_heart.core.runtime_logging import emit_basic_log
 from puripuly_heart.core.speech_boundary import SpeechBoundaryReason
 from puripuly_heart.core.stt.backend import (
     LEGACY_STT_SESSION_PROJECTION,
@@ -234,14 +237,45 @@ class LocalQwenSherpaSTTBackend(STTBackend):
                 raise RuntimeError("Local STT backend is closed")
             if self._recognizer is not None:
                 return self._recognizer
-            await run_owned_thread_call(self._validate_runtime_assets)
-            if self._closed:
-                raise RuntimeError("Local STT backend is closed")
-            recognizer = await run_owned_thread_call(self._create_recognizer)
-            if self._closed:
-                raise RuntimeError("Local STT backend is closed")
+            stage = "asset_validation"
+            started = time.monotonic()
+            self._log_model_stage(stage, "started", started)
+            try:
+                await run_owned_thread_call(self._validate_runtime_assets)
+                self._log_model_stage(stage, "success", started)
+                if self._closed:
+                    raise RuntimeError("Local STT backend is closed")
+                stage = "recognizer_create"
+                started = time.monotonic()
+                self._log_model_stage(stage, "started", started)
+                recognizer = await run_owned_thread_call(self._create_recognizer)
+                if self._closed:
+                    raise RuntimeError("Local STT backend is closed")
+                self._log_model_stage(stage, "success", started)
+            except asyncio.CancelledError:
+                self._log_model_stage(stage, "cancelled", started)
+                raise
+            except Exception as exc:
+                self._log_model_stage(stage, "failed", started, type(exc).__name__)
+                raise
             self._recognizer = recognizer
             return recognizer
+
+    def _log_model_stage(self, stage, result, started, error_type=None) -> None:
+        channel = self.stream_label if self.stream_label in {"self", "peer"} else "unknown"
+        model = (
+            self.model_id
+            if self.model_id
+            in {LOCAL_STT_MODEL_ID, PARAKEET_JAPANESE_MODEL_ID, PARAKEET_V3_MODEL_ID}
+            else "unknown"
+        )
+        message = (
+            f"[LocalASR] stage={stage} result={result} channel={channel} backend=CPU model={model} "
+            f"elapsed_ms={int((time.monotonic() - started) * 1000)}"
+        )
+        if error_type is not None:
+            message += f" exception_type={error_type} code=model_initialization_failed"
+        emit_basic_log(logger, message, level=logging.ERROR if result == "failed" else logging.INFO)
 
     def _validate_runtime_assets(self) -> None:
         if self.model_id == LOCAL_STT_MODEL_ID:

@@ -430,8 +430,12 @@ class FletUiPresentationAdapter:
         remaining_percent: int | None,
         referral_id: str | None,
         pass_status: object | None,
+        usage_status: str | None = None,
     ) -> None:
         settings_view = getattr(self._app, "view_settings", None)
+        status_setter = getattr(settings_view, "set_managed_usage_status", None)
+        if callable(status_setter) and usage_status is not None:
+            status_setter(usage_status)
         setter = getattr(settings_view, "set_managed_key_state", None)
         if callable(setter):
             try:

@@ -3422,6 +3422,9 @@ class SettingsView(ft.Column):
         ):
             _update_control_if_mounted(control)
 
+    def set_managed_usage_status(self, status: str) -> None:
+        self._managed_trial_usage_bar.set_status(status)
+
     def set_managed_trial_usage_state(
         self, *, visible: bool, remaining_percent: int | None = None
     ) -> None:

@@ -77,6 +77,7 @@ from puripuly_heart.config.alibaba_connection import AlibabaEndpointMode, Alibab
 from puripuly_heart.config.prompts import resolve_system_prompt
 from puripuly_heart.config.settings_vnext.schema import AppSettingsVNext
 from puripuly_heart.config.translation_values import provider_llm_for_translation
+from puripuly_heart.core.feature_diagnostics import log_feature
 from puripuly_heart.core.http_extensions import (
     http_extension_secret_key_prefix,
 )
@@ -461,6 +462,7 @@ class UiProviderRuntimeAdapter:
     llm_devices_sink: Callable[[tuple[GpuDeviceOption, ...]], None] | None = None
     chatgpt: ChatGptAccountOwner | None = None
     connection_readiness: LlmConnectionReadinessOwner | None = None
+    runtime_warning_sink: Callable[[], None] | None = None
     _alibaba_workspace: AlibabaWorkspaceOwner | None = field(default=None, init=False)
 
     def alibaba_workspace(self) -> AlibabaWorkspaceOwner:
@@ -746,7 +748,24 @@ class UiProviderRuntimeAdapter:
                 "openrouter": "openrouter_api_key",
             }.get(active_provider)
             if translation.connection in {"official_byok", "openrouter"} and key == active_llm_key:
-                await self.apply_providers(force_rebuild_llm=True, persist_settings=False)
+                try:
+                    applied = await self.apply_providers(
+                        force_rebuild_llm=True, persist_settings=False
+                    )
+                except Exception as exc:
+                    log_feature(
+                        "Translation", "runtime_apply", "key_saved_runtime_failed", error=exc
+                    )
+                    retry = getattr(self.provider_application, "mark_llm_retry", None)
+                    if callable(retry):
+                        retry()
+                    if self.runtime_warning_sink is not None:
+                        self._show_runtime_warning()
+                else:
+                    if applied is False:
+                        log_feature("Translation", "runtime_apply", "key_saved_runtime_failed")
+                        if self.runtime_warning_sink is not None:
+                            self._show_runtime_warning()
         http_extension_id = (
             None if current is None else current.intent.translation.http_extension_id
         )
@@ -763,6 +782,13 @@ class UiProviderRuntimeAdapter:
                 persist_settings=False,
             )
         return succeeded
+
+    def _show_runtime_warning(self) -> None:
+        try:
+            if self.runtime_warning_sink is not None:
+                self.runtime_warning_sink()
+        except Exception as exc:
+            log_feature("Translation", "notification", "runtime_warning_unavailable", error=exc)
 
     def clear_provider_verification(self, provider: str) -> None:
         self.provider_settings.persist_verification(provider, "", False)

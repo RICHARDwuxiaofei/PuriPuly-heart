@@ -184,7 +184,7 @@ class ProviderVerifierAdapter(ProviderVerifierPort):
         self,
         api_key: str,
     ) -> OpenRouterKeyMetadata | None:
-        return await OpenRouterLLMProvider.fetch_key_metadata(api_key)
+        return await OpenRouterLLMProvider.fetch_key_metadata(api_key, strict=True)
 
     async def verify_provider_secret(
         self,

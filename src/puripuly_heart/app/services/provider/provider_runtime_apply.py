@@ -9,6 +9,7 @@ from dataclasses import field as dataclass_field
 
 from puripuly_heart.app.ports.runtime_apply import RuntimeApplyRequest
 from puripuly_heart.app.ports.settings_runtime_effects import SettingsRuntimeState
+from puripuly_heart.core.feature_diagnostics import log_feature
 from puripuly_heart.core.messages import (
     CONTENT_POLICY_METADATA_ONLY,
     DIAGNOSTIC_CATEGORY_LIFECYCLE,
@@ -117,6 +118,13 @@ class LlmProviderRebuildOwner:
             create_provider=lambda: self.provider_factory(context.settings),
         )
         provider = outcome.provider
+        if outcome.error is not None:
+            log_feature(
+                "Translation",
+                "provider_create",
+                "provider_construction_failed",
+                error=outcome.error,
+            )
         self.availability_sink(provider is None and context.requires_secret)
         await self.usage_refresh()
         if provider is None:
@@ -173,7 +181,10 @@ class ProviderRuntimeOwner:
         next_llm_signature = self.llm_signature_builder(next_settings)
         return ProviderRuntimeApplyPlan(
             should_rebuild_llm=(
-                force_rebuild_llm or llm_signature is None or next_llm_signature != llm_signature
+                force_rebuild_llm
+                or llm_signature is None
+                or next_llm_signature != llm_signature
+                or not self.state_provider(next_settings).llm_available
             ),
             should_refresh_peer=(
                 self.state_provider(next_settings).peer_stt_desired
@@ -200,23 +211,23 @@ class ProviderRuntimeOwner:
         plan: ProviderRuntimeApplyPlan,
     ) -> None:
         self.common_effect(settings)
-        if plan.should_rebuild_llm:
-            await self.rebuild_llm()
-        if plan.coordinated_gpu_restart:
-            await self.recover_gpu(settings, plan)
+        try:
+            if plan.should_rebuild_llm:
+                await self.rebuild_llm()
+            if plan.coordinated_gpu_restart:
+                await self.recover_gpu(settings, plan)
+                self._require_stt_runtime_convergence(settings)
+                self.signature_sink(settings)
+                return
+            if plan.should_refresh_peer:
+                await self.refresh_peer()
+            if plan.should_refresh_self_stt:
+                await self.refresh_self_stt()
             self._require_stt_runtime_convergence(settings)
             self.signature_sink(settings)
+        finally:
             if plan.should_rebuild_llm and not self.state_provider(settings).llm_available:
                 self.llm_retry_sink()
-            return
-        if plan.should_refresh_peer:
-            await self.refresh_peer()
-        if plan.should_refresh_self_stt:
-            await self.refresh_self_stt()
-        self._require_stt_runtime_convergence(settings)
-        self.signature_sink(settings)
-        if plan.should_rebuild_llm and not self.state_provider(settings).llm_available:
-            self.llm_retry_sink()
 
     def _require_stt_runtime_convergence(self, settings: object) -> None:
         if self.self_runtime_convergence(settings) is False:

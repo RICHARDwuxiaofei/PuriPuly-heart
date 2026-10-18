@@ -1,0 +1,16 @@
+Readiness diagnostics candidate / 2026-10-18
+
+Baseline: 683b23609b22d439111ffb8d9cdb2740d43f260c
+Branch: fix/beta-readiness-diagnostics-20261018
+
+Managed usage: distinguish active queries, missing keys, storage failure, request failure and unavailable quota metadata. Preserve safe transport categories, status and timing in normal logs. Reject superseded metadata/status results. A usage-query failure does not delete keys or initiate authentication.
+Translation: keep the existing active-BYOK save/rebuild path; a runtime failure does not turn a successful key save into a failed save or skip verification. Emit a runtime warning and safe construction diagnostics. Missing backends remain eligible for subsequent ordinary apply, including when another runtime step failed.
+Peer: exception/cancellation cleanup is scoped to the latest activation request. Escaped startup failures no longer remain in the loading presentation. CPU asset validation and recognizer construction emit bounded stage/result diagnostics without audio, text or secrets.
+
+Existing native binaries are reused because native sources and dependencies are unchanged. The local candidate bundles its own Python/Flet payload and uses --isolated-profile readiness-20261018: data stays beside the package in isolated-data; secret-store service is puripuly-heart.test.readiness-20261018. Other Beta/production profiles remain unchanged.
+
+Validation before packaging: 714 focused existing/new tests passed, one existing Python deprecation warning. Includes metadata failure/timeout/cancellation, late response rejection, log view close/reopen and file flush, safe logs, BYOK adapter/owner recovery, Peer cleanup, QQ authentication regression, manual/floating chat/audio mocks, and profile isolation. Ruff and git diff checks passed.
+
+Limits: no paid provider inference, real QQ issuance, real ASR model inference, actual loopback recognition, interactive Windows GUI acceptance or customer hardware validation. A native initializer that never returns is still not forcibly terminated; these changes add phase evidence and fix terminal-state cleanup, not a new CPU worker architecture. Detailed per-segment audio counters and complete PR250 compound diagnostic propagation are not implemented in this candidate.
+
+Deferred: legacy-profile migration, cross-profile credentials, mirror replacement, complete large-model download and direct mainland network acceptance. No upstream merge, PR, upload or release is part of this candidate.
