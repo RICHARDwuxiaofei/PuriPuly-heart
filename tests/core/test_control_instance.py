@@ -21,6 +21,19 @@ from puripuly_heart.core.control_instance import (
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="Windows ACL and file-lock contract")
 
 
+def test_beta_control_records_stay_in_the_channel_data_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("PURIPULY_HEART_TEST_PROFILE", "qq-auth-beta")
+    channel = tmp_path / "PuriPulyHeartQQAuthBeta"
+    channel.mkdir()
+    monkeypatch.setenv("PURIPULY_HEART_TEST_DATA_DIR", str(channel))
+    with acquire(channel / "settings.json") as lease:
+        assert lease._path.parent == channel / "control"
+        lease.publish(port=23456, token="x" * 43, instance_id=str(uuid.uuid4()))
+        assert len(discover_instances()) == 1
+    assert not (tmp_path / "puripuly-heart").exists()
+
+
 def test_aliases_duplicate_owner_and_restart_changes_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

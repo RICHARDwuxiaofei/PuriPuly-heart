@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
+from puripuly_heart.config.paths import user_config_dir
+
 
 class InstanceAlreadyRunning(RuntimeError):
     pass
@@ -289,7 +291,7 @@ def _control_root(security: _WindowsSecurity) -> Path:
     local = os.environ.get("LOCALAPPDATA")
     if not local or not Path(local).is_dir():
         raise InstanceSecurityError("LOCALAPPDATA is unavailable")
-    root = Path(local) / "puripuly-heart" / "control"
+    root = user_config_dir() / "control"
     for directory in (root.parent, root):
         if not _exists(directory):
             try:
@@ -497,7 +499,7 @@ def discover_instances() -> list[dict[str, str | int]]:
         local = os.environ.get("LOCALAPPDATA")
         if not local or not Path(local).is_dir():
             raise InstanceSecurityError("LOCALAPPDATA is unavailable")
-        root = Path(local) / "puripuly-heart" / "control"
+        root = user_config_dir() / "control"
         if not _exists(root):
             return []
         security.verify_path(root)
