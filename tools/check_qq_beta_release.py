@@ -23,7 +23,7 @@ def inspect_paths(paths):
         rb"github_pat_[A-Za-z0-9_]{40,}",
         rb"sk-or-v1-[a-f0-9]{48,}",
         rb"sk-proj-[A-Za-z0-9_-]{40,}",
-        rb"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----",
+        rb"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----(?:\r?\n|\\n)[A-Za-z0-9+/=]{32,}",
     ]
     for path, label in paths:
         if not path.is_file():

@@ -24,7 +24,7 @@ def copy_payload_file(source, destination):
 
 
 def package_copy_ignore(source_packages):
-    cache_filter = shutil.ignore_patterns("__pycache__", "*.pyc")
+    cache_filter = shutil.ignore_patterns("__pycache__", "*.pyc", "tests", "test")
     root_filter = shutil.ignore_patterns(
         "*.pth",
         "*.egg-link",
@@ -318,6 +318,12 @@ def main():
                 ),
                 channel="PuriPuly Heart QQ Auth Beta" if args.qq_auth_beta else "desktop-preview",
                 app_id="PuriPulyHeart-Fork-QQ-Auth-Beta" if args.qq_auth_beta else None,
+                installer_compiler="Inno Setup 7.1.0 portable" if args.qq_auth_beta else None,
+                installer_compiler_archive_sha256=(
+                    "0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f"
+                    if args.qq_auth_beta
+                    else None
+                ),
                 readiness_baseline=(
                     "76af91bb76deabcbd0f8dc519b5e21f2049054df" if args.qq_auth_beta else None
                 ),
