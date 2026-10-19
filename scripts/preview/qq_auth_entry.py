@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sys
+
+sys.dont_write_bytecode = True
 from pathlib import Path
 
 root = Path(__file__).resolve().parent
@@ -12,6 +14,7 @@ for name in tuple(os.environ):
     ):
         os.environ.pop(name, None)
 os.environ["PYTHONNOUSERSITE"] = "1"
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 os.environ["PYTHONPATH"] = str(root / "src")
 os.environ["FLET_VIEW_PATH"] = str(root.parent / "flet" / "flet")
 os.environ["FLET_SERVER_IP"] = "127.0.0.1"

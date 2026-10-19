@@ -15,6 +15,6 @@ if "%choice%"=="3" set "mode=app"
 if "%choice%"=="4" set "mode=recover"
 if "%choice%"=="5" set "mode=inspect"
 if "%choice%"=="5" set "extra=--refresh-usage"
-"%~dp0runtime\python.exe" "%~dp0app\qq_auth_entry.py" probe --mode %mode% %extra%
+"%~dp0runtime\python.exe" -B "%~dp0app\qq_auth_entry.py" probe --mode %mode% %extra%
 echo 只回传生成的脱敏 JSON 或 TXT，不要发送 settings.json、密钥库或运行目录。
 pause

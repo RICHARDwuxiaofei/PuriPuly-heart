@@ -38,7 +38,8 @@ LicenseFile=..\..\LICENSE
 SetupIconFile=..\..\src\puripuly_heart\data\icons\icon.ico
 
 [Files]
-Source: "{#BetaPayload}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "SOURCE.zip"
+Source: "{#BetaPayload}\.qq-auth-beta-owned"; DestDir: "{app}"; Flags: ignoreversion uninsneveruninstall
+Source: "{#BetaPayload}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "SOURCE.zip,.qq-auth-beta-owned"
 
 [Icons]
 Name: "{group}\PuriPuly Heart QQ Auth Beta"; Filename: "{app}\PuriPulyHeartQQAuthBeta.exe"; Comment: "Independent QQ Auth Beta"
@@ -127,7 +128,7 @@ begin
   Result := '';
   if not SafeInstallPath() then Result := 'QQ Auth Beta requires its dedicated per-user directory without links. Existing ownership could not be confirmed.';
   if (Result = '') and FileExists(ExpandConstant('{app}\app\qq_auth_entry.py')) then
-    if not Exec(ExpandConstant('{app}\runtime\python.exe'), '"' + ExpandConstant('{app}\app\qq_auth_entry.py') + '" check-idle', ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then
+    if not Exec(ExpandConstant('{app}\runtime\python.exe'), '-B "' + ExpandConstant('{app}\app\qq_auth_entry.py') + '" check-idle', ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then
       Result := 'Please close only PuriPuly Heart QQ Auth Beta before upgrading.';
 end;
 
@@ -135,7 +136,7 @@ function InitializeUninstall(): Boolean;
 var ExitCode: Integer;
 begin
   Result := SafeInstallPath();
-  if Result then Result := Exec(ExpandConstant('{app}\runtime\python.exe'), '"' + ExpandConstant('{app}\app\qq_auth_entry.py') + '" check-idle', ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) and (ExitCode = 0);
+  if Result then Result := Exec(ExpandConstant('{app}\runtime\python.exe'), '-B "' + ExpandConstant('{app}\app\qq_auth_entry.py') + '" check-idle', ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) and (ExitCode = 0);
   if not Result then MsgBox('QQ Auth Beta ownership/path check failed. No files were removed.', mbError, MB_OK);
 end;
 
@@ -147,7 +148,7 @@ begin
     if UninstallSilent then DeleteData := ExpandConstant('{param:DELETEQQAUTHBETADATA|0}') = '1'
     else DeleteData := MsgBox('同时删除此 QQ Auth Beta 的配置、日志、缓存、内部模型及专属密钥？默认保留。外部模型目录不会被删除。', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
     if DeleteData then begin
-      Parameters := '"' + ExpandConstant('{app}\app\qq_auth_entry.py') + '" cleanup-data';
+      Parameters := '-B "' + ExpandConstant('{app}\app\qq_auth_entry.py') + '" cleanup-data';
       if not Exec(ExpandConstant('{app}\runtime\python.exe'), Parameters, ExpandConstant('{app}\app'), SW_HIDE, ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then begin
         Log('QQ Auth Beta data cleanup refused or incomplete. Data was retained.');
         if not UninstallSilent then MsgBox('无法确认数据归属或安全清理；已保留测试数据，请查看卸载日志。', mbInformation, MB_OK);

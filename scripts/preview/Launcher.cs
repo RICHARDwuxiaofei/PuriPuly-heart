@@ -13,6 +13,7 @@ internal static class Launcher
         {
             var start = new ProcessStartInfo(Path.Combine(root, "runtime", "pythonw.exe"));
 #if QQ_AUTH_BETA
+            start.EnvironmentVariables["PYTHONDONTWRITEBYTECODE"] = "1";
             start.Arguments = "\"" + Path.Combine(root, "app", "qq_auth_entry.py") + "\"";
 #else
             start.Arguments = "\"" + Path.Combine(root, "app", "preview_entry.py") + "\"";

@@ -21,6 +21,7 @@ App 阶段日志在数据目录 logs\qq-auth-stages.jsonl，只记录关联 ID�
 Windows 设置 → 应用 → 已安装的应用 → 精确找到“PuriPuly Heart QQ Auth Beta”再卸载。不要选择 PuriPuly <3 或 PuriPuly Heart Beta。
 默认保留本 Beta 测试数据和密钥。卸载时“同时删除此 QQ Auth Beta 的测试数据”默认选择否。
 选择删除时，仅清理已确认属于本渠道的数据目录及其登记的专属密钥，不跟随链接；遇到链接或归属无法确认时保留数据并报告。手动选择的外部模型目录不会被删除。
+程序目录可能保留一个 31 字节的 .qq-auth-beta-owned 归属标记及无法确认归属的未登记文件；不影响 Windows 卸载项移除，也使安全重装可以识别同一渠道。新渠道启动器禁止生成程序目录内的 Python 字节码缓存。
 不修改全局代理、TUN、防火墙，不向 Broker 撤销其他版本密钥或重置资格。先关闭本渠道再升级/卸载；无需关闭原版或旧 Beta。
 
 验证边界：
