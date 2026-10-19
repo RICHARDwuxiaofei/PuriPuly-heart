@@ -437,6 +437,13 @@ class ManagedUsageOwner:
             "superseded",
         }
         code = code if code in allowed else "unknown_error"
+        from puripuly_heart.core.qq_auth_trace import trace_event
+
+        trace_event(
+            "usage_refresh",
+            "entered" if result == "started" else "failed" if result == "failed" else "completed",
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
         fields = [
             "[ManagedUsage]",
             (

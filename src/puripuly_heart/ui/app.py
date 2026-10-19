@@ -502,7 +502,9 @@ class TranslatorApp:
         self.page.title = t("app.title")
         from puripuly_heart.config.paths import test_profile_name
 
-        if test_profile_name() is not None:
+        if test_profile_name() == "qq-auth-beta":
+            self.page.title = "PuriPuly Heart QQ Auth Beta"
+        elif test_profile_name() is not None:
             self.page.title += " [TEST]"
         self.page.theme_mode = ft.ThemeMode.LIGHT
         register_ui_fonts(self.page)
@@ -1273,7 +1275,9 @@ class TranslatorApp:
         self.page.title = t("app.title")
         from puripuly_heart.config.paths import test_profile_name
 
-        if test_profile_name() is not None:
+        if test_profile_name() == "qq-auth-beta":
+            self.page.title = "PuriPuly Heart QQ Auth Beta"
+        elif test_profile_name() is not None:
             self.page.title += " [TEST]"
         self.page.theme = get_app_theme(
             font_family=font_for_language(get_locale()),

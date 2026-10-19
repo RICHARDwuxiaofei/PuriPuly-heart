@@ -140,7 +140,15 @@ class ManagedAuthOwner:
     def dashboard_prompt_kind(self) -> str:
         return "qq" if self.state_provider().managed_china else "discord"
 
-    async def start_qq(
+    async def start_qq(self, *, qq_identity: str, credential: str, referral_id: str | None = None):
+        from puripuly_heart.core.qq_auth_trace import auth_trace
+
+        with auth_trace():
+            return await self._start_qq(
+                qq_identity=qq_identity, credential=credential, referral_id=referral_id
+            )
+
+    async def _start_qq(
         self,
         *,
         qq_identity: str,
@@ -175,7 +183,12 @@ class ManagedAuthOwner:
             self.last_referral_bonus_applied = result.referral_bonus_applied
             if result.runtime_rebuild != "never":
                 try:
-                    await self.runtime_ensurer(result.runtime_rebuild)
+                    from puripuly_heart.core.qq_auth_trace import trace_event, trace_stage
+
+                    with trace_stage("provider_apply"):
+                        applied = await self.runtime_ensurer(result.runtime_rebuild)
+                        if not applied:
+                            trace_event("provider_apply", "failed")
                 except Exception as exc:
                     log_qq_auth(
                         "translation_start", "translation_init_failed", fields=exception_fields(exc)

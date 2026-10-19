@@ -6,6 +6,11 @@ from enum import Enum
 
 from puripuly_heart.app.ports.managed_identity_state import ManagedIdentityStatePort
 from puripuly_heart.config.provider_values import OpenRouterCredentialSource
+from puripuly_heart.core.qq_delivery_receipt import (
+    QQ_DELIVERY_RECEIPT_SECRET,
+    decode_receipt,
+    receipt_matches,
+)
 from puripuly_heart.core.storage.secrets import SecretStore
 
 OPENROUTER_BYOK_API_KEY_SECRET = "openrouter_api_key"
@@ -32,6 +37,7 @@ class OpenRouterCredentialRuntimeConfig:
     managed_credential_kind: str = "standard"
     active_managed_credential_ref: str | None = None
     active_managed_expires_at: str | None = None
+    delivery_pending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +80,28 @@ def resolve_openrouter_credentials(
     managed_secret_key = _managed_api_key_secret_for_kind(managed_credential_kind)
     opposite_managed_secret_key = _opposite_managed_api_key_secret_for_kind(managed_credential_kind)
     managed_api_key = _normalize_secret(secrets.get(managed_secret_key))
+    if managed_credential_kind == "qq" and managed_api_key is not None:
+        receipt = decode_receipt(secrets.get(QQ_DELIVERY_RECEIPT_SECRET))
+        from puripuly_heart.config.paths import test_profile_name
+
+        if (
+            (test_profile_name() == "qq-auth-beta" and receipt is None)
+            or config.delivery_pending
+            or (
+                receipt is not None
+                and (
+                    receipt.get("terminal") is True
+                    or not receipt["acknowledged"]
+                    or not receipt_matches(
+                        receipt,
+                        key=managed_api_key,
+                        installation=config.installation_id,
+                        reference=config.active_managed_credential_ref,
+                    )
+                )
+            )
+        ):
+            managed_api_key = None
     opposite_managed_api_key = _normalize_secret(secrets.get(opposite_managed_secret_key))
     if opposite_managed_api_key is not None:
         raise ValueError("OpenRouter managed local claim conflict")

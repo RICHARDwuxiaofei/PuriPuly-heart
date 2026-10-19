@@ -3,12 +3,35 @@ from __future__ import annotations
 import base64
 import json
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+
+_file_locks: dict[str, threading.RLock] = {}
+_file_locks_guard = threading.Lock()
+
+
+def _file_lock(path: Path) -> threading.RLock:
+    with _file_locks_guard:
+        return _file_locks.setdefault(str(path.resolve()).casefold(), threading.RLock())
+
+
+def _keyring_lock(service: str) -> threading.RLock:
+    with _file_locks_guard:
+        return _file_locks.setdefault("keyring:" + service, threading.RLock())
+
+
+def _load_or_initialize(path: Path) -> dict:
+    with _file_lock(path):
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+        raw = {"version": 1, "salt": base64.b64encode(os.urandom(16)).decode("ascii"), "items": {}}
+        _atomic_write_json(path, raw)
+        return raw
 
 
 class SecretStore(Protocol):
@@ -45,14 +68,30 @@ class KeyringSecretStore:
 
     def get(self, key: str) -> str | None:
         keyring = self._keyring()
-        return keyring.get_password(self.service_name, key)
+        with _keyring_lock(self.service_name):
+            return keyring.get_password(self.service_name, key)
 
     def set(self, key: str, value: str) -> None:
+        if self.service_name == "puripuly-heart.test.qq-auth-beta":
+            from puripuly_heart.config.paths import user_config_dir
+
+            inventory = user_config_dir() / "credential-keys.json"
+            with _file_lock(inventory):
+                known = (
+                    json.loads(inventory.read_text(encoding="utf-8")) if inventory.exists() else []
+                )
+                if key not in known:
+                    _atomic_write_json(inventory, sorted([*known, key]))
         keyring = self._keyring()
-        keyring.set_password(self.service_name, key, value)
+        with _keyring_lock(self.service_name):
+            keyring.set_password(self.service_name, key, value)
 
     def delete(self, key: str) -> None:
         keyring = self._keyring()
+        with _keyring_lock(self.service_name):
+            self._delete_keyring_item(keyring, key)
+
+    def _delete_keyring_item(self, keyring, key: str) -> None:
         try:
             keyring.delete_password(self.service_name, key)
         except Exception as exc:
@@ -83,15 +122,9 @@ class EncryptedFileSecretStore:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-        if path.exists():
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            salt_b64 = raw["salt"]
-            items = raw.get("items", {})
-        else:
-            salt = os.urandom(16)
-            salt_b64 = base64.b64encode(salt).decode("ascii")
-            items = {}
-            _atomic_write_json(path, {"version": 1, "salt": salt_b64, "items": items})
+        raw = _load_or_initialize(path)
+        salt_b64 = raw["salt"]
+        items = raw.get("items", {})
 
         salt = base64.b64decode(salt_b64)
         key = _derive_key(passphrase=passphrase, salt=salt)
@@ -99,7 +132,9 @@ class EncryptedFileSecretStore:
         self._items = dict(items)
 
     def get(self, key: str) -> str | None:
-        token = self._items.get(key)
+        with _file_lock(self.path):
+            self._items = dict(json.loads(self.path.read_text(encoding="utf-8")).get("items", {}))
+            token = self._items.get(key)
         if token is None:
             return None
         try:
@@ -110,13 +145,17 @@ class EncryptedFileSecretStore:
 
     def set(self, key: str, value: str) -> None:
         token = self._fernet.encrypt(value.encode("utf-8")).decode("ascii")
-        self._items[key] = token
-        self._save()
+        with _file_lock(self.path):
+            self._items = dict(json.loads(self.path.read_text(encoding="utf-8")).get("items", {}))
+            self._items[key] = token
+            self._save()
 
     def delete(self, key: str) -> None:
-        if key in self._items:
-            del self._items[key]
-            self._save()
+        with _file_lock(self.path):
+            self._items = dict(json.loads(self.path.read_text(encoding="utf-8")).get("items", {}))
+            if key in self._items:
+                del self._items[key]
+                self._save()
 
     def _save(self) -> None:
         raw = json.loads(self.path.read_text(encoding="utf-8"))

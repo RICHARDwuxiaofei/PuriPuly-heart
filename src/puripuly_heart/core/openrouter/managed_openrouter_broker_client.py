@@ -27,6 +27,7 @@ from puripuly_heart.app.ports.broker_client import (
 from puripuly_heart.config.provider_values import normalize_owned_referral_id
 from puripuly_heart.core import messages, network_clients
 from puripuly_heart.core.qq_auth_diagnostics import exception_fields, safe_fields
+from puripuly_heart.core.qq_auth_trace import trace_event, trace_stage
 
 from .managed_openrouter_release import (
     ManagedOpenRouterChallengeSuccess,
@@ -236,7 +237,7 @@ class HttpManagedOpenRouterBrokerClient:
             )
 
         status = payload.get("status")
-        if status not in {"issued", "delivery_pending"}:
+        if payload.get("ok") is not True or status not in {"issued", "delivery_pending"}:
             return _qq_assertion_failure(
                 failure_subcode="key_unavailable",
                 code="qq_key_unavailable",
@@ -246,6 +247,8 @@ class HttpManagedOpenRouterBrokerClient:
                 fields={"status": status if isinstance(status, str) else "missing"},
             )
         try:
+            if request.operation_id and payload.get("delivery_ack_required") is not True:
+                raise ValueError("modern operation missing delivery ACK contract")
             entitlement = QqManagedEntitlementSnapshot(
                 qq_subject_ref=_require_text(payload, "qq_subject_ref"),
                 managed_credential_ref=_require_optional_text(
@@ -324,7 +327,16 @@ class HttpManagedOpenRouterBrokerClient:
             "acknowledged",
             "already_acknowledged",
         }
-        if not isinstance(status, str):
+        if status not in {
+            "acknowledged",
+            "already_acknowledged",
+            "pending",
+            "expired",
+            "cleanup_required",
+            "invalid_token",
+            "missing",
+            "retryable",
+        }:
             status = "malformed"
         return ManagedKeyDeliveryAckResult(
             succeeded=succeeded,
@@ -430,7 +442,16 @@ class HttpManagedOpenRouterBrokerClient:
     ) -> tuple[Mapping[str, object], int]:
         client = await self._get_http_client()
         try:
-            response = await client.post(path, json=dict(request_body))
+            stage = {"qq_assert": "assert", "managed_key_delivery_ack": "delivery_ack"}.get(
+                operation, "recovery"
+            )
+            with trace_stage(stage):
+                response = await client.post(path, json=dict(request_body))
+                trace_event(
+                    stage,
+                    "completed" if 200 <= response.status_code < 300 else "failed",
+                    fields={"http_status": response.status_code},
+                )
         except httpx.TimeoutException as exc:
             raise _retryable_error(operation, f"broker request timed out: {exc}") from exc
         except httpx.TransportError as exc:
@@ -447,7 +468,7 @@ class HttpManagedOpenRouterBrokerClient:
                 )
             except ManagedOpenRouterReleaseError:
                 return {}, response.status_code
-        if response.is_error:
+        if not 200 <= response.status_code < 300:
             try:
                 error = _parse_error_response(response, operation=operation)
             except ManagedOpenRouterReleaseError as exc:
@@ -492,7 +513,16 @@ class HttpManagedOpenRouterBrokerClient:
     ) -> Mapping[str, object]:
         client = await self._get_http_client()
         try:
-            response = await client.post(path, json=dict(request_body))
+            stage = {"qq_assert": "assert", "managed_key_delivery_ack": "delivery_ack"}.get(
+                operation, "recovery"
+            )
+            with trace_stage(stage):
+                response = await client.post(path, json=dict(request_body))
+                trace_event(
+                    stage,
+                    "completed" if 200 <= response.status_code < 300 else "failed",
+                    fields={"http_status": response.status_code},
+                )
         except httpx.TimeoutException as exc:
             raise _retryable_error(operation, f"broker request timed out: {exc}") from exc
         except httpx.TransportError as exc:
@@ -500,7 +530,7 @@ class HttpManagedOpenRouterBrokerClient:
         except httpx.HTTPError as exc:
             raise _retryable_error(operation, f"broker request failed: {exc}") from exc
 
-        if response.is_error:
+        if not 200 <= response.status_code < 300:
             try:
                 error = _parse_error_response(response, operation=operation)
             except ManagedOpenRouterReleaseError as exc:
@@ -530,7 +560,7 @@ class HttpManagedOpenRouterBrokerClient:
         except httpx.HTTPError as exc:
             raise _retryable_error(operation, f"broker request failed: {exc}") from exc
 
-        if response.is_error:
+        if not 200 <= response.status_code < 300:
             raise _parse_error_response(response, operation=operation)
 
         return _parse_json_mapping(response, operation=operation)
@@ -846,6 +876,8 @@ def _parse_managed_operation_status(
     operation: str,
     expected_source: str | None,
 ) -> ManagedOperationStatusResult:
+    if payload.get("ok") is not True:
+        raise ValueError("broker operation response did not confirm success")
     if "state" not in payload or "client_action" not in payload:
         return _parse_managed_operation_credential(
             payload, operation=operation, expected_source=expected_source

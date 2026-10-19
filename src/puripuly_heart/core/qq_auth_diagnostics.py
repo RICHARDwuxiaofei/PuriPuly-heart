@@ -101,6 +101,19 @@ CODES = frozenset(
         "action_required",
         "authorization_expired",
         "other_source_pending",
+        "qq_managed_operation_installation_mismatch",
+        "qq_managed_operation_resume_token_unavailable",
+        "qq_managed_operation_binding_invalid",
+        "qq_delivery_receipt_store_failed",
+        "qq_delivery_receipt_unavailable",
+        "qq_delivery_binding_invalid",
+        "qq_delivery_ack_token_store_failed_after_key_save",
+        "qq_pending_delivery_ack_persist_failed_after_key_save",
+        "invalid_operation_binding",
+        "installation_binding_mismatch",
+        "invalid_resume_token",
+        "operation_not_found",
+        "managed_key_delivery_ack_failed",
     }
 )
 ENUM_FIELDS = {
@@ -115,6 +128,9 @@ ENUM_FIELDS = {
         "cleanup_required",
         "invalid_token",
         "managed_secret_missing",
+        "operation_not_confirmed",
+        "receipt_confirmation_failed",
+        "credential_binding_failed",
     },
     "managed_operation_state": {
         "AUTHENTICATED",
@@ -250,8 +266,32 @@ def log_qq_auth(
         )
     )
     text = f"[QQAuth] {event} stage={stage} code={code} category={category}"
+    from puripuly_heart.core.qq_auth_trace import correlation_id
+
+    correlation = correlation_id()
+    if correlation:
+        text += f" correlation={correlation}"
     text += "".join(f" {key}={value}" for key, value in sorted(metadata.items()))
     emit_basic_log(logger, text, level=level)
+    from puripuly_heart.core.qq_auth_trace import trace_event
+
+    trace_stage = {
+        "broker_request": "assert",
+        "key_issuance": "assert",
+        "secret_storage": "credential_save",
+        "settings_storage": "settings_commit",
+        "translation_start": "provider_apply",
+    }.get(stage, stage)
+    trace_event(
+        trace_stage,
+        (
+            "completed"
+            if level == logging.INFO
+            else "pending" if level == logging.WARNING else "failed"
+        ),
+        fields=metadata,
+        code=code,
+    )
 
 
 def log_qq_diagnostics(

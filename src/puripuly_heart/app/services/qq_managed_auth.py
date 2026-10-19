@@ -94,6 +94,13 @@ from puripuly_heart.core.qq_auth_diagnostics import (
     log_qq_diagnostics,
     safe_fields,
 )
+from puripuly_heart.core.qq_auth_trace import trace_stage
+from puripuly_heart.core.qq_delivery_receipt import (
+    QQ_DELIVERY_RECEIPT_SECRET,
+    decode_receipt,
+    encode_receipt,
+    receipt_matches,
+)
 
 QQ_MANAGED_AUTH_FAILURE_MESSAGE_KEYS = (
     "qq_managed_auth.invalid_credential",
@@ -170,7 +177,21 @@ class QqManagedAuthService:
         other_source_refusal = _refuse_other_source_pending(self.managed_state)
         if other_source_refusal is not None:
             return other_source_refusal
-        recovery_result = await self._recover_pending_delivery_ack()
+        restored = await self._restore_delivery_receipt()
+        if restored is not None:
+            return restored
+        if (
+            self.managed_state.pending_managed_operation_source == "qq"
+            and self.managed_state.pending_managed_operation_id
+            and read_pending_operation(self.managed_state, source=MANAGED_OPERATION_SOURCE_QQ)
+            is None
+        ):
+            return _local_failure_result(
+                operation="recover_qq_managed_operation",
+                code="qq_managed_operation_binding_invalid",
+                phase="persist_managed_operation",
+            )
+        recovery_result = await self._recover_pending_delivery_ack(request)
         if recovery_result is not None:
             return recovery_result
 
@@ -183,7 +204,8 @@ class QqManagedAuthService:
             return claim_result
 
         emit_progress(request.progress_sink, "preparing")
-        assured_operation = await self._ensure_pending_operation(request)
+        with trace_stage("operation_prepare"):
+            assured_operation = await self._ensure_pending_operation(request)
         if isinstance(assured_operation, TransactionResult):
             return assured_operation
         operation, resume_token = assured_operation
@@ -220,15 +242,20 @@ class QqManagedAuthService:
         state_snapshot = self.managed_state.snapshot()
 
         if broker_result.delivery_ack is not None:
+            bound = await self._save_delivery_receipt(
+                broker_result.managed_secret_key, broker_result.delivery_ack
+            )
+            if bound is not None:
+                return bound
             try:
                 await self._delivery_ack_service().store_pending(broker_result.delivery_ack)
             except ManagedKeyDeliveryAckTokenStoreError:
                 return _remote_active_local_missing_result(
                     operation="store_qq_delivery_ack_token",
-                    code="qq_delivery_ack_token_store_failed_before_local_key_write",
+                    code="qq_delivery_ack_token_store_failed_after_key_save",
                     phase="delivery_ack_token_store",
                     failure_subcode="key_unavailable",
-                    secret_write_succeeded=False,
+                    secret_write_succeeded=True,
                     settings_commit_succeeded=False,
                     rollback_succeeded=None,
                     compensation_succeeded=None,
@@ -254,18 +281,15 @@ class QqManagedAuthService:
                 self._restore_state_snapshot(state_snapshot)
                 return _remote_active_local_missing_result(
                     operation="persist_qq_pending_delivery_ack",
-                    code="qq_pending_delivery_ack_persist_failed_before_local_key_write",
+                    code="qq_pending_delivery_ack_persist_failed_after_key_save",
                     phase="delivery_ack_pending_persist",
                     failure_subcode="key_unavailable",
-                    secret_write_succeeded=False,
+                    secret_write_succeeded=True,
                     settings_commit_succeeded=False,
                     rollback_succeeded=None,
                     compensation_succeeded=None,
                     retry_after_ms=None,
                 )
-            secret_write = await self._write_managed_secret(broker_result.managed_secret_key)
-            if isinstance(secret_write, TransactionResult):
-                return secret_write
             await self._write_status_auth_secret_best_effort(request)
             ack_result = await self._delivery_ack_service().retry_pending()
             self._consume_ack_result(ack_result.ack_result)
@@ -355,9 +379,41 @@ class QqManagedAuthService:
             managed_state=self.managed_state,
         )
 
-    async def _recover_pending_delivery_ack(self) -> TransactionResult | None:
+    async def _recover_pending_delivery_ack(
+        self, request: QqManagedAuthRequest
+    ) -> TransactionResult | None:
         if self.managed_state.pending_delivery_ack_source != ACK_SOURCE_QQ:
             return None
+        pending = read_pending_operation(self.managed_state, source=MANAGED_OPERATION_SOURCE_QQ)
+        if pending is not None:
+            token = await read_resume_token(self.secret_store)
+            if not token or pending.installation_id != self._installation_id():
+                return _local_failure_result(
+                    operation="recover_qq_delivery",
+                    code="qq_managed_operation_resume_token_unavailable",
+                    phase="persist_managed_operation",
+                )
+            probe = await self._fetch_operation_status(
+                pending.operation_id, token, pending.installation_id
+            )
+            if probe is not None and probe.operation_status == "FAILED":
+                await self._invalidate_delivery_receipt()
+                return _qq_operation_action_required_result(
+                    QqManagedAuthRequest("", "", ""), operation=pending, probe=probe
+                )
+            if (
+                probe is None
+                or not probe.succeeded
+                or probe.operation_status not in {"ACTIVE", "DELIVERY_PENDING"}
+            ):
+                return _delivery_ack_pending_result(
+                    ack_status="operation_not_confirmed", diagnostics_present=True
+                )
+            converted = _status_result_to_qq_credential(probe)
+            if converted is not None:
+                return await self._finalize_qq_resumed_credential(
+                    request, operation=pending, credential=converted
+                )
         result = await self._delivery_ack_service().recover_pending(
             source=ACK_SOURCE_QQ,
             managed_secret_key=OPENROUTER_MANAGED_QQ_API_KEY_SECRET,
@@ -385,6 +441,145 @@ class QqManagedAuthService:
                 },
             ),
         )
+
+    async def _save_delivery_receipt(
+        self, key: str, metadata: ManagedKeyDeliveryAckMetadata
+    ) -> TransactionResult | None:
+        if metadata.source != ACK_SOURCE_QQ or not metadata.managed_credential_ref:
+            return _local_failure_result(
+                operation="bind_qq_delivery",
+                code="qq_delivery_binding_invalid",
+                phase="delivery_ack_token_store",
+            )
+        try:
+            receipt = encode_receipt(
+                key=key,
+                installation=self._installation_id() or "",
+                operation=self.managed_state.pending_managed_operation_id,
+                reference=metadata.managed_credential_ref,
+                delivery=metadata.delivery_id,
+                token=metadata.delivery_ack_token,
+                expires=metadata.expires_at,
+            )
+            saved = await self.secret_store.set_secret(QQ_DELIVERY_RECEIPT_SECRET, receipt)
+            if not saved.succeeded:
+                raise ValueError("receipt store failed")
+            written = await self._write_managed_secret(key)
+            if written is not None:
+                return written
+        except Exception:
+            return _local_failure_result(
+                operation="bind_qq_delivery",
+                code="qq_delivery_receipt_store_failed",
+                phase="delivery_ack_token_store",
+            )
+        return None
+
+    async def _invalidate_delivery_receipt(self) -> None:
+        try:
+            stored = await self.secret_store.get_secret(QQ_DELIVERY_RECEIPT_SECRET)
+            receipt = decode_receipt(stored.value)
+            if receipt is not None:
+                receipt["terminal"] = True
+                receipt["acknowledged"] = False
+                await self.secret_store.set_secret(QQ_DELIVERY_RECEIPT_SECRET, json.dumps(receipt))
+        finally:
+            self.managed_state.pending_managed_operation_state = "FAILED"
+            self.managed_state.persist()
+
+    async def _restore_delivery_receipt(self) -> TransactionResult | None:
+        try:
+            stored = await self.secret_store.get_secret(QQ_DELIVERY_RECEIPT_SECRET)
+            receipt = decode_receipt(stored.value)
+            if receipt is None:
+                from puripuly_heart.config.paths import test_profile_name
+
+                if (
+                    test_profile_name() == "qq-auth-beta"
+                    and self.managed_state.pending_delivery_ack_source
+                ):
+                    return _local_failure_result(
+                        operation="recover_qq_delivery",
+                        code="qq_delivery_binding_invalid",
+                        phase="secret_snapshot",
+                    )
+                return None
+            if receipt.get("terminal") is True:
+                return _local_failure_result(
+                    operation="recover_qq_delivery",
+                    code="qq_delivery_binding_invalid",
+                    phase="secret_snapshot",
+                )
+            key = await self.secret_store.get_secret(OPENROUTER_MANAGED_QQ_API_KEY_SECRET)
+            if not receipt_matches(
+                receipt,
+                key=key.value,
+                installation=self._installation_id(),
+                reference=receipt["reference"],
+            ):
+                if (
+                    not receipt["acknowledged"]
+                    and receipt["installation"] == self._installation_id()
+                    and receipt.get("operation") == self.managed_state.pending_managed_operation_id
+                ):
+                    return None
+                return _local_failure_result(
+                    operation="recover_qq_delivery",
+                    code="qq_delivery_binding_invalid",
+                    phase="secret_snapshot",
+                )
+            if self.managed_state.active_managed_credential_ref not in {
+                None,
+                receipt["reference"],
+            } and (
+                receipt["acknowledged"]
+                or receipt.get("operation") != self.managed_state.pending_managed_operation_id
+            ):
+                return _local_failure_result(
+                    operation="recover_qq_delivery",
+                    code="qq_delivery_binding_invalid",
+                    phase="secret_snapshot",
+                )
+            if receipt["acknowledged"]:
+                if self.managed_state.pending_managed_operation_state == "FAILED":
+                    return _local_failure_result(
+                        operation="recover_qq_delivery",
+                        code="qq_delivery_binding_invalid",
+                        phase="secret_snapshot",
+                    )
+                self.managed_state.active_managed_credential_ref = receipt["reference"]
+                self.managed_state.persist()
+                if self.managed_state.pending_delivery_ack_source:
+                    return None
+                await self._clear_qq_operation()
+                return TransactionResult(
+                    status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
+                    message=_message("qq_managed_auth.success", severity=SEVERITY_INFO),
+                )
+            if receipt.get("operation") != self.managed_state.pending_managed_operation_id:
+                return _local_failure_result(
+                    operation="recover_qq_delivery",
+                    code="qq_delivery_binding_invalid",
+                    phase="secret_snapshot",
+                )
+            await self._delivery_ack_service().store_pending(
+                ManagedKeyDeliveryAckMetadata(
+                    source="qq",
+                    delivery_id=receipt["delivery"],
+                    managed_credential_ref=receipt["reference"],
+                    delivery_ack_token=receipt["token"],
+                    expires_at=receipt.get("expires"),
+                )
+            )
+            self.managed_state.active_managed_credential_ref = receipt["reference"]
+            self.managed_state.persist()
+        except Exception:
+            return _local_failure_result(
+                operation="recover_qq_delivery",
+                code="qq_delivery_receipt_unavailable",
+                phase="secret_snapshot",
+            )
+        return None
 
     async def _assert_qq_identity(
         self,
@@ -530,12 +725,18 @@ class QqManagedAuthService:
             return None
         installation_id = self._installation_id()
         if not installation_id or pending.installation_id != installation_id:
-            await self._clear_qq_operation()
-            return None
+            return _local_failure_result(
+                operation="recover_qq_managed_operation",
+                code="qq_managed_operation_installation_mismatch",
+                phase="persist_managed_operation",
+            )
         resume_token = await read_resume_token(self.secret_store)
         if resume_token is None:
-            await self._clear_qq_operation()
-            return None
+            return _local_failure_result(
+                operation="recover_qq_managed_operation",
+                code="qq_managed_operation_resume_token_unavailable",
+                phase="persist_managed_operation",
+            )
         emit_progress(request.progress_sink, "recovering")
         return await self._drive_qq_operation_recovery(
             request,
@@ -695,8 +896,9 @@ class QqManagedAuthService:
                     if original_failure is not None and first_iteration:
                         await self._clear_qq_operation()
                         return original_failure
-                    await self._clear_qq_operation()
-                    return None
+                    return _qq_operation_recovery_pending_result(
+                        request, operation=operation, polls=polls
+                    )
                 consecutive_probe_failures += 1
                 if consecutive_probe_failures >= MANAGED_OPERATION_MAX_CONSECUTIVE_PROBE_FAILURES:
                     return _qq_operation_recovery_pending_result(
@@ -716,6 +918,7 @@ class QqManagedAuthService:
                     request, operation=operation, polls=polls
                 )
             if probe.operation_status == "FAILED":
+                await self._invalidate_delivery_receipt()
                 await self._clear_qq_operation()
                 return _qq_operation_action_required_result(
                     request, operation=operation, probe=probe
@@ -748,6 +951,7 @@ class QqManagedAuthService:
                 resumed = await self._call_resume(operation, resume_token)
                 if resumed is not None and resumed.succeeded:
                     if resumed.operation_status == "FAILED":
+                        await self._invalidate_delivery_receipt()
                         await self._clear_qq_operation()
                         return _qq_operation_action_required_result(
                             request, operation=operation, probe=resumed
@@ -776,7 +980,24 @@ class QqManagedAuthService:
         operation: ManagedOperationIdentity,
         probe: ManagedOperationStatusResult,
     ) -> TransactionResult:
-        if not await self._local_qq_key_present():
+        try:
+            raw = await self.secret_store.get_secret(QQ_DELIVERY_RECEIPT_SECRET)
+            receipt = decode_receipt(raw.value)
+            saved = await self.secret_store.get_secret(OPENROUTER_MANAGED_QQ_API_KEY_SECRET)
+            bound = bool(
+                receipt
+                and receipt["acknowledged"]
+                and not receipt.get("terminal")
+                and receipt_matches(
+                    receipt,
+                    key=saved.value,
+                    installation=operation.installation_id,
+                    reference=self.managed_state.active_managed_credential_ref,
+                )
+            )
+        except Exception:
+            bound = False
+        if not bound:
             await self._clear_qq_operation()
             return _qq_operation_action_required_result(
                 request,
@@ -880,12 +1101,15 @@ class QqManagedAuthService:
             return secret_snapshot
         state_snapshot = self.managed_state.snapshot()
         delivery_ack = credential.delivery_ack
+        bound = await self._save_delivery_receipt(credential.managed_secret_key, delivery_ack)
+        if bound is not None:
+            return bound
         try:
             await self._delivery_ack_service().store_pending(delivery_ack)
         except ManagedKeyDeliveryAckTokenStoreError:
             return _remote_active_local_missing_result(
                 operation="store_qq_delivery_ack_token",
-                code="qq_delivery_ack_token_store_failed_before_local_key_write",
+                code="qq_delivery_ack_token_store_failed_after_key_save",
                 phase="delivery_ack_token_store",
                 failure_subcode="key_unavailable",
                 secret_write_succeeded=False,
@@ -1449,7 +1673,11 @@ def _with_network_context(
     if detail.get("network_error_kind") in {"timeout", "proxy", "tls", "dns", "network"}:
         diagnostics = result.diagnostics
         if diagnostics is not None:
-            diagnostics = replace(diagnostics, fields={**diagnostics.fields, **detail})
+            diagnostics = replace(
+                diagnostics,
+                code=assertion.diagnostics.code,
+                fields={**diagnostics.fields, **detail},
+            )
         return replace(result, message=assertion.message, diagnostics=diagnostics)
     return result
 

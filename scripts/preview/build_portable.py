@@ -104,6 +104,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--beta", action="store_true")
+    parser.add_argument("--qq-auth-beta", action="store_true")
     parser.add_argument("--wrist-development", action="store_true")
     parser.add_argument("--vc-runtime", type=Path)
     parser.add_argument("--isolated-profile")
@@ -114,6 +115,8 @@ def main():
         or len(args.isolated_profile) > 64
     ):
         raise SystemExit("Invalid isolated preview profile")
+    if args.qq_auth_beta and (not args.beta or args.isolated_profile or args.wrist_development):
+        raise SystemExit("QQ Auth Beta requires --beta and its fixed profile")
     if args.wrist_development and not args.beta:
         raise SystemExit("Wrist development requires the complete --beta native runtime payload")
     repo = Path(__file__).resolve().parents[2]
@@ -219,8 +222,29 @@ def main():
     for name in ("pyproject.toml", "LICENSE", "uv.lock"):
         shutil.copy2(repo / name, app / name)
     shutil.copy2(repo / "scripts" / "preview" / "entry.py", app / "preview_entry.py")
+    if args.qq_auth_beta:
+        shutil.copy2(repo / "scripts" / "preview" / "qq_auth_entry.py", app / "qq_auth_entry.py")
+        shutil.copy2(repo / "tools" / "qq_auth_probe.py", output / "qq_auth_probe.py")
+        shutil.copy2(
+            repo / "docs" / "QQ-AUTH-BETA-使用说明.txt", output / "QQ-AUTH-BETA-使用说明.txt"
+        )
+        (output / ".qq-auth-beta-owned").write_text(
+            "PuriPulyHeart-Fork-QQ-Auth-Beta", encoding="utf-8"
+        )
+        (output / "QQ认证诊断.cmd").write_text(
+            (repo / "scripts" / "preview" / "qq-auth-diagnostics.cmd").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+    from puripuly_heart.core.local_translation.runtime_profile import LLAMA_CPP_RUNTIME_DIRNAME
+    from puripuly_heart.release_evidence.managed_gemma_distribution import validate_runtime_root
+
+    llama_source = repo / "build" / "llama.cpp" / LLAMA_CPP_RUNTIME_DIRNAME
+    validate_runtime_root(llama_source)
     shutil.copytree(
-        repo / "build" / "llama.cpp", app / "build" / "llama.cpp", copy_function=copy_payload_file
+        llama_source,
+        app / "build" / "llama.cpp" / LLAMA_CPP_RUNTIME_DIRNAME,
+        copy_function=copy_payload_file,
     )
     shutil.copytree(
         repo / "third_party" / "llama.cpp",
@@ -263,8 +287,9 @@ def main():
             "/target:winexe",
             "/reference:System.Windows.Forms.dll",
             *(["/define:BETA_DISTRIBUTION"] if args.beta else []),
+            *(["/define:QQ_AUTH_BETA"] if args.qq_auth_beta else []),
             *(["/define:WRIST_DEVELOPMENT"] if args.wrist_development else []),
-            f"/out:{output / 'PuriPulyHeartPreview.exe'}",
+            f"/out:{output / ('PuriPulyHeartQQAuthBeta.exe' if args.qq_auth_beta else 'PuriPulyHeartPreview.exe')}",
             str(repo / "scripts" / "preview" / "Launcher.cs"),
         ],
         check=True,
@@ -286,29 +311,60 @@ def main():
                 commit=revision,
                 qq_baseline="677a9ee837b7e19abfa758998e86f8bce6a28b3a",
                 upstream_baseline="75c4485a6787d504f5335d1602973f63b4d0c234",
-                version="2.8.2-beta" if args.beta else "2.8.2-preview",
+                version=(
+                    "2.8.2-qq-auth-beta"
+                    if args.qq_auth_beta
+                    else "2.8.2-beta" if args.beta else "2.8.2-preview"
+                ),
+                channel="PuriPuly Heart QQ Auth Beta" if args.qq_auth_beta else "desktop-preview",
+                app_id="PuriPulyHeart-Fork-QQ-Auth-Beta" if args.qq_auth_beta else None,
+                readiness_baseline=(
+                    "76af91bb76deabcbd0f8dc519b5e21f2049054df" if args.qq_auth_beta else None
+                ),
+                upstream_reference=(
+                    "f28891da7f75508d4e3bcbf1bddbbca99ac7616d" if args.qq_auth_beta else None
+                ),
+                install_directory=(
+                    "%LOCALAPPDATA%/Programs/PuriPulyHeartQQAuthBeta" if args.qq_auth_beta else None
+                ),
+                lockfile_sha256=hashlib.sha256((repo / "uv.lock").read_bytes()).hexdigest(),
+                native_component_provenance=(
+                    json.loads(
+                        (repo / "build" / "qq-native-provenance.json").read_text(encoding="utf-8")
+                    )
+                    if args.qq_auth_beta
+                    else None
+                ),
                 packaging="portable bundled CPython + locked Flet desktop (not native release)",
                 python=sys.version,
                 isolated_keyring=(
-                    f"puripuly-heart.test.{args.isolated_profile}"
-                    if args.isolated_profile
+                    "puripuly-heart.test.qq-auth-beta"
+                    if args.qq_auth_beta
                     else (
-                        "puripuly-heart.test.desktop-wrist-vision"
-                        if args.wrist_development
+                        f"puripuly-heart.test.{args.isolated_profile}"
+                        if args.isolated_profile or args.qq_auth_beta
                         else (
-                            "puripuly-heart.test.desktop-beta"
-                            if args.beta
-                            else "puripuly-heart.test.desktop-preview"
+                            "puripuly-heart.test.desktop-wrist-vision"
+                            if args.wrist_development
+                            else (
+                                "puripuly-heart.test.desktop-beta"
+                                if args.beta
+                                else "puripuly-heart.test.desktop-preview"
+                            )
                         )
                     )
                 ),
                 data_directory=(
-                    "isolated-data"
-                    if args.isolated_profile
+                    "%LOCALAPPDATA%/PuriPulyHeartQQAuthBeta"
+                    if args.qq_auth_beta
                     else (
-                        "wrist-development-data"
-                        if args.wrist_development
-                        else "%LOCALAPPDATA%/PuriPulyHeartBeta" if args.beta else "preview-data"
+                        "isolated-data"
+                        if args.isolated_profile or args.qq_auth_beta
+                        else (
+                            "wrist-development-data"
+                            if args.wrist_development
+                            else "%LOCALAPPDATA%/PuriPulyHeartBeta" if args.beta else "preview-data"
+                        )
                     )
                 ),
                 wrist_sha256=wrist_sha256,
@@ -324,6 +380,11 @@ def main():
         ),
         encoding="utf-8",
     )
+    if args.qq_auth_beta:
+        for stale in ("README-BETA.txt", "README.md", "FEATURES.md", "app/preview_entry.py"):
+            candidate = output / stale
+            if candidate.is_file():
+                candidate.unlink()
     print(output)
 
 

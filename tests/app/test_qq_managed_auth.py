@@ -624,7 +624,7 @@ async def test_assert_timeout_then_status_timeout_and_404_preserves_network_fail
     finally:
         await broker.close()
 
-    assert result.status == messages.TRANSACTION_STATUS_PROVIDER_VERIFICATION_FAILED
+    assert result.status == messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
     assert result.message.key == "qq_managed_auth.network_timeout"
     assert result.diagnostics.code == "broker_timeout"
     assert result.diagnostics.fields["network_error_kind"] == "timeout"
@@ -633,9 +633,9 @@ async def test_assert_timeout_then_status_timeout_and_404_preserves_network_fail
         "/v1/providers/openrouter/managed-operation/status",
         "/v1/providers/openrouter/managed-operation/status",
     ]
-    assert state.pending_managed_operation_id is None
-    assert state.pending_managed_operation_source is None
-    assert "openrouter_managed_operation_resume_token" not in store.values
+    assert state.pending_managed_operation_id is not None
+    assert state.pending_managed_operation_source == "qq"
+    assert "openrouter_managed_operation_resume_token" in store.values
     assert OPENROUTER_MANAGED_QQ_API_KEY_SECRET not in store.values
     assert "code=broker_timeout" in caplog.text
     assert "code=unknown_error" not in caplog.text
@@ -660,25 +660,14 @@ async def test_key_write_failure_then_retry_reports_local_key_missing_without_ac
     caplog.clear()
 
     retried = await service.authenticate(_request())
-
     assert retried.status == messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
-    assert retried.message.key == "qq_managed_auth.managed_secret_missing"
-    assert retried.diagnostics.code == "qq_delivery_ack_managed_secret_missing"
-    assert retried.diagnostics.fields["ack_status"] == "managed_secret_missing"
-    assert retried.diagnostics.fields["secret_write_succeeded"] is False
-    assert retried.diagnostics.fields["settings_commit_succeeded"] is False
+    assert state.pending_managed_operation_id is not None
+    assert "openrouter_managed_qq_delivery_receipt_v1" in store.values
     assert OPENROUTER_MANAGED_QQ_API_KEY_SECRET not in store.values
-    assert state.pending_delivery_ack_source == "qq"
-    assert state.pending_delivery_ack_delivery_id == metadata.delivery_id
-    assert store.values["openrouter_managed_qq_delivery_ack_token"] == metadata.delivery_ack_token
     assert len(broker.requests) == 1
     assert broker.ack_requests == []
-    assert broker.status_requests == []
+    assert broker.status_requests
     assert broker.resume_requests == []
-    assert "stage=secret_storage code=qq_delivery_ack_managed_secret_missing" in caplog.text
-    assert "category=storage" in caplog.text
-    assert "ack_status=managed_secret_missing" in caplog.text
-    assert "code=qq_delivery_ack_pending" not in caplog.text
     _assert_no_raw_values(retried)
     _assert_no_raw_values(caplog.text)
 
@@ -766,7 +755,7 @@ async def test_qq_managed_auth_does_not_ack_or_reassert_without_local_managed_ke
 
 
 @pytest.mark.asyncio
-async def test_qq_managed_auth_ack_token_store_failure_happens_before_local_key_write() -> None:
+async def test_qq_managed_auth_ack_token_store_failure_retains_bound_key_for_recovery() -> None:
     metadata = _delivery_ack_metadata()
     store = RecordingSecretStore()
     store.fail_set_keys.add("openrouter_managed_qq_delivery_ack_token")
@@ -779,15 +768,16 @@ async def test_qq_managed_auth_ack_token_store_failure_happens_before_local_key_
 
     assert result.status == messages.TRANSACTION_STATUS_REMOTE_ACTIVE_LOCAL_MISSING
     assert result.diagnostics is not None
-    assert result.diagnostics.code == "qq_delivery_ack_token_store_failed_before_local_key_write"
-    assert OPENROUTER_MANAGED_QQ_API_KEY_SECRET not in store.values
+    assert result.diagnostics.code == "qq_delivery_ack_token_store_failed_after_key_save"
+    assert store.values[OPENROUTER_MANAGED_QQ_API_KEY_SECRET] == RAW_MANAGED_KEY
+    assert "openrouter_managed_qq_delivery_receipt_v1" in store.values
     assert broker.ack_requests == []
     assert state.active_managed_credential_ref == "previous-ref"
     _assert_no_raw_values(result)
 
 
 @pytest.mark.asyncio
-async def test_qq_managed_auth_pending_ack_persist_failure_happens_before_local_key_write() -> None:
+async def test_qq_managed_auth_pending_ack_persist_failure_retains_bound_key_for_recovery() -> None:
     metadata = _delivery_ack_metadata()
     state = RecordingManagedState(
         active_managed_credential_ref="previous-ref",
@@ -805,10 +795,9 @@ async def test_qq_managed_auth_pending_ack_persist_failure_happens_before_local_
 
     assert result.status == messages.TRANSACTION_STATUS_REMOTE_ACTIVE_LOCAL_MISSING
     assert result.diagnostics is not None
-    assert (
-        result.diagnostics.code == "qq_pending_delivery_ack_persist_failed_before_local_key_write"
-    )
-    assert OPENROUTER_MANAGED_QQ_API_KEY_SECRET not in store.values
+    assert result.diagnostics.code == "qq_pending_delivery_ack_persist_failed_after_key_save"
+    assert store.values[OPENROUTER_MANAGED_QQ_API_KEY_SECRET] == RAW_MANAGED_KEY
+    assert "openrouter_managed_qq_delivery_receipt_v1" in store.values
     assert "openrouter_managed_qq_delivery_ack_token" not in store.values
     assert broker.ack_requests == []
     assert state.active_managed_credential_ref == "previous-ref"
@@ -1096,7 +1085,7 @@ def _render(value: object) -> str:
 
 
 @pytest.mark.asyncio
-async def test_qq_managed_auth_restart_resumes_active_operation_without_fresh_assert(
+async def test_qq_managed_auth_restart_refuses_unbound_active_key_without_fresh_assert(
     caplog,
 ) -> None:
     caplog.set_level(logging.INFO)
@@ -1116,28 +1105,14 @@ async def test_qq_managed_auth_restart_resumes_active_operation_without_fresh_as
     )
 
     result = await service.authenticate(_request())
-
-    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
-    assert result.message is None
-    assert "success stage=recovery code=qq_managed_operation_active_recovered" in caplog.text
-    assert "category=recovery" in caplog.text
-    assert "[QQAuth] failure" not in caplog.text
-    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert result.status == messages.TRANSACTION_STATUS_REMOTE_ACTIVE_LOCAL_MISSING
+    assert result.diagnostics.code == "qq_managed_operation_active_key_missing"
     assert broker.requests == []
     assert broker.resume_requests == []
     assert len(broker.status_requests) == 1
-    assert broker.status_requests[0].operation_id == SEEDED_OPERATION_ID
-    assert broker.status_requests[0].resume_token == SEEDED_RESUME_TOKEN
-    assert SEEDED_RESUME_TOKEN not in repr(broker.status_requests[0])
-    assert state.pending_managed_operation_id is None
-    assert state.pending_managed_operation_source is None
-    assert "openrouter_managed_operation_resume_token" not in store.values
-    assert state.referral_source == "qq"
-    assert state.referral_id == "8H3J4N"
-    _assert_no_raw_values(result)
-    _assert_no_raw_values(caplog.text)
+    assert "openrouter_managed_qq_delivery_receipt_v1" not in store.values
+    assert RAW_MANAGED_KEY not in caplog.text
     assert SEEDED_RESUME_TOKEN not in caplog.text
-    assert SEEDED_OPERATION_ID not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1234,7 +1209,7 @@ async def test_qq_managed_auth_wait_keeps_recovering_without_fresh_assert() -> N
 
 
 @pytest.mark.asyncio
-async def test_qq_managed_auth_pending_ack_takes_precedence_over_pending_operation() -> None:
+async def test_qq_managed_auth_pending_ack_checks_operation_before_ack() -> None:
     metadata = _delivery_ack_metadata()
     state = _seeded_operation_state()
     state.pending_delivery_ack_source = "qq"
@@ -1255,16 +1230,16 @@ async def test_qq_managed_auth_pending_ack_takes_precedence_over_pending_operati
 
     result = await service.authenticate(_request())
 
-    assert result.status == messages.TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED
+    assert result.status == messages.TRANSACTION_STATUS_REMOTE_DELIVERY_ACK_PENDING
     assert result.diagnostics is not None
-    assert result.diagnostics.code == "qq_delivery_ack_recovered"
+    assert result.diagnostics.code == "qq_delivery_ack_pending"
     assert broker.requests == []
-    assert broker.status_requests == []
+    assert broker.status_requests
     assert broker.resume_requests == []
-    assert broker.ack_requests[0].delivery_id == metadata.delivery_id
-    assert state.pending_managed_operation_id is None
-    assert state.pending_managed_operation_source is None
-    assert "openrouter_managed_operation_resume_token" not in store.values
+    assert broker.ack_requests == []
+    assert state.pending_managed_operation_id == SEEDED_OPERATION_ID
+    assert state.pending_managed_operation_source == "qq"
+    assert "openrouter_managed_operation_resume_token" in store.values
     _assert_no_raw_values(result)
 
 

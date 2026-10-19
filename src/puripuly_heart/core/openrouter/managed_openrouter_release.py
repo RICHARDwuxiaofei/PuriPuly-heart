@@ -483,6 +483,10 @@ class ManagedOpenRouterReleaseService:
             managed_credential_kind=self.openrouter_config.managed_credential_kind,
             active_managed_credential_ref=self.managed_state.active_managed_credential_ref,
             active_managed_expires_at=self.managed_state.active_managed_expires_at,
+            delivery_pending=bool(
+                self.managed_state.pending_delivery_ack_source
+                or self.managed_state.pending_managed_operation_id
+            ),
         )
 
     def _uses_qq_managed_credentials(self) -> bool:

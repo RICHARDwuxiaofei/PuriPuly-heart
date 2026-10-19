@@ -425,6 +425,7 @@ def managed_identity_state_port_from_vnext(
     from puripuly_heart.config.settings_vnext.schema import ManagedConnectionState
 
     bag = SimpleNamespace(**asdict(settings.state.managed_connection))
+    persist_identity = owner.managed_identity_persistence_callback(settings)
 
     def persist() -> None:
         live = owner.canonical or settings
@@ -436,7 +437,10 @@ def managed_identity_state_port_from_vnext(
                 managed_connection=ManagedConnectionState(**values),
             ),
         )
-        owner.persist_managed_identity(next_settings)
+        from puripuly_heart.core.qq_auth_trace import trace_stage
+
+        with trace_stage("settings_commit"):
+            persist_identity(next_settings)
 
     return ManagedIdentityStateAdapter(bag, persist)
 
@@ -951,6 +955,9 @@ def build_openrouter_credential_runtime_config_from_vnext(
         managed_credential_kind=_managed_credential_kind_from_connection(translation.connection),
         active_managed_credential_ref=identity.active_managed_credential_ref,
         active_managed_expires_at=identity.active_managed_expires_at,
+        delivery_pending=bool(
+            identity.pending_delivery_ack_source or identity.pending_managed_operation_id
+        ),
     )
 
 
@@ -1066,6 +1073,8 @@ class ManagedAuthRuntimeAdapter:
     runtime_presence_provider: ManagedAuthRuntimePresenceProvider
     ingress_provider: ManagedAuthIngressProvider
 
+    _qq_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+
     async def logout_local_managed(self, provider: str) -> dict[str, object]:
         if provider not in {"qq", "discord"}:
             raise ValueError("unsupported managed account provider")
@@ -1168,6 +1177,33 @@ class ManagedAuthRuntimeAdapter:
         )
 
     async def execute_qq(
+        self, qq_identity: str, credential: str, referral_id: str | None
+    ) -> ManagedAuthExecutionResult:
+        from puripuly_heart.core.qq_auth_trace import auth_trace, trace_event, trace_stage
+
+        if self._qq_lock.locked():
+            return ManagedAuthExecutionResult(
+                succeeded=False, message_key="qq_managed_auth.error.recovery_pending"
+            )
+        async with self._qq_lock:
+            with auth_trace(), trace_stage("authentication"):
+                with trace_stage("preflight"):
+                    if self.ingress_provider():
+                        return ManagedAuthExecutionResult(
+                            succeeded=False, message_key="qq_managed_auth.configuration_unavailable"
+                        )
+                result = await self._execute_qq(qq_identity, credential, referral_id)
+                trace_event(
+                    "authentication",
+                    (
+                        "completed"
+                        if result.succeeded
+                        else "pending" if result.delivery_ack_pending else "failed"
+                    ),
+                )
+                return result
+
+    async def _execute_qq(
         self,
         qq_identity: str,
         credential: str,
@@ -1195,6 +1231,25 @@ class ManagedAuthRuntimeAdapter:
             )
         secret_store_port = SyncSecretStoreAdapter(secret_store)
         managed_state = managed_identity_state_port_from_vnext(self.settings, current)
+        if not managed_state.installation_id and not (
+            managed_state.pending_managed_operation_id
+            or managed_state.pending_delivery_ack_source
+            or managed_state.active_managed_credential_ref
+        ):
+            initialized = await ManagedIdentityPreflightAdapter(
+                managed_state=managed_state, secrets=secret_store
+            ).preflight_managed_identity(
+                ManagedIdentityPreflightRequest(
+                    local_secret_key=OPENROUTER_MANAGED_QQ_API_KEY_SECRET,
+                    correlation_id=None,
+                    metadata={},
+                )
+            )
+            if not initialized.succeeded:
+                log_qq_auth("preflight", "local_storage_unavailable")
+                return ManagedAuthExecutionResult(
+                    succeeded=False, message_key="qq_managed_auth.local_storage_unavailable"
+                )
         assertion_results: list[QqManagedAssertionResult] = []
         ack_results: list[ManagedKeyDeliveryAckResult] = []
         result = await QqManagedAuthService(
@@ -1245,9 +1300,7 @@ class ManagedAuthRuntimeAdapter:
                 ),
                 referral_id=projected_referral_id,
                 pass_status=projected_pass_status,
-                runtime_rebuild=(
-                    "if_missing" if runtime_owner_available and not runtime_available else "never"
-                ),
+                runtime_rebuild=("always" if runtime_owner_available else "never"),
             )
         message = result.message
         return ManagedAuthExecutionResult(

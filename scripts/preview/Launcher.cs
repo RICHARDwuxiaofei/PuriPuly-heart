@@ -12,7 +12,11 @@ internal static class Launcher
         try
         {
             var start = new ProcessStartInfo(Path.Combine(root, "runtime", "pythonw.exe"));
+#if QQ_AUTH_BETA
+            start.Arguments = "\"" + Path.Combine(root, "app", "qq_auth_entry.py") + "\"";
+#else
             start.Arguments = "\"" + Path.Combine(root, "app", "preview_entry.py") + "\"";
+#endif
             start.WorkingDirectory = Path.Combine(root, "app");
             start.UseShellExecute = false;
             start.CreateNoWindow = true;
@@ -37,7 +41,11 @@ internal static class Launcher
         }
         catch (Exception error)
         {
+#if QQ_AUTH_BETA
+            MessageBox.Show("QQ Auth Beta startup failed: " + error.GetType().Name, "PuriPuly Heart QQ Auth Beta");
+#else
             MessageBox.Show("Preview startup failed: " + error.GetType().Name, "PuriPuly Preview");
+#endif
         }
     }
 }

@@ -1,0 +1,29 @@
+PuriPuly Heart QQ Auth Beta — 实验性 QQ 认证修复渠道
+
+这是独立 QQ Auth Beta。安装目录为 %LOCALAPPDATA%\Programs\PuriPulyHeartQQAuthBeta，数据目录为 %LOCALAPPDATA%\PuriPulyHeartQQAuthBeta。
+它使用独立固定 AppId PuriPulyHeart-Fork-QQ-Auth-Beta，密钥命名空间 puripuly-heart.test.qq-auth-beta。
+原版与既有 Desktop Beta 不会被替换。首次启动不继承旧版配置、安装身份、模型缓存或真实凭据。
+不要因为新 Beta 设置为空，就再次领取已经使用过的 QQ 资格。先用旧版保留的脱敏信息确认状态；本工具不会导入旧凭据，也不会自动重新领取。
+
+最短复测流程：
+1. 安装后打开“PuriPuly Heart QQ Auth Beta”，确认窗口标题包含 QQ Auth Beta。
+2. 打开安装目录或开始菜单中的“QQ Auth Beta 认证诊断”。先选 1 离线自检；它使用合成数据与本机服务，不调用付费推理。
+3. 选 2 检查已有凭据。has_key/key_saved 表示密钥是否存在与已保存，ack 表示交付是否确认，credential_consistent 表示绑定和配置一致；这不等于真实在线账号测试通过。
+4. 确需首次认证时，选 3。使用自己的合法数字标识及现成的 64 位小写十六进制激活凭证。工具隐藏凭证输入，不提供生产 PSK 生成功能，不打印 API Key。输入 QQ AUTH BETA 才执行单次联网尝试。
+5. 请求超时、结果不确定、已有待恢复操作时，选 4 恢复原操作。缺失恢复令牌或身份不匹配会停止，不自动生成新操作重新领取。不要手动删除身份或反复申请。
+6. auth 已提交但用量失败，属于用量查询问题；不要因此重领。GUI 用量条会显示查询失败，日志中的 [ManagedUsage] 保留错误分类。[QQAuthTrace] 和 [QQAuth] 串起认证阶段与错误。provider_apply 失败属于运行时初始化问题，不代表密钥未收到。
+
+工具输出在数据目录 diagnostics 中，包含脱敏 JSON/TXT。请回传本次生成的 qq-auth-日期时间.json（及需要时同名 TXT），不要回传 settings.json、credential-keys.json、secrets.json、完整日志目录或任何 Token。
+App 阶段日志在数据目录 logs\qq-auth-stages.jsonl，只记录关联 ID、阶段、耗时、状态与安全错误分类；不记录身份、凭证、API Key 或响应正文。
+
+升级与卸载：
+本渠道后续版本使用同一固定 AppId、安装目录与数据目录，保留安装身份和恢复状态。
+Windows 设置 → 应用 → 已安装的应用 → 精确找到“PuriPuly Heart QQ Auth Beta”再卸载。不要选择 PuriPuly <3 或 PuriPuly Heart Beta。
+默认保留本 Beta 测试数据和密钥。卸载时“同时删除此 QQ Auth Beta 的测试数据”默认选择否。
+选择删除时，仅清理已确认属于本渠道的数据目录及其登记的专属密钥，不跟随链接；遇到链接或归属无法确认时保留数据并报告。手动选择的外部模型目录不会被删除。
+不修改全局代理、TUN、防火墙，不向 Broker 撤销其他版本密钥或重置资格。先关闭本渠道再升级/卸载；无需关闭原版或旧 Beta。
+
+验证边界：
+真实线上 QQ 账号及生产 Broker 部署版本需用户受控复测。不能凭本地模拟、静态检查或 Key 已存在，宣称线上 QQ 认证全面修复。
+其他人的语音识别、真实设备/模型、TRANS 与原生模型初始化卡住仍需独立验收；本次保留 readiness 中已有 Peer 失败清理及 ASR 分阶段诊断，未宣称它们全部根治。
+构建源码 SHA、依赖锁哈希、复用二进制来源见 BUILD.json；精确测试结果以 Release 附件为准。

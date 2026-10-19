@@ -108,6 +108,7 @@ class LlmFactoryManagedIdentity:
     active_managed_credential_ref: str | None = None
     active_managed_expires_at: str | None = None
     local_managed_claim_sources: tuple[str, ...] = ()
+    delivery_pending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +126,9 @@ def llm_factory_extras_from_vnext(settings: AppSettingsVNext) -> LlmFactoryResol
             active_managed_credential_ref=identity.active_managed_credential_ref,
             active_managed_expires_at=identity.active_managed_expires_at,
             local_managed_claim_sources=tuple(identity.local_managed_claim_sources),
+            delivery_pending=bool(
+                identity.pending_delivery_ack_source or identity.pending_managed_operation_id
+            ),
         ),
         gpu_device_id=settings.intent.translation.gpu_device_id,
     )
@@ -490,6 +494,7 @@ def _openrouter_credential_config_from_resolved_fields(
         active_managed_expires_at=(
             None if identity is None else identity.active_managed_expires_at
         ),
+        delivery_pending=False if identity is None else identity.delivery_pending,
     )
 
 
@@ -629,7 +634,11 @@ def _openrouter_provider_from_resolved_fields(
             secrets=secrets,
             credential=credential,
         )
-        managed_api_key = _openrouter_managed_api_key(secrets, credential)
+        from puripuly_heart.core.openrouter.openrouter_credentials import (
+            resolve_openrouter_credentials,
+        )
+
+        managed_api_key = resolve_openrouter_credentials(credential_config, secrets=secrets).api_key
         if force_managed_wrapper or managed_api_key is None:
             from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterLLMProvider
 

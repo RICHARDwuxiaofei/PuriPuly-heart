@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -22,6 +23,11 @@ from puripuly_heart.core.messages import (
     DIAGNOSTIC_VISIBILITY_BASIC,
     DiagnosticFieldValue,
     ErrorDiagnostics,
+)
+from puripuly_heart.core.qq_delivery_receipt import (
+    QQ_DELIVERY_RECEIPT_SECRET,
+    decode_receipt,
+    receipt_matches,
 )
 
 ACK_SOURCE_DISCORD = "discord"
@@ -133,6 +139,27 @@ class ManagedKeyDeliveryAckService:
                     fields={"source": source, "token_present": False},
                 ),
             )
+        if source == ACK_SOURCE_QQ:
+            try:
+                stored = await self.secret_store.get_secret(QQ_DELIVERY_RECEIPT_SECRET)
+                receipt = decode_receipt(stored.value)
+                if receipt is not None:
+                    key = await self.secret_store.get_secret("openrouter_managed_qq_api_key")
+                    if (
+                        not receipt_matches(
+                            receipt,
+                            key=key.value,
+                            installation=self.managed_state.installation_id,
+                            reference=managed_credential_ref,
+                        )
+                        or receipt["delivery"] != delivery_id
+                        or receipt["token"] != token_read.value
+                    ):
+                        raise ValueError("delivery binding mismatch")
+            except Exception:
+                return ManagedKeyDeliveryAckServiceResult(
+                    succeeded=False, status="credential_binding_failed"
+                )
         try:
             ack_result = await self.broker_client.acknowledge_managed_key_delivery(
                 ManagedKeyDeliveryAckRequest(
@@ -152,6 +179,32 @@ class ManagedKeyDeliveryAckService:
                 ),
             )
         if ack_result.succeeded and ack_result.status in {"acknowledged", "already_acknowledged"}:
+            if source == ACK_SOURCE_QQ:
+                try:
+                    stored = await self.secret_store.get_secret(QQ_DELIVERY_RECEIPT_SECRET)
+                    receipt = decode_receipt(stored.value)
+                    if receipt is not None:
+                        key = await self.secret_store.get_secret("openrouter_managed_qq_api_key")
+                        if (
+                            not receipt_matches(
+                                receipt,
+                                key=key.value,
+                                installation=self.managed_state.installation_id,
+                                reference=managed_credential_ref,
+                            )
+                            or receipt["delivery"] != delivery_id
+                        ):
+                            raise ValueError("delivery binding mismatch")
+                        receipt["acknowledged"] = True
+                        saved = await self.secret_store.set_secret(
+                            QQ_DELIVERY_RECEIPT_SECRET, json.dumps(receipt)
+                        )
+                        if not saved.succeeded:
+                            raise ValueError("receipt confirmation store failed")
+                except Exception:
+                    return ManagedKeyDeliveryAckServiceResult(
+                        succeeded=False, status="receipt_confirmation_failed", ack_result=ack_result
+                    )
             previous_referral_id = self.managed_state.referral_id
             previous_referral_source = self.managed_state.referral_source
             previous_operation_id = self.managed_state.pending_managed_operation_id

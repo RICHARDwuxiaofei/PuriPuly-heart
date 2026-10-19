@@ -34,7 +34,10 @@ class SyncSecretStoreAdapter:
         )
 
     async def set_secret(self, key: str, value: str) -> SecretWriteResult:
-        await asyncio.to_thread(self.store.set, key, value)
+        from puripuly_heart.core.qq_auth_trace import trace_stage
+
+        with trace_stage("credential_save"):
+            await asyncio.to_thread(self.store.set, key, value)
         return SecretWriteResult(
             succeeded=True,
             key=key,
