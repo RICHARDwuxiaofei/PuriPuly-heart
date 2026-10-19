@@ -87,12 +87,15 @@ async def test_assert_business_false_cannot_authorize_key():
         await client.close()
 
 
-@pytest.mark.parametrize("corruption", ["missing_token", "installation_mismatch"])
+@pytest.mark.parametrize("corruption", ["missing_token", "installation_mismatch", "orphan_token"])
 async def test_pending_identity_damage_must_not_issue_new_operation(corruption):
     state = RecordingManagedState()
     store = RecordingSecretStore()
     operation = ManagedOperationIdentity("ph-mop-v1_" + "A" * 32, "qq", state.installation_id)
     write_pending_operation(state, operation)
+    if corruption == "orphan_token":
+        state.pending_managed_operation_id = None
+        store.values[MANAGED_OPERATION_RESUME_TOKEN_SECRET] = "B" * 43
     if corruption == "installation_mismatch":
         state.pending_managed_operation_installation_id = "different-installation"
         store.values[MANAGED_OPERATION_RESUME_TOKEN_SECRET] = "B" * 43
@@ -102,7 +105,9 @@ async def test_pending_identity_damage_must_not_issue_new_operation(corruption):
         QqManagedAuthRequest("100001", "a" * 64, "2026-10-19T00:00:00.000Z", max_status_polls=0)
     )
     assert broker.requests == []
-    assert state.pending_managed_operation_id == operation.operation_id
+    assert state.pending_managed_operation_id == (
+        None if corruption == "orphan_token" else operation.operation_id
+    )
     assert result.status != "settings_commit_success_runtime_applied"
 
 

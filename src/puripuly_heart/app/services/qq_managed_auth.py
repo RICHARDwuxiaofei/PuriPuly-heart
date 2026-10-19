@@ -694,6 +694,12 @@ class QqManagedAuthService:
             )
         pending = read_pending_operation(self.managed_state, source=MANAGED_OPERATION_SOURCE_QQ)
         existing_token = await read_resume_token(self.secret_store)
+        if pending is None and existing_token is not None:
+            return _local_failure_result(
+                operation="ensure_qq_managed_operation",
+                code="qq_managed_operation_binding_invalid",
+                phase="persist_managed_operation",
+            )
         if (
             pending is not None
             and pending.installation_id == installation_id
