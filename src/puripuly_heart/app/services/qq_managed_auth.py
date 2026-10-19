@@ -555,6 +555,16 @@ class QqManagedAuthService:
                 return TransactionResult(
                     status=TRANSACTION_STATUS_SETTINGS_COMMIT_SUCCESS_RUNTIME_APPLIED,
                     message=_message("qq_managed_auth.success", severity=SEVERITY_INFO),
+                    diagnostics=_diagnostics(
+                        operation="recover_qq_delivery",
+                        code="qq_delivery_ack_recovered",
+                        category=DIAGNOSTIC_CATEGORY_TRANSACTION,
+                        fields={
+                            "phase": "remote_delivery_ack_recovery",
+                            "secret_write_succeeded": True,
+                            "settings_commit_succeeded": True,
+                        },
+                    ),
                 )
             if receipt.get("operation") != self.managed_state.pending_managed_operation_id:
                 return _local_failure_result(
@@ -573,7 +583,10 @@ class QqManagedAuthService:
             )
             self.managed_state.active_managed_credential_ref = receipt["reference"]
             self.managed_state.persist()
-        except Exception:
+        except Exception as exc:
+            log_qq_auth(
+                "secret_storage", "qq_delivery_receipt_unavailable", fields=exception_fields(exc)
+            )
             return _local_failure_result(
                 operation="recover_qq_delivery",
                 code="qq_delivery_receipt_unavailable",

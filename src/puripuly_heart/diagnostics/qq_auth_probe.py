@@ -225,6 +225,7 @@ async def app_attempt(
                 if result.succeeded
                 else "pending" if result.delivery_ack_pending else "failed"
             )
+            report["authenticated"] = bool(result.succeeded and report.get("credential_consistent"))
             diagnostics = (
                 result.transaction_result.diagnostics if result.transaction_result else None
             )
@@ -470,6 +471,10 @@ def offline_selftest(output):
                     command, env=environment, capture_output=True, timeout=40
                 )
                 if case in {"normal", "normal-keyring"} and completed.returncode == 0:
+                    first_report = json.loads((data / "result.json").read_text(encoding="utf-8"))
+                    if first_report.get("authentication_result") != "committed":
+                        raise RuntimeError("Initial authentication did not commit")
+                    broker.translation_received = False
                     completed = subprocess.run(
                         command, env=environment, capture_output=True, timeout=40
                     )
@@ -483,6 +488,8 @@ def offline_selftest(output):
                     completed.returncode == 0
                     and report.get("authenticated") is expected
                     and (not expected or broker.translation_received)
+                    and (not expected or report.get("authentication_result") == "committed")
+                    and (not expected or report.get("runtime") == "translation_received")
                     and broker.assert_count == 1
                 )
                 results.append(

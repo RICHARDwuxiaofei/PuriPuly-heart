@@ -175,6 +175,7 @@ ENUM_FIELDS = {
         "PermissionError",
         "FileNotFoundError",
         "ValueError",
+        "TypeError",
         "RuntimeError",
         "Exception",
     },

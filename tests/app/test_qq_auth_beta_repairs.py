@@ -233,3 +233,32 @@ async def test_duplicate_click_and_cancel_keep_the_same_pending_operation(tmp_pa
     assert owner.canonical.state.managed_connection.pending_managed_operation_id == operation
     store = create_secret_store(owner.canonical.intent.secrets, config_path=owner.path)
     assert store.get(MANAGED_OPERATION_RESUME_TOKEN_SECRET)
+
+
+async def test_acknowledged_receipt_new_owner_returns_committed_and_translates(
+    tmp_path, monkeypatch
+):
+    from puripuly_heart.diagnostics.qq_auth_probe import ControlledBroker, app_attempt
+
+    monkeypatch.setenv("PURIPULY_HEART_TEST_PROFILE", "qq-auth-beta-offline-restart-result")
+    monkeypatch.setenv("PURIPULY_HEART_TEST_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PURIPULY_HEART_SECRETS_PASSPHRASE", "synthetic-restart-only")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    owner = compose_settings_owner(tmp_path / "settings.json")
+    initial = owner.start().settings
+    owner.canonical = replace(
+        initial,
+        intent=replace(
+            initial.intent, secrets=replace(initial.intent.secrets, backend="encrypted_file")
+        ),
+    )
+    owner.persist()
+    with ControlledBroker() as broker:
+        first = await app_attempt("100001", "a" * 64, local_broker=broker.url)
+        assert first["authentication_result"] == "committed"
+        assert not broker.translation_received
+        second = await app_attempt("100001", "a" * 64, local_broker=broker.url, translate=True)
+        assert second["authentication_result"] == "committed"
+        assert second["runtime"] == "translation_received"
+        assert broker.translation_received
+        assert broker.assert_count == 1
