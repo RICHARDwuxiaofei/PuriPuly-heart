@@ -268,7 +268,6 @@ from puripuly_heart.ui.desktop_overlay_surface.renderer import (
 from puripuly_heart.ui.desktop_overlay_surface.renderer import (
     _caption_card_width_memory_key as _caption_card_width_memory_key,
 )
-from puripuly_heart.ui.desktop_overlay_surface.renderer import _caption_plan_with_fitted_fonts
 from puripuly_heart.ui.desktop_overlay_surface.renderer import (
     _caption_line as _caption_line,
 )
@@ -281,6 +280,7 @@ from puripuly_heart.ui.desktop_overlay_surface.renderer import (
 from puripuly_heart.ui.desktop_overlay_surface.renderer import (
     _caption_lines_for_snapshot as _caption_lines_for_snapshot,
 )
+from puripuly_heart.ui.desktop_overlay_surface.renderer import _caption_plan_with_fitted_fonts
 from puripuly_heart.ui.desktop_overlay_surface.renderer import (
     _caption_slot_with_dynamic_width as _caption_slot_with_dynamic_width,
 )
@@ -1680,6 +1680,10 @@ class FletDesktopRendererWindow:
             )
 
     def _window_title(self) -> str:
+        from puripuly_heart.config.paths import test_profile_name
+
+        if test_profile_name() == "qq-auth-beta":
+            return "PuriPuly Heart QQ Auth Beta Overlay"
         return t_for_locale(
             self._locale,
             "desktop_overlay.window.title",

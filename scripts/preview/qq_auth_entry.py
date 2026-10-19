@@ -42,6 +42,26 @@ else:
         from puripuly_heart.diagnostics.qq_auth_probe import main
 
         raise SystemExit(main(sys.argv[2:]))
-    from puripuly_heart.main import main
+    try:
+        from puripuly_heart.main import main
 
-    main()
+        main()
+    except Exception as error:
+        import ctypes
+        import json
+
+        from puripuly_heart.core.qq_auth_diagnostics import exception_fields
+
+        report = data / "diagnostics" / "startup-failure.json"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(
+            json.dumps({"channel": "QQ Auth Beta", "stage": "startup", **exception_fields(error)}),
+            encoding="utf-8",
+        )
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "QQ Auth Beta 启动失败。请回传本渠道 diagnostics/startup-failure.json，或运行 QQ认证诊断。",
+            "PuriPuly Heart QQ Auth Beta",
+            0x10,
+        )
+        raise SystemExit(1)

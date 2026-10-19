@@ -156,6 +156,10 @@ class QuickWindow:
         )
         self.button = ft.Button(t("quick.send"), on_click=self.send)
         page.title = t("quick.title")
+        from puripuly_heart.config.paths import test_profile_name
+
+        if test_profile_name() == "qq-auth-beta":
+            page.title += " — QQ Auth Beta"
         page.theme_mode = ft.ThemeMode.LIGHT
         page.theme = get_app_theme(font_family=font_for_language(get_locale()))
         register_ui_fonts(page)
