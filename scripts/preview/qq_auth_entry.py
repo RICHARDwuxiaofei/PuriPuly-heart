@@ -48,7 +48,7 @@ else:
     try:
         from puripuly_heart.main import main
 
-        main()
+        raise SystemExit(main())
     except Exception as error:
         import ctypes
         import json
